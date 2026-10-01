@@ -294,3 +294,44 @@ test('monitor de captura: conta framespresented e reporta resolução real', () 
   m.detach()
   assert.equal(m.sample().width, null, 'detach limpa a referência da track')
 })
+test('constraints: microfone nunca vem do getDisplayMedia (só o áudio do sistema)', () => {
+  const env = detectScreenEnvironment()
+  // Modo "só mic": o getDisplayMedia NÃO deve pedir áudio de sistema — o mic vem
+  // do getUserMedia como trilha separada (senão abriria o áudio errado).
+  const onlyMic = buildDisplayMediaConstraints(
+    { ...SCREEN_DEFAULT_OPTIONS, audio: 'mic' }, env)
+  assert.equal(onlyMic.audio, false, 'audio:false quando o usuário pediu só o microfone')
+  assert.equal(onlyMic.systemAudio, 'exclude')
+
+  const onlySystem = buildDisplayMediaConstraints(
+    { ...SCREEN_DEFAULT_OPTIONS, audio: 'system' }, env)
+  assert.equal(onlySystem.audio, true, 'áudio do sistema é pedido ao getDisplayMedia')
+  assert.equal(onlySystem.systemAudio, 'include')
+
+  const both = buildDisplayMediaConstraints(
+    { ...SCREEN_DEFAULT_OPTIONS, audio: 'system+mic' }, env)
+  assert.equal(both.audio, true, 'sistema+mic ainda pede o áudio do sistema no display')
+
+  const none = buildDisplayMediaConstraints(
+    { ...SCREEN_DEFAULT_OPTIONS, audio: 'none' }, env)
+  assert.equal(none.audio, false, '"somente tela" não captura áudio nenhum')
+  assert.equal(none.systemAudio, 'exclude')
+})
+
+test('constraints: fonte janela vs monitor muda o displaySurface pedido', () => {
+  const env = detectScreenEnvironment()
+  const win = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'window' }, env)
+  assert.deepEqual(win.video, { displaySurface: 'window' })
+  const mon = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor' }, env)
+  assert.deepEqual(mon.video, { displaySurface: 'monitor' })
+  assert.equal(mon.monitorTypeSurfaces, 'include')
+  assert.equal(win.monitorTypeSurfaces, 'exclude')
+})
+
+test('monitores: fora do app nativo devolve lista vazia em vez de inventar', async () => {
+  const { listShareableMonitors } = await import('../src/services/screenShare.ts')
+  const list = await listShareableMonitors()
+  // Em node puro não existe runtime Tauri: a lista é vazia, sem exceção.
+  assert.ok(Array.isArray(list))
+  assert.equal(list.length, 0, 'sem runtime Tauri não há monitores para listar')
+})
