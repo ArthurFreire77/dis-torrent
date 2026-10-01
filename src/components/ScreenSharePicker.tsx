@@ -6,12 +6,13 @@
 // `callManager.setScreenShareOptions`, que aplica na captura viva sem derrubar
 // a chamada (trocar fonte/áudio recaptura, resolução/FPS não).
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { callManager, screenShareUnavailableReason } from '../services/callManager'
 import {
   detectScreenEnvironment,
   buildSourceChoices,
   supportsScreenSource,
+  listShareableMonitors,
   SCREEN_QUALITY_STEPS,
   SCREEN_FPS_OPTIONS,
   type ScreenShareOptions,
@@ -19,6 +20,7 @@ import {
   type ScreenAudioMode,
   type ScreenQualityKey,
   type ScreenFpsKey,
+  type MonitorInfo,
 } from '../services/screenShare'
 import { ui, labelStyle, helpStyle, errorStyle, Modal, Button, WIDTHS } from '../shared/ui'
 import { Icon } from '../shared/icons'
@@ -37,12 +39,17 @@ const QUALITY_CHOICES: { value: ScreenQualityKey; label: string }[] = [
   { value: '1080p', label: '1080p' },
 ]
 
-const FPS_CHOICES: { value: ScreenFpsKey; label: string }[] = [
-  { value: 'auto', label: 'Automático' },
-  { value: '30', label: '30 FPS' },
-  { value: '60', label: '60 FPS' },
-  { value: '120', label: '120 FPS (se o aparelho suportar)' },
-]
+const FPS_LABELS: Record<ScreenFpsKey, string> = {
+  auto: 'Automático',
+  '30': '30 FPS',
+  '60': '60 FPS',
+  '120': '120 FPS (se o aparelho suportar)',
+}
+// A lista de opções vem de screenShare.ts (fonte única); aqui só o rótulo.
+const FPS_CHOICES: { value: ScreenFpsKey; label: string }[] = SCREEN_FPS_OPTIONS.map(v => ({
+  value: v,
+  label: FPS_LABELS[v],
+}))
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -106,7 +113,18 @@ export default function ScreenSharePicker({
   const env = useMemo(() => detectScreenEnvironment(), [open])
   const [opts, setOpts] = useState<ScreenShareOptions>(() => callManager.getScreenShareOptions())
   const [busy, setBusy] = useState(false)
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([])
   const unavailable = !env.hasDisplayMedia ? screenShareUnavailableReason() : null
+
+  // Monitores reais da máquina. Só faz sentido quando a fonte é "monitor
+  // específico"; fora do app nativo (Android/browser) a lista fica vazia e a UI
+  // não promete o que a plataforma não tem.
+  useEffect(() => {
+    let alive = true
+    if (!open || opts.source !== 'monitor') { setMonitors([]); return }
+    void listShareableMonitors().then(list => { if (alive) setMonitors(list) })
+    return () => { alive = false }
+  }, [open, opts.source])
 
   const choices = useMemo(() => buildSourceChoices(env, opts.source), [env, opts.source])
 
@@ -154,6 +172,24 @@ export default function ScreenSharePicker({
           </Choice>
         ))}
       </Row>
+
+      {opts.source === 'monitor' && monitors.length > 0 && (
+        <div style={{ marginTop: -8, marginBottom: ui.lg }} data-testid="screen-monitor-list">
+          <div style={{ ...labelStyle, marginBottom: ui.xs }}>Monitores detectados ({monitors.length})</div>
+          {monitors.map(m => (
+            <div key={m.id} style={{ ...helpStyle, display: 'flex', gap: ui.sm, alignItems: 'center' }}>
+              <span style={{ color: ui.text }}>
+                {m.name ?? 'Monitor'} — {m.width}x{m.height}
+              </span>
+              {m.primary && <span style={{ color: ui.muted }}>(principal)</span>}
+              {m.scale !== 1 && <span style={{ color: ui.muted }}>(escala {m.scale}×)</span>}
+            </div>
+          ))}
+          <div style={{ ...helpStyle, marginTop: ui.xs }}>
+            Escolha qual deles enviar na próxima etapa, no seletor do sistema.
+          </div>
+        </div>
+      )}
 
       <Row label="Áudio">
         {AUDIO_CHOICES.map((a) => {

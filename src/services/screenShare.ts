@@ -687,3 +687,55 @@ export function pickMonitorLabel(monitors: MonitorInfo[] | null | undefined, id:
   const m = monitors.find(x => x.id === id)
   return m ? `${m.name ?? 'monitor'} ${m.width}x${m.height}` : null
 }
+
+/**
+ * Monitores realmente plugged na máquina, via `availableMonitors()` do Tauri 2.
+ *
+ * Devolve `[]` (e nunca lança) fora do app nativo — Android, iOS e o modo
+ * browser não têm multi-monitor. Import dinâmico de propósito: este módulo é
+ * carregado também pelos testes em node puro, onde o pacote do Tauri não deve
+ * ser pesado nem inicializar IPC.
+ *
+ * A ESCOLHA final continua sendo do seletor nativo do sistema (é ele que sabe
+ * qual monitor/janela está visível no momento); aqui enumeramos para a UI
+ * mostrar quantos e quais existem, em vez de oferecer "monitor específico" no
+ * escuro.
+ */
+export async function listShareableMonitors(): Promise<MonitorInfo[]> {
+  try {
+    const g = globalThis as Record<string, unknown>
+    const w = g as { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown; __TAURI_IPC__?: unknown }
+    if (!('__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w)) return []
+    const mod = (await import('@tauri-apps/api/window')) as {
+      availableMonitors: () => Promise<unknown[]>
+      primaryMonitor: () => Promise<unknown>
+    }
+    const [mons, primary] = await Promise.all([
+      mod.availableMonitors().catch(() => [] as unknown[]),
+      mod.primaryMonitor().catch(() => null),
+    ])
+    const pname = (primary as { name?: string | null } | null)?.name ?? null
+    return (mons as unknown[]).map((raw, i) => {
+      const m = raw as {
+        name?: string | null
+        size?: { width?: number; height?: number }
+        scaleFactor?: number
+      }
+      const name = m?.name ?? null
+      const width = Number(m?.size?.width ?? 0)
+      const height = Number(m?.size?.height ?? 0)
+      return {
+        // id estável o bastante para a UI: índice + nome. Não é um id de
+        // captura (o Web não expõe isso de forma padrão) — é rótulo de UI.
+        id: `${i}:${name ?? 'monitor'}`,
+        name,
+        width,
+        height,
+        scale: Number(m?.scaleFactor ?? 1) || 1,
+        primary: name !== null && pname !== null && name === pname,
+      }
+    })
+  } catch {
+    return []
+  }
+}

@@ -2959,7 +2959,7 @@ export class CallManager {
   private async ensureShareMicrophone(): Promise<MediaStreamTrack | null> {
     const live = this.localStream?.getAudioTracks().find(t => t.readyState === 'live') ?? null
     if (live) return live
-    let captured: MediaStream | null = null
+    let captured: MediaStream | null
     try {
       captured = await getLocalMedia({ audio: { ...AUDIO_CONSTRAINTS }, video: false })
     } catch { return null }
