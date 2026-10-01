@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { createServerViaWizard } from './helpers/server';
 
 // v6 — bots conectados à web: criar bot, abrir o painel (prefixo, comando
 // REST, escopo, webhook), salvar config e regenerar token. Token mascarado
@@ -13,21 +14,6 @@ async function createAccount(page: Page, name: string) {
   await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 });
 }
 
-async function createServerViaWizard(page: Page, name: string): Promise<void> {
-  await page.getByTitle('Adicionar um servidor').click();
-  await page.getByText('Criar meu próprio', { exact: false }).click();
-  const wizard = page.getByRole('dialog', { name: 'Criar servidor' });
-  await expect(wizard).toBeVisible({ timeout: 10000 });
-  await wizard.getByPlaceholder('ex.: cantinho dos amigos').fill(name);
-  await wizard.getByRole('button', { name: 'Continuar' }).click();
-  await wizard.getByRole('button', { name: 'Continuar' }).click();
-  await wizard.getByRole('button', { name: 'Continuar' }).click();
-  await wizard.getByPlaceholder('ex.: sem flood, sem spam, respeite todo mundo').fill('regras');
-  await wizard.getByRole('button', { name: 'Criar servidor' }).click();
-  await expect(wizard.getByText('Convidar', { exact: false })).toBeVisible({ timeout: 15000 });
-  await wizard.getByRole('button', { name: 'Concluir' }).click();
-  await expect(wizard).toBeHidden({ timeout: 10000 });
-}
 
 async function openServerSettingsBots(page: Page): Promise<void> {
   // menu do servidor (cabeçalho da sidebar) → item "Bots" abre as configurações já na aba
@@ -53,6 +39,10 @@ test('dono adiciona bot, configura comando REST e salva config', async ({ page }
 
   // prefixo + um comando GET
   await panel.getByLabel('prefixo do bot').fill('!')
+  // A lista de comandos começa vazia: os campos só existem depois de
+  // "Adicionar comando" (o painel abre na 1a aba, "Comandos web").
+  await panel.getByRole('button', { name: /Adicionar comando/ }).click()
+  await expect(panel.getByLabel('nome do comando 1')).toBeVisible({ timeout: 5000 })
   await panel.getByLabel('nome do comando 1').fill('clima')
   await panel.getByLabel('url do comando 1').fill('https://api.exemplo.com/clima/{{query}}')
   await panel.getByLabel('responsePath do comando 1').fill('data.temp')

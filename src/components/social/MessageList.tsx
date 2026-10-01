@@ -3,7 +3,7 @@
 // links, divisores de data e barra de não-lidas.
 // O motor valida tudo; aqui só refletimos o resultado real.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { services } from '../../services'
 import type {
   EmojiView,
@@ -44,22 +44,33 @@ export interface MessageListProps {
   onForward: (m: StoredMessage) => void
   onThread: (m: StoredMessage) => void
   onToast: (s: string) => void
+  /** reenvia mensagem que falhou (o motor re-tenta pela outbox, isto força já) */
+  onResend?: (m: StoredMessage) => void
   renderFile?: (m: StoredMessage, grouped: boolean) => React.ReactNode
   /** enquetes do canal (nativo; vazio no browser até criar) */
   pollChannel?: { communityId: string; channelId: string }
   pollHighlight?: string
 }
 
-export default function MessageList(props: MessageListProps) {
+export interface MessageListHandle {
+  /** força a recarga de enquetes/emojis do canal (após criar enquete no shell) */
+  reloadPolls: () => void
+}
+
+// `export default const ...` não é sintaxe válida — o default export só aceita
+// a declaração ou a expressão diretamente. Declara e exporta em separado.
+const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageListInner(props, ref) {
   const {
     messages, convId, myFp, nameOf, profiles, presence, emptyBlock,
-    onReply, onProfile, onForward, onThread, onToast, renderFile, pollChannel,
+    onReply, onProfile, onForward, onThread, onToast, renderFile, pollChannel, onResend,
   } = props
 
   const [metas, setMetas] = useState<Record<string, MsgMetaView>>({})
   const [bodies, setBodies] = useState<Record<string, string>>({})
   const [reactions, setReactions] = useState<Record<string, ReactionSummary[]>>({})
   const [polls, setPolls] = useState<PollView[]>([])
+  const [pollNonce, setPollNonce] = useState(0)
+  useImperativeHandle(ref, () => ({ reloadPolls: () => setPollNonce(n => n + 1) }))
   const [tallies, setTallies] = useState<Record<string, PollTally>>({})
   const [emojis, setEmojis] = useState<EmojiView[]>([])
   const [unreadBefore, setUnreadBefore] = useState<number | null>(null)
@@ -93,17 +104,33 @@ export default function MessageList(props: MessageListProps) {
   useEffect(() => {
     if (!pollChannel) { setPolls([]); return }
     let alive = true
-    services.pollList(pollChannel.communityId, pollChannel.channelId)
-      .then(async ps => {
-        if (!alive) return
-        setPolls(ps)
-        const t: Record<string, PollTally> = {}
-        for (const p of ps) t[p.id] = await services.pollTally(p.id).catch(() => ({ counts: [], total: 0, mine: [] }))
-        if (alive) setTallies(t)
-      })
-      .catch(() => setPolls([]))
+    const load = () => {
+      services.pollList(pollChannel.communityId, pollChannel.channelId)
+        .then(async ps => {
+          if (!alive) return
+          setPolls(ps)
+          const t: Record<string, PollTally> = {}
+          for (const p of ps) t[p.id] = await services.pollTally(p.id).catch(() => ({ counts: [], total: 0, mine: [] }))
+          if (alive) setTallies(t)
+        })
+        .catch(() => { if (alive) setPolls([]) })
+    }
+    load()
     return () => { alive = false }
-  }, [pollChannel?.communityId, pollChannel?.channelId, messages.length])
+    // messages.length é o gatilho de "chegou mensagem nova". Criar/votar numa
+    // enquete NÃO muda esse número, então a lista ficava congelada e a enquete
+    // recém-criada não aparecia — depende também do evento de enquete do motor.
+    // (sem diretiva eslint-disable: o plugin react-hooks não está instalado;
+    // a diretiva morta quebrava o lint com "rule not found".)
+  }, [pollChannel?.communityId, pollChannel?.channelId, messages.length, pollNonce])
+
+  useEffect(() => {
+    if (!pollChannel) return
+    const un = services.subscribe((ev) => {
+      if (String(ev.type).includes('poll')) setPollNonce(n => n + 1)
+    })
+    return un
+  }, [pollChannel?.communityId, pollChannel?.channelId])
 
   useEffect(() => {
     if (!pollChannel) return
@@ -140,6 +167,24 @@ export default function MessageList(props: MessageListProps) {
       setReactions(s => ({ ...s, [msgId]: r }))
     } catch (e: any) { onToast(String(e?.message ?? e)) }
   }
+
+  // Reação do OUTRO lado chegando: o motor emite `reaction_changed` (inclui o
+  // eco local). Sem esta escuta, a reação remota só aparecia ao reabrir a
+  // conversa — "reações não transmitidas". Re-lê só a mensagem afetada.
+  useEffect(() => {
+    if (!convId) return
+    const un = services.subscribe((ev: any) => {
+      try {
+        if (ev?.type !== 'reaction_changed' || ev?.conv_id !== convId) return
+        const mid = String(ev?.msg_id ?? '')
+        if (!mid) return
+        services.reactions(mid)
+          .then(r => { setReactions(s => ({ ...s, [mid]: r })) })
+          .catch(() => {})
+      } catch { /* evento nunca derruba a lista */ }
+    })
+    return () => { try { un() } catch { /* ignore */ } }
+  }, [convId])
 
   async function doEdit(id: string) {
     if (!editing) return
@@ -215,7 +260,7 @@ export default function MessageList(props: MessageListProps) {
             >
               {grouped ? <span style={{ width: 40, flexShrink: 0 }} /> : (
                 <span style={{ position: 'relative', flexShrink: 0, cursor: 'pointer' }} onClick={() => onProfile(authorFp)}>
-                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} />
+                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} />
                   {pres && <PresenceDot status={pres} size={12} ring={T_MAIN} />}
                 </span>
               )}
@@ -265,16 +310,30 @@ export default function MessageList(props: MessageListProps) {
                 )}
 
                 <ReactionBar reactions={rx} onToggle={e => toggleReact(m.id, e)}
-                  onHoverList={r => onToast(`${r.emoji} ${r.count} · ${r.reactors.map(f => f.slice(0, 8)).join(', ')}`)} />
+                  resolveName={fp => nameOf(fp)} />
 
-                {polls.length > 0 && idx === visible.length - 1 - Math.min(3, polls.length) && polls.map(p => (
-                  <PollCard key={p.id} poll={p} tally={tallies[p.id] ?? { counts: [], total: 0, mine: [] }}
-                    communityId={pollChannel?.communityId ?? ''} channelId={pollChannel?.channelId ?? ''}
-                    onVote={async i => {
-                      if (!pollChannel) return
-                      try { await services.pollVote(pollChannel.communityId, pollChannel.channelId, p.id, i) } catch (e: any) { onToast(String(e?.message ?? e)) }
-                    }} />
-                ))}
+                {/* Enquetes ancoradas nas últimas mensagens. A âncora é
+                    distribuída: a i-ésima enquete (das N mais recentes) fica na
+                    mensagem `len-1-(N-1-i)`. A conta antiga usava um índice fixo
+                    que dava negativo quando havia menos mensagens que enquetes
+                    — aí NENHUMA aparecia, mesmo com a enquete criada no motor. */}
+                {polls.map((p, pi) => {
+                  const n = polls.length
+                  const anchor = n <= visible.length ? visible.length - 1 - (n - 1 - pi) : visible.length - 1
+                  if (idx !== anchor) return null
+                  return (
+                    <PollCard key={p.id} poll={p} tally={tallies[p.id] ?? { counts: [], total: 0, mine: [] }}
+                      communityId={pollChannel?.communityId ?? ''} channelId={pollChannel?.channelId ?? ''}
+                      onVote={async (i: number) => {
+                        if (!pollChannel) return
+                        try {
+                          await services.pollVote(pollChannel.communityId, pollChannel.channelId, p.id, i)
+                          const t = await services.pollTally(p.id).catch(() => ({ counts: [], total: 0, mine: [] }))
+                          setTallies(prev => ({ ...prev, [p.id]: t }))
+                        } catch (e: any) { onToast(String(e?.message ?? e)) }
+                      }} />
+                  )
+                })}
               </div>
 
               {/* barra de ações no hover — estilo Discord */}
@@ -304,11 +363,33 @@ export default function MessageList(props: MessageListProps) {
               <MenuItem label="↪ Encaminhar" onClick={() => { onForward(m); setMenu(null) }} />
               <MenuItem label="🧵 Criar thread" onClick={() => { onThread(m); setMenu(null) }} />
               {(mine || meta) && <MenuItem label="✏️ Editar" onClick={() => { setEditing({ id: m.id, body }); setMenu(null) }} />}
+              {/* Reenviar: só faz sentido quando o envio realmente falhou. O
+                  glyph já aparece na linha (StatusGlyph), aqui damos o botão. */}
+              {mine && m.status === 'failed' && onResend && (
+                <MenuItem label="🔁 Reenviar" onClick={() => { onResend(m); setMenu(null) }} />
+              )}
+              <MenuItem label="🔕 Marcar como não lida" onClick={() => {
+                // Cursor de leitura falso logo abaixo desta msg = tudo acima
+                // volta a contar como não lida (mesma semântica do Discord).
+                services.readSet(convId, Math.max(0, m.ts - 1)).catch(() => {})
+                setUnreadBefore(m.ts)
+                onToast('marcada como não lida')
+                setMenu(null)
+              }} />
               <MenuItem label="🔎 Copiar texto" onClick={() => { navigator.clipboard?.writeText(body); onToast('copiado'); setMenu(null) }} />
               <MenuItem label="🔖 Salvar marcador" onClick={async () => {
                 try { await services.bookmarkSet(convId, body.slice(0, 24) || 'mensagem', m.id); onToast('marcador salvo') } catch (e: any) { onToast(String(e?.message ?? e)) }
                 setMenu(null)
               }} />
+              {!mine && (
+                <MenuItem label="⚠️ Denunciar" danger onClick={async () => {
+                  try {
+                    await services.reportUser(authorFp, undefined, `Mensagem: ${body.slice(0, 80)}`)
+                    onToast('denunciada')
+                  } catch (e: any) { onToast(String(e?.message ?? e)) }
+                  setMenu(null)
+                }} />
+              )}
               <MenuItem label="🗑 Apagar" danger onClick={() => { doDelete(m.id); setMenu(null) }} />
             </div>
             )}
@@ -325,7 +406,9 @@ export default function MessageList(props: MessageListProps) {
       <JumpToBottom visible={!stickBottom} onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })} />
     </div>
   )
-}
+})
+
+export default MessageList
 
 function JumpToBottom({ visible, onClick }: { visible: boolean; onClick: () => void }) {
   if (!visible) return null

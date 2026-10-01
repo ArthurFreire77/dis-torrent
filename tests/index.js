@@ -4,3 +4,4 @@
 import './callPhases.test.ts'
 import './botCommands.test.ts'
 import './downloadQueue.test.ts'
+import './screenShare.test.ts'

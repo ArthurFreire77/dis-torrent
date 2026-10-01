@@ -826,6 +826,12 @@ const JITTER_DEPTH: Duration = Duration::from_millis(50);
 const JITTER_CAPACITY: usize = 64;
 const BITRATE_BPS: i32 = 32_000;
 const STUN_DEFAULT: &str = "stun:stun.l.google.com:19302";
+/// TURN público padrão (mesmo do caminho do navegador). Sem relay, CGNAT
+/// simétrico não fecha — daí a obrigatoriedade.
+const TURN_DEFAULT_HOST: &str = "openrelay.metered.ca";
+const TURN_DEFAULT_PORT: u16 = 80;
+const TURN_DEFAULT_USER: &str = "openrelayproject";
+const TURN_DEFAULT_SECRET: &str = "openrelayprojectsecret";
 const SDP_WAIT: Duration = Duration::from_millis(1500);
 /// fmtp Opus: 20 ms e FEC in-band (RFC 7587 5.1).
 const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
@@ -1406,15 +1412,28 @@ fn ice_servers() -> Vec<RTCIceServer> {
             ..Default::default()
         });
     }
-    if let Ok(urls) = std::env::var("VOICE_TURN_URLS") {
-        for url in urls.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            v.push(RTCIceServer {
-                urls: vec![url.to_string()],
-                username: std::env::var("VOICE_TURN_USER").unwrap_or_default(),
-                credential: std::env::var("VOICE_TURN_PASS").unwrap_or_default(),
-                ..Default::default()
-            });
-        }
+    // TURN é OBRIGATÓRIO atrás de CGNAT: o STUN só revela o IP mapeado, e
+    // CGNAT simétrico não deixa esse IP ser alcançado de volta. Sem relay, dois
+    // peers atrás de CGNAT nunca fecham — a chamada fica em "Conectando…"
+    // para sempre.
+    //
+    // BUG que isto corrige: o TURN vinha SÓ de `VOICE_TURN_URLS`, que ninguém
+    // define. O caminho do navegador (`getIceServers` no JS) tinha TURN padrão;
+    // a voz nativa não tinha NENHUM. Então no 4G/CGNAT a chamada nativa nunca
+    // conectava. Agora usa os mesmos servidores padrão do caminho JS.
+    let turn_urls = std::env::var("VOICE_TURN_URLS").unwrap_or_else(|_| {
+        // openrelay: TURN público com credencial estática documentada.
+        format!("{TURN_DEFAULT_HOST}:{TURN_DEFAULT_PORT}")
+    });
+    let turn_user = std::env::var("VOICE_TURN_USER").unwrap_or_else(|_| TURN_DEFAULT_USER.to_string());
+    let turn_pass = std::env::var("VOICE_TURN_PASS").unwrap_or_else(|_| TURN_DEFAULT_SECRET.to_string());
+    for url in turn_urls.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let urls = if url.starts_with("turn:") || url.starts_with("turns:") {
+            vec![url.to_string()]
+        } else {
+            vec![format!("turn:{url}")]
+        };
+        v.push(RTCIceServer { urls, username: turn_user.clone(), credential: turn_pass.clone(), ..Default::default() });
     }
     v
 }

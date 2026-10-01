@@ -38,9 +38,14 @@ export function extraChannels(communityId: string): ChannelMeta[] {
 export function saveExtraChannels(communityId: string, list: ChannelMeta[]) {
   save(key('channels', communityId), list)
 }
-export function createLocalChannel(communityId: string, name: string, opts?: { topic?: string; category?: string; kind?: 'text' | 'voice' | 'video' }): string {
+export function createLocalChannel(communityId: string, name: string, opts?: { topic?: string; category?: string; kind?: 'text' | 'voice' | 'video'; id?: string }): string {
   const list = extraChannels(communityId)
-  const id = `${communityId}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}-${Math.random().toString(36).slice(2, 6)}`
+  // O caller pode trazer o id que já usou na tupla da comunidade. Sem isso,
+  // `createCommunity` criava o canal duas vezes com ids DIFERENTES — uma na
+  // tupla `channels` do servidor e outra aqui — e o sidebar mostrava o mesmo
+  // canal duplicado, porque o merge casa por id.
+  const id = opts?.id
+    ?? `${communityId}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')}-${Math.random().toString(36).slice(2, 6)}`
   const kind = opts?.kind ?? 'text'
   const meta: ChannelMeta = {
     id,

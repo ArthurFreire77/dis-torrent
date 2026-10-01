@@ -3,7 +3,7 @@ import { Icon, Icons } from '../shared/icons'
 import { activeToken, applyFormat } from '../shared/markdown'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { EmojiPicker } from '../shared/EmojiPicker'
-import MessageList from '../components/social/MessageList'
+import MessageList, { type MessageListHandle } from '../components/social/MessageList'
 import {
   BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel,
   PinsPanel, ProfileModal,
@@ -12,7 +12,7 @@ import {
 } from '../components/social/Social'
 import { services } from '../services'
 import type { Identity, MessageStatus, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage } from '../services/models'
-import { PRIVACY_MODES, PERMS, PERM_LABELS, DEFAULT_ROLE_COLORS, BOT_AVATARS } from '../services/models'
+import { PRIVACY_MODES } from '../services/models'
 import {
   useConversations,
   useEngineEvents,
@@ -21,15 +21,19 @@ import {
   useIdentity as useIdentityBase,
 } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
+import CallDiagnostics from '../components/CallDiagnostics'
+import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CreateServerWizard from '../components/CreateServerWizard'
 import BotConfigPanel from '../components/BotConfigPanel'
+import ServerSettings from '../components/server/ServerSettings'
+import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
-import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
 import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, isVideoName, mediaAutoFetchCap, isMediaName } from '../services/fileSwarm'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import { throttleTrailing } from '../shared/perf'
@@ -506,6 +510,16 @@ function fmtShortDuration(ms: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
+/** Ponte entre a aba legada (`serverTab`) e as seções novas. Sai quando o
+ *  menu do servidor for migrado por completo. */
+const SECTION_IDA: Record<string, 'visao-geral' | 'canais' | 'cargos' | 'membros' | 'bots'> = {
+  geral: 'visao-geral',
+  canais: 'canais',
+  cargos: 'cargos',
+  membros: 'membros',
+  bots: 'bots',
+}
+
 export default function ThemeShell({ designId }: {designId:string}){
   void designId
   const [theme] = useState<'dark'|'light'>('dark')
@@ -527,9 +541,11 @@ export default function ThemeShell({ designId }: {designId:string}){
   const { messages, patchStatus, append, replaceOptimistic, failOptimistic, loadOlder, hasOlder } = useMessages(selConv)
   const [showBookmarks, setShowBookmarks] = useState(false)
   const [showInbox, setShowInbox] = useState(false)
+  const [inboxTab, setInboxTab] = useState<InboxTab>('mentions')
   const [unreadMap, setUnreadMap] = useState<Record<string, number>>({})
   const [mentionTotal, setMentionTotal] = useState(0)
   const [jumpTarget, setJumpTarget] = useState<string | null>(null)
+  const [loadingOlder, setLoadingOlder] = useState(false)
 
   // --- contadores reais de não-lida / menção -----------------------------
   // O motor é a fonte da verdade: consultamos unreadCount/unreadMentions em vez
@@ -585,6 +601,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   /** Espelho da fonte de captura escolhida na barra da chamada, para o botão
    *  reagir ao clique (o CallManager não emite evento para isso). */
   const [screenSourceHint, setScreenSourceHint] = useState<'monitor' | 'window'>('monitor')
+  /** Seletor completo de compartilhamento (fonte/áudio/qualidade/FPS). */
+  const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [showPrivacyModal, setShowPrivacyModal] = useState(false)
   const [addrInput, setAddrInput] = useState('')
@@ -724,25 +742,14 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [extraChannels, setExtraChannels] = useState<ChannelMeta[]>([])
   const [roles, setRoles] = useState<RoleView[]>([])
   const [bots, setBots] = useState<BotView[]>([])
-  const [showCreateChannel, setShowCreateChannel] = useState(false)
-  const [newChannelName, setNewChannelName] = useState('')
-  const [newChannelTopic, setNewChannelTopic] = useState('')
-  const [newChannelCategory, setNewChannelCategory] = useState('GERAL')
-  const [newChannelKind, setNewChannelKind] = useState<'text'|'voice'>('text')
-  const [editingChannel, setEditingChannel] = useState<string | null>(null)
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; id: string } | null>(null)
   const [collapsedCats, setCollapsedCats] = useState<Set<string>>(new Set())
   const [showServerSettings, setShowServerSettings] = useState(false)
   const [serverTab, setServerTab] = useState<'geral'|'canais'|'cargos'|'bots'|'membros'>('geral')
-  const [editingRoleId, setEditingRoleId] = useState<string | null>(null)
-  const [newRoleName, setNewRoleName] = useState('')
-  const [newRoleColor, setNewRoleColor] = useState(DEFAULT_ROLE_COLORS[0])
-  const [newRolePerms, setNewRolePerms] = useState<number>(PERMS.VIEW_CHANNEL | PERMS.SEND_MESSAGES)
-  const [newRoleHoist, setNewRoleHoist] = useState(true)
-  const [newRoleMention, setNewRoleMention] = useState(true)
-  const [newBotName, setNewBotName] = useState('')
-  const [newBotAvatar, setNewBotAvatar] = useState(BOT_AVATARS[0])
-  const [newBotRoleId, setNewBotRoleId] = useState<string | null>(null)
+  // Canal a abrir já em edição ao entrar em Configurações (menu da sidebar).
+  const [pendingChannelEdit, setPendingChannelEdit] = useState<string | null>(null)
+  // Categoria pré-selecionada ao criar canal pelo "+" da sidebar.
+  const [pendingCategory, setPendingCategory] = useState<string | null>(null)
   const [memberRolesCache, setMemberRolesCache] = useState<Record<string, string[]>>({})
   // --- CALL (Discord idêntico) ---
   const [activeCall, setActiveCall] = useState<any>(null)
@@ -762,6 +769,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [qualityError, setQualityError] = useState<string | null>(null)
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
+  /** Painel de diagnóstico da chamada (tempo real) dentro do overlay. */
+  const [showCallDiag, setShowCallDiag] = useState(false)
   const [, setFileList] = useState<any[]>([])
   const handlePreviewTick = useCallback(() => {
     try { setFileList([...fileSwarm.files.values()]) } catch { /* ignore */ }
@@ -1153,7 +1162,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       const nowSlash = Date.now()
       const ans = await runSlash(body)
       const convIdSlash = selConv
-      const cidSlash = selCommunity
+      const cidSlash = communities.find(c => c.channels.some(([id]) => id === convIdSlash))?.id ?? null
       const meFpSlash = identity?.fingerprint ?? ''
       const tempSlash: StoredMessage = { id: `pending-cmd-${nowSlash}`, conv_id: convIdSlash, author_fp: meFpSlash, body, ts: nowSlash, sig: 'pending', direction: 'out', status: 'sending' }
       const ansMsg: StoredMessage = { id: `pending-ans-${nowSlash}`, conv_id: convIdSlash, author_fp: meFpSlash, body: ans, ts: nowSlash + 1, sig: 'pending', direction: 'out', status: 'sending' }
@@ -1175,7 +1184,15 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (now - lastSendRef.current < 300) return
     lastSendRef.current = now
     const convId = selConv
-    const communityId = selCommunity
+    // `selCommunity` sobrevive à abertura de DM (só a aba "amigos" o limpa),
+    // então ele não é prova de que a conversa selecionada é um canal. O
+    // membership real é a única fonte: mandar num id de DM com community setado
+    // produzia "canal inexistente" para toda mensagem escrita numa conversa
+    // privada depois de visitar um servidor.
+    const isChannelConv = !!selCommunity && communities.some(c =>
+      c.id === selCommunity && c.channels.some(([cid]) => cid === selConv),
+    )
+    const communityId = isChannelConv ? selCommunity : null
     const myFp = identity?.fingerprint ?? ''
     const ts = Date.now()
     const tempId = `pending-${ts}`
@@ -1210,12 +1227,16 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!m.conv_id) return
     patchStatus(m.id, 'sending')
     setError(null)
+    // resolve a comunidade pela PRÓPRIA mensagem, não pelo estado da UI: a
+    // falha original pode ter vindo de outro canal, e o reenvio não pode
+    // herdar o mesmo `selCommunity` que a recusou.
+    const cid = communities.find(c => c.channels.some(([id]) => id === m.conv_id))?.id ?? null
     try {
-      const fresh = selCommunity
-        ? await services.sendChannelMessage(selCommunity, m.conv_id, m.body)
+      const fresh = cid
+        ? await services.sendChannelMessage(cid, m.conv_id, m.body)
         : await services.messageSend(m.conv_id, m.body)
       replaceOptimistic(m.id, fresh)
-      if (!selCommunity) refreshConvos()
+      if (!cid) refreshConvos()
     } catch (e: any) {
       patchStatus(m.id, 'failed')
       setError(String(e?.message ?? e))
@@ -1242,6 +1263,10 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   // ---------- composer: formatação, autocompletar, emoji ----------
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
+  // o MessageList expõe reloadPolls() para o shell forçar a releitura das
+  // enquetes do canal logo após criar uma (o efeito interno só reage a
+  // mensagens novas e a eventos de enquete, que o browser não emite).
+  const msgListRef = useRef<MessageListHandle | null>(null)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [composerMenu, setComposerMenu] = useState(false)
   const [autocompleteIdx, setAutocompleteIdx] = useState(0)
@@ -1364,6 +1389,17 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
   }
 
+  // O auto-resize vivia só no onChange, então limpar o campo depois de enviar
+  // (setInput(''), que não passa pelo onChange) deixava a caixa com a altura
+  // que a mensagem multi-linha tinha criado — o composer ficava gigante para
+  // sempre. Sincroniza em qualquer mudança de `input`, inclusive automática.
+  useEffect(() => {
+    const ta = composerRef.current
+    if (!ta) return
+    ta.style.height = 'auto'
+    ta.style.height = `${Math.min(ta.scrollHeight, 220)}px`
+  }, [input])
+
   function applyAutocomplete(it: AutoItem | undefined) {
     if (!it || !activeAutocomplete) return
     const { start, end } = activeAutocomplete
@@ -1458,7 +1494,18 @@ export default function ThemeShell({ designId }: {designId:string}){
       // envia mensagem com attachment info (hash) para swarm — todos que têm o arquivo semeiam
       if (selConv) {
         const body = encodeFileBody(sf)
-        try { const m = selCommunity ? await services.sendChannelMessage(selCommunity, selConv, body) : await services.messageSend(selConv, body); append(m); refreshConvos() } catch { /* silent */ }
+        // mesmo critério do envio de texto: só communityId se selConv for um
+        // canal DELE. Ver comentário em `send()`.
+        const chCid = selCommunity && communities.some(c =>
+          c.id === selCommunity && c.channels.some(([cid]) => cid === selConv),
+        ) ? selCommunity : null
+        try {
+          const m = chCid
+            ? await services.sendChannelMessage(chCid, selConv, body)
+            : await services.messageSend(selConv, body)
+          append(m)
+          refreshConvos()
+        } catch (err: any) { setError(String(err?.message ?? err)) }
       }
     } catch (err: any) { setError(String(err?.message ?? err)) }
     e.target.value = ''
@@ -1641,6 +1688,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     cmdk: () => setShowCmdK(true),
     search: () => setShowSearch(s => !s),
     pins: () => setShowPins(s => !s),
+    inbox: () => setShowInbox(s => !s),
+    bookmarks: () => setShowBookmarks(s => !s),
     mute: () => setIsMuted(v => { const n = !v; try { (callManager as any).setMuted?.(n) } catch { /* noop */ } return n }),
     next: () => { const i = conversations.findIndex(c => c.id === selConv); const nx = conversations[(i + 1) % Math.max(1, conversations.length)]; if (nx) { setSelConv(nx.id); setSelPeerFp(nx.peer_fp || null) } },
     prev: () => { const i = conversations.findIndex(c => c.id === selConv); const pv = conversations[(i - 1 + conversations.length) % Math.max(1, conversations.length)]; if (pv) { setSelConv(pv.id); setSelPeerFp(pv.peer_fp || null) } },
@@ -1673,6 +1722,10 @@ export default function ThemeShell({ designId }: {designId:string}){
       await services.pollCreate(selCommunity, selConv, newPollQ.trim(), opts, false, Date.now() + 86400000)
       setNewPollQ(''); setNewPollOpts(''); setShowPollForm(false)
       setNotice('enquete criada')
+      // O MessageList so recarrega as enquetes quando chega mensagem ou chega
+      // evento de enquete; o backend de browser não emite esse evento, então
+      // damos um toque para a lista aparecer na hora.
+      msgListRef.current?.reloadPolls()
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
@@ -1765,7 +1818,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 >
                   {(c.name || '?').charAt(0).toUpperCase()}
                 </button>
-                {unread && !active && <span className="rail-badge">1</span>}
+                {!active && (unreadMap[c.id] || 0) > 0 && <span className="rail-badge">{unreadMap[c.id]}</span>}
               </div>
             )
           })}
@@ -1856,9 +1909,9 @@ export default function ThemeShell({ designId }: {designId:string}){
                           </button>
                           {isOwner && (
                             <button
-                              onClick={() => { setNewChannelCategory(cat); setShowCreateChannel(true) }}
+                              onClick={() => { setPendingCategory(cat); setShowServerSettings(true); setServerTab('canais') }}
                               className="cat-plus"
-                              title="Criar canal"
+                              title="Criar canal nesta categoria"
                             ><Icon d={Icons.plus} size={12} /></button>
                           )}
                         </div>
@@ -2048,12 +2101,17 @@ export default function ThemeShell({ designId }: {designId:string}){
               <div style={{ width: 1, height: 20, background: borderColor, margin: '0 8px' }} />
               <span style={{ fontSize: 12, color: muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{extraChannels.find(c => c.id === selConv)?.topic || 'Bem-vindo ao canal'}</span>
               <span style={{ marginLeft: 'auto', display: 'flex', gap: 14, alignItems: 'center', color: muted }}>
-                <button onClick={() => setShowSearch(s => !s)} title="Buscar mensagens (Ctrl+F)" aria-label="Buscar" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>🔍</button>
-                <button onClick={() => setShowPins(s => !s)} title="Mensagens fixadas (Ctrl+Shift+P)" aria-label="Fixadas" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>📌</button>
-                <button onClick={() => setShowEvents(true)} title="Eventos agendados" aria-label="Eventos" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>📅</button>
-                <button onClick={() => setShowModeration(true)} title="Moderação do servidor" aria-label="Moderação" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>🛡️</button>
-                <button onClick={() => setShowChannelCfg(true)} title="Configurar canal (slowmode, emojis)" aria-label="Configurar canal" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>⚙️</button>
-                <button onClick={() => setShowCmdK(true)} title="Paleta de comandos (Ctrl+K)" aria-label="Comandos" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>⌘</button>
+                <button onClick={() => setShowSearch(s => !s)} title="Buscar mensagens (Ctrl+F)" aria-label="Buscar" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.search} size={17} /></button>
+                <button onClick={() => setShowInbox(s => !s)} title="Inbox: menções e não-lidas (Ctrl+I)" aria-label="Inbox" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center', position: 'relative' }}>
+                  <Icon d={Icons.bell} size={17} />
+                  {mentionTotal > 0 && <span style={{ position: 'absolute', top: -6, right: -8, background: t.red, color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: 99, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{mentionTotal}</span>}
+                </button>
+                <button onClick={() => setShowBookmarks(s => !s)} title="Mensagens salvas" aria-label="Salvas" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.file} size={17} /></button>
+                <button onClick={() => setShowPins(s => !s)} title="Mensagens fixadas (Ctrl+Shift+P)" aria-label="Fixadas" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.pin} size={17} /></button>
+                <button onClick={() => setShowEvents(true)} title="Eventos agendados" aria-label="Eventos" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.history} size={17} /></button>
+                <button onClick={() => setShowModeration(true)} title="Moderação do servidor" aria-label="Moderação" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.shield} size={17} /></button>
+                <button onClick={() => setShowChannelCfg(true)} title="Configurar canal (slowmode, emojis)" aria-label="Configurar canal" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.settings} size={17} /></button>
+                <button onClick={() => setShowCmdK(true)} title="Paleta de comandos (Ctrl+K)" aria-label="Comandos" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.terminal} size={17} /></button>
                 <button onClick={() => setShowDownloads(true)} title="Downloads" aria-label="Downloads" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center', position: 'relative' }}>
                   <Icon d={Icons.download} size={17} />
                   {dlCount > 0 && <span style={{ position: 'absolute', top: -6, right: -8, background: t.accent, color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: 99, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount}</span>}
@@ -2100,8 +2158,31 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <button onClick={() => setShowAddToCall(true)} title="Adicionar amigos à chamada" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex' }}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg></button>
                 <button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" style={{ background: inputBg, border: `1px solid ${borderColor}`, color: t.accent, cursor: 'pointer', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800 }}>+ Grupo</button>
                 <span style={{ width: 1, height: 20, background: borderColor, margin: '0 4px' }}/>
-                <Icon d={Icons.bell} size={17} />
-                <Icon d={Icons.grid} size={17} />
+                {/* Antes estes dois eram <Icon> PURO: pareciam botões e não
+                    faziam nada. Agora abrem as caixas de menções e_fixados. */}
+                <button
+                  onClick={() => { setInboxTab('mentions'); setShowInbox(true) }}
+                  title="Menções"
+                  aria-label={`Menções${mentionTotal ? ` (${mentionTotal})` : ''}`}
+                  data-testid="open-inbox"
+                  style={{ position: 'relative', background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 5, borderRadius: 6, display: 'flex' }}
+                >
+                  <Icon d={Icons.bell} size={17} />
+                  {mentionTotal > 0 && <span style={{ position: 'absolute', top: -2, right: -4, minWidth: 15, height: 15, padding: '0 4px', borderRadius: 99, background: t.red, color: '#fff', fontSize: 9.5, fontWeight: 900, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{mentionTotal > 99 ? '99+' : mentionTotal}</span>}
+                </button>
+                <button
+                  onClick={() => { setInboxTab('bookmarks'); setShowInbox(true) }}
+                  title="Marcadores"
+                  aria-label="Mensagens salvas"
+                  data-testid="open-bookmarks"
+                  style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 5, borderRadius: 6, display: 'flex' }}
+                ><Icon d={Icons.grid} size={17} /></button>
+                <button
+                  onClick={() => { setShowInbox(false); setShowBookmarks(true) }}
+                  title="Fixadas e salvas deste canal"
+                  aria-label="Fixadas e salvas"
+                  style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 5, borderRadius: 6, display: 'flex' }}
+                ><Icon d={Icons.pin} size={17} /></button>
                 {netPill(status)}
               </span>
             </div>
@@ -2177,7 +2258,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                               <div style={{ fontSize: 10, color: isQueued ? t.yellow : t.green }}>{isQueued ? 'offline — será entregue ao reconectar' : '✓ peer online — enviando…'}</div>
                             </div>
                             <span style={{ fontSize: 10, color: muted, fontFamily: 'JetBrains Mono' }}>{r.fp.slice(0,8)}</span>
-                            <button onClick={async()=>{ try{ await services.friendRemove(r.fp); refreshFriends(); setFriendSuccess('Solicitação cancelada')}catch(e:any){setError(String(e?.message??e))}}} title="Cancelar" style={{ background: 'transparent', border: `1px solid ${borderColor}`, color: t.red, padding: '4px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 10, fontWeight: 700 }}>✕</button>
+                            <button onClick={async()=>{ try{ await services.friendRemove(r.fp); refreshFriends(); setFriendSuccess('Solicitação cancelada')}catch(e:any){setError(String(e?.message??e))}}} title="Cancelar" style={{ background: 'transparent', border: `1px solid ${borderColor}`, color: t.red, padding: '4px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 10, fontWeight: 700 }}><Icon d={Icons.x} size={13} /></button>
                           </div>
                         )
                       })}
@@ -2225,7 +2306,27 @@ export default function ThemeShell({ designId }: {designId:string}){
           )}
 
           {selConv && (
+              <>
+              {/* Histórico: o core pagina por timestamp, mas a UI nunca expôs o
+                  `loadOlder` — conversas longas ficavam truncadas em 100. */}
+              {hasOlder && (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0 2px' }}>
+                  <button
+                    onClick={async () => {
+                      setLoadingOlder(true)
+                      try { await loadOlder() } finally { setLoadingOlder(false) }
+                    }}
+                    disabled={loadingOlder}
+                    style={{
+                      background: inputBg, border: `1px solid ${borderColor}`, color: muted,
+                      borderRadius: 99, padding: '6px 16px', fontSize: 12, fontWeight: 700,
+                      cursor: loadingOlder ? 'progress' : 'pointer', opacity: loadingOlder ? 0.6 : 1,
+                    }}
+                  >{loadingOlder ? 'carregando…' : '↑ carregar mensagens anteriores'}</button>
+                </div>
+              )}
               <MessageList
+                ref={msgListRef}
                 messages={messages}
                 convId={selConv}
                 myFp={identity?.fingerprint ?? ''}
@@ -2238,6 +2339,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 onForward={(m) => setForwardMsg(m)}
                 onThread={(m) => { void createThreadFrom(m) }}
                 onToast={setNotice}
+                onResend={(m) => { void resendMessage(m) }}
                 pollChannel={view === 'servidores' && selCommunity ? { communityId: selCommunity, channelId: selConv } : undefined}
                 renderFile={(m, grouped) => (
                   <div style={{ marginTop: 6, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', maxWidth: 400 }}>
@@ -2252,6 +2354,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   </div>
                 )}
               />
+              </>
           )}
 
           {selConv && showSearch && (
@@ -2260,7 +2363,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               convLabel={view === 'servidores' ? '#' + channelLabel : (peerTitle || 'conversa')}
               profiles={socialProfiles}
               onClose={() => setShowSearch(false)}
-              onJump={() => setShowSearch(false)}
+              onJump={(hit) => { setShowSearch(false); void jumpToMessage(hit.conv_id || selConv, hit.id) }}
             />
           )}
           {selConv && showPins && (
@@ -2268,7 +2371,24 @@ export default function ThemeShell({ designId }: {designId:string}){
               convId={selConv}
               messages={messages}
               onClose={() => setShowPins(false)}
-              onJump={() => setShowPins(false)}
+              onJump={(m) => { setShowPins(false); void jumpToMessage(m.conv_id || selConv, m.id) }}
+            />
+          )}
+          {selConv && showBookmarks && (
+            <BookmarksPanel
+              convId={selConv}
+              messages={messages}
+              onClose={() => setShowBookmarks(false)}
+              onJump={(id) => { setShowBookmarks(false); void jumpToMessage(selConv, id) }}
+            />
+          )}
+          {showInbox && (
+            <InboxPanel
+              tab={inboxTab}
+              onTab={setInboxTab}
+              profiles={socialProfiles}
+              onClose={() => setShowInbox(false)}
+              onJump={(cid, mid) => { setShowInbox(false); void jumpToMessage(cid, mid) }}
             />
           )}
           {selConv && (
@@ -2332,7 +2452,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </div>
               )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, background: t.composer, borderRadius: 8, padding: '8px 10px' }}>
+              {/* position:relative — os popovers ("+", autocomplete) são positionados
+                  em relação a ESTE box com bottom:calc(100% + 6px). Sem isso o
+                  ancestral de posicionamento era o viewport e o menu aparecia
+                  acima da tela (y negativo), inalcançável. */}
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 8, background: t.composer, borderRadius: 8, padding: '8px 10px' }}>
                 <input type="file" ref={(el:any)=> fileInputRef.current = el} onChange={onPickFile} style={{ display: 'none' }} />
                 <button onClick={() => setShowEmojiPicker(v => !v)} className="composer-icon" title="Mais: arquivo, enquete, emoji" aria-label="Mais" aria-expanded={showEmojiPicker} style={{ background: showEmojiPicker ? t.accent : t.accent, color: '#fff', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></button>
                 {showEmojiPicker && (
@@ -2605,7 +2729,10 @@ export default function ThemeShell({ designId }: {designId:string}){
           <BotConfigPanel
             communityId={selCommunity}
             bot={cb}
-            channels={[...(activeComm?.channels ?? []).map(([cid, n]) => ({ id: cid, name: n, topic: '', category: '', position: 0, kind: 'text' as const })), ...extraChannels]}
+            // FONTE ÚNICA: `mergeChannels` deduplica por id E por nome. Antes esta
+            // linha concatenava as duas listas sem filtro, e o mesmo canal
+            // aparecia duas vezes na lista de escopos do bot.
+            channels={mergeChannels(activeComm?.channels, extraChannels)}
             onSaved={() => { refreshExtras(selCommunity); setConfigBotId(null) }}
             onClose={() => setConfigBotId(null)}
           />
@@ -2619,335 +2746,114 @@ export default function ThemeShell({ designId }: {designId:string}){
             style={{ position: 'fixed', left: channelMenu.x, top: channelMenu.y, background: '#111214', borderRadius: 8, padding: 6, boxShadow: '0 8px 16px rgba(0,0,0,.4)', width: 200, zIndex: 76 }}
             onClick={e => e.stopPropagation()}
           >
-            <button className="dd-item" onClick={() => { const id = channelMenu.id; setChannelMenu(null); const ch = [...(activeComm?.channels ?? []).map(([cid, n]) => ({ id: cid, name: n })), ...extraChannels].find(c => c.id === id); if (ch) { setEditingChannel(id); setNewChannelName((ch as any).name ?? ''); setNewChannelTopic((ch as any).topic ?? ''); setNewChannelCategory((ch as any).category ?? 'GERAL') } }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.edit} size={14} /></span> Editar canal</button>
+            <button className="dd-item" onClick={() => { const id = channelMenu.id; setChannelMenu(null); const ch = mergeChannels(activeComm?.channels, extraChannels).find(c => c.id === id); if (ch) { setChannelMenu(null); setShowServerSettings(true); setServerTab('canais'); setPendingChannelEdit(ch.id) } }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.edit} size={14} /></span> Editar canal</button>
             <button className="dd-item" onClick={async () => { if (!selCommunity) return; const id = channelMenu.id; setChannelMenu(null); if (!confirm('Excluir este canal?')) return; try { await services.channelDelete(selCommunity, id); refreshExtras(selCommunity); if (selConv === id) { const fallback = activeComm?.channels.find(([cid]) => cid !== id)?.[0] ?? extraChannels.find(c => c.id !== id)?.id ?? null; setSelConv(fallback) } } catch (e: any) { setError(String(e?.message ?? e)) } }} style={{ color: t.red }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.trash} size={14} /></span> Excluir canal</button>
             <button className="dd-item" onClick={() => { const id = channelMenu.id; setChannelMenu(null); navigator.clipboard?.writeText?.(id).catch(() => {}) }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.copy} size={14} /></span> Copiar ID</button>
           </div>
         </div>
       )}
 
-      {/* Modal criar canal */}
-      {showCreateChannel && selCommunity && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 92 }} onClick={() => setShowCreateChannel(false)}>
-          <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 12, padding: 22, width: 460 }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-              <h3 style={{ fontWeight: 800, color: t.heading, margin: 0, flex: 1 }}>Criar canal</h3>
-              <button onClick={() => setShowCreateChannel(false)} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', fontSize: 16 }}>x</button>
-            </div>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: muted, marginBottom: 6 }}>TIPO DE CANAL</div>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-              <button onClick={() => setNewChannelKind('text')} className={'type-card' + (newChannelKind === 'text' ? ' on' : '')}><Icon d={Icons.hash} size={18} /> Texto</button>
-              <button onClick={() => setNewChannelKind('voice')} className={'type-card' + (newChannelKind === 'voice' ? ' on' : '')}><Icon d={Icons.speaker} size={18} /> Voz</button>
-            </div>
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>NOME DO CANAL</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '8px 12px', marginBottom: 10 }}>
-              <span style={{ color: muted }}><Icon d={newChannelKind === 'voice' ? Icons.speaker : Icons.hash} size={16} /></span>
-              <input value={newChannelName} onChange={e => setNewChannelName(e.target.value.toLowerCase().replace(/\s+/g, '-'))} placeholder="novo-canal" style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: text }} />
-            </div>
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>CATEGORIA</label>
-            <input value={newChannelCategory} onChange={e => setNewChannelCategory(e.target.value.toUpperCase())} placeholder="GERAL" style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, marginBottom: 10, boxSizing: 'border-box' }} />
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>TÓPICO (opcional)</label>
-            <input value={newChannelTopic} onChange={e => setNewChannelTopic(e.target.value)} placeholder="Sobre o que é este canal?" style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, boxSizing: 'border-box' }} />
-            <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-              <button onClick={() => setShowCreateChannel(false)} className="link-btn" style={{ padding: '8px 14px' }}>Cancelar</button>
-              <button
-                onClick={async () => {
-                  if (!newChannelName.trim() || !selCommunity) return
-                  try {
-                    const id = await services.channelCreate(selCommunity, newChannelName.trim(), { topic: newChannelTopic.trim(), category: newChannelCategory.trim() || 'GERAL', kind: newChannelKind })
-                    setShowCreateChannel(false); setNewChannelName(''); setNewChannelTopic(''); setSelConv(id); refreshExtras(selCommunity)
-                  } catch (e: any) { setError(String(e?.message ?? e)) }
-                }}
-                disabled={!newChannelName.trim()}
-                style={{ background: t.accent, color: '#fff', border: 'none', padding: '8px 18px', borderRadius: 8, fontWeight: 800, cursor: newChannelName.trim() ? 'pointer' : 'not-allowed', opacity: newChannelName.trim() ? 1 : 0.5 }}
-              >Criar canal</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal editar canal */}
-      {editingChannel && selCommunity && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 92 }} onClick={() => setEditingChannel(null)}>
-          <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 12, padding: 22, width: 460 }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-              <h3 style={{ fontWeight: 800, color: t.heading, margin: 0, flex: 1 }}>Editar canal</h3>
-              <button onClick={() => setEditingChannel(null)} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', fontSize: 16 }}>x</button>
-            </div>
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>NOME</label>
-            <input value={newChannelName} onChange={e => setNewChannelName(e.target.value.toLowerCase().replace(/\s+/g, '-'))} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, marginBottom: 10, boxSizing: 'border-box' }} />
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>CATEGORIA</label>
-            <input value={newChannelCategory} onChange={e => setNewChannelCategory(e.target.value.toUpperCase())} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, marginBottom: 10, boxSizing: 'border-box' }} />
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>TÓPICO</label>
-            <input value={newChannelTopic} onChange={e => setNewChannelTopic(e.target.value)} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, boxSizing: 'border-box' }} />
-            <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-              <button onClick={() => setEditingChannel(null)} className="link-btn" style={{ padding: '8px 14px' }}>Cancelar</button>
-              <button
-                onClick={async () => {
-                  if (!editingChannel || !selCommunity) return
-                  try {
-                    await services.channelRename(selCommunity, editingChannel, newChannelName.trim())
-                    if (newChannelTopic.trim()) await services.channelSetTopic(selCommunity, editingChannel, newChannelTopic.trim())
-                    if (newChannelCategory.trim()) await services.channelSetCategory(selCommunity, editingChannel, newChannelCategory.trim())
-                    setEditingChannel(null); refreshExtras(selCommunity)
-                  } catch (e: any) { setError(String(e?.message ?? e)) }
-                }}
-                style={{ background: t.accent, color: '#fff', border: 'none', padding: '8px 18px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}
-              >Salvar</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Configurações do Servidor — estilo Discord */}
+      {/* Configurações do servidor — componente próprio (server/ServerSettings).
+          Substitui o modal de 5 abas que vivia inline aqui. */}
       {showServerSettings && selCommunity && activeComm && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'stretch', zIndex: 85 }} onClick={() => setShowServerSettings(false)}>
-          <div style={{ display: 'flex', width: '100%', maxWidth: 960, margin: '0 auto', background: bg, borderRadius: 8, overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
-            {/* nav esquerda */}
-            <div style={{ width: 220, background: t.sidebar, padding: '20px 8px', display: 'flex', flexDirection: 'column', gap: 2, borderRight: `1px solid ${borderColor}` }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: muted, padding: '8px 10px' }}>{activeComm.name.toUpperCase()}</div>
-              {(['geral','canais','cargos','bots','membros'] as const).map(tab => (
-                <button key={tab} onClick={() => setServerTab(tab)} className={'nav-row' + (serverTab === tab ? ' active' : '')} style={{ fontSize: 13 }}>
-                  {tab === 'geral' ? 'Visão geral' : tab === 'canais' ? 'Canais' : tab === 'cargos' ? 'Cargos' : tab === 'bots' ? 'Bots' : 'Membros'} ({tab === 'canais' ? ((activeComm.channels?.length ?? 0) + extraChannels.length) : tab === 'cargos' ? roles.length : tab === 'bots' ? bots.length : (activeComm.members?.length ?? 0)})
-                </button>
-              ))}
-              <div style={{ marginTop: 'auto', padding: 8 }}>
-                <button onClick={() => setShowServerSettings(false)} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 6, padding: '8px', color: text, cursor: 'pointer', fontWeight: 700 }}>Fechar</button>
-              </div>
-            </div>
-            {/* conteúdo */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
-              {serverTab === 'geral' && (
-                <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 900, color: t.heading, margin: 0 }}>Visão geral do servidor</h2>
-                  <div style={{ fontSize: 13, color: muted, marginTop: 6 }}>Gerencie nome, canais, cargos e bots. Apenas o dono pode alterar.</div>
-                  <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginTop: 16, marginBottom: 6 }}>NOME DO SERVIDOR</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input defaultValue={activeComm.name} id="srv-rename" style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text }} />
-                    <button
-                      onClick={async () => {
-                        const el = document.getElementById('srv-rename') as HTMLInputElement | null
-                        if (!el?.value.trim() || !selCommunity) return
-                        try {
-                          await services.communityRename(selCommunity, el.value.trim())
-                          setError(null)
-                          refreshCommunities()
-                        } catch (e: any) { setError(String(e?.message ?? e)) }
-                      }}
-                      style={{ background: t.accent, color: '#fff', border: 'none', padding: '0 16px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}
-                    >Salvar</button>
-                  </div>
-                  <div style={{ marginTop: 16, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: 12 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: muted }}>DONO</div>
-                    <div style={{ fontSize: 13, color: text, marginTop: 4 }}>{activeComm.owner_fp === identity?.fingerprint ? 'Você' : activeComm.owner_fp.slice(0, 16)}</div>
-                    <div style={{ fontSize: 11, color: muted, marginTop: 4 }}>ID: {activeComm.id}</div>
-                  </div>
-                </div>
-              )}
-              {serverTab === 'canais' && (
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <h2 style={{ fontSize: 18, fontWeight: 900, color: t.heading, margin: 0, flex: 1 }}>Canais</h2>
-                    <button onClick={() => { setNewChannelCategory('GERAL'); setNewChannelName(''); setNewChannelTopic(''); setShowCreateChannel(true) }} style={{ background: t.green, color: '#fff', border: 'none', padding: '8px 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>+ Criar canal</button>
-                  </div>
-                  <div style={{ fontSize: 12, color: muted, marginTop: 6 }}>Texto e voz. Arraste para reordenar (em breve). Clique para editar.</div>
-                  <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {(() => {
-                      const base: ChannelMeta[] = (activeComm.channels ?? []).map(([id, name], idx) => {
-                        const ov = extraChannels.find(c => c.id === id)
-                        return ov ?? { id, name, category: 'CANAIS DE TEXTO', position: idx, kind: 'text' as const, topic: '' }
-                      })
-                      const merged = [...base, ...extraChannels.filter(ec => !(activeComm.channels ?? []).some(([id]) => id === ec.id))]
-                      return merged.map(ch => (
-                        <div key={ch.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px' }}>
-                          <Icon d={ch.kind === 'voice' ? Icons.speaker : Icons.hash} size={16} />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 14, fontWeight: 700, color: t.heading }}>{ch.name}</div>
-                            <div style={{ fontSize: 11, color: muted }}>{ch.category} {ch.topic ? `• ${ch.topic}` : ''} • {ch.kind}</div>
-                          </div>
-                          <button onClick={() => { setEditingChannel(ch.id); setNewChannelName(ch.name); setNewChannelTopic(ch.topic ?? ''); setNewChannelCategory(ch.category ?? 'GERAL') }} className="link-btn" style={{ fontSize: 13 }}>Editar</button>
-                          <button onClick={async () => { if (!selCommunity || !confirm(`Excluir #${ch.name}?`)) return; await services.channelDelete(selCommunity, ch.id); refreshExtras(selCommunity) }} style={{ background: 'transparent', border: 'none', color: t.red, cursor: 'pointer', fontWeight: 700, fontSize: 13 }}>Excluir</button>
-                        </div>
-                      ))
-                    })()}
-                  </div>
-                </div>
-              )}
-              {serverTab === 'cargos' && (
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <h2 style={{ fontSize: 18, fontWeight: 900, color: t.heading, margin: 0, flex: 1 }}>Cargos</h2>
-                    <button onClick={() => { setEditingRoleId(null); setNewRoleName('Novo cargo'); setNewRoleColor(DEFAULT_ROLE_COLORS[Math.floor(Math.random()*DEFAULT_ROLE_COLORS.length)]); setNewRolePerms(PERMS.VIEW_CHANNEL | PERMS.SEND_MESSAGES); setNewRoleHoist(true); setNewRoleMention(true) }} style={{ background: t.accent, color: '#fff', border: 'none', padding: '8px 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>+ Criar cargo</button>
-                  </div>
-                  <div style={{ fontSize: 12, color: muted, marginTop: 6 }}>Cargos organizam membros e controlam permissões. Cores aparecem no nome.</div>
-                  <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: editingRoleId !== null || newRoleName ? '200px 1fr' : '1fr', gap: 16 }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      {roles.slice().sort((a,b)=>b.position-a.position).map(r => (
-                        <button key={r.id} onClick={() => { setEditingRoleId(r.id); setNewRoleName(r.name); setNewRoleColor(r.color); setNewRolePerms(r.permissions); setNewRoleHoist(r.hoist); setNewRoleMention(r.mentionable) }} className={'nav-row' + (editingRoleId === r.id ? ' active' : '')} style={{ borderLeft: `4px solid ${r.color}` }}>
-                          <span style={{ width: 10, height: 10, borderRadius: '50%', background: r.color, display: 'inline-block', flexShrink: 0 }} />
-                          <span style={{ flex: 1, textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
-                        </button>
-                      ))}
-                    </div>
-                    {(editingRoleId !== null || newRoleName) && (
-                      <div style={{ background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: 16 }}>
-                        <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>NOME DO CARGO</label>
-                        <input value={newRoleName} onChange={e => setNewRoleName(e.target.value)} placeholder="Nome do cargo" style={{ width: '100%', background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, boxSizing: 'border-box', marginBottom: 12 }} />
-                        <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>COR</label>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
-                          {DEFAULT_ROLE_COLORS.map(c => (
-                            <button key={c} onClick={() => setNewRoleColor(c)} style={{ width: 28, height: 28, borderRadius: '50%', background: c, border: newRoleColor === c ? `3px solid ${t.heading}` : `2px solid ${borderColor}`, cursor: 'pointer' }} title={c} />
-                          ))}
-                          <input type="color" value={newRoleColor} onChange={e => setNewRoleColor(e.target.value)} style={{ width: 28, height: 28, border: 'none', padding: 0, borderRadius: '50%', cursor: 'pointer' }} />
-                        </div>
-                        <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>PERMISSÕES</label>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
-                          {Object.entries(PERM_LABELS).map(([bit, label]) => {
-                            const b = Number(bit)
-                            const on = (newRolePerms & b) !== 0
-                            return (
-                              <label key={bit} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: text, cursor: 'pointer' }}>
-                                <input type="checkbox" checked={on} onChange={e => setNewRolePerms(v => e.target.checked ? (v | b) : (v & ~b))} />
-                                {label}
-                              </label>
-                            )
-                          })}
-                        </div>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: text, marginBottom: 6 }}>
-                          <input type="checkbox" checked={newRoleHoist} onChange={e => setNewRoleHoist(e.target.checked)} /> Exibir separadamente
-                        </label>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: text, marginBottom: 12 }}>
-                          <input type="checkbox" checked={newRoleMention} onChange={e => setNewRoleMention(e.target.checked)} /> Mencionável
-                        </label>
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <button
-                            onClick={async () => {
-                              if (!selCommunity || !newRoleName.trim()) return
-                              try {
-                                if (editingRoleId) {
-                                  await services.roleUpdate(selCommunity, editingRoleId, { name: newRoleName.trim(), color: newRoleColor, permissions: newRolePerms, hoist: newRoleHoist, mentionable: newRoleMention })
-                                } else {
-                                  await services.roleCreate(selCommunity, { name: newRoleName.trim(), color: newRoleColor, permissions: newRolePerms, hoist: newRoleHoist, mentionable: newRoleMention })
-                                }
-                                setEditingRoleId(null); setNewRoleName(''); refreshExtras(selCommunity)
-                              } catch (e: any) { setError(String(e?.message ?? e)) }
-                            }}
-                            style={{ flex: 1, background: t.green, color: '#fff', border: 'none', padding: '10px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}
-                          >{editingRoleId ? 'Salvar' : 'Criar'}</button>
-                          {editingRoleId && (
-                            <button onClick={async () => { if (!selCommunity || !editingRoleId) return; if (!confirm('Excluir cargo?')) return; await services.roleDelete(selCommunity, editingRoleId); setEditingRoleId(null); setNewRoleName(''); refreshExtras(selCommunity) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>Excluir</button>
-                          )}
-                          <button onClick={() => { setEditingRoleId(null); setNewRoleName('') }} style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '10px 14px', borderRadius: 8, cursor: 'pointer' }}>Cancelar</button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-              {serverTab === 'bots' && (
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <h2 style={{ fontSize: 18, fontWeight: 900, color: t.heading, margin: 0, flex: 1 }}>Bots</h2>
-                    <span style={{ fontSize: 11, color: muted }}>{bots.length} bot(s)</span>
-                  </div>
-                  <div style={{ fontSize: 12, color: muted, marginTop: 6 }}>Bots são membros automatizados. Cada bot tem um token e um cargo.</div>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 12, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: 12, alignItems: 'flex-end' }}>
-                    <div style={{ flex: 1 }}>
-                      <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>NOME DO BOT</label>
-                      <input value={newBotName} onChange={e => setNewBotName(e.target.value)} placeholder="MeuBot" style={{ width: '100%', background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', color: text, boxSizing: 'border-box' }} />
-                    </div>
-                    <div>
-                      <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>AVATAR</label>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        {BOT_AVATARS.map(a => (
-                          <button key={a} onClick={() => setNewBotAvatar(a)} style={{ width: 32, height: 32, borderRadius: 8, background: newBotAvatar === a ? t.accent : inputBg, border: `1px solid ${borderColor}`, cursor: 'pointer', fontSize: 16 }}>{a}</button>
-                        ))}
-                      </div>
-                    </div>
-                    <div style={{ minWidth: 120 }}>
-                      <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>CARGO</label>
-                      <select value={newBotRoleId ?? ''} onChange={e => setNewBotRoleId(e.target.value || null)} style={{ width: '100%', background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px', color: text }}>
-                        <option value="">(sem cargo)</option>
-                        {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                      </select>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        if (!selCommunity || !newBotName.trim()) return
-                        try { await services.botCreate(selCommunity, { name: newBotName.trim(), avatar: newBotAvatar, roleId: newBotRoleId }); setNewBotName(''); refreshExtras(selCommunity) } catch (e: any) { setError(String(e?.message ?? e)) }
-                      }}
-                      disabled={!newBotName.trim()}
-                      style={{ background: t.accent, color: '#fff', border: 'none', padding: '10px 18px', borderRadius: 8, fontWeight: 800, cursor: newBotName.trim() ? 'pointer' : 'not-allowed', opacity: newBotName.trim() ? 1 : 0.5, height: 40 }}
-                    >Adicionar bot</button>
-                  </div>
-                  <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {bots.length === 0 && <div style={{ fontSize: 12, color: muted, textAlign: 'center', padding: 16, background: inputBg, borderRadius: 8 }}>Nenhum bot ainda. Crie um acima — copie o token e use em integrações.</div>}
-                    {bots.map(b => {
-                      const r = roles.find(x => x.id === b.roleId)
-                      return (
-                        <div key={b.id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '10px 12px' }}>
-                          <span style={{ width: 36, height: 36, borderRadius: '50%', background: r?.color ?? t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>{b.avatar}</span>
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 14, fontWeight: 800, color: r?.color ?? t.heading, display: 'flex', alignItems: 'center', gap: 6 }}>{b.name}<span style={{ fontSize: 10, background: t.accent, color: '#fff', padding: '1px 4px', borderRadius: 4 }}>BOT</span> <span style={{ fontSize: 11, color: muted }}>#{b.discriminator}</span></div>
-                            <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', wordBreak: 'break-all' }}>{b.token.slice(0, 28)}…</div>
-                            <div style={{ fontSize: 11, color: muted }}>{r?.name ?? 'Sem cargo'} • {b.online ? 'Online' : 'Offline'}</div>
-                          </div>
-                          <button onClick={() => setConfigBotId(b.id)} title="Comandos web, token e escopos" style={{ background: t.panel, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>Configurar</button>
-                          <button onClick={async () => { if (!selCommunity) return; await services.botUpdate(selCommunity, b.id, { online: !b.online }); refreshExtras(selCommunity) }} style={{ background: b.online ? t.green : inputBg, color: b.online ? '#fff' : muted, border: `1px solid ${borderColor}`, padding: '6px 10px', borderRadius: 6, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>{b.online ? 'Online' : 'Offline'}</button>
-                          <button onClick={async () => { await navigator.clipboard?.writeText?.(b.token).catch(() => {}) }} style={{ background: t.panel, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>Copiar token</button>
-                          <button onClick={async () => { if (!selCommunity || !confirm(`Remover ${b.name}?`)) return; await services.botDelete(selCommunity, b.id); refreshExtras(selCommunity) }} style={{ background: 'transparent', border: 'none', color: t.red, cursor: 'pointer', fontSize: 14 }}>✕</button>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-              {serverTab === 'membros' && (
-                <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 900, color: t.heading, margin: 0 }}>Membros — {activeComm.members.length}</h2>
-                  <div style={{ fontSize: 12, color: muted, marginTop: 6 }}>Atribua cargos, expulse ou veja fingerprints.</div>
-                  <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {activeComm.members.map(([fp, nick, role]) => {
-                      const rs = memberRolesCache[fp] ?? []
-                      const assignedRoles = roles.filter(r => rs.includes(r.id))
-                      return (
-                        <div key={fp} style={{ display: 'flex', alignItems: 'center', gap: 10, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '10px 12px' }}>
-                          <Avatar name={nick || fp} fp={fp} size={32} />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, display: 'flex', alignItems: 'center', gap: 6 }}>{nick || fp} {role === 'owner' && <span style={{ fontSize: 9, background: t.accent, color: '#fff', padding: '1px 4px', borderRadius: 4 }}>DONO</span>}</div>
-                            <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono' }}>{fp.slice(0, 16)}</div>
-                            <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>{assignedRoles.map(r => <span key={r.id} style={{ fontSize: 10, background: `${r.color}22`, color: r.color, border: `1px solid ${r.color}55`, padding: '1px 6px', borderRadius: 99, fontWeight: 700 }}>{r.name} ✕</span>)}{assignedRoles.length === 0 && <span style={{ fontSize: 11, color: muted, opacity: 0.7 }}>sem cargos</span>}</div>
-                          </div>
-                          <select
-                            defaultValue=""
-                            onChange={async e => { const rid = e.target.value; if (!rid || !selCommunity) return; await services.memberAssignRole(selCommunity, fp, rid); refreshExtras(selCommunity); e.target.value = '' }}
-                            style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 6, padding: '6px', color: text, fontSize: 12 }}
-                          >
-                            <option value="">+ Cargo</option>
-                            {roles.filter(r => !rs.includes(r.id)).map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                          </select>
-                          {assignedRoles.length > 0 && (
-                            <select
-                              defaultValue=""
-                              onChange={async e => { const rid = e.target.value; if (!rid || !selCommunity) return; await services.memberUnassignRole(selCommunity, fp, rid); refreshExtras(selCommunity); e.target.value = '' }}
-                              style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 6, padding: '6px', color: text, fontSize: 12 }}
-                            >
-                              <option value="">- Cargo</option>
-                              {assignedRoles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                            </select>
-                          )}
-                          {activeComm.owner_fp === identity?.fingerprint && fp !== identity?.fingerprint && (
-                            <button onClick={async () => { if (!selCommunity || !confirm(`Expulsar ${nick || fp}?`)) return; await services.memberKick(selCommunity, fp); refreshCommunities(); refreshExtras(selCommunity) }} style={{ background: 'transparent', border: 'none', color: t.red, cursor: 'pointer', fontWeight: 700, fontSize: 12 }}>Expulsar</button>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <ServerSettings
+          serverId={activeComm.id}
+          serverName={activeComm.name}
+          ownerFp={activeComm.owner_fp}
+          myFp={identity?.fingerprint}
+          description={activeComm.description}
+          category={activeComm.category}
+          channelsSummary={activeComm.channels}
+          channelsFull={extraChannels}
+          members={activeComm.members}
+          roles={roles}
+          bots={bots}
+          memberRoles={memberRolesCache}
+          error={error}
+          onError={setError}
+          onClose={() => setShowServerSettings(false)}
+          onRename={async (nome) => {
+            await services.communityRename(selCommunity, nome)
+            refreshCommunities()
+          }}
+          onSetMeta={async (patch) => {
+            await services.communitySetMeta(selCommunity, patch)
+            refreshCommunities()
+          }}
+          onChannelCreate={async (d) => {
+            const id = await services.channelCreate(selCommunity, d.name, {
+              topic: d.topic,
+              category: d.category,
+              kind: d.kind,
+            })
+            refreshExtras(selCommunity)
+            setSelConv(id)
+          }}
+          onChannelUpdate={async (id, d) => {
+            await services.channelRename(selCommunity, id, d.name)
+            await services.channelSetTopic(selCommunity, id, d.topic)
+            await services.channelSetCategory(selCommunity, id, d.category)
+            refreshExtras(selCommunity)
+          }}
+          onChannelDelete={async (id) => {
+            await services.channelDelete(selCommunity, id)
+            refreshExtras(selCommunity)
+            if (selConv === id) {
+              const fallback = mergeChannels(activeComm.channels, extraChannels).find(c => c.id !== id)?.id ?? null
+              setSelConv(fallback)
+            }
+          }}
+          onChannelMove={async (id, categoria) => {
+            await services.channelSetCategory(selCommunity, id, categoria)
+            refreshExtras(selCommunity)
+          }}
+          onRoleSave={async (d, id) => {
+            if (id) await services.roleUpdate(selCommunity, id, d)
+            else await services.roleCreate(selCommunity, d)
+            refreshExtras(selCommunity)
+          }}
+          onRoleDelete={async (id) => {
+            await services.roleDelete(selCommunity, id)
+            refreshExtras(selCommunity)
+          }}
+          onMemberAssign={async (fp, roleId) => {
+            await services.memberAssignRole(selCommunity, fp, roleId)
+            refreshExtras(selCommunity)
+          }}
+          onMemberUnassign={async (fp, roleId) => {
+            await services.memberUnassignRole(selCommunity, fp, roleId)
+            refreshExtras(selCommunity)
+          }}
+          onMemberKick={async (fp) => {
+            await services.memberKick(selCommunity, fp)
+            refreshCommunities()
+            refreshExtras(selCommunity)
+          }}
+          onBotCreate={async (d) => {
+            await services.botCreate(selCommunity, d)
+            refreshExtras(selCommunity)
+          }}
+          onBotUpdate={async (id, patch) => {
+            await services.botUpdate(selCommunity, id, patch)
+            refreshExtras(selCommunity)
+          }}
+          onBotDelete={async (id) => {
+            await services.botDelete(selCommunity, id)
+            refreshExtras(selCommunity)
+          }}
+          onConfigBot={setConfigBotId}
+          onMakeInvite={async () =>
+            services.makeInvite(selCommunity, identity?.fingerprint ?? '000000000000')
+          }
+          onRefresh={() => refreshExtras(selCommunity)}
+          initialSection={SECTION_IDA[serverTab]}
+          editChannelId={pendingChannelEdit}
+          presetCategory={pendingCategory}
+          onConsumedPending={() => {
+            setPendingChannelEdit(null)
+            setPendingCategory(null)
+          }}
+        />
       )}
 
       {/* INCOMING CALL — igual Discord: card escuro com aceitar/recusar */}
@@ -3011,10 +2917,16 @@ export default function ThemeShell({ designId }: {designId:string}){
               <span title="Áudio via relay pela sinalização — latência alta, WebRTC indisponível" style={{ fontSize: 10, fontWeight: 800, background: '#f0b232', color: '#000', padding: '3px 8px', borderRadius: 99, marginLeft: 8, whiteSpace: 'nowrap' }}>via relay (latência alta)</span>
             )}
             <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+              <button onClick={() => setShowCallDiag((v) => !v)} title="Diagnóstico da chamada em tempo real (ICE, RTT, FPS, causa da falha)" aria-label="Diagnóstico da chamada" style={{ background: showCallDiag ? t.accent : inputBg, border: `1px solid ${borderColor}`, color: showCallDiag ? '#fff' : text, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>Diagnóstico</button>
               <button onClick={() => setShowAddToCall(true)} style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>+ Adicionar amigo</button>
               <button onClick={() => fileInputRef.current?.click()} style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon d={Icons.attach} size={13} /> Arquivo</button>
             </span>
           </div>
+          {showCallDiag && (
+            <div style={{ background: '#1a1a1a', borderBottom: `1px solid ${borderColor}`, padding: '8px 12px', maxHeight: 260, overflowY: 'auto' }}>
+              <CallDiagnostics compact />
+            </div>
+          )}
           {((activeCall.qualityNotice as string | undefined) || qualityError || (activeCall as any)?.relayActive) && (
             <div style={{ background: '#232428', borderBottom: `1px solid ${borderColor}`, padding: '6px 16px', fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }} role="status">
               {qualityError ?? (activeCall.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}
@@ -3071,16 +2983,16 @@ export default function ThemeShell({ designId }: {designId:string}){
                 tela-inteira vs janela, e o alvo some quando para. */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <button
-                onClick={async ()=> { try { if (!supportsScreenShare() && !activeCall.sharing) { setError(SCREEN_UNAVAILABLE_MSG); return } await callManager.toggleScreen(); setError(null) } catch (e: any) { setError(String(e?.message ?? e)) } }}
+                onClick={()=> { if (activeCall.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
                 disabled={!supportsScreenShare() && !activeCall.sharing}
                 data-testid="call-screen-share"
-                title={activeCall.sharing ? 'Parar de compartilhar a tela' : supportsScreenShare() ? 'Compartilhar a tela com a chamada' : 'Este navegador não permite compartilhar tela'}
+                title={activeCall.sharing ? 'Parar de compartilhar a tela' : supportsScreenShare() ? 'Compartilhar a tela com a chamada (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? 'Este navegador não permite compartilhar tela')}
                 aria-label={activeCall.sharing ? 'Parar de compartilhar a tela' : 'Compartilhar tela'}
                 style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: activeCall.sharing ? t.red : '#3a3a3c', color: '#fff', opacity: supportsScreenShare() || activeCall.sharing ? 1 : 0.45, cursor: supportsScreenShare() || activeCall.sharing ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               ><Icon d={Icons.screen} size={18} /></button>
               {activeCall.sharing && (
                 <button
-                  onClick={()=> callManager.toggleScreen().catch((e: any) => setError(String(e?.message ?? e)))}
+                  onClick={()=> callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))}
                   data-testid="call-screen-stop"
                   title="Parar de compartilhar"
                   aria-label="Parar de compartilhar"
@@ -3088,16 +3000,16 @@ export default function ThemeShell({ designId }: {designId:string}){
                 ><Icon d={Icons.screen} size={14} /> Parar</button>
               )}
             </div>
-            {/* Fonte da captura: tela inteira ou uma janela/aba. Escolher antes
-                de capturar evita o principal atrito — compartilhar "Tela
-                inteira" e depois querer só o navegador obrigava a parar e
-                recomeçar. Veio com ícone para não parecer um botão solto. */}
+            {/* Fonte da captura: tela inteira, janela ou monitor específico.
+                Escolher antes de capturar evita o principal atrito — compartilhar
+                "Tela inteira" e depois querer só uma janela obrigava a parar e
+                recomeçar. Abre o seletor completo (fonte/áudio/qualidade/FPS). */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#3a3a3c', borderRadius: 24, padding: 4, height: 48 }}>
               <button
-                onClick={()=> { const next = screenSourceHint === 'monitor' ? 'window' : 'monitor'; callManager.setScreenSource(next); setScreenSourceHint(next) }}
+                onClick={()=> { if (!supportsScreenShare() && !activeCall.sharing) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
                 data-testid="call-screen-source"
-                aria-label={screenSourceHint === 'monitor' ? 'Fonte: tela inteira. Clique para compartilhar uma janela.' : 'Fonte: janela. Clique para compartilhar a tela inteira.'}
-                title={`Fonte: ${screenSourceHint === 'monitor' ? 'tela inteira' : 'uma janela/aba'}. Vale na próxima captura.`}
+                aria-label={`Fonte: ${screenSourceHint === 'monitor' ? 'tela inteira' : 'uma janela/aba'}. Clique para escolher fonte, áudio e qualidade.`}
+                title="Fonte, áudio, qualidade e FPS do compartilhamento de tela"
                 style={{ height: 40, padding: '0 12px', borderRadius: 20, border: 'none', background: 'transparent', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
               ><Icon d={screenSourceHint === 'monitor' ? Icons.screen : Icons.grid} size={14} /> {screenSourceHint === 'monitor' ? 'Tela' : 'Janela'}</button>
             </div>
@@ -3367,6 +3279,9 @@ export default function ThemeShell({ designId }: {designId:string}){
           </div>
         </div>
       )}
+
+      {/* COMPARTILHAR TELA — seletor de fonte/áudio/qualidade/FPS */}
+      <ScreenSharePicker open={showScreenPicker} onClose={() => setShowScreenPicker(false)} onError={setError} />
 
       {/* PRIVACIDADE — mesmo painel do celular */}
       {showPrivacyModal && (

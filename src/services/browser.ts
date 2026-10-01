@@ -494,6 +494,19 @@ export const browserServices: ForgeServices = {
   vaultUnlock: () =>
     Promise.reject(new Error('cofre disponível no app nativo')),
 
+  // Endereços locais. No browser puro o IP de LAN não é descobrível com
+  // segurança (WebRTC painfully). `localhost` é honesto; `lan` fica null e a
+  // UI diz que não há endereço de rede disponível — melhor que inventar um.
+  localAddresses: (port) => {
+    const p = port ?? (Number(window.location.port) || 5173)
+    return Promise.resolve({
+      localhost: `${window.location.protocol}//localhost:${p}`,
+      lan: null,
+      lan_all: [],
+      port: p,
+    })
+  },
+
   identityRename: (nickname) => {
     const id = store.load()
     if (!id) return Promise.reject(new Error('sem identidade'))
@@ -688,8 +701,11 @@ export const browserServices: ForgeServices = {
     }
     list.push(cv)
     localStorage.setItem('forge:extras:communities', JSON.stringify(list))
-    // materializa canais com kind/categoria para o sidebar/voice funcionarem
-    for (const c of seeds) LX.createLocalChannel(cid, c.name, { kind: c.kind, category: c.category })
+    // materializa canais com kind/categoria para o sidebar/voice funcionarem.
+    // Reaproveita o MESMO id da tupla acima, senão o canal aparece duplicado.
+    seeds.forEach((c, i) => {
+      LX.createLocalChannel(cid, c.name, { kind: c.kind, category: c.category, id: chanTuples[i][0] })
+    })
     // cargos do wizard (presets admin/mod/membro) + regras + meta
     for (const r of opts?.roles ?? []) LX.createLocalRole(cid, r)
     LX.saveCommunityMeta(cid, { description: opts?.description, category: opts?.category, icon: opts?.icon })
@@ -1617,9 +1633,17 @@ export const browserServices: ForgeServices = {
     emit({ type: 'poll_updated', community_id: communityId, channel_id: channelId, poll_id: pollId })
   },
   pollTally: async (pollId) => {
-    const votes: Record<string, number[]> = loadAll<number[]>('social:votes')
-    const mine = votes[pollId] ?? []
-    return { counts: mine, total: mine.length, mine }
+    // `social:votes[polllId]` guarda os ÍNDICES escolhidos por quem votou, não as
+    // contagens por opção. Somar em um contador por opção — senão 1 voto em
+    // "Tokio" produzia counts[0]=0 e a barra mostrava 0%.
+    const chosen: number[] = loadAll<number[]>('social:votes')[pollId] ?? []
+    const poll = loadAll<PollView>(POLLS_BASE)[pollId]
+    const nOpts = poll?.options?.length ?? 0
+    const counts = new Array<number>(nOpts).fill(0)
+    for (const idx of chosen) {
+      if (idx >= 0 && idx < nOpts) counts[idx]++
+    }
+    return { counts, total: chosen.length, mine: chosen }
   },
 
   eventUpsert: async (ev) => {

@@ -1,36 +1,38 @@
-# Instalações — DisTorrent 0.2
+# Instalações — DisTorrent 2.1
 
-Build de 30/09/2026, com as correções de chamada atrás de CGNAT, de proxy e de
-tela compartilhada. Detalhes no `CHANGELOG.md`, seções 5.4.2 e 5.4.3.
+Build de 01/10/2026. Inclui a correção do "conectando infinito" (watchdogs de
+outgoing/incoming/connecting + promoção por sinalização/mídia), vídeo
+adaptativo com piso 480p e teto 120 FPS, e painel de diagnóstico da chamada
+em tempo real com causa técnica da falha.
 
 | Arquivo | Tamanho | Plataforma | Estado |
 |---|---|---|---|
-| `DisTorrent_0.2_amd64.deb` | 10,0 MB | Linux x86_64 | assinado por pacote Debian, **instalado** |
-| `DisTorrent_0.2_arm64.apk` | 20,9 MB | Android arm64 | **ASSINADO** — instala |
+| `DisTorrent_2.1_amd64.deb` | 12,8 MB | Linux x86_64 | pacote Debian |
+| `DisTorrent_2.1_arm64.apk` | 21,5 MB | Android arm64 | **ASSINADO** — instala |
 
-Os dois arquivos recebem o rótulo `0.2` para ficarem mais fáceis de distinguir,
-mas a **versão real do pacote é 1.0.2** (é o que o `dpkg` e o Android enxergam).
+A **versão real do pacote é 2.1.0** (é o que o `dpkg` e o Android enxergam).
 
 ## Instalar o .deb
 
 ```bash
-sudo apt install "./instalações/DisTorrent_0.2_amd64.deb"
+sudo apt install "./instalações/DisTorrent_2.1_amd64.deb"
 ```
 
-## Instalar o APK — LEIA ANTES
+## Instalar o APK
 
-O APK é assinado com `android-keystore/forge-release-v3.jks`, um keystore
-**novo** (criado em 30/09/2026, alias `forge`, senha em
-`~/.config/opencode/AGENTS.md`). As chaves antigas `forge-release.jks` e
-`forge-release-v2.jks` têm senha desconhecida e não abrem.
+Assinado com o mesmo keystore v3 (`667d56b7…`), então **atualiza por cima
+da 2.0 direto**, sem desinstalar:
 
-**Consequência: o Android recusa atualizar por cima da v1.** São certificados
-diferentes (v1: SHA-256 `69117a25…`; esta: `667d56b7…`), e isso é conflito de
-assinatura — o Android não deixa. É preciso **desinstalar a v1 antes**:
+```bash
+adb install "instalações/DisTorrent_2.1_arm64.apk"
+```
+
+Quem ainda está na v1 precisa desinstalar antes (conflito de assinatura
+v1/v3):
 
 ```bash
 adb uninstall com.forge.app
-adb install "instalações/DisTorrent_0.2_arm64.apk"
+adb install "instalações/DisTorrent_2.1_arm64.apk"
 ```
 
 **Aviso honesto:** desinstalar apaga os dados locais do app — identidade
@@ -41,9 +43,8 @@ antes** de desinstalar, ou não desinstale ainda.
 Da primeira instalação com o `v3` em diante, todo update é direto: basta
 instalar o APK novo por cima.
 
-## Sobre o "20 MB"
+## Sobre o tamanho do APK
 
-O APK tem 20,9 MB porque embute o frontend React compilado **dentro** do
-`libforge_lib.so` (18,3 MB de lib nativa) — não é o bundle da interface. Não há
-como reduzir sem trocar a engine de WebRTC ou fazer split por ABI.
-
+O APK tem ~21 MB porque embute o frontend React compilado **dentro** do
+`libforge_lib.so` — não é o bundle da interface. Não há como reduzir sem
+trocar a engine de WebRTC ou fazer split por ABI.

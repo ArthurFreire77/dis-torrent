@@ -1,5 +1,86 @@
 # CHANGELOG
 
+## 2.0.0 — Voz nativa em Rust: chamada funciona no Linux sem WebRTC
+
+O ponto de virada: o WebKitGTK do Ubuntu **não expõe `RTCPeerConnection`**, então
+WebRTC de navegador é impossível no desktop Linux. Até aqui isso era contornado
+com áudio pelo túnel de sinalização (o "relay"), de latência alta — a origem de
+praticamente toda complaint de chamada. Agora a voz é um plano de mídia nativo em
+Rust, e o relay saiu do caminho de chamadas.
+
+### Voz nativa (`forge-core/src/net/media_voice.rs`)
+- **webrtc-rs 0.21** (ICE/UDP/DTLS/SRTP reais) + **cpal 0.18** + **Opus**. A
+  sinalização reaproveita os frames que já existiam (`CallOffer`/`CallAnswer`/
+  `CallIce`): o core Rust intercepta antes do JS e fala SDP padrão, então um peer
+  Linux conversa tanto com outro Linux quanto com navegador.
+- **Cadeia validada em execução real**: mic → Opus → webrtc → jitter buffer →
+  decode → alto-falante, **100/100 pacotes tocados**. Com **5% de perda
+  injetada** o PLC segurou: 100 tocados, **0 erro de decode**.
+- **Latência 144 ms → 84–93 ms** mediana (abaixo dos 100 ms interativos do
+  ITU-T G.114). O ganho veio de baixar o jitter de 120→50 ms e corrigir três
+  bugs: falta de pacing, replay de frame velho, e envio ancorado no relógio de
+  captura.
+- **Cancelamento de eco** com `aec-rs` (speexdsp embutido): **10–12 dB** de
+  redução medida, a **2,7%** do prazo de quadro. Duas premissas da implementação
+  original estavam erradas e foram corrigidas: `speexdsp` da crates.io expõe
+  **só o resampler** (o AEC exigiria headers de sistema), e `echo_ctl(SetSize)` /
+  `tail_length_ms` **não existem** naquela API.
+- Supressão de ruído: gancho pronto, **desligada de propósito** — o
+  preprocessor do speex destrói a forma de onda da voz.
+
+### A rota que o WebView não sabia mostrar
+- `getRungSummary()` lia só `iceReports` do WebRTC, vazio no caminho nativo — a
+  tela mostrava "sem rota" **com a chamada conectada**. Agora reporta a rota do
+  core (LAN/STUN/TURN).
+- A fase ficava presa em "Conectando…": quem emitia `media-connected` era o
+  WebRTC do navegador, e no caminho nativo ninguém emitia nada. O monitor de
+  estado do core avança a máquina de fases.
+
+### Três bugs de integração que só apareceram no app real
+- **`AppState` deixou de ser registrado**: um **segundo `.setup()`** em
+  `tauri::generate_context` *sobrescreve* o anterior no Tauri, então o
+  `app.manage(...)` nunca rodava e todo comando morria com *state not
+  managed* — quebrava o "Criar conta" no PC **e no Android**.
+- **Voz nativa travada em "indisponível"**: `voice_media_available` consultava o
+  motor, que é `None` enquanto o cofre está trancado. O app perguntava no boot,
+  recebia `false` e **cacheava para sempre**. Capacidade é propriedade do
+  **build**, não do estado → `native_voice_capable()`.
+- **`getUserMedia` competiria com o core** pelo microfone, e
+  `new RTCPeerConnection` explodiria com `ReferenceError` no WebKitGTK. O
+  `start()` agora desvia para o caminho nativo antes de tocar em mídia de
+  navegador.
+
+### O que NÃO mudou (de propósito)
+- **Windows/Android seguem no WebRTC do navegador.** A voz nativa é
+  `cfg!(target_os = "linux")`. A regra que garante isso por construção: a mídia
+  nativa só assume a chamada se já tiver sessão ativa para aquele
+  `(call_id, peer_fp)`; senão o frame segue exatamente como antes.
+- **Relay de chamada removido** — sem `relay-only`, sem botão "R". O relay de
+  **arquivos** é outro caminho e não foi tocado.
+
+### Limites conhecidos e medidos (não são escolha de implementação)
+- **Tela: 120 fps não cabe nesta GPU.** RX 580 é Polaris/GCN4 = **VCE**, encoder
+  fixo antigo: medido isolado, **37,8 ms/quadro = 26,5 fps a 1080p**, linear em
+  pixels (~18 ms/MP) e **insensível a QP/trellis/cabac**. Perfis medidos:
+  1080p→26 · 720p→60 · 480p→100 · 360p→240 fps. Tela a **720p/60fps** é o alvo
+  realista.
+- **Câmera: 19 fps**, e é **a webcam**, não o código — confirmado com
+  `v4l2-ctl` puro (60 quadros em 3,11 s a 720p e 3,23 s a 1080p, igual em toda
+  resolução). É firmware.
+- **AEC de ~10 dB, e ~0 dB em duplex** (double-talk prende o filtro). Os 43 dB
+  da primeira medição eram artefato do gerador de teste. O AEC3 do navegador é
+  superior; não há equivalente em Rust puro hoje.
+- **Latência com AEC não foi medida** — exige duas máquinas reais.
+- A webcam **trava** após ~8–10 ciclos de open/close (firmware UVC de webcam
+  barata). Precisa de replug físico.
+
+### Operação
+- `forge-core/dev/safe-build.sh` — guardião de build: aborta com RAM livre
+  < 2 GB, trava o build em 3 GB (`systemd-run --scope -p MemoryMax`) e usa 1 job
+  com nice 19. Existe porque um build sem teto derrubou a máquina.
+- zram (7 GB, zstd, prioridade 100) + swapfile de 4 GB, `swappiness=100`:
+  **compactação de memória** de verdade, já que a máquina estava com swap 0.
+
 ## 5.4.4 — Ícones que respondem, tela de chamada refeita
 Duas falhas visuais e uma de interaction, encontradas abrindo o app de verdade
 (sem build novo) e medindo o DOM.

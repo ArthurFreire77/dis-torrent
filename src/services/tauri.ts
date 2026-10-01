@@ -55,6 +55,9 @@ export const tauriServices: ForgeServices = {
 
   vaultUnlock: (password) => invoke<Identity>('vault_unlock', { password }),
 
+  // Endereços locais — o IP de LAN vem do Rust (o JS não tem como descobrir).
+  localAddresses: (port) => invoke<import('./models').LocalAddresses>('local_addresses', { port: port ?? null }),
+
   identityRename: (nickname) => invoke<Identity>('identity_rename', { nickname }),
 
   networkStatus: () => invoke<NetworkStatusView>('network_status'),

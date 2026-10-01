@@ -91,3 +91,40 @@ button{ touch-action:manipulation; user-select:none }
 @keyframes spin { to { transform: rotate(360deg) } }
 .spin{ animation: spin .7s linear infinite }
 @keyframes shimmer { 0%{ transform: translateX(-100%) } 100%{ transform: translateX(100%) } }
+
+/* ==========================================================================
+   Tooltip — só existe no hover/focus, e some no toque.
+   Em toque não há hover: o tooltip apareceria junto com o dedo e cobriria o
+   conteúdo. `pointer: coarse` pega celular e tablet de verdade, e não afeta
+   monitor com tela de toque.
+   ========================================================================== */
+.tooltip-desktop-only { }
+@media (hover: none), (pointer: coarse) {
+  .tooltip-desktop-only { display: none !important; }
+}
+
+/* Foco visível só para quem navega por teclado — o clique não deve deixar
+   anel de foco sujando a tela, mas teclado precisa de retorno visível. */
+:focus-visible { outline: 2px solid #00a8fc; outline-offset: 2px; }
+
+/* ==========================================================================
+   Configurações do servidor — responsividade
+   A navegação lateral tem 248px, que é confortável no desktop mas come a
+   tela inteira num celular. Abaixo de 860px ela vira gaveta: some do fluxo e
+   reaparece por cima quando o botão de menu é pressionado.
+   ========================================================================== */
+@media (max-width: 860px) {
+  /* Só a nav marcada como aberta aparece; a versão fixa some. */
+  .srv-settings-nav { display: none; }
+  .srv-settings-nav.srv-nav-open {
+    display: flex;
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: min(300px, 84vw) !important;
+    z-index: 3;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+  }
+  .srv-settings-topbar { display: flex !important; }
+  /* O grid de cargos (lista + detalhe) não cabe em coluna estreita. */
+  .srv-roles-grid { grid-template-columns: 1fr !important; }
+}

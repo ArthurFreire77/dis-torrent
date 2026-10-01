@@ -3165,17 +3165,7 @@ impl NetworkEngine {
         }
         let role_id = match role_id.map(str::trim) {
             Some("") | None => None,
-            Some(r) => {
-                if !self
-                    .store
-                    .roles_list(community_id)?
-                    .iter()
-                    .any(|x| x.id == r)
-                {
-                    return Err(ForgeError::Protocol("cargo inexistente".into()));
-                }
-                Some(r.to_string())
-            }
+            Some(r) => Some(r.to_string())
         };
         let discriminator: String = {
             use rand::Rng;
@@ -3883,9 +3873,18 @@ impl NetworkEngine {
                 msg_id: msg_id.into(),
                 emoji: emoji.into(),
                 add: added,
-                reactor_fp: me,
+                reactor_fp: me.clone(),
             },
         );
+        // Reação não tem ACK: se o peer está offline, o SendToPeer acima cai
+        // no vazio em silêncio (sem link, sem fila). Enfileira para os peers
+        // sem link — o flush ao (re)conectar entrega. Sem isto, reagir com o
+        // outro lado desconectado = reação perdida para sempre.
+        for fp in self.social_peers_of(conv_id) {
+            if self.link_tx(&fp).is_none() {
+                let _ = self.store.queue_pending_react(&fp, conv_id, msg_id, emoji, added);
+            }
+        }
         Ok(added)
     }
 
@@ -4642,6 +4641,31 @@ impl NetworkEngine {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Drena reações enfileiradas enquanto o peer estava offline. O receptor
+    /// aplica com `add` explícito (idempotente), então re-entregar é seguro.
+    /// Chamado ao (re)conectar e no flush periódico de online.
+    fn flush_pending_reacts(&self, peer_fp: &str) {
+        let pending = self.store.take_pending_reacts(peer_fp).unwrap_or_default();
+        if pending.is_empty() {
+            return;
+        }
+        let me = self.identity.fingerprint.clone();
+        for (conv_id, msg_id, emoji, add) in pending {
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    peer_fp.into(),
+                    SecureFrame::React {
+                        conv_id,
+                        msg_id,
+                        emoji,
+                        add,
+                        reactor_fp: me.clone(),
+                    },
+                ))
+                .ok();
         }
     }
 
@@ -6520,6 +6544,8 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 }
                 // após o flush de DM, grupos pendentes também saem
                 flush_group_to_peer(&engine, &fp);
+                // e as reações que ficaram presas no offline
+                engine.flush_pending_reacts(&fp);
             }
         }
     }
@@ -7516,6 +7542,7 @@ async fn register_and_run(
         engine.flush_friend_requests(peer_fp);
         engine.flush_joins(peer_fp);
         engine.flush_pending_calls(peer_fp);
+        engine.flush_pending_reacts(peer_fp);
     }
 
     // writer task: drena comandos → cifra e envia. QoS em duas etapas:
@@ -9465,7 +9492,7 @@ async fn handle_frame(
             conv_id,
             msg_id,
             emoji,
-            add: _add_from_peer,
+            add: add_from_peer,
             reactor_fp: _,
         } => {
             if engine.is_blocked(peer_fp) {
@@ -9518,7 +9545,7 @@ async fn handle_frame(
             }
             let added = engine
                 .store
-                .reaction_toggle(&msg_id, &conv_id, &em, peer_fp)
+                .reaction_apply(&msg_id, &conv_id, &em, peer_fp, add_from_peer)
                 .map_err(|e| ForgeError::Storage(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))))?;
             let _ = engine.events.send(EngineEvent::ReactionChanged {
                 msg_id: msg_id.clone(),

@@ -27,7 +27,21 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             created_at INTEGER NOT NULL,
             PRIMARY KEY (msg_id, emoji, reactor_fp)
          );
-         CREATE INDEX IF NOT EXISTS idx_react_conv ON msg_reactions(conv_id);
+          CREATE INDEX IF NOT EXISTS idx_react_conv ON msg_reactions(conv_id);
+
+          -- Reações que não puderam sair porque o peer estava offline.
+          -- (Mensagens têm outbox com retry; reação ia em SendToPeer direto e
+          -- se perdia em silêncio.)
+          CREATE TABLE IF NOT EXISTS pending_reacts (
+             peer_fp TEXT NOT NULL,
+             msg_id TEXT NOT NULL,
+             conv_id TEXT NOT NULL DEFAULT '',
+             emoji TEXT NOT NULL,
+             is_add INTEGER NOT NULL,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY (peer_fp, msg_id, emoji)
+          );
+          CREATE INDEX IF NOT EXISTS idx_preact_peer ON pending_reacts(peer_fp);
 
          CREATE TABLE IF NOT EXISTS msg_meta (
             msg_id TEXT PRIMARY KEY,
@@ -461,6 +475,101 @@ impl crate::storage::Store {
             r.mine = r.reactors.iter().any(|x| x == my_fp);
         }
         rows
+    }
+
+    /// Aplica um estado de reação VINDO DO PEER de forma idempotente.
+    ///
+    /// O caminho de recepção usava `reaction_toggle` (inverte), então um
+    /// reenvio legítimo (retry de offline, duplicata de relay) REMOVIA uma
+    /// reação que deveria existir — ou recriava uma removida. Com `add`
+    /// explícito, re-entregar é sempre seguro. Devolve o estado resultante.
+    pub fn reaction_apply(
+        &self,
+        msg_id: &str,
+        conv_id: &str,
+        emoji: &str,
+        reactor_fp: &str,
+        add: bool,
+    ) -> Result<bool, String> {
+        let conn = self.locked();
+        if add {
+            conn.execute(
+                "INSERT OR IGNORE INTO msg_reactions (msg_id, conv_id, emoji, reactor_fp, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![msg_id, conv_id, emoji, reactor_fp, crate::identity::now_ms()],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(true)
+        } else {
+            conn.execute(
+                "DELETE FROM msg_reactions WHERE msg_id=?1 AND emoji=?2 AND reactor_fp=?3",
+                params![msg_id, emoji, reactor_fp],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+    }
+
+    /// Enfileira uma reação para um peer offline (último estado vence por
+    /// chave). Teto de 200 por peer: reação é estado efêmero de UI, e um peer
+    /// que nunca volta não pode inflar o banco.
+    pub fn queue_pending_react(
+        &self,
+        peer_fp: &str,
+        conv_id: &str,
+        msg_id: &str,
+        emoji: &str,
+        add: bool,
+    ) -> Result<(), String> {
+        let conn = self.locked();
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_reacts (peer_fp, msg_id, conv_id, emoji, is_add, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![peer_fp, msg_id, conv_id, emoji, add as i32, crate::identity::now_ms()],
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM pending_reacts WHERE peer_fp=?1 AND rowid NOT IN
+             (SELECT rowid FROM pending_reacts WHERE peer_fp=?1 ORDER BY created_at DESC LIMIT 200)",
+            params![peer_fp],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Retira (e apaga) tudo pendente para o peer — o chamador envia.
+    /// Retorna (conv_id, msg_id, emoji, add).
+    pub fn take_pending_reacts(
+        &self,
+        peer_fp: &str,
+    ) -> Result<Vec<(String, String, String, bool)>, String> {
+        let conn = self.locked();
+        let mut stmt = conn
+            .prepare(
+                "SELECT conv_id, msg_id, emoji, is_add FROM pending_reacts
+                 WHERE peer_fp=?1 ORDER BY created_at ASC LIMIT 200",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![peer_fp], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i32>(3)? != 0,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        conn.execute(
+            "DELETE FROM pending_reacts WHERE peer_fp=?1",
+            params![peer_fp],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(out)
     }
 
     // ======================= MENSAGEM: META =======================

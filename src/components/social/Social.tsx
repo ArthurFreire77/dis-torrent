@@ -2,8 +2,9 @@
 // Todos consomem `services` (nativo OU browser): a UI não sabe a diferença
 // e nunca decide permissão — quem valida é o motor.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { services } from '../../services'
+import { Markdown } from '../../shared/markdown'
 import type {
   BanView,
   ChannelMeta,
@@ -105,208 +106,34 @@ export function RichText({
   highlight?: string
   onMention?: (fp: string) => void
 }) {
-  const [spoilers, setSpoilers] = useState<Record<number, boolean>>({})
-  const nodes = useMemo(
-    () => parseDiscord(body, highlight, onMention, spoilers, setSpoilers),
-    [body, highlight, onMention, spoilers],
-  )
-  return <>{nodes}</>
-}
-
-function parseDiscord(
-  body: string,
-  highlight: string | undefined,
-  onMention: ((fp: string) => void) | undefined,
-  spoilers: Record<number, boolean>,
-  setSpoilers: React.Dispatch<React.SetStateAction<Record<number, boolean>>>,
-): React.ReactNode[] {
-  const out: React.ReactNode[] = []
-  const lines = body.split('\n')
-  let key = 0
-
-  lines.forEach((line, li) => {
-    // bloco de código
-    const fence = line.match(/^```(\w+)?\s*$/)
-    if (fence) {
-      const lang = fence[1] || ''
-      const buf: string[] = []
-      let i = li + 1
-      for (; i < lines.length; i++) {
-        if (/^```\s*$/.test(lines[i])) break
-        buf.push(lines[i])
-      }
-      out.push(
-        <pre key={key++} style={codeBlockStyle(lang)}>
-          <span style={codeHeaderStyle}>{lang || 'texto'}</span>
-          <code>{highlightLines(buf.join('\n'), lang)}</code>
-        </pre>,
-      )
-      return
-    }
-
-    // spoiler ||texto||
-    if (line.includes('||')) {
-      const parts = line.split('||')
-      const idx = key
-      const children: React.ReactNode[] = []
-      parts.forEach((p, i) => {
-        if (i % 2 === 1) {
-          children.push(
-            <span
-              key={key++}
-              onClick={() => setSpoilers(s => ({ ...s, [idx]: !s[idx] }))}
-              title="Clique para revelar"
-              style={{
-                background: spoilers[idx] ? 'transparent' : 'rgba(255,255,255,.12)',
-                color: spoilers[idx] ? 'inherit' : 'transparent',
-                borderRadius: 3,
-                cursor: 'pointer',
-                textShadow: spoilers[idx] ? 'none' : '0 0 7px rgba(0,0,0,.95)',
-              }}
-            >
-              {renderInline(p, highlight, onMention, () => key++)}
-            </span>,
-          )
-        } else {
-          children.push(<span key={key++}>{renderInline(p, highlight, onMention, () => key++)}</span>)
-        }
-      })
-      out.push(<div key={idx} style={{ whiteSpace: 'pre-wrap' }}>{children}</div>)
-      return
-    }
-
-    // citação
-    if (line.startsWith('> ')) {
-      out.push(
-        <div key={key++} style={{ borderLeft: '4px solid #4e5058', paddingLeft: 10, margin: '2px 0', color: T.muted, whiteSpace: 'pre-wrap' }}>
-          {renderInline(line.slice(2), highlight, onMention, () => key++)}
-        </div>,
-      )
-      return
-    }
-
-    // título
-    const h = line.match(/^(#{1,3})\s+(.*)$/)
-    if (h) {
-      const size = [18, 16, 15][h[1].length - 1]
-      out.push(
-        <div key={key++} style={{ fontWeight: 800, color: T.heading, fontSize: size, margin: '4px 0 2px' }}>
-          {renderInline(h[2], highlight, onMention, () => key++)}
-        </div>,
-      )
-      return
-    }
-
-    out.push(
-      <div key={key++} style={{ whiteSpace: 'pre-wrap', minHeight: line ? undefined : 4 }}>
-        {renderInline(line, highlight, onMention, () => key++)}
-      </div>,
-    )
-  })
-  return out
-}
-
-function codeBlockStyle(lang: string): React.CSSProperties {
-  return {
-    background: '#2b2d31',
-    border: `1px solid ${T.border}`,
-    borderRadius: 6,
-    padding: '8px 10px 10px',
-    margin: '4px 0',
-    overflowX: 'auto',
-    position: 'relative',
-    fontSize: 12.5,
-    lineHeight: 1.5,
-  }
-}
-const codeHeaderStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: -1,
-  right: 6,
-  fontSize: 9,
-  color: T.muted,
-  textTransform: 'uppercase',
-  letterSpacing: 0.5,
-}
-
-const KEYWORDS: Record<string, string[]> = {
-  rust: ['fn', 'let', 'mut', 'pub', 'struct', 'impl', 'match', 'use', 'enum', 'return'],
-  typescript: ['const', 'let', 'function', 'return', 'async', 'await', 'interface', 'type', 'import', 'export'],
-  javascript: ['const', 'let', 'var', 'function', 'return', 'async', 'await', 'import', 'export'],
-  python: ['def', 'return', 'import', 'from', 'class', 'if', 'else', 'with', 'lambda'],
-  sql: ['select', 'from', 'where', 'insert', 'update', 'delete', 'join', 'create', 'table'],
-}
-const KEYWORD_COLOR = '#c678dd'
-const STRING_COLOR = '#98c379'
-const COMMENT_COLOR = '#5c6370'
-
-function highlightLines(code: string, lang: string): React.ReactNode[] {
-  const kw = KEYWORDS[(lang || '').toLowerCase()]
-  if (!kw) return [code]
-  const parts: React.ReactNode[] = []
-  const re = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b|\b[A-Za-z_]\w*\b|\s+|.)/g
-  let m: RegExpExecArray | null
-  let i = 0
-  while ((m = re.exec(code)) !== null) {
-    const tok = m[0]
-    let color: string | undefined
-    if (kw.includes(tok)) color = KEYWORD_COLOR
-    else if (/^["']/.test(tok)) color = STRING_COLOR
-    else if (/^\d/.test(tok)) color = '#d19a66'
-    else if (tok.startsWith('//') || tok.startsWith('#')) color = COMMENT_COLOR
-    parts.push(color ? <span key={i++} style={{ color }}>{tok}</span> : <span key={i++}>{tok}</span>)
-  }
-  return parts
-}
-
-function renderInline(
-  text: string,
-  highlight: string | undefined,
-  onMention: ((fp: string) => void) | undefined,
-  k: () => number,
-): React.ReactNode[] {
-  const out: React.ReactNode[] = []
-  const token = /(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(~~[^~]+~~)|(`[^`\n]+`)|(https?:\/\/\S+)|(<@[a-f0-9]{8,64}>)|(:[a-z0-9_+-]{2,}:)/gi
-  let last = 0
-  let m: RegExpExecArray | null
-  let i = 0
-  while ((m = token.exec(text)) !== null) {
-    if (m.index > last) out.push(withHighlight(text.slice(last, m.index), highlight, k))
-    const t = m[0]
-    if (t.startsWith('**')) out.push(<b key={k()} style={{ color: T.heading }}>{withHighlight(t.slice(2, -2), highlight, k)}</b>)
-    else if (t.startsWith('~~')) out.push(<s key={k()} style={{ color: T.muted }}>{withHighlight(t.slice(2, -2), highlight, k)}</s>)
-    else if (t.startsWith('*')) out.push(<em key={k()}>{withHighlight(t.slice(1, -1), highlight, k)}</em>)
-    else if (t.startsWith('`')) out.push(<code key={k()} style={{ background: '#2b2d31', padding: '1px 4px', borderRadius: 4, fontFamily: 'JetBrains Mono, monospace', fontSize: 12.5 }}>{t.slice(1, -1)}</code>)
-    else if (t.startsWith('http')) out.push(<a key={k()} href={t} target="_blank" rel="noreferrer noopener" style={{ color: '#00a8fc', textDecoration: 'none' }} onClick={e => e.stopPropagation()}>{t}</a>)
-    else if (t.startsWith('<@')) {
-      const fp = t.slice(2, -1)
-      out.push(
-        <span key={k()} onClick={e => { e.stopPropagation(); onMention?.(fp) }} style={{ background: 'rgba(88,101,242,.3)', color: '#c9cdfb', borderRadius: 4, padding: '1px 4px', cursor: onMention ? 'pointer' : 'inherit', fontWeight: 600 }}>
-          @{fp.slice(0, 8)}
-        </span>,
-      )
-    } else if (t.startsWith(':')) {
-      const name = t.slice(1, -1).toLowerCase()
-      const e = EMOJI_SHORT[name]
-      out.push(<span key={k()} title={`:${name}:`}>{e || t}</span>)
-    }
-    last = m.index + t.length
-    i++
-  }
-  if (last < text.length) out.push(withHighlight(text.slice(last), highlight, k))
-  return out
-}
-
-function withHighlight(text: string, highlight: string | undefined, k: () => number): React.ReactNode {
-  if (!highlight || highlight.length < 2) return text
-  const idx = text.toLowerCase().indexOf(highlight.toLowerCase())
-  if (idx < 0) return text
+  const [revealed, setRevealed] = useState<Set<string>>(new Set())
+  const toggle = useCallback((key: string) => {
+    setRevealed((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }, [])
+  // Este é o MESMO parser do mobile (shared/markdown) — havia uma segunda
+  // implementação só aqui, que renderizava o conteúdo de um bloco ``` duas
+  // vezes (o forEach do scanner não sabia que o for interno já consumiu as
+  // linhas). Um parser só, mesmo comportamento nos dois shells.
   return (
-    <>
-      {text.slice(0, idx)}
-      <mark style={{ background: '#f0b232', color: '#1e1f22', borderRadius: 2 }}>{text.slice(idx, idx + highlight.length)}</mark>
-      {text.slice(idx + highlight.length)}
-    </>
+    <Markdown
+      body={body}
+      revealedSpoilers={revealed}
+      onRevealSpoiler={toggle}
+      resolveMention={(token) => {
+        const raw = token.trim()
+        if (/^everyone$/i.test(raw)) return { kind: 'everyone', label: 'everyone', noteIndex: 0 }
+        if (/^here$/i.test(raw)) return { kind: 'here', label: 'here', noteIndex: 0 }
+        if (/^[a-f0-9]{8,64}$/i.test(raw)) return { kind: 'user', label: raw.slice(0, 8), fp: raw, noteIndex: 0 }
+        return null
+      }}
+      onMentionClick={(hit) => { if (hit.fp) onMention?.(hit.fp) }}
+      resolveEmoji={(name) => EMOJI_SHORT[name.toLowerCase()] ?? null}
+      theme={{ text: T.text, link: '#00a8fc' }}
+    />
   )
 }
 
@@ -393,27 +220,82 @@ export function Avatar({ name, fp, size = 40, avatarB64, ring }: {
 
 // ============================== REAÇÕES ==============================
 
-export function ReactionBar({ reactions, onToggle, onHoverList }: {
+/** Nome legível de um reator: recebe um resolvedor (nick/apelido) do shell. */
+export type ReactorNameFn = (fp: string) => string
+
+/**
+ * Popover "quem reagiu" — o Discord abre a lista ao passar/clicar no chip.
+ * Sem isto o contador ficava opaco e o usuário não sabia quem reagiu.
+ * `resolve` devolve o nome bonito; cai no fp curto quando não há mapping.
+ */
+export function ReactionWhoPopover({ r, resolve, onClose }: {
+  r: ReactionSummary
+  resolve: ReactorNameFn
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [onClose])
+  const names = r.reactors.map(resolve)
+  return (
+    <div ref={ref} style={{
+      position: 'absolute', bottom: 'calc(100% + 6px)', left: 0, zIndex: 60,
+      background: T.rail, border: `1px solid ${T.border}`, borderRadius: 8, padding: 8,
+      boxShadow: '0 10px 30px rgba(0,0,0,.55)', minWidth: 170, maxWidth: 260,
+    }}>
+      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: .6, color: T.muted, marginBottom: 6, textTransform: 'uppercase' }}>
+        {r.emoji} · {r.count} {r.count === 1 ? 'reação' : 'reações'}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+        {names.map((n, i) => (
+          <div key={r.reactors[i] + i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: T.text }}>
+            <span style={{ width: 16, height: 16, borderRadius: '50%', background: T.accent, color: '#fff', fontSize: 9, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              {n.slice(0, 1).toUpperCase()}
+            </span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export function ReactionBar({ reactions, onToggle, onHoverList, resolveName }: {
   reactions: ReactionSummary[]
   onToggle: (emoji: string) => void
+  /** clique simples já alterna; este callback lista quem reagiu (opcional). */
   onHoverList?: (r: ReactionSummary) => void
+  /** fp → nome bonito, para o popover "quem reagiu". */
+  resolveName?: ReactorNameFn
 }) {
+  const [who, setWho] = useState<{ emoji: string; r: ReactionSummary } | null>(null)
   if (reactions.length === 0) return null
+  const shown = who ? reactions.find(r => r.emoji === who.emoji) ?? null : null
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
       {reactions.map((r) => (
-        <button key={r.emoji} onClick={() => onToggle(r.emoji)}
-          onMouseEnter={() => onHoverList?.(r)}
-          title={`${r.count} · ${r.reactors.join(', ')}`}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px', borderRadius: 8,
-            background: r.mine ? 'rgba(88,101,242,.25)' : T.input,
-            border: `1px solid ${r.mine ? T.accent : 'transparent'}`,
-            color: T.text, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
-          }}>
-          <span style={{ fontSize: 15 }}>{r.emoji}</span>
-          <span style={{ color: r.mine ? '#c9cdfb' : T.muted }}>{r.count}</span>
-        </button>
+        <div key={r.emoji} style={{ position: 'relative' }}>
+          <button
+            onClick={() => { setWho(w => w?.emoji === r.emoji ? null : { emoji: r.emoji, r }); onHoverList?.(r) }}
+            onMouseEnter={() => onHoverList?.(r)}
+            title={`${r.count} · ${r.reactors.join(', ')}`}
+            aria-label={`${r.emoji}, ${r.count} reações. Ver quem reagiu`}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px', borderRadius: 8,
+              background: r.mine ? 'rgba(88,101,242,.25)' : T.input,
+              border: `1px solid ${r.mine ? T.accent : 'transparent'}`,
+              color: T.text, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
+            }}>
+            <span style={{ fontSize: 15 }}>{r.emoji}</span>
+            <span style={{ color: r.mine ? '#c9cdfb' : T.muted }}>{r.count}</span>
+          </button>
+          {shown && resolveName && (
+            <ReactionWhoPopover r={shown} resolve={resolveName} onClose={() => setWho(null)} />
+          )}
+        </div>
       ))}
     </div>
   )
@@ -482,7 +364,9 @@ export function Modal({ title, onClose, children, width = 520, footer }: {
   }, [onClose])
   return (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: T.main, border: `1px solid ${T.border}`, borderRadius: 12, width: '100%', maxWidth: width, maxHeight: '86vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,.6)' }}>
+      {/* role/aria-modal: leitores de tela anunciam isto como diálogo e o
+          conteúdo atrás fica aria-hidden por padrão do papel dialog. */}
+      <div role="dialog" aria-modal="true" aria-label={title} onClick={e => e.stopPropagation()} style={{ background: T.main, border: `1px solid ${T.border}`, borderRadius: 12, width: '100%', maxWidth: width, maxHeight: '86vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,.6)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: `1px solid ${T.border}`, position: 'sticky', top: 0, background: T.main, zIndex: 1 }}>
           <div style={{ fontSize: 17, fontWeight: 900, color: T.heading }}>{title}</div>
           <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: T.muted, fontSize: 20, cursor: 'pointer', lineHeight: 1 }}>×</button>
@@ -546,6 +430,10 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   const [banner, setBanner] = useState('')
   const [status, setStatus] = useState<PresenceStatus>('online')
   const [custom, setCustom] = useState('')
+  // Emoji do status personalizado (igual Discord): o core já difunde
+  // `custom_emoji` via presença P2P, mas a UI salvava '' e não exibia.
+  const [customEmoji, setCustomEmoji] = useState('')
+  const [memberSince, setMemberSince] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // apelido por servidor: como EU apareço naquele servidor, separado do
@@ -577,8 +465,16 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
         setAvatar(p.avatar_b64); setBanner(p.banner_b64)
         setStatus(pr.status === 'offline' ? 'online' : pr.status)
         setCustom(pr.custom)
+        setCustomEmoji((pr as { custom_emoji?: string }).custom_emoji ?? '')
       })
       .catch(() => { if (alive) setProfile({ fp, display_name: nickname, about: '', avatar_b64: '', banner_b64: '', accent: '', updated_at: 0 }) })
+    // Membro desde: data de criação da identidade local (só faz sentido para
+    // mim — o perfil de terceiros não carrega essa data e não vou inventar).
+    if (isMe) {
+      services.identityGet()
+        .then(id => { if (alive && id && typeof id.created_at === 'number' && id.created_at > 0) setMemberSince(id.created_at) })
+        .catch(() => {})
+    }
     return () => { alive = false }
   }, [fp, nickname])
 
@@ -595,12 +491,24 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
     try {
       const p = await services.profileSet({ display_name: displayName, about, avatar_b64: avatar, banner_b64: banner, accent })
       setProfile(p)
-      await services.presenceSet(status, custom, '')
+      await services.presenceSet(status, custom, customEmoji)
+      // Reflete na hora: sem isto o cabeçalho mantinha a presença carregada
+      // ao abrir (ex.: "Offline" após salvar como Online).
+      setPresence({ fp, status, custom, custom_emoji: customEmoji, updated_at: Date.now() })
       setEditing(false)
     } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy(false) }
   }
 
-  const name = profile?.display_name || nickname || fp
+  // Pré-visualização ao vivo (igual Discord): editando, o cabeçalho mostra o
+  // rascunho em vez do salvo.
+  const previewing = editing && isMe
+  const name = previewing ? (displayName || nickname || fp) : (profile?.display_name || nickname || fp)
+  const shownStatus = previewing ? status : (presence?.status ?? 'offline')
+  const shownCustom = previewing ? custom : (presence?.custom ?? '')
+  const shownEmoji = previewing ? customEmoji : ((presence as { custom_emoji?: string } | null)?.custom_emoji ?? '')
+  const shownAbout = previewing ? about : (profile?.about ?? '')
+  const shownAccent = previewing ? accent : (profile?.accent || T.accent)
+  const shownAvatar = previewing ? (avatar || profile?.avatar_b64) : profile?.avatar_b64
   return (
     <Modal title={isMe ? 'Meu perfil' : 'Perfil'} onClose={onClose} width={560}>
       {banner && (
@@ -608,26 +516,31 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
       )}
       <div style={{ display: 'flex', gap: 14, alignItems: 'flex-end', marginTop: banner ? -34 : 0, marginBottom: 16, position: 'relative' }}>
         <div style={{ position: 'relative' }}>
-          <Avatar name={name} fp={fp} size={80} avatarB64={profile?.avatar_b64} ring={profile?.accent || T.accent} />
+          <Avatar name={name} fp={fp} size={80} avatarB64={shownAvatar} ring={shownAccent} />
           {presence && (
             <span style={{ position: 'absolute', bottom: 2, right: 2 }}>
-              <PresenceDot status={presence.status} size={20} ring={T.main} />
+              <PresenceDot status={shownStatus} size={20} ring={T.main} />
             </span>
           )}
         </div>
         <div style={{ flex: 1, paddingBottom: 6 }}>
           <div style={{ fontSize: 20, fontWeight: 900, color: T.heading }}>{name}</div>
           <div style={{ fontSize: 11, color: T.muted, fontFamily: 'JetBrains Mono' }}>{fp}</div>
-          <div style={{ fontSize: 12, color: PRESENCE_COLOR[presence?.status ?? 'offline'], marginTop: 4 }}>
-            {PRESENCE_LABEL[presence?.status ?? 'offline']}{presence?.custom ? ` — ${presence.custom}` : ''}
+          <div style={{ fontSize: 12, color: PRESENCE_COLOR[shownStatus], marginTop: 4 }}>
+            {PRESENCE_LABEL[shownStatus]}{shownCustom ? ` — ${shownEmoji ? `${shownEmoji} ` : ''}${shownCustom}` : (shownEmoji ? ` — ${shownEmoji}` : '')}
           </div>
+          {memberSince && (
+            <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>
+              Membro desde {new Date(memberSince).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+            </div>
+          )}
         </div>
         {!isMe && onMessage && (
           <button onClick={() => { onMessage(fp); onClose() }} style={{ ...btnPrimary, marginBottom: 6 }}>Mensagem</button>
         )}
       </div>
 
-      {profile?.about && <div style={{ fontSize: 13, color: T.text, whiteSpace: 'pre-wrap', marginBottom: 16, background: T.input, borderRadius: 8, padding: '10px 12px' }}>{profile.about}</div>}
+      {shownAbout && <div style={{ fontSize: 13, color: T.text, whiteSpace: 'pre-wrap', marginBottom: 16, background: T.input, borderRadius: 8, padding: '10px 12px' }}>{shownAbout}</div>}
 
       {editing && isMe ? (
         <>
@@ -655,6 +568,18 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
           </Field>
           <Field label="Status personalizado" hint="O que você está fazendo? (até 128 caracteres)">
             <input value={custom} onChange={e => setCustom(e.target.value)} style={inputStyle} maxLength={128} placeholder="ex.: estudando Rust 🦀" />
+          </Field>
+          <Field label="Emoji do status" hint="Aparece antes do texto, igual no Discord">
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {['🎮', '💻', '🎧', '📚', '☕', '🏖️', '💤', '🔥', '🦀', '🚀'].map(e => (
+                <button key={e} type="button" onClick={() => setCustomEmoji(customEmoji === e ? '' : e)}
+                  title={e} aria-label={`Emoji ${e}`}
+                  style={{ fontSize: 20, background: customEmoji === e ? `${T.accent}33` : 'transparent', border: `1px solid ${customEmoji === e ? T.accent : T.border}`, borderRadius: 8, padding: '4px 6px', cursor: 'pointer' }}>{e}</button>
+              ))}
+              {customEmoji && (
+                <button type="button" onClick={() => setCustomEmoji('')} style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}>Limpar</button>
+              )}
+            </div>
           </Field>
           {err && <div style={{ color: '#ff9c9c', fontSize: 12, marginBottom: 10 }}>{err}</div>}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -1198,7 +1123,9 @@ export function ChannelSettingsModal({ communityId, channel, isOwner, onClose, o
 export const SHORTCUTS: [string, string][] = [
   ['Ctrl + K', 'Paleta de comandos'],
   ['Ctrl + F', 'Buscar mensagens'],
+  ['Ctrl + I', 'Inbox (menções / não lidas)'],
   ['Ctrl + Shift + P', 'Mensagens fixadas'],
+  ['Ctrl + Shift + D', 'Mensagens salvas'],
   ['Ctrl + Shift + M', 'Mute/desmute'],
   ['Alt + ↑ / ↓', 'Navegar conversas'],
   ['Esc', 'Fechar painel'],
@@ -1219,6 +1146,10 @@ export function useShortcuts(handlers: Record<string, (e: KeyboardEvent) => void
       if (key && !e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); ref.current.search?.(e); return }
       if (key && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); ref.current.pins?.(e); return }
       if (key && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); ref.current.mute?.(e); return }
+      // Inbox (menções + não-lidas) e salvas — atalhos do próprio Discord
+      // (Ctrl+I e Ctrl+Shift+D). Não colidem com nada acima.
+      if (key && !e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); ref.current.inbox?.(e); return }
+      if (key && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); ref.current.bookmarks?.(e); return }
       if (!typing && e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); (e.key === 'ArrowDown' ? ref.current.next : ref.current.prev)?.(e) }
     }
     window.addEventListener('keydown', onKey)

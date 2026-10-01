@@ -56,6 +56,86 @@ struct AppState {
     data_dir: PathBuf,
     unlocked: Mutex<bool>,
     cache: forge_core::cache::DiskLru,
+    /// Limite de tentativas de senha/token. Vive no processo nativo, então
+    /// recarregar a página ou o WebView NÃO cria uma janela nova.
+    auth_limit: forge_core::authlimit::AuthLimiter,
+}
+
+/// Origem da chamada de desbloqueio. Num app desktop há uma origem só, então
+/// ela é constante — e é justamente por isso que o limite não pode depender
+/// de algo que o chamador controle (header, Origin, IP de loopback): aqui não
+/// há nada que o front-end possa trocar.
+const AUTH_ORIGIN: &str = "desktop";
+
+/// Monta a chave do orçamento de tentativas.
+///
+/// `account` é o fingerprint da conta cujo cofre está sendo aberto. Antes de
+/// existir identidade — primeira configuração, ou um vault sem identidade
+/// carregada — usamos um marcador fixo, para que as tentativas nesse estado
+/// também somem no mesmo balde.
+fn auth_key(store: &Store, suffix: &str) -> String {
+    let account = store
+        .load_identity()
+        .map(|i| i.fingerprint)
+        .unwrap_or_else(|| "no-identity".to_string());
+    forge_core::authlimit::AuthLimiter::key(&format!("{account}:{suffix}"), AUTH_ORIGIN)
+}
+
+/// Verifica o orçamento antes de gastar o Argon2id.
+///
+/// Devolve `Err` com o tempo restante quando bloqueado. A mensagem diz
+/// quantos segundos faltam — a UI mostra isso e impede novo envio, mas quem
+/// manda é esta função, não a UI.
+fn auth_guard(state: &State<AppState>, key: &str) -> Result<(), String> {
+    match state.auth_limit.check(key) {
+        forge_core::authlimit::Decision::Allowed => Ok(()),
+        forge_core::authlimit::Decision::Blocked { retry_after } => {
+            let secs = retry_after.as_secs().max(1);
+            tracing::warn!(
+                fingerprint = %key,
+                bloqueado_ate_s = secs,
+                "tentativa de desbloqueio recusada: limite de tentativas"
+            );
+            Err(format!(
+                "muitas tentativas incorretas. Tente de novo em {secs}s."
+            ))
+        }
+    }
+}
+
+/// Registra uma tentativa FALHA e devolve o erro de bloqueio se estourou o
+/// limite. Log sem nenhum fragmento do segredo.
+///
+/// Semântica: a 3ª falha é a que instala o bloqueio, e ela ainda responde
+/// "senha incorreta" — a senha estava errada de fato. A mensagem de bloqueio
+/// aparece na 4ª tentativa, quando a guarda a barra de verdade.
+fn auth_fail(state: &State<AppState>, key: &str, motivo: &str) -> String {
+    let out = state.auth_limit.record_failure(key);
+    if out.locked_now {
+        let secs = out.retry_after.map(|d| d.as_secs()).unwrap_or(0).max(1);
+        tracing::warn!(
+            fingerprint = %key,
+            motivo = %motivo,
+            bloqueado_s = secs,
+            "desbloqueio falhou — limite de tentativas atingido"
+        );
+        // A 3ª tentativa foi a última aceita. Dizemos isso agora, para o
+        // usuário não ficar descobrindo na 4ª.
+        return format!("senha incorreta. Mais {secs}s de espera antes de tentar de novo.");
+    }
+    tracing::warn!(
+        fingerprint = %key,
+        motivo = %motivo,
+        tentativas_restantes = out.remaining,
+        "desbloqueio falhou"
+    );
+    "senha incorreta".into()
+}
+
+/// Zera o histórico depois de um desbloqueio bem-sucedido.
+fn auth_ok(state: &State<AppState>, key: &str) {
+    state.auth_limit.record_success(key);
+    tracing::info!(fingerprint = %key, "cofre desbloqueado");
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +189,65 @@ fn db_path(state: &State<AppState>) -> PathBuf {
 fn open_store(state: &State<AppState>) -> Result<Store, String> {
     Store::open(&db_path(state)).map_err(err)
 }
+
+// ---------------- endereços locais ----------------
+
+#[derive(Debug, Serialize)]
+struct LocalAddresses {
+    /// `localhost` — válido SÓ nesta máquina.
+    localhost: String,
+    /// IP de LAN (en0/wlan0/etc). Válido no celular, na mesma rede Wi-Fi.
+    /// `None` quando não há rede cabeada/sem fio (ou não foi possível ler).
+    lan: Option<String>,
+    /// Todos os IPs de LAN encontrados, para o usuário escolher.
+    lan_all: Vec<String>,
+    /// A porta em que o servidor de desenvolvimento/UI escuta.
+    port: u16,
+}
+
+/// IPs de todas as interfaces locais, em ordem de preferência.
+///
+/// Por que isso importa: `localhost` no celular é o PRÓPRIO celular. Um link
+/// de convite `http://localhost:5173/...` que o usuário copia e manda para o
+/// celular não abre o app do computador — abre o celular e falha. O endereço
+/// que funciona é o IP de LAN. Este comando existe para a interface poder
+/// MOSTRAR os dois, com essa explicação, em vez de fingir que localhost
+/// resolve para o computador.
+fn local_ipv4_addresses() -> Vec<String> {
+    // `UdpSocket::bind` numa porta descartável + `connect` para um endereço
+    // público não envia nada: só faz o SO escolher a interface de saída. É a
+    // forma padrão de descobrir o IP de LAN sem trazer dependência de rede.
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if s.connect("192.0.2.1:9").is_ok() {
+            if let Ok(a) = s.local_addr() {
+                let ip = a.ip();
+                let v4 = !ip.is_loopback() && !ip.is_unspecified() && ip.is_ipv4();
+                if v4 {
+                    out.push(ip.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+#[tauri::command]
+fn local_addresses(port: Option<u16>, state: State<AppState>) -> Result<LocalAddresses, String> {
+    let lan_all = local_ipv4_addresses();
+    let port = port.unwrap_or(DEV_PORT);
+    let _ = &state;
+    Ok(LocalAddresses {
+        localhost: format!("http://localhost:{port}"),
+        lan: lan_all.first().cloned(),
+        lan_all,
+        port,
+    })
+}
+
+/// Porta do servidor de desenvolvimento (Vite). O `vite.config.ts` fixa
+/// `port: 5173, strictPort: true`, então divergir daqui quebraria o link.
+const DEV_PORT: u16 = 5173;
 
 // ---------------- identidade ----------------
 
@@ -222,6 +361,11 @@ fn vault_status(state: State<AppState>) -> Result<VaultStatus, String> {
     })
 }
 
+/// Desbloqueia o cofre com a senha do usuário.
+///
+/// ORDEM DELIBERADA: o orçamento é verificado ANTES do Argon2id. Um atacante
+/// bloqueado nem chega a gastar o KDF — o que também impede que ele use o
+/// próprio app como oráculo de tempo de resposta para medir a senha.
 #[tauri::command]
 fn vault_unlock(
     app: AppHandle,
@@ -229,10 +373,23 @@ fn vault_unlock(
     state: State<AppState>,
 ) -> Result<Identity, String> {
     let store = open_store(&state)?;
+    let key = auth_key(&store, "unlock");
+    auth_guard(&state, &key)?;
+
     let mut identity = store.load_identity().ok_or("sem identidade")?;
     let stored = store.load_secret_hex().ok_or("sem cofre")?;
     let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
-    let secret = forge_core::vault::open_sealed(&blob, &password).map_err(err)?;
+
+    let secret = match forge_core::vault::open_sealed(&blob, &password) {
+        Ok(s) => s,
+        Err(e) => {
+            // A senha NÃO aparece no log nem no erro devolvido.
+            return Err(auth_fail(&state, &key, &e.to_string()));
+        }
+    };
+
+    auth_ok(&state, &key);
+
     // corrigir pubkey vazio (após account_switch) derivando da secret
     if identity.pubkey_hex.is_empty() {
         if let Ok(kp) = Keypair::from_secret_hex(&secret) {
@@ -246,16 +403,30 @@ fn vault_unlock(
 }
 
 /// Troca de senha (exige a atual). Re-cifra a secret local.
+///
+/// Caminho de autenticação paralelo e COM o MESMO orçamento: sem isto, um
+/// atacante bloquearia `vault_unlock` e depois usaria `vault_change` para
+/// testar senhas sem limite nenhum.
 #[tauri::command]
 fn vault_change(old: String, new: String, state: State<AppState>) -> Result<(), String> {
     let store = open_store(&state)?;
+    let key = auth_key(&store, "change");
+    auth_guard(&state, &key)?;
+
     let stored = store.load_secret_hex().ok_or("sem cofre")?;
     let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
-    let secret = forge_core::vault::open_sealed(&blob, &old).map_err(err)?;
-    let newblob = forge_core::vault::seal_secret(&secret, &new).map_err(err)?;
+    let secret = match forge_core::vault::open_sealed(&blob, &old) {
+        Ok(s) => s,
+        Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
+    };
+    let newblob = match forge_core::vault::seal_secret(&secret, &new) {
+        Ok(b) => b,
+        Err(e) => return Err(e.to_string()),
+    };
     store
         .save_secret_blob(&hex::encode(&newblob))
         .map_err(err)?;
+    auth_ok(&state, &key);
     Ok(())
 }
 
@@ -2818,6 +2989,11 @@ fn export_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
 /// Importa um `.stormvault`: instala a identidade em device limpo (a senha do
 /// arquivo vira a senha do cofre local) ou mescla dados na mesma conta.
 /// Conta diferente = recusa (use multi-conta).
+///
+/// Terceiro caminho de autenticação por senha, e o mais perigoso dos três:
+/// o usuário digita a senha de um ARQUIVO, e o arquivo pode vir de qualquer
+/// lugar. Sem o mesmo orçamento, este comando seria um caminho completo para
+/// testar senhas sem limite.
 #[tauri::command]
 async fn stormvault_import(
     content_b64: String,
@@ -2832,13 +3008,25 @@ async fn stormvault_import(
         return Err("arquivo grande demais (máx 512MB)".into());
     }
     let store = open_store(&state)?;
+
+    // A chave inclui o fingerprint do ARQUIVO (via `import_with_password`), e
+    // não o da conta local: assim, tentar o mesmo arquivo 3 vezes bloqueia, e
+    // trocar de arquivo dá um balde novo — sem virar uma brecha trivial, porque
+    // o orçamento por conta continua valendo nos outros dois caminhos.
+    let key = auth_key(&store, "stormvault");
+    auth_guard(&state, &key)?;
+
     if store.load_identity().is_some() {
         // merge numa conta existente: exige desbloqueio (a senha do cofre
         // local continua valendo — o arquivo sozinho não injeta nada)
         engine(&state)?;
     }
     let report =
-        forge_core::stormvault::import_with_password(&store, &bytes, &password).map_err(err)?;
+        match forge_core::stormvault::import_with_password(&store, &bytes, &password) {
+            Ok(r) => r,
+            Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
+        };
+    auth_ok(&state, &key);
     forge_core::metrics::metrics().vault_op();
     drop(password);
     Ok(report)
@@ -3176,6 +3364,7 @@ fn main() {
             vault_status,
             vault_unlock,
             vault_change,
+            local_addresses,
             communities_list,
             create_community,
             make_invite,
@@ -3363,6 +3552,9 @@ fn main() {
                 data_dir: dir,
                 unlocked: Mutex::new(false),
                 cache,
+                // 3 tentativas em 15 min, bloqueio de 60s dobrando a cada
+                // reincidência. Ver `forge-core/src/authlimit.rs`.
+                auth_limit: forge_core::authlimit::AuthLimiter::new(),
             });
             // Liga o WebRTC no WebKitGTK (Linux). TEM que estar NESTE closure:
             // um segundo `.setup()` SOBRESCREVE o anterior no Tauri, e aí o

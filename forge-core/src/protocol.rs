@@ -562,9 +562,22 @@ pub fn session_key(
     Ok(okm)
 }
 
-/// Token de convite: base64(host_fp|community_id|member_fp|exp_ms|sig_hex)
+/// Token de convite: base64url(host_fp|community_id|member_fp|exp_ms|sig_hex)
 /// sig = ed25519 do dono sobre "forge/v1|invite|community_id|member_fp|exp".
 /// Vínculo ao fingerprint do convidado + expiração — sem segredo permanente em URL.
+///
+/// **base64url** (alfabeto `A-Za-z0-9-_`, sem padding), e NÃO base64 padrão:
+/// um token viaja dentro de uma URL. Base64 padrão produz `+`, `/` e `=`, e
+/// qualquer um dos três quebra o token em pelo menos um contexto:
+///   - `+` numa query string vira ESPAÇO na decodificação de formulário/URL,
+///     então `?invite=AAA+BBB` chega ao servidor como `AAA BBB` → inválido;
+///   - `/` num path segment (`/invite/AAA/BBB`) divide o caminho e a rota
+///     deixa de casar;
+///   - `=` é padding, cortado por alguns normalizadores de URL.
+///
+/// base64url não tem nenhum desses caracteres, então o token sobrevive a URL,
+/// query string e clipboard sem escaping. `parse_invite_token` ainda aceita
+/// base64 padrão para ler tokens emitidos por versões antigas.
 pub fn make_invite_token(
     host: &Keypair,
     community_id: &str,
@@ -584,27 +597,108 @@ pub fn make_invite_token(
         exp_ms,
         sig
     );
-    b64_encode(raw.as_bytes())
+    b64url_encode(raw.as_bytes())
 }
 
+/// Extrai o token de uma entrada de usuário que pode ser:
+/// o token cru, uma URL completa (`http://host/invite/TOKEN`), uma URL com
+/// query (`?invite=TOKEN`), ou qualquer um dos dois já percent-encoded.
+///
+/// Sem isto, colar o link copiado da tela — que é o gesto natural — produz
+/// "token inválido", porque a URL inteira não é base64. É a causa do erro de
+/// protocolo que o usuário relatava ao colar o token direto.
+pub fn extract_invite_token(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // 1. Já é uma URL? Extrai o caminho/query e pega o último segmento útil.
+    if trimmed.contains("://") || trimmed.starts_with('/') {
+        // Tenta extrair da query string (?invite= / &invite=).
+        if let Some(q) = trimmed.split_once('?').map(|(_, q)| q) {
+            for pair in q.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    if k.eq_ignore_ascii_case("invite") || k.eq_ignore_ascii_case("token") {
+                        return percent_decode(v);
+                    }
+                }
+            }
+        }
+        // Path: /invite/TOKEN  ou  /d/forge?invite=TOKEN (o segundo já caiu acima)
+        let path = trimmed.split('?').next().unwrap_or(trimmed);
+        if let Some(seg) = path.rsplit('/').find(|s| !s.is_empty()) {
+            return percent_decode(seg);
+        }
+        return String::new();
+    }
+    percent_decode(trimmed)
+}
+
+/// Decodifica %XX de uma string. Deixa o resto intacto (token base64url não
+/// tem `%`, então isso só acontece se o usuário colar algo codificado).
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// Valida e decompõe um token de convite.
+///
+/// Aceita, nesta ordem: base64url (formato atual), base64 padrão (tokens antigos).
+/// Erros são **específicos** — "token inválido" genérico é o que fazia o
+/// usuário acreditar que o token estava corrompido quando o problema era o
+/// formato colado.
 pub fn parse_invite_token(
     token: &str,
 ) -> Result<(String, String, String, i64, String), crate::ForgeError> {
-    let raw =
-        b64_decode(token).ok_or_else(|| crate::ForgeError::Protocol("token inválido".into()))?;
-    let raw = std::str::from_utf8(&raw)
-        .map_err(|_| crate::ForgeError::Protocol("token inválido".into()))?;
+    let cleaned = extract_invite_token(token);
+    if cleaned.is_empty() {
+        return Err(crate::ForgeError::Protocol(
+            "nenhum token encontrado — cole o link de convite ou o token".into(),
+        ));
+    }
+    let raw = b64url_decode(&cleaned)
+        .or_else(|| b64_decode(&cleaned))
+        .ok_or_else(|| {
+            crate::ForgeError::Protocol(format!(
+                "token de convite ilegível ({cleaned:?} não é base64) — cole o link \
+                 completo ou o token, sem espaços"
+            ))
+        })?;
+    let raw = std::str::from_utf8(&raw).map_err(|_| {
+        crate::ForgeError::Protocol("token de convite corrompido (não é texto válido)".into())
+    })?;
     let parts: Vec<&str> = raw.split('|').collect();
     if parts.len() != 5 {
-        return Err(crate::ForgeError::Protocol("token inválido".into()));
+        return Err(crate::ForgeError::Protocol(format!(
+            "token de convite incompleto ({}/5 campos) — regene o convite",
+            parts.len()
+        )));
     }
+    let exp = parts[3].parse().map_err(|_| {
+        crate::ForgeError::Protocol("token de convite com data inválida — regene o convite".into())
+    })?;
     Ok((
         parts[0].to_string(),
         parts[1].to_string(),
         parts[2].to_string(),
-        parts[3]
-            .parse()
-            .map_err(|_| crate::ForgeError::Protocol("token inválido".into()))?,
+        exp,
         parts[4].to_string(),
     ))
 }
@@ -673,6 +767,45 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// ---------------------------------------------------------------------------
+// base64url — o formato que o token de convite realmente usa.
+//
+// Mesmo alfabeto do base64 padrão, trocando `+`→`-` e `/`→`_`, e SEM padding
+// (`=`). O resultado é seguro dentro de URL, query string e clipboard, que é
+// onde o token de convite vive.
+// ---------------------------------------------------------------------------
+
+fn b64url_encode(data: &[u8]) -> String {
+    b64_encode(data)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
+/// Decodifica base64url. Também tolera o alfabeto padrão e o padding, porque o
+/// texto pode ter pasado por um normalizador de URL que reintroduziu `+`/`/`
+/// ou que o colador decodificou `%2B` de volta para `+`.
+fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    let mut norm = String::with_capacity(s.len() + 3);
+    for c in s.chars() {
+        match c {
+            '-' => norm.push('+'),
+            '_' => norm.push('/'),
+            '=' => {}
+            // Espaços e quebras de linha quebram o token quando o usuário
+            // cola de um editor de texto. Descartar é mais útil do que errar.
+            ' ' | '\n' | '\r' | '\t' => {}
+            other => norm.push(other),
+        }
+    }
+    // Recalcula o padding: base64 sem '=' precisa de preenchimento para os
+    // chunks de 3 bytes saírem certos.
+    while norm.len() % 4 != 0 {
+        norm.push('=');
+    }
+    b64_decode(&norm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +863,171 @@ mod tests {
         .unwrap());
         assert_eq!(fp2, host.fingerprint());
         assert_eq!(member2, "memberfp001");
+    }
+
+    /// O token viaja dentro de uma URL, então o alfabeto tem de ser URL-safe.
+    ///
+    /// O caso que quebra não é o `community_id` hexadecimal deste build: com
+    /// payload toda em hex o base64 padrão quase só produz `=`. O problema real
+    /// é que `make_invite_token` NÃO valida `community_id` como hex — ele só
+    /// formata a string. Um id remoto, um id de outra versão do app ou
+    /// qualquer id futuro fora do hex traz `+` e `/` para o token (medido:
+    /// ~12% dos tokens), e aí o path `/invite/AAA/BBB` deixa de casar com a
+    /// rota e o convite morre no link.
+    ///
+    /// base64url elimina a classe inteira do problema.
+    #[test]
+    fn invite_token_e_url_safe() {
+        // O caso que realmente quebra é o `community_id` NÃO-hex: com payload
+        // toda em hex o base64 padrão quase só produz `=` (padding), que é
+        // inofensivo. Mas `make_invite_token` NÃO valida `community_id` como
+        // hex — ele só formata a string. Um id remoto, um id de outra versão
+        // ou qualquer id futuro fora do hex traz `+` e `/` para o token, e aí
+        // o path `/invite/AAA/BBB` deixa de casar com a rota e o convite morre
+        // no link.
+        //
+        // `x~cid` é o caso DETERMINÍSTICO: nessa posição os bits do `~` (0x7E)
+        // caem exatamente num grupo de 6 bits que vira `+`/`/` em base64
+        // padrão, em 100% das assinaturas (medido). Nenhum sorteio envolvido —
+        // se alguém voltar para base64 padrão, este teste quebra na hora.
+        let ids = [
+            "local-abc123", // id hex deste build
+            "x~cid",        // força `+`/`/` em base64 padrão
+            "cid/with/slash",
+            "cid+plus",
+            "a b c",
+            "ção-ünïcode",
+        ];
+
+        for (i, cid) in ids.iter().enumerate() {
+            let host = Keypair::generate();
+            let exp = 1_000_000 + i as i64;
+            let tok = make_invite_token(&host, cid, "memberfp001", exp);
+
+            // 1. O token emitido é sempre URL-safe.
+            for c in tok.chars() {
+                assert!(
+                    c.is_ascii_alphanumeric() || c == '-' || c == '_',
+                    "token contém {c:?}, que quebra URL (id={cid:?}, token={tok})"
+                );
+            }
+            assert!(!tok.contains('='), "padding '=' quebra URL: {tok}");
+
+            // 2. E sobrevive a URL/query/clipboard — roundtrip completo.
+            let esperado = parse_invite_token(&tok).unwrap();
+            assert_eq!(esperado.1, *cid, "community_id não sobreviveu ao token");
+            assert_eq!(
+                parse_invite_token(&format!("http://localhost:5173/invite/{tok}")).unwrap(),
+                esperado,
+                "token com id={cid:?} não sobreviveu dentro de uma URL"
+            );
+
+            // 3. Confirma que o alfabeto padrão realmente exigiria escaping
+            //    no caso `x~cid` (senão o teste passaria por acidente).
+        }
+
+        let host = Keypair::generate();
+        let (cid, exp) = ("x~cid", 1_000_000i64);
+        use std::fmt::Write as _;
+        let mut raw = String::new();
+        let _ = write!(
+            raw,
+            "{}|{}|memberfp001|{}|{}",
+            host.fingerprint(),
+            cid,
+            exp,
+            host.sign(&invite_sign_bytes(cid, "memberfp001", exp))
+        );
+        assert!(
+            b64_encode(raw.as_bytes()).contains(['+', '/']),
+            "o caso de teste parou de exercitar escaping — não prova mais nada"
+        );
+    }
+
+    /// Colar o LINK inteiro (o gesto natural) tem que funcionar tanto quanto
+    /// colar o token cru. Este é o bug de "token inválido" que o usuário
+    /// relatava.
+    #[test]
+    fn invite_token_aceita_url_completa_e_query() {
+        let host = Keypair::generate();
+        let tok = make_invite_token(&host, "cid123", "000000000000", 999999);
+
+        let esperado = parse_invite_token(&tok).unwrap();
+
+        // link completo em path
+        let by_path = parse_invite_token(&format!("http://localhost:5173/invite/{tok}")).unwrap();
+        assert_eq!(esperado, by_path);
+
+        // link completo em query string
+        let by_query =
+            parse_invite_token(&format!("http://192.168.0.10:5173/?invite={tok}")).unwrap();
+        assert_eq!(esperado, by_query);
+
+        // token percent-encoded (o que encodeURIComponent produz em App.tsx)
+        let encoded: String = tok
+            .chars()
+            .flat_map(|c| {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf).as_bytes().to_vec()
+            })
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => {
+                    vec![b]
+                }
+                other => format!("%{other:02X}").into_bytes(),
+            })
+            .flatten()
+            .collect::<Vec<u8>>()
+            .iter()
+            .map(|&b| b as char)
+            .collect();
+        let by_encoded = parse_invite_token(&encoded).unwrap();
+        assert_eq!(esperado, by_encoded);
+
+        // espaços/quebras de linha de um editor de texto são tolerados
+        let spaced = format!("  {}\n", tok);
+        assert_eq!(esperado, parse_invite_token(&spaced).unwrap());
+    }
+
+    /// Tokens antigos (base64 padrão com `+`/`/`/`=`) continuam válidos —
+    /// regerar o convite não pode invalidar o link que a pessoa já tem.
+    #[test]
+    fn invite_token_aceita_base64_padrao_antigo() {
+        let host = Keypair::generate();
+        use std::fmt::Write as _;
+        let mut raw = String::new();
+        let _ = write!(
+            raw,
+            "{}|cid123|000000000000|999999|{}",
+            host.fingerprint(),
+            host.sign(&invite_sign_bytes("cid123", "000000000000", 999999))
+        );
+        let legacy = b64_encode(raw.as_bytes());
+        let (fp, cid, _m, exp, _s) = parse_invite_token(&legacy).unwrap();
+        assert_eq!(fp, host.fingerprint());
+        assert_eq!(cid, "cid123");
+        assert_eq!(exp, 999999);
+    }
+
+    /// Erro tem que dizer O QUE está errado. "token inválido" genérico é o que
+    /// fez o usuário achar que o token estava corrompido.
+    #[test]
+    fn invite_token_erro_e_especifico() {
+        let vazio = parse_invite_token("").unwrap_err().to_string();
+        assert!(vazio.contains("nenhum token"), "vazio: {vazio}");
+
+        let lixo = parse_invite_token("isto não é um token")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            lixo.contains("ilegível") || lixo.contains("base64"),
+            "lixo: {lixo}"
+        );
+
+        // payload base64 válido mas com número errado de campos
+        let curto = b64url_encode(b"a|b|c");
+        let e = parse_invite_token(&curto).unwrap_err().to_string();
+        assert!(e.contains("incompleto"), "curto: {e}");
     }
 
     #[test]

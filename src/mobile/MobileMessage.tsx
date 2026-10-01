@@ -11,6 +11,7 @@ import { Icon, Icons } from '../shared/icons'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import { QUICK_REACTIONS } from '../shared/emojiSet'
+import { ReactionWhoPopover, LinkUnfurl } from '../components/social/Social'
 
 const T = {
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
@@ -28,10 +29,26 @@ export function avatarColor(fp: string): string {
   return palette[h % palette.length]
 }
 
-function Avatar({ name, fp, size = 36 }: { name: string; fp: string; size?: number }) {
+function Avatar({ name, fp, size = 36, avatarB64, accent }: {
+  name: string
+  fp: string
+  size?: number
+  avatarB64?: string
+  /** cor de destaque do perfil (personalização do usuário, paridade Discord). */
+  accent?: string
+}) {
+  const [err, setErr] = useState(false)
   const initial = (name || '?').trim().charAt(0).toUpperCase()
+  const ring = accent ? `2px solid ${accent}` : undefined
+  // Avatar salvo pelo usuário tem precedência sobre a cor gerada por fp.
+  if (avatarB64 && !err) {
+    return (
+      <img src={`data:image/png;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
+        style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring }} />
+    )
+  }
   return (
-    <span style={{ width: size, height: size, borderRadius: '50%', background: avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0 }}>
+    <span style={{ width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, border: ring }}>
       {initial}
     </span>
   )
@@ -42,12 +59,18 @@ export interface MobileMessageProps {
   mine: boolean
   authorName: string
   authorFp: string
+  /** avatar salvo no perfil (paridade Discord: respeita upload do usuário). */
+  authorAvatar?: string
+  /** cor de destaque do perfil, aplicada em avatar e nome. */
+  authorAccent?: string
   /** corpo efetivo (edição aplicada pelo motor) */
   body: string
   meta: MsgMetaView | undefined
   reactions: ReactionSummary[]
   grouped: boolean
   ctx: InlineCtx
+  /** fp → nome, para o popover "quem reagiu" no chip de reação. */
+  resolveName?: (fp: string) => string
   /** mensagem citada (para o preview da resposta) */
   replyTo: { name: string; body: string } | null
   onJumpToReply?: (msgId: string) => void
@@ -71,12 +94,13 @@ type SheetAction = { id: string; label: string; icon?: string; danger?: boolean 
 
 const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   const {
-    m, mine, authorName, authorFp, body, meta, reactions, grouped, ctx,
+    m, mine, authorName, authorFp, authorAvatar, authorAccent, body, meta, reactions, grouped, ctx,
     replyTo, onJumpToReply, onReact, onEdit, onDelete, onPin, onReply, onCopy,
     onReport, onForward, onOpenThread, onOpenProfile, isBot, botName, highlighted,
-    renderFile,
+    renderFile, resolveName,
   } = props
 
+  const [whoEmoji, setWhoEmoji] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
   const [sheet, setSheet] = useState(false)
@@ -148,7 +172,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
         boxShadow: meta?.pinned ? 'inset 0 0 0 1px rgba(240,178,50,0.35)' : 'none',
       }}
     >
-      {grouped ? <span style={{ width: 36, flexShrink: 0 }} /> : <Avatar name={authorName} fp={authorFp} size={36} />}
+      {grouped ? <span style={{ width: 36, flexShrink: 0 }} /> : <Avatar name={authorName} fp={authorFp} size={36} avatarB64={authorAvatar} accent={authorAccent} />}
       <div style={{ flex: 1, minWidth: 0 }}>
         {!grouped && (
           <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -156,7 +180,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
               onClick={() => onOpenProfile?.(authorFp)}
               style={{ background: 'transparent', border: 'none', padding: 0, cursor: onOpenProfile ? 'pointer' : 'default' }}
             >
-              <span style={{ fontWeight: 700, fontSize: 14, color: isBot ? T.accent : T.heading }}>{botName ?? authorName}</span>
+              <span style={{ fontWeight: 700, fontSize: 14, color: isBot ? T.accent : (authorAccent || T.heading) }}>{botName ?? authorName}</span>
             </button>
             {isBot && <span style={{ fontSize: 9, background: T.accent, color: '#fff', padding: '1px 4px', borderRadius: 4, fontWeight: 800 }}>BOT</span>}
             <span style={{ fontSize: 10, color: T.muted, fontFamily: MONO }}>{authorFp.slice(0, 8)}</span>
@@ -221,6 +245,9 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
           </div>
         )}
 
+        {/* Preview de link — paridade com o desktop (que usa LinkUnfurl). */}
+        {!editing && !deleted && <LinkUnfurl body={body} />}
+
         {onOpenThread && (
           <button
             onClick={onOpenThread}
@@ -233,21 +260,39 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
         {reactions.length > 0 && (
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 6 }}>
             {reactions.map((r) => (
-              <button
-                key={r.emoji}
-                onClick={() => onReact(r.emoji)}
-                title={r.reactors.length > 0 ? `reagiram: ${r.reactors.map((x) => x.slice(0, 8)).join(', ')}` : r.emoji}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13,
-                  background: r.mine ? 'rgba(88,101,242,0.22)' : T.input,
-                  border: `1px solid ${r.mine ? T.accent : T.border}`,
-                  color: r.mine ? T.heading : T.text, borderRadius: 8, padding: '3px 8px',
-                  cursor: 'pointer', fontWeight: 700,
-                }}
-              >
-                <span style={{ fontSize: 14 }}>{r.emoji}</span>
-                <span style={{ fontSize: 12 }}>{r.count}</span>
-              </button>
+              <div key={r.emoji} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                {/* toque = alterna a MINHA reação (como o Discord) */}
+                <button
+                  onClick={() => onReact(r.emoji)}
+                  aria-label={`${r.emoji}, ${r.count} reações. Toque para alternar a sua`}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13,
+                    background: r.mine ? 'rgba(88,101,242,0.22)' : T.input,
+                    border: `1px solid ${r.mine ? T.accent : T.border}`,
+                    color: r.mine ? T.heading : T.text, borderRadius: 8, padding: '3px 8px',
+                    cursor: 'pointer', fontWeight: 700,
+                  }}
+                >
+                  <span style={{ fontSize: 14 }}>{r.emoji}</span>
+                  <span style={{ fontSize: 12 }}>{r.count}</span>
+                </button>
+                {/* com 2+ pessoas, o separador mostra QUEM reagiu */}
+                {r.count > 1 && resolveName && (
+                  <button
+                    onClick={() => setWhoEmoji(w => w === r.emoji ? null : r.emoji)}
+                    aria-label={`Ver quem reagiu com ${r.emoji}`}
+                    style={{
+                      position: 'absolute', right: -9, bottom: 6, width: 18, height: 18,
+                      borderRadius: '50%', background: T.rail, border: `1px solid ${T.border}`,
+                      color: T.muted, fontSize: 9, fontWeight: 800, display: 'inline-flex',
+                      alignItems: 'center', justifyContent: 'center', padding: 0, cursor: 'pointer',
+                    }}
+                  >?</button>
+                )}
+                {whoEmoji === r.emoji && resolveName && (
+                  <ReactionWhoPopover r={r} resolve={resolveName} onClose={() => setWhoEmoji(null)} />
+                )}
+              </div>
             ))}
             <button
               onClick={() => setEmojiOpen((v) => !v)}

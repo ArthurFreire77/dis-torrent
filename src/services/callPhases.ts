@@ -53,15 +53,30 @@ export function nextCallPhase(phase: CallPhase, ev: CallEvent): CallPhase {
       if (ev === 'hangup') return 'rejected' // recusei
       if (ev === 'remote-ended') return 'missed' // desligaram antes de eu atender
       if (ev === 'remote-reject') return 'ended'
+      // Tocando para sempre porque quem ligou sumiu sem desligar (rede caiu):
+      // o watchdog de `incoming` emite `reconnect-timeout` → perdida honesta.
+      if (ev === 'reconnect-timeout') return 'missed'
       return phase
     case 'outgoing':
       if (ev === 'accept' || ev === 'signal') return 'connecting'
+      // Mídia real fluindo (ICE conectou / track remota chegou) promove mesmo
+      // sem `accept` — o frame CallAccepted pode se perder (peer subindo,
+      // fila do motor cheia). Sem isto a fase ficava presa em "Chamando…"
+      // para sempre mesmo com áudio/vídeo passando (causa raiz do
+      // "conectando infinito" no lado de quem liga).
+      if (ev === 'media-connected') return 'connected'
       // Chamada relay-only: o outro lado não tem PC nenhum para mandar ICE, e
       // quem chama nunca recebe `accept` (o motor emite CallAcceptedEv só no
       // host da chamada). Sem esta transição, `relay-audio-live` — que chega
       // assim que o áudio sai — era ignorado e a fase ficava presa em
       // "Chamando…" para sempre.
       if (ev === 'relay-audio-live') return 'connected'
+      // ICE falhou ainda chamando (TURN recusou, rede caiu): tenta reconexão
+      // em vez de ficar em "Chamando…" para sempre.
+      if (ev === 'ice-failed') return 'reconnecting'
+      // Ninguém atendeu / sinalização nunca completou: encerra honesto.
+      // O watchdog de `outgoing` do CallManager emite este evento.
+      if (ev === 'reconnect-timeout') return 'failed'
       if (ev === 'remote-reject') return 'rejected'
       if (ev === 'remote-ended') return 'ended'
       if (ev === 'hangup') return 'ended' // cancelei antes de atenderem

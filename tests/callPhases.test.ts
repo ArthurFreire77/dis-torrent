@@ -29,8 +29,13 @@ test('outgoing: accept/signal → connecting; recusa/desligar → terminais', ()
   assert.equal(nextCallPhase('outgoing', 'remote-reject'), 'rejected')
   assert.equal(nextCallPhase('outgoing', 'hangup'), 'ended')
   assert.equal(nextCallPhase('outgoing', 'remote-ended'), 'ended')
-  // mídia do outro lado não conecta sozinha — sigo em "chamando"
-  assert.equal(nextCallPhase('outgoing', 'media-connected'), 'outgoing')
+  // Mídia real promove mesmo sem `accept` (frame CallAccepted pode se perder):
+  // sem isto, "Chamando…" infinito com áudio passando (causa raiz corrigida).
+  assert.equal(nextCallPhase('outgoing', 'media-connected'), 'connected')
+  // ICE falhou ainda chamando → tenta reconexão em vez de travar.
+  assert.equal(nextCallPhase('outgoing', 'ice-failed'), 'reconnecting')
+  // Sem resposta em 45s → falha honesta (watchdog de outgoing).
+  assert.equal(nextCallPhase('outgoing', 'reconnect-timeout'), 'failed')
 })
 
 test('incoming: accept → connecting; hangup → rejected; remote-ended → missed; ice-failed → incoming', () => {
@@ -38,6 +43,8 @@ test('incoming: accept → connecting; hangup → rejected; remote-ended → mis
   assert.equal(nextCallPhase('incoming', 'hangup'), 'rejected')
   assert.equal(nextCallPhase('incoming', 'remote-ended'), 'missed')
   assert.equal(nextCallPhase('incoming', 'ice-failed'), 'incoming')
+  // Quem ligou sumiu sem desligar (rede caiu): watchdog → perdida honesta.
+  assert.equal(nextCallPhase('incoming', 'reconnect-timeout'), 'missed')
 })
 
 test('connecting: media-connected → connected; remote-ended/hangup → ended', () => {

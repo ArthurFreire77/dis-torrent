@@ -117,7 +117,7 @@ async function main() {
     await page.waitForTimeout(700)
     // a barra de fixadas mostra o TRECHO da mensagem fixada
     check('barra de fixadas aparece', (await page.locator('button:has-text("+") , button').filter({ hasText: /spoiler secreto|secret/ }).count()) > 0
-      || (await page.locator('text=/Fixadas \(1\)/').count()) > 0
+      || (await page.getByText(/^Fixadas \(1\)$/).count()) > 0
       || (await page.evaluate(() => {
         const st = localStorage.getItem('forge:msg_meta') ?? ''
         return st.includes('"pinned":true')

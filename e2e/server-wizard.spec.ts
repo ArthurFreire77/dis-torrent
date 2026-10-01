@@ -39,9 +39,10 @@ test('wizard completo: 4 passos criam servidor com convite', async ({ page }) =>
   await wizard.getByPlaceholder('ex.: sem flood, sem spam, respeite todo mundo').fill('sem flood');
   await wizard.getByRole('button', { name: 'Criar servidor' }).click();
 
-  // tela de convite com link gerado
-  await expect(wizard.getByText('Convidar', { exact: false })).toBeVisible({ timeout: 15000 });
-  await expect(wizard.getByText(/invite|token|gerando/i)).toBeVisible();
+  // tela final: confirmação + link de convite pronto para copiar
+  // (o rótulo real é "Servidor criado!", não "Convidar")
+  await expect(wizard.getByText('Servidor criado', { exact: false })).toBeVisible({ timeout: 15000 });
+  await expect(wizard.getByText(/invite/i)).toBeVisible();
 
   // concluir fecha e seleciona o servidor criado
   await wizard.getByRole('button', { name: 'Concluir' }).click();

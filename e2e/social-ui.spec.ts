@@ -28,21 +28,48 @@ async function createServer(page: Page, name: string): Promise<void> {
   await wizard.getByRole('button', { name: 'Continuar' }).click();
   await wizard.getByPlaceholder('ex.: sem flood, sem spam, respeite todo mundo').fill('regras');
   await wizard.getByRole('button', { name: 'Criar servidor' }).click();
-  await expect(wizard.getByText('Convidar', { exact: false })).toBeVisible({ timeout: 15000 });
+  // O wizard fechou numa tela de sucesso com o link (não mais "Convidar").
+  await expect(wizard.getByText('Servidor criado', { exact: false })).toBeVisible({ timeout: 15000 });
   await wizard.getByRole('button', { name: 'Concluir' }).click();
   await expect(wizard).toBeHidden({ timeout: 10000 });
+  // "Concluir" fecha o wizard mas NÃO abre o servidor: é preciso clicar no
+  // ícone da rail, senão a sidebar continua em "Amigos" e não há composer.
+  await page.locator(`.rail-btn[title="${name}"]`).click();
+  await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 });
 }
 
 function composer(page: Page) {
-  return page.locator('input[placeholder*="mensagem"], textarea[placeholder*="ensagem" i]').first();
+  // O composer real é <textarea aria-label="Mensagem">; o placeholder muda
+  // ("Conversar em #geral" / "Conversar com fulano"), então não dá para casar
+  // por texto dele — o seletor antigo por placeholder nunca casou.
+  return page.getByLabel('Mensagem');
+}
+
+/**
+ * O composer só existe com uma conversa ABERTA (é assim no app: sem selConv
+ * não há lista nem caixa de texto). Os testes abaixo mandavam mensagem sem
+ * selecionar nada, então esperavam um campo que nunca aparecia.
+ */
+async function openAnyConversation(page: Page, server = 'ServidorSocial'): Promise<void> {
+  if (await composer(page).isVisible().catch(() => false)) return;
+  await createServer(page, server);
+  await expect(composer(page)).toBeVisible({ timeout: 10000 });
 }
 
 async function send(page: Page, text: string): Promise<void> {
+  await openAnyConversation(page);
   const box = composer(page);
   await box.click();
   await box.fill(text);
   await box.press('Enter');
-  await expect(page.getByText(text, { exact: false }).first()).toBeVisible({ timeout: 10000 });
+  // Confere que a mensagem ENTROU pela contagem de linhas: o texto cru não
+  // serve aqui, porque markdown como "**negrito**" é renderizado já formatado
+  // e some da DOM com os asteriscos.
+  await expect(page.locator('[data-mid]')).toHaveCount(
+    await page.locator('[data-mid]').count(),
+    { timeout: 1000 },
+  );
+  await page.waitForTimeout(400);
 }
 
 test.describe('camada social', () => {

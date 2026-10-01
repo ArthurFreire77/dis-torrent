@@ -108,6 +108,103 @@ fn reacao_agrupa_por_emoji_e_por_reator() {
 }
 
 #[test]
+fn reacao_apply_e_idempotente_no_reenvio() {
+    // O receptor aplica com `add` explícito: re-entregar o mesmo frame (retry
+    // de offline, duplicata de relay) NÃO pode inverter o estado.
+    let (e, _d) = engine("ana");
+    let m = env(&Keypair::generate(), "c1", "oi");
+    put(&e, &m);
+    let st = e.store_ref();
+
+    assert!(st.reaction_apply(&m.id, "c1", "👍", "peer1", true).unwrap());
+    assert!(
+        st.reaction_apply(&m.id, "c1", "👍", "peer1", true).unwrap(),
+        "re-entrega mantém"
+    );
+    let rs = st.reactions_for_msg(&m.id).unwrap();
+    assert_eq!(rs.len(), 1);
+    assert_eq!(rs[0].count, 1, "sem duplicata no reenvio");
+
+    assert!(!st
+        .reaction_apply(&m.id, "c1", "👍", "peer1", false)
+        .unwrap());
+    assert!(
+        !st.reaction_apply(&m.id, "c1", "👍", "peer1", false)
+            .unwrap(),
+        "remover 2x mantém removido"
+    );
+    assert!(st.reactions_for_msg(&m.id).unwrap().is_empty());
+
+    assert!(
+        st.reaction_apply(&m.id, "c1", "👍", "peer1", true).unwrap(),
+        "reagir de novo volta a adicionar"
+    );
+}
+
+#[test]
+fn reacao_offline_enfileira_ultimo_estado_e_drena() {
+    // Reagir com o peer offline enfileira; o último estado vence; o take
+    // entrega uma vez e limpa.
+    let (e, _d) = engine("ana");
+    let st = e.store_ref();
+
+    st.queue_pending_react("peer1", "c1", "m1", "👍", true)
+        .unwrap();
+    st.queue_pending_react("peer1", "c1", "m1", "👍", false)
+        .unwrap();
+    st.queue_pending_react("peer1", "c1", "m2", "🔥", true)
+        .unwrap();
+
+    let got = st.take_pending_reacts("peer1").unwrap();
+    assert_eq!(got.len(), 2, "m1 (último estado) + m2");
+    let m1 = got.iter().find(|r| r.1 == "m1").expect("m1 presente");
+    assert!(!m1.3, "último estado de m1 vence (removida)");
+    assert!(
+        st.take_pending_reacts("peer1").unwrap().is_empty(),
+        "drenou de verdade"
+    );
+    assert!(st.take_pending_reacts("desconhecido").unwrap().is_empty());
+}
+
+#[test]
+fn reacao_com_peer_offline_enfileira_para_reenvio() {
+    // Motor de teste não tem links: todo peer está "offline". Reagir numa DM
+    // aplica local E enfileira para o peer (antes, o frame caía no vazio).
+    let (e, _d) = engine("ana");
+    let eu = e.identity().fingerprint.clone();
+    let conv = e
+        .store_ref()
+        .ensure_dm_conversation(&eu, "peer1", "peer1")
+        .unwrap();
+    let m = env(&Keypair::generate(), &conv.id, "oi");
+    put(&e, &m);
+
+    assert!(e.social_react(&conv.id, &m.id, "👍").unwrap());
+    // local aplicou
+    assert_eq!(e.store_ref().reactions_for_msg(&m.id).unwrap().len(), 1);
+    // e enfileirou para o peer offline
+    let pend = e.store_ref().take_pending_reacts("peer1").unwrap();
+    assert_eq!(pend.len(), 1, "reação foi para a fila do peer offline");
+    assert_eq!(pend[0].1, m.id);
+    assert!(pend[0].3, "estado add preservado");
+}
+
+#[test]
+fn reacao_offline_tem_teto_por_peer() {
+    // Um peer que nunca volta não pode inflar o banco: ficam as 200 novas.
+    let (e, _d) = engine("ana");
+    let st = e.store_ref();
+    for i in 0..250 {
+        st.queue_pending_react("sumido", "c1", &format!("mx{i}"), "👍", true)
+            .unwrap();
+    }
+    let got = st.take_pending_reacts("sumido").unwrap();
+    assert_eq!(got.len(), 200, "teto respeitado");
+    assert!(got.iter().any(|r| r.1 == "mx249"), "as mais novas ficam");
+    assert!(!got.iter().any(|r| r.1 == "mx0"), "as mais velhas caem");
+}
+
+#[test]
 fn reacoes_de_varias_mensagens_vem_em_uma_travessia() {
     let (e, _d) = engine("ana");
     let a = env(&Keypair::generate(), "c1", "a");
@@ -852,7 +949,10 @@ fn evento_cria_interest_e_apaga() {
 
     // toggle: marcar, desmarcar, marcar de novo
     e.social_event_interest("srv", "ev1").unwrap();
-    assert_eq!(e.store_ref().event_list("srv").unwrap()[0].interested.len(), 1);
+    assert_eq!(
+        e.store_ref().event_list("srv").unwrap()[0].interested.len(),
+        1
+    );
     e.social_event_interest("srv", "ev1").unwrap();
     assert_eq!(
         e.store_ref().event_list("srv").unwrap()[0].interested.len(),
@@ -969,7 +1069,10 @@ fn amizade_fluxo_completo() {
     e.friend_request(&b).unwrap();
     // o pedido é idempotente: repetir não cria uma segunda pendência
     e.friend_request(&b).unwrap();
-    assert_eq!(e.store_ref().get_friend(&b).unwrap().unwrap().1, "pending_out");
+    assert_eq!(
+        e.store_ref().get_friend(&b).unwrap().unwrap().1,
+        "pending_out"
+    );
     // agora o PAPEL inverte: sou eu que recebo, então respondo
     e.store_ref().set_friend(&b, "bruno", "pending_in").unwrap();
     e.friend_respond(&b, true).unwrap();
@@ -1072,7 +1175,10 @@ fn mute_realmente_bloqueia_a_fala() {
     let alvo = Keypair::generate().fingerprint();
     add_member(&e, "srv", &alvo);
 
-    assert!(e.gate_speech_for("srv", "c1", &alvo).is_ok(), "antes do mute, fala");
+    assert!(
+        e.gate_speech_for("srv", "c1", &alvo).is_ok(),
+        "antes do mute, fala"
+    );
 
     e.moderate("srv", "mute", &alvo, "flood").unwrap();
 
@@ -1151,4 +1257,52 @@ fn mute_exige_autoridade() {
     // o host é dono: pode. O ponto é que a checagem acontece antes do efeito.
     assert!(e.moderate("srv", "mute", &membro, "").is_ok());
     assert!(e.store_ref().mute_active(&membro).unwrap() > now_ms());
+}
+
+// =====================================================================
+// Envio em canal: o erro que a UI produzia
+// =====================================================================
+
+#[test]
+fn mandar_em_dm_nao_exige_comunidade() {
+    // Regressão de UI: `selCommunity` sobrevivia à abertura de uma conversa
+    // privada, e o shell usava esse estado para decidir que a conversa era um
+    // canal. O motor recusava com "canal inexistente" — mensagem escrita numa
+    // DM depois de visitar um servidor.
+    let (e, _d) = engine("ana");
+    let k = e.keypair();
+    let outro = Keypair::generate().fingerprint();
+    let conv = e.open_dm(&outro, "Bruno").unwrap();
+    let conv_id = conv.id.clone();
+    let m = env(&k, &conv_id, "isto é uma DM");
+    e.store_ref().insert_message(&m, "out", "ok").unwrap();
+    assert_eq!(
+        e.store_ref().message_by_id(&m.id).unwrap().unwrap().conv_id,
+        conv_id
+    );
+    // o caminho de DM não recebe community_id nenhum — é por isso que o erro
+    // vinha do branch errado do shell, não do motor.
+    assert!(e.open_dm(&outro, "Bruno").is_ok());
+}
+
+#[test]
+fn canal_valido_e_recusado_pelo_community_errado() {
+    // O par (comunidade, canal) precisa casar: um canal de A enviado como se
+    // fosse de B tem de ser recusado, senão o bug do shell passaria batido.
+    let (e, _d) = engine("dono");
+    let owner = e.identity().fingerprint.clone();
+    e.store_ref()
+        .create_community("srv-a", "A", &owner, &[("a1", "geral")])
+        .unwrap();
+    e.store_ref()
+        .create_community("srv-b", "B", &owner, &[("b1", "geral")])
+        .unwrap();
+
+    assert!(e.send_channel_message("srv-a", "a1", "ok").is_ok());
+    assert!(e.send_channel_message("srv-b", "b1", "ok").is_ok());
+    // o canal existe, mas não em B
+    let err = e
+        .send_channel_message("srv-b", "a1", "vai falhar")
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("canal inexistente"));
 }

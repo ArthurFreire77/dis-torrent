@@ -1,6 +1,6 @@
 [package]
 name = "forge"
-version = "1.0.0"
+version = "2.2.0"
 description = "FORGE — Comunicação descentralizada P2P"
 authors = ["FORGE"]
 license = "MIT"

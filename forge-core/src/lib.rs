@@ -7,6 +7,7 @@
 //! - testes de integração (dois nós reais em localhost)
 
 pub mod antispam;
+pub mod authlimit;
 pub mod cache;
 pub mod identity;
 pub mod media;

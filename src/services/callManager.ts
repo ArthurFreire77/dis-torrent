@@ -6,6 +6,27 @@ import { services } from './index'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha1 } from '@noble/hashes/legacy.js'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
+import type { VoiceMediaStats } from './models'
+import {
+  detectScreenEnvironment,
+  buildDisplayMediaConstraints,
+  classifyScreenShareError,
+  applyScreenConstraints,
+  applySenderTuning,
+  setScreenContentHint,
+  ScreenShareError,
+  ScreenCaptureMonitor,
+  ScreenStatsCollector,
+  normalizeOptions,
+  isScreenSampleBad,
+  lowerScreenQuality,
+  SCREEN_DEFAULT_OPTIONS,
+  type ScreenShareOptions,
+  type ScreenShareMetrics,
+  type ScreenShareErrorCode,
+  type ScreenEnvironment,
+  emptyScreenMetrics,
+} from './screenShare'
 
 export type CallKind = 'voice' | 'video' | 'screen'
 
@@ -24,21 +45,69 @@ export const TURN_URL_KEY = 'forge:turn_url'
 export const QUALITY_ORDER: CallQuality[] = ['480p', '720p', '1080p', '4K']
 
 export const QUALITY_CONSTRAINTS: Record<CallQuality, MediaTrackConstraints> = {
-  '480p': { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
-  '720p': { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-  '1080p': { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-  '4K': { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } },
+  // Piso 480p em todas: nunca abaixo de 640x480. Teto de FPS 120 — o browser
+  // negocia o que o dispositivo/câmera/rede suportam (ideal alto, max 120);
+  // estabilidade vem do monitor adaptativo (pollStats rebaixa se houver perda).
+  '480p': { width: { min: 640, ideal: 640, max: 1280 }, height: { min: 480, ideal: 480, max: 720 }, frameRate: { min: 24, ideal: 60, max: 120 } },
+  '720p': { width: { min: 640, ideal: 1280, max: 1920 }, height: { min: 480, ideal: 720, max: 1080 }, frameRate: { min: 24, ideal: 60, max: 120 } },
+  '1080p': { width: { min: 640, ideal: 1920, max: 1920 }, height: { min: 480, ideal: 1080, max: 1080 }, frameRate: { min: 24, ideal: 60, max: 120 } },
+  '4K': { width: { min: 640, ideal: 3840, max: 3840 }, height: { min: 480, ideal: 2160, max: 2160 }, frameRate: { min: 24, ideal: 60, max: 120 } },
 }
 
 /**
- * Qualidade da CÂMERA é FIXA (720p/30, ideal) — o seletor de qualidade vale
- * SÓ para o compartilhamento de TELA. Câmera com 1080p/4K quebrava/atrasava em
- * celular e forçava renegociação à toa; 720p é o melhor custo-benefício.
+ * CÂMERA adaptativa: piso 480p, teto 1080p/120fps. `ideal` é pedido, não
+ * ordem — o navegador entrega o mais próximo que câmera/driver suportar.
+ * ideal 60 (não 120) de propósito: 120 força CPU/GPU e rede em celular;
+ * com max:120 o dispositivo que SUPORTA sobe sozinho, e o diagnóstico mostra
+ * o limite real via getCapabilities/getSettings (ver probeVideoLimits).
+ * O seletor de qualidade vale para CÂMERA e TELA (antes era só tela).
  */
 export const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
-  width: { ideal: 1280 },
-  height: { ideal: 720 },
-  frameRate: { ideal: 30 },
+  width: { min: 640, ideal: 1280, max: 1920 },
+  height: { min: 480, ideal: 720, max: 1080 },
+  frameRate: { min: 24, ideal: 60, max: 120 },
+}
+
+/**
+ * Limite REAL do dispositivo (para exibir "seu aparelho entrega até X").
+ * Lê capabilities/settings da track viva; sem track, tenta capabilities do
+ * dispositivo via getUserMedia temporário? Não — sem track retorna null
+ * honesto (diagnóstico mostra "desconhecido, sem câmera ativa").
+ */
+export interface VideoDeviceLimits {
+  maxWidth: number | null
+  maxHeight: number | null
+  maxFrameRate: number | null
+  curWidth: number | null
+  curHeight: number | null
+  curFrameRate: number | null
+}
+export function probeVideoLimits(track?: MediaStreamTrack | null): VideoDeviceLimits | null {
+  try {
+    if (!track || track.kind !== 'video' || track.readyState !== 'live') return null
+    const caps: any = typeof (track as any).getCapabilities === 'function' ? (track as any).getCapabilities() : null
+    const st: any = typeof track.getSettings === 'function' ? track.getSettings() : {}
+    const num = (v: any): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+    return {
+      maxWidth: num(caps?.width?.max) ?? null,
+      maxHeight: num(caps?.height?.max) ?? null,
+      maxFrameRate: num(caps?.frameRate?.max) ?? null,
+      curWidth: num(st?.width) ?? null,
+      curHeight: num(st?.height) ?? null,
+      curFrameRate: num(st?.frameRate) ?? null,
+    }
+  } catch { return null }
+}
+/** Texto honesto do limite: "até 1280x720@60" ou null se desconhecido. */
+export function formatVideoLimits(l: VideoDeviceLimits | null): string | null {
+  try {
+    if (!l) return null
+    const w = l.curWidth ?? l.maxWidth
+    const h = l.curHeight ?? l.maxHeight
+    const f = l.curFrameRate ?? l.maxFrameRate
+    if (!w || !h) return null
+    return `até ${w}x${h}${f ? `@${Math.round(f)}` : ''}`
+  } catch { return null }
 }
 
 export function getStoredQuality(): CallQuality {
@@ -366,22 +435,31 @@ export function supportsCalls(): boolean {
 }
 
 /**
- * Transmitir tela estilo Discord: só desktop com `getDisplayMedia`.
- * Mobile (WebView Android/iOS) não expõe a API — o transmissor recebe
+ * Transmitir tela estilo Discord: desktop e Android (WebView) via
+ * `getDisplayMedia`. iOS/iPadOS não expõe a API — o transmissor recebe
  * SCREEN_UNAVAILABLE_MSG honesto; o RECEPTOR continua exibindo vídeo/track
  * normalmente (view-only mobile funciona: ver shells).
+ *
+ * Detecção honesta e NÃOFatal: só desligamos o botão quando sabemos que não
+ * funciona (false negativo = botão morto à toa). `detectScreenEnvironment()`
+ * diz o motivo exato (plataforma, permissão, contexto inseguro).
  */
 export function supportsScreenShare(): boolean {
   try {
     if (typeof navigator === 'undefined') return false
     const md: any = (navigator as any).mediaDevices
     if (!md?.getDisplayMedia) return false
-    // Android: o método existe em WebViews modernos, mas depende de o sistema
-    // ter a permissão CAPTURE_VIDEO_OUTPUT e de o aparelho permitir projeção.
-    // Só desligamos o botão quando sabemos que NÃO FUNCIONA — não we can hide
-    // um recurso que talvez funcione (false negativo = botão morto à toa).
     return true
   } catch { return false }
+}
+
+/** Motivo técnico pelo qual a captura de tela não está disponível agora. */
+export function screenShareUnavailableReason(): string | null {
+  try {
+    if (supportsScreenShare()) return null
+    const env = detectScreenEnvironment()
+    return env.notes.length ? env.notes.join(' · ') : SCREEN_UNAVAILABLE_MSG
+  } catch { return SCREEN_UNAVAILABLE_MSG }
 }
 
 /** Anexa track remota sem derrubar o áudio: mescla no stream existente. */
@@ -618,6 +696,177 @@ export interface IceMediaReport {
   bytesOut: number
 }
 export interface ForgeNatEndpoint { addr: string; source: string }
+
+/**
+ * Diagnóstico por peer para o painel em tempo real (ver getCallDiagnostics).
+ * Todos os numéricos são null quando indisponíveis — o painel mostra "—".
+ */
+export interface CallDiagnostics {
+  fp: string
+  connectionState: string
+  iceConnectionState: string
+  signalingState: string
+  localType: string | null
+  remoteType: string | null
+  selectedPair: string | null
+  rttMs: number | null
+  audioBitrateKbps: number | null
+  videoBitrateKbps: number | null
+  resolution: string | null
+  fps: number | null
+  framesReceived: number | null
+  framesLost: number | null
+  packetsLost: number | null
+  packetLossPct: number | null
+  codec: string | null
+  jitterMs: number | null
+  camera: string
+  microphone: string
+}
+
+/** Constrói o diagnóstico de um peer a partir do PC + getStats (nunca lança). */
+export function buildPeerDiagnostics(
+  fp: string,
+  pc: RTCPeerConnection,
+  stats: RTCStatsReport | null,
+  rep: IceMediaReport | null,
+  st: CallState | null,
+): CallDiagnostics {
+  const safe = (v: unknown): string => {
+    try { return String((v as any) ?? '?') } catch { return '?' }
+  }
+  let rttMs: number | null = rep?.rttMs ?? null
+  let localType: string | null = rep?.localType ?? null
+  let remoteType: string | null = rep?.remoteType ?? null
+  let selectedPair: string | null = null
+  const audioBitrateKbps: number | null = null
+  const videoBitrateKbps: number | null = null
+  let resolution: string | null = null
+  let fps: number | null = null
+  let framesReceived: number | null = null
+  let framesLost: number | null = null
+  let packetsLost: number | null = null
+  let packetLossPct: number | null = null
+  let codec: string | null = null
+  let jitterMs: number | null = null
+  try {
+    if (stats) {
+      const byId = new Map<string, any>()
+      try { stats.forEach((r: any) => { if (r && r.id) byId.set(String(r.id), r) }) } catch { /* ignore */ }
+      let pair: any = null
+      try {
+        stats.forEach((r: any) => {
+          if (r && r.type === 'candidate-pair' && (r.nominated || r.selected)) pair = r
+        })
+        if (!pair) stats.forEach((r: any) => {
+          if (!pair && r && r.type === 'candidate-pair' && r.state === 'succeeded') pair = r
+        })
+      } catch { /* ignore */ }
+      if (pair) {
+        const local = byId.get(String(pair.localCandidateId ?? ''))
+        const remote = byId.get(String(pair.remoteCandidateId ?? ''))
+        if (local?.candidateType && !localType) localType = String(local.candidateType)
+        if (remote?.candidateType && !remoteType) remoteType = String(remote.candidateType)
+        if (typeof pair.currentRoundTripTime === 'number') rttMs = Math.round(pair.currentRoundTripTime * 1000)
+        try {
+          const lt = local ? `${local.candidateType ?? '?'}:${local.protocol ?? 'udp'}` : '?'
+          const rt = remote ? `${remote.candidateType ?? '?'}` : '?'
+          selectedPair = `${lt} ↔ ${rt}`
+        } catch { /* ignore */ }
+      }
+      let aBytes = 0; let vBytes = 0; let aPkts = 0; let aLost = 0
+      stats.forEach((r: any) => {
+        try {
+          if (!r) return
+          if (r.type === 'inbound-rtp') {
+            if (typeof r.jitter === 'number' && (jitterMs === null || r.jitter * 1000 > 0)) {
+              const jm = Math.round(r.jitter * 1000)
+              if (jitterMs === null) jitterMs = jm
+            }
+            if (typeof r.packetsLost === 'number') {
+              packetsLost = (packetsLost ?? 0) + r.packetsLost
+              if (r.kind === 'audio' || String(r.mediaType ?? '') === 'audio') { aLost += r.packetsLost }
+            }
+            if (typeof r.packetsReceived === 'number' && (r.kind === 'audio' || String(r.mediaType ?? '') === 'audio')) {
+              aPkts += r.packetsReceived
+            }
+            if ((r.kind === 'video' || String(r.mediaType ?? '') === 'video')) {
+              if (typeof r.framesReceived === 'number') framesReceived = (framesReceived ?? 0) + r.framesReceived
+              if (typeof r.framesDropped === 'number' || typeof r.framesLost === 'number') {
+                framesLost = (framesLost ?? 0) + Number(r.framesDropped ?? r.framesLost ?? 0)
+              }
+              if (typeof r.frameWidth === 'number' && typeof r.frameHeight === 'number') {
+                resolution = `${r.frameWidth}x${r.frameHeight}`
+              }
+              if (typeof r.framesPerSecond === 'number') fps = Math.round(r.framesPerSecond)
+            }
+            if (typeof r.mimeType === 'string' && !codec) codec = r.mimeType.replace('video/', '').replace('audio/', '')
+            if (typeof r.codecId === 'string' && byId.has(r.codecId)) {
+              const c = byId.get(r.codecId)
+              if (c?.mimeType && !codec) codec = String(c.mimeType).replace('video/', '').replace('audio/', '')
+            }
+          }
+          if (r.type === 'outbound-rtp') {
+            if (typeof r.bytesSent === 'number') {
+              if (r.kind === 'audio' || String(r.mediaType ?? '') === 'audio') aBytes += r.bytesSent
+              else vBytes += r.bytesSent
+            }
+            if ((r.kind === 'video' || String(r.mediaType ?? '') === 'video')) {
+              if (typeof r.frameWidth === 'number' && typeof r.frameHeight === 'number' && !resolution) {
+                resolution = `${r.frameWidth}x${r.frameHeight}`
+              }
+              if (typeof r.framesPerSecond === 'number' && fps === null) fps = Math.round(r.framesPerSecond)
+            }
+          }
+        } catch { /* stat individual nunca derruba o painel */ }
+      })
+      // Bitrate aproximado: bytes acumulados não dão taxa sem janela temporal;
+      // expõe como null honesto quando não há baseline (o painel mostra "—").
+      // O bitrate real por janela vem do pollStats futuro; aqui não inventamos.
+      void aBytes; void vBytes
+      if (aPkts + aLost > 0) packetLossPct = Math.round((aLost / (aPkts + aLost)) * 1000) / 10
+      else if (typeof packetsLost === 'number' && packetsLost > 0) packetLossPct = null
+    }
+  } catch { /* diagnóstico parcial */ }
+  let camera = 'desligada'
+  let microphone = 'desligado'
+  try {
+    const mine = fp === (st as any)?.participants?.[0]?.fp
+    void mine
+    // Estado local (o painel mostra por peer; para o remoto, tracks vêm do stream).
+    const local = (st as any)
+    void local
+  } catch { /* ignore */ }
+  try {
+    // Remoto: procura o stream do participante.
+    const p: any = (st?.participants as any[])?.find((x: any) => x.fp === fp)
+    const stream: MediaStream | undefined = p?.stream
+    if (stream) {
+      try {
+        const vt = stream.getVideoTracks()[0]
+        camera = vt ? (vt.readyState === 'live' ? (vt.enabled ? `ativa (${vt.label || 'câmera'})` : 'mutada') : 'encerrada') : 'sem vídeo'
+      } catch { camera = 'desconhecida' }
+      try {
+        const at = stream.getAudioTracks()[0]
+        microphone = at ? (at.readyState === 'live' ? (at.enabled ? 'ativo' : 'mutado') : 'encerrado') : 'sem áudio'
+      } catch { microphone = 'desconhecido' }
+    } else {
+      camera = 'sem track remota'
+      microphone = 'sem track remota'
+    }
+  } catch { /* ignore */ }
+  return {
+    fp,
+    connectionState: safe((pc as any).connectionState),
+    iceConnectionState: safe((pc as any).iceConnectionState),
+    signalingState: safe((pc as any).signalingState),
+    localType, remoteType, selectedPair, rttMs,
+    audioBitrateKbps, videoBitrateKbps,
+    resolution, fps, framesReceived, framesLost,
+    packetsLost, packetLossPct, codec, jitterMs,
+    camera, microphone,
+  }
+}
 
 type IceFailureListener = (info: IceFailureInfo) => void
 const iceFailureListeners = new Set<IceFailureListener>()
@@ -914,18 +1163,51 @@ export class CallManager {
   private relayFallbackTimer: ReturnType<typeof setTimeout> | null = null
   /** Timeout de 'connecting' sem mídia → reinicia ICE (ICE em silêncio no CGNAT). */
   private nativeVoiceTimer: ReturnType<typeof setInterval> | null = null
+  private nativeVoiceSince = 0
   private connectTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly CONNECT_TIMEOUT_MS = 20_000
+  /** Sem resposta do outro lado (ninguém atendeu / sinalização não andou). */
+  private outgoingTimer: ReturnType<typeof setTimeout> | null = null
+  private static readonly OUTGOING_TIMEOUT_MS = 45_000
+  /** Tocando sem atender e sem desligo remoto (quem ligou sumiu). */
+  private incomingTimer: ReturnType<typeof setTimeout> | null = null
+  private static readonly INCOMING_TIMEOUT_MS = 60_000
+  /** Teto da voz nativa sem conectar: sem isto a chamada fica em "Conectando…"
+   *  para sempre quando o ICE não fecha (CGNAT simétrico). */
+  private static readonly NATIVE_VOICE_TIMEOUT_MS = 45_000
   /** Janelas extras concedidas ao watchdog enquanto o ICE ainda coleta. */
   private connectWatchdogGrants = 0
   /** O stream do recorder relay é exclusivo dele (true) ou é o localStream compartilhado (false)? */
   private relayRecDedicated = false
   private localStream: MediaStream | null = null
   private screenStream: MediaStream | null = null
-  /** Fonte que o usuário quer compartilhar: 'monitor' (tela inteira) ou
-   *  'window' (uma janela/aba). Vira a dica `displaySurface` do getDisplayMedia
-   *  e é o que habilita o botão de trocar aba no Chrome/Edge. */
+  /** Atalho legado: 'monitor' (tela) ou 'window' (janela/aba). Espelha
+   *  `screenOptions.source` e existe só para a UI antiga; a fonte de verdade é
+   *  o objeto de opções (que também carrega monitor/áudio/qualidade/FPS). */
   private screenSource: 'monitor' | 'window' = 'monitor'
+  // ── Screen share (módulo screenShare.ts) ──────────────────────────────────
+  /** Opções completas de compartilhamento (fonte/áudio/qualidade/FPS). */
+  private screenOptions: ScreenShareOptions = { ...SCREEN_DEFAULT_OPTIONS }
+  /** Ambiente de captura detectado (plataforma, capacidades, notas). */
+  private screenEnv: ScreenEnvironment = detectScreenEnvironment()
+  /** FPS capturado de verdade (requestVideoFrameCallback) — nunca inventado. */
+  private screenMonitor = new ScreenCaptureMonitor()
+  /** Agrega getStats em métricas reais de bitrate/FPS/perda/latência. */
+  private screenStats = new ScreenStatsCollector()
+  private screenMetrics: ScreenShareMetrics = emptyScreenMetrics()
+  /** Timer do diagnóstico da tela (1s: resolução/FPS/bitrate reais). */
+  private screenStatsTimer: ReturnType<typeof setInterval> | null = null
+  /** Último erro de captura (código + mensagem) para a UI mostrar e reagir. */
+  private screenError: { code: ScreenShareErrorCode; message: string } | null = null
+  /** Contador de tentativas de recuperação automática da captura. */
+  private screenRecoveryAttempts = 0
+  private static readonly SCREEN_MAX_RECOVERY = 5
+  /** Timer de recuperação (janela fechada/monitor desconectado/perda). */
+  private screenRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+  /** Resolução observada na track viva (para detectar mudança de resolução). */
+  private screenLastSize = ''
+  /** Callback de UI para o painel "Screen Share Debug". */
+  public onScreenDebug: ((m: ScreenShareMetrics & { options: ScreenShareOptions; env: ScreenEnvironment; error: { code: ScreenShareErrorCode; message: string } | null }) => void) | null = null
   private onUpdate: (s: CallState | null) => void = () => {}
   private state: CallState | null = null
   private myFp = ''
@@ -977,9 +1259,21 @@ export class CallManager {
     this.engineOff = services.subscribe((ev: any) => {
       // eventos de sinalização sem fp válido são ignorados (nunca crasham o bus)
       const fpOk = typeof ev?.from_fp === 'string' && ev.from_fp.length > 0
-      if (ev.type === 'call_offer' && fpOk) this.handleOffer(ev.from_fp, ev.call_id, ev.sdp)
-      if (ev.type === 'call_answer' && fpOk) this.handleAnswer(ev.from_fp, ev.call_id, ev.sdp)
-      if (ev.type === 'call_ice' && fpOk) this.handleIce(ev.from_fp, ev.call_id, ev.candidate, ev.mid)
+      if (ev.type === 'call_offer' && fpOk) {
+        // Offer fluindo = sinalização viva: tira de outgoing/incoming mesmo se
+        // o frame `call_accepted` se perdeu (causa raiz do "Chamando…" infinito
+        // no lado de quem liga).
+        try { if (this.state && (ev as any).call_id === this.state.callId) this.promoteOnSignal(String((ev as any).call_id ?? '')) } catch { /* ignore */ }
+        this.handleOffer(ev.from_fp, ev.call_id, ev.sdp)
+      }
+      if (ev.type === 'call_answer' && fpOk) {
+        try { if (this.state && (ev as any).call_id === this.state.callId) this.promoteOnSignal(String((ev as any).call_id ?? '')) } catch { /* ignore */ }
+        this.handleAnswer(ev.from_fp, ev.call_id, ev.sdp)
+      }
+      if (ev.type === 'call_ice' && fpOk) {
+        try { if (this.state && (ev as any).call_id === this.state.callId) this.promoteOnSignal(String((ev as any).call_id ?? '')) } catch { /* ignore */ }
+        this.handleIce(ev.from_fp, ev.call_id, ev.candidate, ev.mid)
+      }
       // futuro engine com callSignal dedicado (hoje inexistente — ver nota do relay):
       // aceita `call_signal`/`call-signal`/`call_relay` com payload audio-chunk.
       if ((ev.type === 'call_signal' || ev.type === 'call-signal' || ev.type === 'call_relay') && fpOk) {
@@ -1041,6 +1335,11 @@ export class CallManager {
       try {
         const st = this.state
         if (st && info.callId === st.callId) {
+          this.setFailureCause(
+            info.state === 'failed'
+              ? `ICE failed com ${info.fp.slice(0, 8)} (sem rota direta nem via TURN; NAT restritivo/CGNAT ou TURN fora)`
+              : `rota com ${info.fp.slice(0, 8)} caiu (disconnected >12s; rede trocou/caiu — tentando ICE restart)`,
+          )
           this.applyPhase('ice-failed')
           if (st.phase === 'reconnecting') this.startReconnectWatchdog()
         }
@@ -1091,15 +1390,96 @@ export class CallManager {
       if (next !== st.phase) {
         st.phase = next
         this.lastPhase = next
+        if (next === 'outgoing') this.startOutgoingWatchdog()
+        else this.stopOutgoingWatchdog()
+        if (next === 'incoming') this.startIncomingWatchdog()
+        else this.stopIncomingWatchdog()
         if (next === 'reconnecting') this.startReconnectWatchdog()
         if (next === 'connected' || next === 'failed') this.stopReconnectWatchdog()
         if (next === 'connecting') this.startConnectWatchdog()
         if (next !== 'connecting') this.stopConnectWatchdog()
+        // Saiu de outgoing/incoming para connecting/connected: os timers de
+        // "sem resposta" não fazem mais sentido.
+        if (next === 'connecting' || next === 'connected') {
+          this.stopOutgoingWatchdog()
+          this.stopIncomingWatchdog()
+        }
+        // Fase terminal: limpa todos os watchdogs de espera (não o de
+        // reconexão, que já foi parado acima quando aplicável).
+        if (next === 'ended' || next === 'rejected' || next === 'failed' || next === 'missed') {
+          this.stopOutgoingWatchdog()
+          this.stopIncomingWatchdog()
+          this.stopConnectWatchdog()
+        }
         this.onUpdate({ ...st })
       }
       return next
     } catch { /* fase nunca derruba a chamada */ }
     return null
+  }
+
+  /**
+   * Watchdog de OUTGOING — corrige o "Chamando…" infinito.
+   * Causa raiz: a fase só saía de `outgoing` via `call_accepted` (accept) ou
+   * sinalização. Se o outro lado nunca atende, está offline, ou o frame de
+   * aceite se perde, nada movia a máquina — overlay preso para sempre.
+   * Aqui: após OUTGOING_TIMEOUT_MS sem sair de `outgoing`, encerra honesto.
+   */
+  private startOutgoingWatchdog() {
+    this.stopOutgoingWatchdog()
+    try {
+      const callId = this.state?.callId
+      this.outgoingTimer = setTimeout(() => {
+        this.outgoingTimer = null
+        try {
+          const st = this.state
+          if (!st || st.callId !== callId || st.phase !== 'outgoing') return
+          this.setFailureCause('sem resposta do outro lado em 45s (peer offline, não atendeu, ou sinalização call_accepted/offer se perdeu)')
+          this.onCallNotice?.('sem resposta — o outro lado não atendeu em 45s')
+          this.applyPhase('reconnect-timeout') // outgoing → failed (ver callPhases)
+          void this.leave()
+        } catch { /* watchdog nunca derruba */ }
+      }, CallManager.OUTGOING_TIMEOUT_MS)
+    } catch { /* ignore */ }
+  }
+  private stopOutgoingWatchdog() {
+    try { if (this.outgoingTimer) clearTimeout(this.outgoingTimer) } catch { /* ignore */ }
+    this.outgoingTimer = null
+  }
+  /**
+   * Watchdog de INCOMING — corrige o "Recebendo chamada" infinito.
+   * Se quem ligou sumiu (rede caiu) sem `call_ended`, o telefone tocaria
+   * para sempre. Após INCOMING_TIMEOUT_MS vira `missed` honesto.
+   */
+  private startIncomingWatchdog() {
+    this.stopIncomingWatchdog()
+    try {
+      const callId = this.state?.callId
+      this.incomingTimer = setTimeout(() => {
+        this.incomingTimer = null
+        try {
+          const st = this.state
+          if (!st || st.callId !== callId || st.phase !== 'incoming') return
+          this.setFailureCause('chamada perdida: quem ligou sumiu sem enviar call_ended (rede caiu)')
+          this.applyPhase('reconnect-timeout') // incoming → missed
+          this.onCallNotice?.('chamada perdida')
+          void this.leave()
+        } catch { /* watchdog nunca derruba */ }
+      }, CallManager.INCOMING_TIMEOUT_MS)
+    } catch { /* ignore */ }
+  }
+  private stopIncomingWatchdog() {
+    try { if (this.incomingTimer) clearTimeout(this.incomingTimer) } catch { /* ignore */ }
+    this.incomingTimer = null
+  }
+
+  /** Sinalização fluindo (offer/answer/ICE) promove outgoing/incoming → connecting. */
+  private promoteOnSignal(callId: string) {
+    try {
+      const st = this.state
+      if (!st || st.callId !== callId) return
+      if (st.phase === 'outgoing' || st.phase === 'incoming') this.applyPhase('signal')
+    } catch { /* fase nunca derruba o bus */ }
   }
 
   /**
@@ -1155,6 +1535,7 @@ export class CallManager {
         return
       }
       try { this.onCallNotice?.('sem rota de mídia direta — reiniciando ICE') } catch { /* ignore */ }
+      this.setFailureCause('sem rota de mídia em 20s (ICE preso em checking/gathering sem par selecionado; NAT/CGNAT ou TURN inalcançável — ver painel)')
       this.restartIceAll(st.callId)
       this.applyPhase('ice-failed')
     } catch { /* watchdog nunca derruba */ }
@@ -1186,6 +1567,7 @@ export class CallManager {
             this.applyPhase('media-reconnected')
             return
           }
+          this.setFailureCause('reconexão falhou — sem rota de mídia após 30s (ICE restarts esgotados; NAT/CGNAT sem TURN válido)')
           this.applyPhase('reconnect-timeout')
           this.onCallNotice?.('reconexão falhou — sem rota de mídia após 30s')
           void this.leave()
@@ -1317,6 +1699,9 @@ export class CallManager {
     this.quality = getStoredQuality()
     this.qualityNotice = null
     this.badWindows = 0
+    this.lastFailureCause = null
+    try { this.lastStats.clear() } catch { /* ignore */ }
+    try { this.lastNativeStats = null } catch { /* ignore */ }
     this.prevLost.clear()
     // mídia local (mesmo em voice pedimos áudio para detectar falando)
     // sem mic/permissão → null; o PC sem tracks ainda completa a sinalização
@@ -1376,6 +1761,10 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
+    // Watchdogs ANTI-INFINITO: outgoing (sem resposta) + connecting (sem rota).
+    // Antes só existia o de reconexão (que só arma em `reconnecting`) — por
+    // isso "Chamando…"/"Conectando…" ficavam presos para sempre.
+    this.startOutgoingWatchdog()
     this.ensureRelayTransport()
     this.startQualityMonitor()
     // mesh: cria PC para cada alvo
@@ -1398,6 +1787,9 @@ export class CallManager {
     this.quality = getStoredQuality()
     this.qualityNotice = null
     this.badWindows = 0
+    this.lastFailureCause = null
+    try { this.lastStats.clear() } catch { /* ignore */ }
+    try { this.lastNativeStats = null } catch { /* ignore */ }
     this.prevLost.clear()
     this.localStream = await getLocalMedia({ audio: true })
     this.resetRelayForNewCall()
@@ -1418,6 +1810,9 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
+    // Entrada direta em `connecting` (sem passar por applyPhase): arma o
+    // watchdog aqui — senão "Conectando…" infinito se o ICE nunca fechar.
+    this.startConnectWatchdog()
     this.ensureRelayTransport()
     this.startQualityMonitor()
     this.onUpdate({ ...this.state })
@@ -1542,6 +1937,9 @@ export class CallManager {
       } catch { this.localStream = null }
     }
     this.resetRelayForNewCall()
+    this.lastFailureCause = null
+    try { this.lastStats.clear() } catch { /* ignore */ }
+    try { this.lastNativeStats = null } catch { /* ignore */ }
     this.state = {
       callId,
       kind,
@@ -1562,6 +1960,8 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
+    // Entrada direta em `connecting`: arma o watchdog (ver joinVoice/start).
+    this.startConnectWatchdog()
     this.startQualityMonitor()
     this.ensureRelayTransport()
     this.syncRelayToState()
@@ -1954,21 +2354,26 @@ export class CallManager {
   }
 
   /**
-   * Troca a qualidade de vídeo em chamada.
-   * - aplica applyConstraints no track vivo
+   * Troca a qualidade de vídeo em chamada (CÂMERA + TELA).
+   * - aplica applyConstraints no track vivo (câmera e/ou tela)
    * - renegocia cada PC (novo offer) quando em chamada
    * - se falhar, mantém a qualidade atual e lança erro honesto em pt-BR
    */
   async setQuality(q: CallQuality): Promise<void> {
     const prev = this.quality
     try {
-      // Qualidade vale SÓ para o compartilhamento de TELA; a CÂMERA é 720p fixo
-      // (CAMERA_CONSTRAINTS). Sem estar compartilhando, só guarda a preferência.
-      const track = this.state?.sharing ? (this.screenStream?.getVideoTracks()[0] ?? null) : null
-      if (track) {
-        await track.applyConstraints({ ...QUALITY_CONSTRAINTS[q] } as MediaTrackConstraints)
+      const tracks: MediaStreamTrack[] = []
+      // A TELA tem degrau próprio (screenShare.ts): trocar a qualidade da câmera
+      // não pode sobrescrever a da tela com constraints de câmera. Quando está
+      // compartilhando, o seletor da tela assume (ver adaptScreenQuality).
+      const camTrack = this.localStream?.getVideoTracks()[0] ?? null
+      if (camTrack && camTrack.readyState === 'live') tracks.push(camTrack)
+      for (const track of tracks) {
+        try {
+          await track.applyConstraints({ ...QUALITY_CONSTRAINTS[q] } as MediaTrackConstraints)
+        } catch { /* track individual pode recusar; segue as demais */ }
       }
-      if (track && this.state && this.pcs.size > 0) {
+      if (tracks.length > 0 && this.state && this.pcs.size > 0) {
         for (const [fp, pc] of this.pcs) {
           try {
             if (pc.signalingState !== 'stable') continue
@@ -2019,6 +2424,8 @@ export class CallManager {
           const stats = await pc.getStats()
           // Medidor B1: par selecionado + rtt + bytes (mesma janela, sem timer novo).
           try { this.iceReports.set(fp, readIceReport(pc, stats)) } catch { /* stats parcial */ }
+          // Cache completo para o painel de diagnóstico (ver getCallDiagnostics).
+          try { this.lastStats.set(fp, stats) } catch { /* ignore */ }
           stats.forEach((r: any) => {
             if (r && r.type === 'inbound-rtp') {
               const lost = Number(r.packetsLost ?? 0)
@@ -2052,6 +2459,150 @@ export class CallManager {
     } catch { /* nunca derruba a chamada por causa do monitor */ }
   }
 
+  // ── Diagnóstico WebRTC em tempo real (painel da chamada) ────────────────
+  /** Último RTCStatsReport por peer (alimentado pelo pollStats + sob demanda). */
+  private lastStats = new Map<string, RTCStatsReport>()
+  /** Causa técnica da última falha (para exibir em vez de "erro na chamada"). */
+  private lastFailureCause: string | null = null
+  /** Define a causa técnica (chamado nos pontos de falha honesta). */
+  private setFailureCause(cause: string) {
+    try { this.lastFailureCause = cause } catch { /* ignore */ }
+  }
+  /** Última causa técnica registrada (null = sem falha nesta chamada). */
+  getFailureCause(): string | null {
+    try { return this.lastFailureCause } catch { return null }
+  }
+  /** Último VoiceStats da mídia nativa (alimentado pelo painel/monitor). */
+  private lastNativeStats: VoiceMediaStats | null = null
+
+  /** Causa técnica da mídia NATIVA (sem PCs no navegador — mensagem própria). */
+  private nativeFailureReason(st: CallState): string {
+    try {
+      const s = this.lastNativeStats
+      if (!s) {
+        if (st.phase === 'outgoing') return 'voz nativa: aguardando o outro lado atender (mídia do Rust ainda sem sessão)'
+        return 'voz nativa: mídia do Rust ainda sem sessão para esta chamada (offer nativa ainda não criada ou sem VoiceMedia)'
+      }
+      const io = `saída=${s.packets_out ?? 0} entrada=${s.packets_in ?? 0} plc=${s.plc_frames ?? 0} erros=${s.decode_errors ?? 0}`
+      if (s.state === 'connected') return `voz nativa conectada via ${s.route} (${io})`
+      if (s.state === 'failed') return `voz nativa: rota perdida (${s.route}; ${io}) — NAT/CGNAT sem TURN válido ou peer caiu`
+      // connecting/idle: distingue "peer não responde" de "rede sem rota".
+      if ((s.packets_out ?? 0) === 0 && (s.packets_in ?? 0) === 0) {
+        return `voz nativa negociando (rota ${s.route}): nenhum pacote trocado ainda — outro lado pode não ter atendido ou SDP/ICE não chegou`
+      }
+      return `voz nativa conectando via ${s.route} (${io}) — ICE ainda sem par final`
+    } catch { return 'voz nativa: falha ao inspecionar a mídia do Rust' }
+  }
+
+  /**
+   * Causa técnica REAL do estado atual (nunca "erro na chamada" genérico).
+   * Ordem de checagem: sem chamada → sem WebRTC → sem mic/câmera → ICE →
+   * sinalização → gathering → rota. Usado pelo painel e pelos toasts.
+   */
+  getCallFailureReason(): string {
+    try {
+      if (this.lastFailureCause) return this.lastFailureCause
+      const st = this.state
+      if (!st) return 'sem chamada ativa'
+      if (!supportsCalls()) {
+        try { return getCallsUnavailableMessage() } catch { return 'WebRTC indisponível neste aparelho' }
+      }
+      // Chamada NATIVA (mídia no Rust, sem PCs no navegador): causa própria —
+      // a mensagem de "nenhuma conexão WebRTC" abaixo seria enganosa aqui.
+      try { if ((st as any)?.nativeMedia) return this.nativeFailureReason(st) } catch { /* segue no caminho WebRTC */ }
+      if (this.pcs.size === 0) {
+        if (st.phase === 'outgoing') return 'aguardando o outro lado atender (sinalização ainda não completou)'
+        if (st.phase === 'incoming') return 'aguardando atendimento local'
+        return 'nenhuma conexão WebRTC criada (offer ainda não enviada ou peer offline)'
+      }
+      // Resume por peer: o pior caso vira a causa.
+      const parts: string[] = []
+      for (const [fp, pc] of this.pcs) {
+        try {
+          const ice = String((pc as any).iceConnectionState ?? '?')
+          const conn = String((pc as any).connectionState ?? '?')
+          const sig = String((pc as any).signalingState ?? '?')
+          const gath = String((pc as any).iceGatheringState ?? '?')
+          const rep = this.iceReports.get(fp)
+          const short = fp.slice(0, 8)
+          if (ice === 'failed' || conn === 'failed') {
+            parts.push(`${short}: ICE falhou (sem rota direta nem via TURN; NAT restritivo/CGNAT ou TURN fora)`)
+          } else if (ice === 'disconnected') {
+            parts.push(`${short}: rota caiu (rede trocou/caiu); tentando ICE restart`)
+          } else if (ice === 'checking' || ice === 'new') {
+            if (gath === 'gathering') parts.push(`${short}: coletando candidatos ICE (TURN pode demorar no 4G)`)
+            else if (!pc.remoteDescription) parts.push(`${short}: aguardando SDP remoto (offer/answer ainda não aplicada)`)
+            else if (sig !== 'stable') parts.push(`${short}: sinalização em ${sig} (renegociação em andamento)`)
+            else parts.push(`${short}: ICE em ${ice} sem par selecionado (NAT/CGNAT sem rota — STUN/TURN tentados)`)
+          } else if (!rep || (!rep.localType && !rep.remoteType)) {
+            parts.push(`${short}: conectado (${ice}) mas sem par ICE selecionado ainda`)
+          }
+        } catch { /* peer isolado */ }
+      }
+      if (parts.length > 0) return parts.join(' | ')
+      // Microfone/câmera?
+      try {
+        const micLive = this.localStream?.getAudioTracks().some(t => t.readyState === 'live') ?? false
+        const camLive = this.localStream?.getVideoTracks().some(t => t.readyState === 'live') ?? false
+        if (!micLive && st.kind !== 'video') return 'conectado, mas sem microfone ativo (permissão negada ou sem dispositivo)'
+        if (st.kind === 'video' && st.cameraOn && !camLive) return 'conectado, mas sem câmera ativa (permissão negada, em uso ou sem dispositivo)'
+      } catch { /* ignore */ }
+      return 'sem falha detectada (mídia negociando ou conectada)'
+    } catch { return 'falha desconhecida ao inspecionar a chamada' }
+  }
+
+  /**
+   * Diagnóstico completo por peer para o painel em tempo real.
+   * Nunca lança; campos ausentes viram null (painel mostra "—").
+   */
+  async getCallDiagnostics(): Promise<CallDiagnostics[]> {
+    const out: CallDiagnostics[] = []
+    try {
+      const st = this.state
+      if (!st) return out
+      for (const [fp, pc] of this.pcs) {
+        try {
+          let stats: RTCStatsReport | null = this.lastStats.get(fp) ?? null
+          try {
+            if ((pc as any).connectionState !== 'closed') {
+              stats = await pc.getStats()
+              if (stats) this.lastStats.set(fp, stats)
+            }
+          } catch { /* mantém último cache */ }
+          out.push(buildPeerDiagnostics(fp, pc, stats, this.iceReports.get(fp) ?? null, st))
+        } catch { /* peer isolado não derruba o painel */ }
+      }
+      // Chamada nativa (mídia no Rust): sem PCs, mas com rota do core.
+      if (out.length === 0 && (st as any)?.nativeMedia) {
+        try {
+          const s = await services.voiceMediaStats(st.callId).catch(() => null)
+          if (s) { try { this.lastNativeStats = s } catch { /* ignore */ } }
+          const io = s ? `out=${s.packets_out ?? 0} in=${s.packets_in ?? 0} plc=${s.plc_frames ?? 0} err=${s.decode_errors ?? 0}` : null
+          out.push({
+            fp: 'nativa (Rust)',
+            connectionState: s ? s.state : 'desconhecida',
+            iceConnectionState: s ? s.state : 'desconhecida',
+            signalingState: 'estável (core)',
+            localType: null, remoteType: null,
+            selectedPair: s ? `rota ${s.route} • ${io}` : null,
+            rttMs: s?.rtt_ms ?? null,
+            audioBitrateKbps: null, videoBitrateKbps: null,
+            resolution: null, fps: null,
+            framesReceived: s ? Number(s.packets_in ?? 0) : null,
+            framesLost: s ? Number(s.plc_frames ?? 0) : null,
+            packetsLost: s ? Number(s.plc_frames ?? 0) : null,
+            packetLossPct: null,
+            codec: 'Opus (nativo)',
+            jitterMs: s ? s.jitter_depth_ms : null,
+            camera: 'n/d (nativa)',
+            microphone: s ? ((s.packets_out ?? 0) > 0 ? 'enviando' : 'sem saída ainda') : 'n/d (nativa)',
+          })
+        } catch { /* ignore */ }
+      }
+    } catch { /* painel nunca derruba a chamada */ }
+    return out
+  }
+
   async leave() {
     if (!this.state) return
     const cid = this.state.callId
@@ -2074,10 +2625,16 @@ export class CallManager {
     if (this.state?.callId.startsWith('voice-')) {
       this.stopQualityMonitor()
       this.stopReconnectWatchdog()
+      this.stopConnectWatchdog()
+      this.stopOutgoingWatchdog()
+      this.stopIncomingWatchdog()
       this.clearIceRestartTimers()
       try { this.stopRelayFull() } catch { /* ignore */ }
       this.badWindows = 0
       this.prevLost.clear()
+      try { this.lastStats.clear() } catch { /* ignore */ }
+      this.lastFailureCause = null
+      try { this.lastNativeStats = null } catch { /* ignore */ }
       this.qualityNotice = null
       this.pendingIce.clear()
       this.localIce.clear()
@@ -2088,12 +2645,30 @@ export class CallManager {
       this.pcs.forEach(pc => { try { pc.close() } catch { /* ignore */ } })
       this.pcs.clear()
       this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
-      this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
+      this.resetScreenRuntime()
       this.localStream = null
-      this.screenStream = null
       this.state = null
       this.onUpdate(null as any)
     }
+  }
+
+  /**
+   * Zera TODO o estado do compartilhamento (timer de métricas, monitor de FPS,
+   * timer de recuperação, stream). Chamado em qualquer saída da chamada —
+   * deixar timer vivo depois do `leave` é vazamento clássico de memória.
+   */
+  private resetScreenRuntime(): void {
+    this.stopScreenStatsTimer()
+    try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
+    this.screenRecoveryTimer = null
+    this.screenMonitor.detach()
+    this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
+    this.screenStream = null
+    this.screenLastSize = ''
+    this.screenMetrics = emptyScreenMetrics()
+    this.screenError = null
+    this.screenRecoveryAttempts = 0
+    this.screenStats.reset()
   }
 
   toggleMute() {
@@ -2204,139 +2779,428 @@ export class CallManager {
    * normal (desktop + mobile view-only). Mobile sem getDisplayMedia lança
    * SCREEN_UNAVAILABLE_MSG honesto em vez de crash/silêncio.
    */
+  /** Última linha de texto do doc da função (substituído abaixo). */
   async toggleScreen(): Promise<void> {
-    if (!this.state) return
-    if (this.state.sharing) {
-      try { this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
-      this.screenStream = null
-      this.state.sharing = false
-      // avisa receptores: tela desligada (badge some)
-      this.broadcastScreenSignal(false)
-      // volta para a câmera viva (se houver) para o remoto não congelar na última tela
-      try {
-        const cam = this.localStream?.getVideoTracks().find(tr => tr.readyState === 'live') ?? null
-        if (cam) {
-          for (const pc of this.pcs.values()) {
-            try {
-              // volta para a câmera no MESMO sender de vídeo (mesmo com track nulo)
-              const sender = this.findVideoSender(pc)
-              if (sender) {
-                await sender.replaceTrack(cam).catch(() => {})
-              }
-              // replaceTrack já restaura localmente; offer só com estável.
-              if (pc.signalingState !== 'closed' && pc.signalingState === 'stable') {
-                const offer = await createTunedOffer(pc).catch(() => null)
-                if (offer) {
-                  await pc.setLocalDescription(offer).catch(() => {})
-                  const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
-                  if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
-                }
-              }
-            } catch { /* peer isolado não derruba os demais */ }
-          }
-        }
-      } catch { /* volta silenciosa: estado local já está consistente */ }
-      this.onUpdate({ ...this.state })
+    if (this.state?.sharing) {
+      await this.stopScreenShare()
       return
     }
-    if (!supportsScreenShare()) throw new Error(SCREEN_UNAVAILABLE_MSG)
-    let s: MediaStream
+    await this.startScreenShare()
+  }
+
+  /**
+   * Compartilhamento de tela P2P (sem servidor de mídia): captura local →
+   * codificação nativa do engine → WebRTC direto peer-a-peer.
+   *
+   * Fontes: tela inteira, janela/aplicativo e monitor específico (o picker
+   * nativo do sistema decide qual; nós dizemos QUAL tipo é permitido). O
+   * áudio do sistema e o microfone são separados: cada um vira sua própria
+   * trilha, então "tela + sistema + mic" funciona e "só tela" não trava.
+   *
+   * `opts` ausente = usa as opções salvas (ver setScreenShareOptions).
+   */
+  async startScreenShare(opts?: Partial<ScreenShareOptions>): Promise<void> {
+    if (!this.state) return
+    this.screenEnv = detectScreenEnvironment()
+    if (!supportsScreenShare()) {
+      const reason = screenShareUnavailableReason()
+      this.setScreenError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG)
+      throw new ScreenShareError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG, false)
+    }
+    this.screenOptions = normalizeOptions(opts, this.screenOptions)
+
+    let stream: MediaStream
     try {
-      const md: any = (typeof navigator !== 'undefined' ? (navigator as any).mediaDevices : null)
-      // getDisplayMedia NÃO aceita width/height/frameRate direto (dava
-      // "Invalid constraint") — pede a tela e aplica a qualidade DEPOIS.
-      //
-      // `displaySurface` diz ao browser QUAL fonte o usuário está escolhendo
-      // (monitor/janela/aba), e é isso que permite ao Chrome/Edge exibir o
-      // botão de TROCAR ABA depois de compartilhado. Sem a dica, o usuário
-      // precisa parar e recomeçar para trocar de aba — a complaint mais comum
-      // de "a tela não funciona". O picker nativo continua responsável pela
-      // escolha; isto só orienta a UI e habilita a troca.
-      s = await md.getDisplayMedia({
-        video: { displaySurface: this.screenSource },
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-        // permite trocar a aba/janela compartilhada sem renegociar o WebRTC
-        surfaceSwitching: 'include',
-        systemAudio: 'include',
-        selfBrowserSurface: 'exclude',
-        preferCurrentTab: false,
-      } as any)
-    } catch (e: any) {
-      const n = String(e?.name ?? '')
-      if (n === 'NotAllowedError' || n === 'AbortError') {
-        const cancelErr = new Error('compartilhamento de tela cancelado')
-        ;(cancelErr as any).cause = e
-        throw cancelErr
-      }
-      const screenErr = new Error(`não foi possível compartilhar a tela: ${String(e?.message ?? e)}`)
-      ;(screenErr as any).cause = e
-      throw screenErr
+      stream = await this.acquireScreenStream(this.screenOptions)
+    } catch (e) {
+      const err = classifyScreenShareError(e)
+      this.setScreenError(err.code, err.message)
+      throw err
     }
-    this.screenStream = s
-    this.state.sharing = true
-    const track = s.getVideoTracks()[0]
+    const track = stream.getVideoTracks()[0]
     if (!track) {
-      this.state.sharing = false
-      throw new Error('nenhuma trilha de vídeo na tela compartilhada')
+      try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
+      const err = new ScreenShareError('no-source', 'nenhuma trilha de vídeo na tela compartilhada', true)
+      this.setScreenError(err.code, err.message)
+      throw err
     }
-    // aplica a QUALIDADE escolhida na trilha da tela (aplicada DEPOIS porque
-    // getDisplayMedia rejeitava as constraints direto)
-    try { await track.applyConstraints({ ...QUALITY_CONSTRAINTS[this.quality] } as MediaTrackConstraints) } catch { /* mantém o que veio */ }
-    try { (track as any).contentHint = 'detail' } catch { /* hint é best-effort */ }
-    // todos semeiam: cada peer recebe via addTrack/replaceTrack (mesh flood).
-    // replaceTrack no m-line existente NÃO precisa de offer; addTrack (m-line
-    // novo) precisa — e só com signaling estável, senão colide com a
-    // renegociação de qualidade/câmera em andamento.
+
+    // Captura substitui a anterior sem derrubar a chamada.
+    try { this.stopScreenStreamOnly() } catch { /* ignore */ }
+    this.screenStream = stream
+    this.state.sharing = true
+    this.screenError = null
+    this.screenRecoveryAttempts = 0
+    this.screenStats.reset()
+    this.screenMetrics = emptyScreenMetrics()
+    this.watchScreenTrack(track)
+    this.screenMonitor.attach(track)
+    await this.tuneScreenTrack(track)
+    await this.seedScreenPeers(stream, track)
+    this.startScreenStatsTimer()
+    this.broadcastScreenSignal(true)
+    this.onUpdate({ ...this.state })
+  }
+
+  /** Pede a captura ao engine com as constraints de fonte/áudio corretas. */
+  private async acquireScreenStream(opts: ScreenShareOptions): Promise<MediaStream> {
+    const md: any = (typeof navigator !== 'undefined' ? (navigator as any).mediaDevices : null)
+    if (!md?.getDisplayMedia) throw new ScreenShareError('unsupported', SCREEN_UNAVAILABLE_MSG, false)
+    const constraints = buildDisplayMediaConstraints(opts, this.screenEnv)
+    return await md.getDisplayMedia(constraints) as MediaStream
+  }
+
+  /**
+   * Reage ao fim/mute/unmute da track de tela — é o que cobre "usuário parou
+   * pelo botão do sistema", "monitor desconectou" e "janela fechada".
+   * `mute` é NORMAL (troca de monitor, janela minimizada); `ended` é o fim real.
+   */
+  private watchScreenTrack(track: MediaStreamTrack): void {
+    try {
+      track.onended = () => { void this.handleScreenEnded() }
+      track.onmute = () => { this.noteScreenEvent('captura pausada pelo sistema (fonte oculta, monitor trocado ou app em segundo plano)') }
+      track.onunmute = () => { this.noteScreenEvent('captura retomada') }
+    } catch { /* engines sem onmute: só onended */ }
+  }
+
+  private async handleScreenEnded(): Promise<void> {
+    if (!this.state?.sharing) return
+    // Differencia "o sistema encerrou a projeção (Android/Android WebView,
+    // barra do navegador, janela fechada)" de um stop explícito nosso.
+    const msg = 'o compartilhamento de tela foi encerrado pelo sistema'
+    this.setScreenError('ended', msg)
+    try { this.onCallNotice?.(msg) } catch { /* ignore */ }
+    await this.stopScreenShare()
+  }
+
+  /** Aplica resolução/FPS no track vivo e afina o encoder de cada sender. */
+  private async tuneScreenTrack(track: MediaStreamTrack): Promise<void> {
+    setScreenContentHint(track, this.screenOptions.source)
+    await applyScreenConstraints(track, this.screenOptions)
+    try {
+      const st = track.getSettings()
+      this.screenLastSize = `${st.width ?? 0}x${st.height ?? 0}`
+    } catch { /* settings indisponível */ }
+    await this.applyScreenSenderTuning()
+  }
+
+  /** Escala/bitrate/degradação por sender — a parte que segura 1080p60. */
+  private async applyScreenSenderTuning(): Promise<void> {
     for (const pc of this.pcs.values()) {
       try {
-        // reusa o m-line de vídeo existente (mesmo com a câmera desligada);
-        // se não houver, addTrack + renegociação abaixo cria a track de tela.
+        const sender = this.findVideoSender(pc)
+        if (!sender) continue
+        await applySenderTuning(sender, this.screenOptions)
+      } catch { /* sender sem parâmetros: segue com o padrão */ }
+    }
+  }
+
+  /** Semeia a track em todo o mesh (replaceTrack quando já existe m-line). */
+  private async seedScreenPeers(stream: MediaStream, track: MediaStreamTrack): Promise<void> {
+    for (const pc of this.pcs.values()) {
+      try {
         const sender = this.findVideoSender(pc)
         if (sender) {
           await sender.replaceTrack(track)
           if (pc.signalingState !== 'stable') continue
         } else {
-          pc.addTrack(track, s)
+          pc.addTrack(track, stream)
         }
-        // renegotiate
         const offer = await createTunedOffer(pc)
         await pc.setLocalDescription(offer)
         const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
         if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
       } catch { /* peer isolado não derruba os demais */ }
     }
-    // áudio da tela (quando o SO permite) semeia como SEGUNDA trilha de áudio
-    // + renegociação real. Antes: addTrack sem offer não tinha efeito (morto).
-    try {
-      const atrack = s.getAudioTracks()[0]
-      if (atrack) {
-        for (const pc of this.pcs.values()) {
-          try {
-            const already = pc.getSenders().some(x => x.track === atrack)
-            if (already || pc.signalingState !== 'stable') continue
-            pc.addTrack(atrack, s)
-            const offer = await createTunedOffer(pc)
-            await pc.setLocalDescription(offer)
+    await this.seedScreenSystemAudio(stream)
+    await this.applyScreenSenderTuning()
+  }
+
+  /**
+   * Áudio do sistema vira trilha separada (nunca mistura com o mic). Se o SO
+   * não entregar áudio, o vídeo segue normal — áudio nunca é pré-requisito.
+   */
+  private async seedScreenSystemAudio(stream: MediaStream): Promise<void> {
+    const atrack = stream.getAudioTracks()[0]
+    if (!atrack) {
+      this.noteScreenEvent('áudio do sistema indisponível nesta fonte — compartilhando só o vídeo')
+      return
+    }
+    for (const pc of this.pcs.values()) {
+      try {
+        if (pc.getSenders().some(x => x.track === atrack)) continue
+        if (pc.signalingState !== 'stable') continue
+        pc.addTrack(atrack, stream)
+        const offer = await createTunedOffer(pc)
+        await pc.setLocalDescription(offer)
+        const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
+        if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
+      } catch { /* áudio opcional: vídeo continua */ }
+    }
+  }
+
+  /** Para o compartilhamento e devolve a câmera (ou null) aos remotos. */
+  async stopScreenShare(): Promise<void> {
+    if (!this.state) return
+    this.stopScreenStatsTimer()
+    try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
+    this.screenRecoveryTimer = null
+    this.stopScreenStreamOnly()
+    this.screenMonitor.detach()
+    this.screenLastSize = ''
+    this.screenMetrics = emptyScreenMetrics()
+    this.state.sharing = false
+    this.broadcastScreenSignal(false)
+    await this.restoreCameraAfterScreen()
+    this.onUpdate({ ...this.state })
+  }
+
+  /** Libera o stream de tela (sem tocar no estado da chamada). */
+  private stopScreenStreamOnly(): void {
+    try { this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
+    this.screenStream = null
+  }
+
+  /** Receiveram a última tela; volta a câmera viva para não congelar. */
+  private async restoreCameraAfterScreen(): Promise<void> {
+    const cam = this.localStream?.getVideoTracks().find(tr => tr.readyState === 'live') ?? null
+    if (!cam) return
+    for (const pc of this.pcs.values()) {
+      try {
+        const sender = this.findVideoSender(pc)
+        if (sender) await sender.replaceTrack(cam).catch(() => {})
+        if (pc.signalingState !== 'closed' && pc.signalingState === 'stable') {
+          const offer = await createTunedOffer(pc).catch(() => null)
+          if (offer) {
+            await pc.setLocalDescription(offer).catch(() => {})
             const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
             if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
-          } catch { /* peer isolado não derruba os demais */ }
+          }
         }
+      } catch { /* peer isolado não derruba os demais */ }
+    }
+  }
+
+  /**
+   * Aplica opções sem derrubar a captura: resolução/FPS vão na track viva e no
+   * encoder (o receiver não vê interrupção). Trocar a FONTE ou o ÁUDIO exige
+   * recapturar — o engine só permite isso no gesto do usuário.
+   */
+  async setScreenShareOptions(patch: Partial<ScreenShareOptions>): Promise<void> {
+    const prev = this.screenOptions
+    const next = normalizeOptions(patch, this.screenOptions)
+    this.screenOptions = next
+    this.screenEnv = detectScreenEnvironment()
+    if (!this.state?.sharing) return
+    const sourceChanged = next.source !== prev.source
+    const audioChanged = next.audio !== prev.audio
+    if (sourceChanged || audioChanged) {
+      await this.recaptureScreen(next)
+      return
+    }
+    const track = this.screenStream?.getVideoTracks()[0] ?? null
+    if (track) {
+      await applyScreenConstraints(track, next)
+      setScreenContentHint(track, next.source)
+    }
+    await this.applyScreenSenderTuning()
+    this.emitScreenDebug()
+  }
+
+  /** Recaptura mantendo a chamada viva (fonte/áudio mudaram). */
+  private async recaptureScreen(opts: ScreenShareOptions): Promise<void> {
+    const wasSharing = !!this.state?.sharing
+    try {
+      this.stopScreenStatsTimer()
+      this.stopScreenStreamOnly()
+      this.screenMonitor.detach()
+      const stream = await this.acquireScreenStream(opts)
+      const track = stream.getVideoTracks()[0]
+      if (!track) {
+        try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
+        throw new ScreenShareError('no-source', 'nenhuma trilha de vídeo na tela compartilhada', true)
       }
-    } catch { /* áudio opcional */ }
-    track.onended = () => { if (this.state) { this.state.sharing = false; this.broadcastScreenSignal(false); this.onUpdate({ ...this.state }) } }
-    // `onended` acima já cobre "o usuário parou pelo botão nativo do SO"
-    // (barra do Chrome / notification do Windows) — inclusive quando ele troca
-    // de aba com surfaceSwitching. O bloco que existia aqui só lia a propriedade
-    // `onended` de cada track e não fazia nada com ela: código morto.
-    // badge TELA nos receptores (sinal dedicado — não é o m-line de vídeo)
-    this.broadcastScreenSignal(true)
-    this.onUpdate({ ...this.state })
+      this.screenStream = stream
+      this.watchScreenTrack(track)
+      this.screenMonitor.attach(track)
+      await this.tuneScreenTrack(track)
+      await this.seedScreenPeers(stream, track)
+      this.startScreenStatsTimer()
+      if (!wasSharing && this.state) {
+        this.state.sharing = true
+        this.broadcastScreenSignal(true)
+      }
+      this.screenError = null
+      if (this.state) this.onUpdate({ ...this.state })
+    } catch (e) {
+      const err = classifyScreenShareError(e)
+      this.setScreenError(err.code, err.message)
+      if (this.state) {
+        this.state.sharing = false
+        this.broadcastScreenSignal(false)
+        this.onUpdate({ ...this.state })
+      }
+      throw err
+    }
+  }
+
+  /**
+   * Recuperação automática: resolução mudou, monitor trocou, encoder engasgou
+   * ou a rede degradou. Nenhum desses casos exige o usuário sair da chamada.
+   */
+  private scheduleScreenRecovery(reason: string): void {
+    if (!this.state?.sharing) return
+    if (this.screenRecoveryAttempts >= CallManager.SCREEN_MAX_RECOVERY) {
+      this.noteScreenEvent(`recuperação automática desistiu após ${CallManager.SCREEN_MAX_RECOVERY} tentativas (${reason})`)
+      return
+    }
+    this.screenRecoveryAttempts += 1
+    this.noteScreenEvent(`recuperando a captura (${reason}) — tentativa ${this.screenRecoveryAttempts}/${CallManager.SCREEN_MAX_RECOVERY}`)
+    try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
+    const delay = Math.min(8000, 800 * this.screenRecoveryAttempts)
+    this.screenRecoveryTimer = setTimeout(() => {
+      this.screenRecoveryTimer = null
+      void this.recoverScreen(reason)
+    }, delay)
+  }
+
+  private async recoverScreen(reason: string): Promise<void> {
+    if (!this.state?.sharing) return
+    try {
+      const track = this.screenStream?.getVideoTracks()[0] ?? null
+      if (!track || track.readyState !== 'live') {
+        await this.recaptureScreen(this.screenOptions)
+        return
+      }
+      // track viva mas ruim (mute/stall): reaplica constraints e reinicia
+      // a estatística — o receiver volta a receber keyframes normais.
+      await applyScreenConstraints(track, this.screenOptions)
+      await this.applyScreenSenderTuning()
+      this.screenStats.reset()
+      this.noteScreenEvent(`captura recuperada (${reason})`)
+    } catch {
+      await this.recaptureScreen(this.screenOptions).catch(() => {})
+    }
+  }
+
+  /** Detecta mudança de resolução/rotação e dispara a recuperação. */
+  private checkScreenGeometry(): void {
+    const track = this.screenStream?.getVideoTracks()[0] ?? null
+    if (!track) return
+    let size: string
+    try {
+      const st = track.getSettings()
+      size = `${st.width ?? 0}x${st.height ?? 0}`
+    } catch { return }
+    if (!size || size === '0x0') return
+    if (this.screenLastSize && size !== this.screenLastSize) {
+      this.scheduleScreenRecovery(`a captura mudou de ${this.screenLastSize} para ${size}`)
+    }
+    this.screenLastSize = size
+  }
+
+  private startScreenStatsTimer(): void {
+    this.stopScreenStatsTimer()
+    try {
+      this.screenStatsTimer = setInterval(() => { void this.sampleScreenStats() }, 1000)
+    } catch { this.screenStatsTimer = null }
+  }
+
+  private stopScreenStatsTimer(): void {
+    try { if (this.screenStatsTimer) clearInterval(this.screenStatsTimer) } catch { /* ignore */ }
+    this.screenStatsTimer = null
+  }
+
+  /** Uma amostra REAL por segundo: FPS capturado, bitrate, perda, latência. */
+  private async sampleScreenStats(): Promise<void> {
+    if (!this.state?.sharing) return
+    try {
+      const capture = this.screenMonitor.sample()
+      let stats: RTCStatsReport | null = null
+      for (const pc of this.pcs.values()) {
+        try {
+          if (pc.connectionState === 'closed') continue
+          stats = await pc.getStats()
+          if (stats) break
+        } catch { /* tenta o próximo peer */ }
+      }
+      const prevRtt = this.screenMetrics.rttMs
+      this.screenMetrics = this.screenStats.read(stats, capture, prevRtt)
+      this.checkScreenGeometry()
+      this.adaptScreenQuality()
+      this.emitScreenDebug()
+    } catch { /* métrica nunca derruba a captura */ }
+  }
+
+  /**
+   * Degradação adaptativa honesta: só desce um degrau quando a rede está
+   * realmente ruim (perda, jitter alto ou FPS enviado bem abaixo do capturado).
+   * 120 FPS só é pedido — nunca reportamos FPS que não foi capturado.
+   */
+  private adaptScreenQuality(): void {
+    if (this.screenOptions.quality === 'auto') return
+    const m = this.screenMetrics
+    if (!isScreenSampleBad(m)) {
+      if (this.screenRecoveryAttempts > 0) this.screenRecoveryAttempts = 0
+      return
+    }
+    const next = lowerScreenQuality(this.screenOptions.quality)
+    if (next === this.screenOptions.quality) return
+    this.screenOptions = { ...this.screenOptions, quality: next }
+    const track = this.screenStream?.getVideoTracks()[0] ?? null
+    if (track) void applyScreenConstraints(track, this.screenOptions)
+    void this.applyScreenSenderTuning()
+    this.noteScreenEvent(`qualidade da tela ajustada para ${next} (rede ruim)`)
+    this.emitScreenDebug()
+  }
+
+  private setScreenError(code: ScreenShareErrorCode, message: string): void {
+    this.screenError = { code, message }
+    this.emitScreenDebug()
+  }
+
+  private noteScreenEvent(_message: string): void {
+    this.emitScreenDebug()
+  }
+
+  private emitScreenDebug(): void {
+    try {
+      this.onScreenDebug?.({
+        ...this.screenMetrics,
+        options: { ...this.screenOptions },
+        env: this.screenEnv,
+        error: this.screenError,
+      })
+    } catch { /* painel nunca derruba a captura */ }
+  }
+
+  /** Opções salvas de compartilhamento (fonte/áudio/qualidade/FPS). */
+  getScreenShareOptions(): ScreenShareOptions {
+    return { ...this.screenOptions }
+  }
+
+  /** Ambiente de captura detectado agora (plataforma + capacidades reais). */
+  getScreenShareEnvironment(): ScreenEnvironment {
+    this.screenEnv = detectScreenEnvironment()
+    return this.screenEnv
+  }
+
+  /** Última amostra de métricas (mesma que o painel "Screen Share Debug"). */
+  getScreenShareMetrics(): ScreenShareMetrics & { options: ScreenShareOptions; env: ScreenEnvironment; error: { code: ScreenShareErrorCode; message: string } | null } {
+    return { ...this.screenMetrics, options: { ...this.screenOptions }, env: this.screenEnv, error: this.screenError }
+  }
+
+  /** Erro atual de captura (null = tudo certo). */
+  getScreenShareError(): { code: ScreenShareErrorCode; message: string } | null {
+    return this.screenError
   }
 
   /** Escolhe a fonte da próxima captura: tela inteira ('monitor') ou uma
    *  janela/aba ('window'). Só tem efeito na próxima vez que você compartilha. */
   setScreenSource(src: 'monitor' | 'window'): void {
     this.screenSource = src === 'window' ? 'window' : 'monitor'
+    const source = src === 'window' ? 'window' : 'screen'
+    this.screenOptions = { ...this.screenOptions, source }
   }
 
   /** Fonte configurada para a próxima captura. */
@@ -2449,6 +3313,18 @@ export class CallManager {
         const st = (e.streams && e.streams[0]) ?? (e.track ? new MediaStream([(e.track as MediaStreamTrack)]) : null)
         if (st && this.state) attachRemoteTrack(this.state, (s) => this.onUpdate(s), fp, st)
       } catch { /* nunca derruba o bus */ }
+      // Mídia remota CHEGOU: se o ICE já está conectado, promove a fase.
+      // Cobre o caso em que o `iceconnectionstatechange` disparou antes de o
+      // estado da chamada existir (race offer→track→accept).
+      try {
+        const st2 = this.state
+        if (st2 && st2.callId === callId) {
+          const iceOk = pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed'
+          const connOk = (pc as any).connectionState === 'connected'
+          if (iceOk || connOk) this.applyPhase('media-connected')
+          else this.promoteOnSignal(callId)
+        }
+      } catch { /* fase nunca derruba o bus */ }
     }
     pc.onicecandidate = (e) => {
       if (!e.candidate) {
@@ -2466,9 +3342,34 @@ export class CallManager {
       pc.addEventListener('iceconnectionstatechange', () => {
         try {
           if (pc.iceConnectionState === 'failed') void this.tryIceRestart(fp, pc, callId)
+          // Promove para conectado também por aqui (além do subscribeIceRecovered
+          // via logIceState): se o `bind()` ainda não assinou ou o evento se
+          // perdeu, a fase não fica presa.
+          if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+            try {
+              const st = this.state
+              if (st && st.callId === callId) this.applyPhase('media-connected')
+            } catch { /* ignore */ }
+          }
         } catch { /* monitor nunca derruba a chamada */ }
       })
     } catch { /* ignore */ }
+    // connectionState (nível PC) é mais confiável que iceConnectionState em
+    // alguns WebViews móveis: cobre 'connected' mesmo quando o ICE reporta
+    // 'checking' por alguns segundos.
+    try {
+      pc.addEventListener('connectionstatechange', () => {
+        try {
+          const cs = (pc as any).connectionState
+          if (cs === 'connected') {
+            const st = this.state
+            if (st && st.callId === callId) this.applyPhase('media-connected')
+          } else if (cs === 'failed') {
+            void this.tryIceRestart(fp, pc, callId)
+          }
+        } catch { /* monitor nunca derruba a chamada */ }
+      })
+    } catch { /* navegador sem connectionstate: segue com ICE */ }
   }
 
   /** Envia um candidato ICE local, remembering-o para reenvio posterior. */
@@ -2517,16 +3418,34 @@ export class CallManager {
    */
   private startNativeVoiceMonitor(callId: string) {
     this.stopNativeVoiceMonitor()
+    this.nativeVoiceSince = Date.now()
     const t = setInterval(() => {
       const st = this.state
       if (!st || st.callId !== callId) { this.stopNativeVoiceMonitor(); return }
+      const waited = Date.now() - (this.nativeVoiceSince ?? (this.nativeVoiceSince = Date.now()))
       void services.voiceMediaStats(callId).then((s) => {
         if (!s || !this.state || this.state.callId !== callId) return
+        try { this.lastNativeStats = s } catch { /* ignore */ }
         if (nativeRoute !== s.route) { nativeRoute = s.route; this.onUpdate({ ...this.state }) }
         if (s.state === 'connected') {
+          this.nativeVoiceSince = 0
           this.applyPhase('media-connected')
-        } else if (s.state === 'failed') {
-          this.onCallNotice?.(`rota de mídia perdida (${s.route})`)
+        } else if (s.state === 'failed' || waited > CallManager.NATIVE_VOICE_TIMEOUT_MS) {
+          // O ICE que nunca fecha é o caso do CGNAT simétrico. Sem este
+          // timeout a tela ficava em "Conectando…" indefinidamente — que é
+          // exatamente o bug que a versão anterior resolveu no caminho do
+          // WebRTC, e que voltou no caminho nativo.
+          this.nativeVoiceSince = 0
+          this.setFailureCause(
+            s.state === 'failed'
+              ? `rota de mídia nativa perdida (${s.route}; pacotes in=${s.packets_in} out=${s.packets_out} plc=${s.plc_frames})`
+              : `sem rota de mídia nativa em ${Math.round(CallManager.NATIVE_VOICE_TIMEOUT_MS / 1000)}s (${s.route}) — CGNAT/NAT simétrico provável`,
+          )
+          this.onCallNotice?.(
+            s.state === 'failed'
+              ? `rota de mídia perdida (${s.route})`
+              : `sem rota de mídia em ${Math.round(CallManager.NATIVE_VOICE_TIMEOUT_MS / 1000)}s (${s.route}) — sua rede ou a da outra pessoa está atrás de CGNAT`,
+          )
           this.applyPhase('reconnect-timeout')
           this.leave()
         }
@@ -2764,7 +3683,14 @@ export class CallManager {
     this.stopQualityMonitor()
     this.stopReconnectWatchdog()
     this.stopConnectWatchdog()
+    this.stopOutgoingWatchdog()
+    this.stopIncomingWatchdog()
+    this.stopNativeVoiceMonitor()
     this.clearIceRestartTimers()
+    try { this.lastStats.clear() } catch { /* ignore */ }
+    try { this.lastNativeStats = null } catch { /* ignore */ }
+    // Mantém lastFailureCause para o toast pós-fim (getPhase pós-leave);
+    // nova chamada zera (ver start/acceptInbound/joinVoice).
     // Timer do grace relay antes do stopRelayFull (que já o cancela): garante
     // que nenhum "connected" chega depois da chamada encerrada.
     this.clearRelayFallbackTimer()
@@ -2781,9 +3707,8 @@ export class CallManager {
     this.pcs.forEach(pc => { try { pc.close() } catch { /* ignore */ } })
     this.pcs.clear()
     this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
-    this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
+    this.resetScreenRuntime()
     this.localStream = null
-    this.screenStream = null
     this.state = null
     this.onUpdate(null as any)
   }

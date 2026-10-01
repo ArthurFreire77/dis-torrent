@@ -3,6 +3,7 @@ import { services } from '../services'
 import { Icon, Icons } from '../shared/icons'
 import { useConversations, useEngineEvents, useMessages, useNetwork } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
+import CallDiagnostics from '../components/CallDiagnostics'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
@@ -11,13 +12,17 @@ import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { attachStream } from '../shared/mediaAttach'
 import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, type FileMsgMeta } from '../services/fileSwarm'
-import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
+import ScreenSharePicker from '../components/ScreenSharePicker'
+import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import MobileMessage, { avatarColor as mAvatarColor } from './MobileMessage'
 import { EmojiPicker } from '../shared/EmojiPicker'
+import { NAMED_EMOJI } from '../shared/emojiSet'
+import { activeToken } from '../shared/markdown'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { useSocialWindow, useMessageActions, usePresence, PRESENCE_COLOR, PRESENCE_LABEL, useReadState } from '../app/useSocial'
-import type { BotView, PresenceStatus, SearchHit } from '../services/models'
+import { BookmarksPanel } from '../components/social/Social'
+import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
 import type { Conversation, Identity, MessageStatus, NetworkState, CommunityView, PrivacyMode, StoredMessage } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 
@@ -27,6 +32,18 @@ const MONO = "'JetBrains Mono', monospace"
 
 /** Fingerprint = 12 hex chars (blake3 truncado, ver forge-core/identity.rs). */
 const FP_RE = /^[0-9a-f]{12}$/
+
+/** Item do autocompletar do composer mobile (mesma forma do desktop). */
+interface AutoItemMobile {
+  key: string
+  kind: 'mention' | 'emoji' | 'slash'
+  label: string
+  hint?: string
+  color?: string
+  glyph?: string
+  insert: string
+  fp?: string
+}
 
 /** Nome de arquivo de imagem (para renderizar prévia inline). */
 function isImageName(name: string): boolean {
@@ -500,12 +517,21 @@ export default function MobileShell() {
   const [threadFor, setThreadFor] = useState<{ parent: string; name: string; body: string } | null>(null)
   const [showSearch, setShowSearch] = useState(false)
   const [showPins, setShowPins] = useState(false)
+  const [showBookmarks, setShowBookmarks] = useState(false)
+  // Criar servidor no mobile (paridade com o wizard do desktop).
+  const [showNewServer, setShowNewServer] = useState(false)
+  const [newServerName, setNewServerName] = useState('')
+  const [newServerChannel, setNewServerChannel] = useState('geral')
+  const [newServerBusy, setNewServerBusy] = useState(false)
   const [showThread, setShowThread] = useState(false)
   const [threadMsgs, setThreadMsgs] = useState<StoredMessage[]>([])
   const [threadInput, setThreadInput] = useState('')
   const [customStatus, setCustomStatus] = useState('')
   const [myPresence, setMyPresence] = useState<PresenceStatus>('online')
   const [composerEmoji, setComposerEmoji] = useState(false)
+  /** Quem está digitando na conversa aberta (fp → nome, expira em 3,5s). */
+  const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
+  const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const [flash, setFlash] = useState<string | null>(null)
   const [pinnedMsgs, setPinnedMsgs] = useState<{ id: string; body: string; author: string }[]>([])
   const readRef = useRef<Set<string>>(new Set())
@@ -513,6 +539,8 @@ export default function MobileShell() {
   const [myStatusBusy, setMyStatusBusy] = useState(false)
   const [topMenu, setTopMenu] = useState(false)
   const [showPrivacy, setShowPrivacy] = useState(false)
+  /** Seletor completo de compartilhamento (fonte/áudio/qualidade/FPS). */
+  const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
   // --- proxy SOCKS5 (modo proxy/Tor): endereço + teste online + ativação ---
@@ -522,6 +550,21 @@ export default function MobileShell() {
   const [proxyTestOk, setProxyTestOk] = useState<number | null>(null)
   const [proxyTestErr, setProxyTestErr] = useState<string | null>(null)
   const [proxyPendingMode, setProxyPendingMode] = useState<PrivacyMode | null>(null)
+  /** Último envio de "digitando" (throttle de 2s, igual desktop/Discord). */
+  const lastTypingSent = useRef(0)
+  /** Momento de abertura do app — usado pelo /uptime (paridade com desktop). */
+  const bootAtMobile = useRef(Date.now())
+
+  /** Avisa a conversa que estou digitando. Throttled: no máximo 1x/2s. */
+  function notifyTyping(v: string) {
+    try {
+      if (!selConv || !v.trim()) return
+      const now = Date.now()
+      if (now - lastTypingSent.current < 2000) return
+      lastTypingSent.current = now
+      void services.sendTyping?.(selConv).catch(() => {})
+    } catch { /* digitando é cosmético: nunca derruba a digitação */ }
+  }
 
   async function refreshPrivacyExtras() {
     try {
@@ -592,6 +635,7 @@ export default function MobileShell() {
   const [isMuted, setIsMuted] = useState(false)
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
+  const [showCallDiag, setShowCallDiag] = useState(false)
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   const swarmNotifyRef = useRef<() => void>(() => {})
@@ -767,6 +811,23 @@ export default function MobileShell() {
     // mensagem em QUALQUER conversa atualiza a lista (DM nova aparecia só após restart)
     if (ev.type === 'message_new') { if (ev.conv_id === selConv) append(ev); refreshConvos(); sfxMessage() }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
+    // "digitando…" — o desktop já mostrava; no mobile faltava (lacuna auditada).
+    if (ev.type === 'typing') {
+      const cid = (ev as unknown as { conv_id?: string; convId?: string }).conv_id ?? (ev as unknown as { convId?: string }).convId
+      const fp = (ev as unknown as { fp?: string }).fp
+      if (!cid || !fp || fp === identity?.fingerprint) return
+      if (cid !== selConv) return
+      const nick = (ev as unknown as { nickname?: string }).nickname ?? fp.slice(0, 8)
+      setTypingPeers(prev => ({ ...prev, [fp]: { nick, at: Date.now() } }))
+      if (typingTimeouts.current[fp]) clearTimeout(typingTimeouts.current[fp])
+      typingTimeouts.current[fp] = setTimeout(() => {
+        setTypingPeers(prev => {
+          const next = { ...prev }
+          delete next[fp]
+          return next
+        })
+      }, 3500)
+    }
     // aceite cria DM no store — refresca conversas junto (era só friends)
     if (ev.type === 'friend_request_in' || ev.type === 'friend_accepted' || ev.type === 'friend_removed') { refreshFriends(); refreshConvos() }
     if (ev.type === 'community_joined') { refreshCommunities(); refreshConvos() }
@@ -908,7 +969,32 @@ export default function MobileShell() {
   }
 
   async function send() {
-    const body = input.trim()
+    const raw = input.trim()
+    // Comando de barra: comportamento igual ao desktop (executa e posta o
+    // texto de resposta na conversa, sem mandar para o peer como comando).
+    if (raw.startsWith('/') && !/\s/.test(raw.split('\n')[0]!)) {
+      const first = raw.split('\n')[0] ?? ''
+      const sp = first.indexOf(' ')
+      const name = (sp === -1 ? first.slice(1) : first.slice(1, sp)).toLowerCase()
+      const rest = sp === -1 ? '' : raw.slice(sp + 1).trim()
+      const out = await runSlashMobile(name, rest)
+      setInput('')
+      if (out && selConv) {
+        const convId = selConv
+        const communityId = selCommunity
+        const myFp2 = identity?.fingerprint ?? ''
+        const ts2 = Date.now()
+        const optimistic: StoredMessage = { id: `pending-${ts2}`, conv_id: convId, author_fp: myFp2, body: out, ts: ts2, sig: 'pending', direction: 'out', status: 'sending' }
+        append(optimistic)
+        try {
+          const m = communityId ? await services.sendChannelMessage(communityId, convId, out) : await services.messageSend(convId, out)
+          replaceOptimistic(`pending-${ts2}`, m)
+          if (!communityId) refreshConvos()
+        } catch (e: any) { failOptimistic(`pending-${ts2}`); setError(String(e?.message ?? e)) }
+      }
+      return
+    }
+    const body = raw
     if (!body || !selConv) return
     const now = Date.now()
     if (now - lastSendRef.current < 300) return
@@ -939,6 +1025,29 @@ export default function MobileShell() {
       setError(String(e?.message ?? e))
     }
   }
+  /** Comandos de barra do mobile — os mesmos do desktop (paridade). */
+  const runSlashMobile = useCallback(async (name: string, args: string): Promise<string> => {
+    try {
+      switch (name) {
+        case 'ajuda': return 'Comandos: /ajuda · /ping · /hora · /uptime · /meu-fp · /meu-status · /membros · /canais · /dado'
+        case 'ping': return 'pong'
+        case 'hora': return new Date().toLocaleString('pt-BR')
+        case 'uptime': return `no ar desde ${new Date(bootAtMobile.current).toLocaleTimeString('pt-BR')}`
+        case 'meu-fp': return identity?.fingerprint ?? '?'
+        case 'meu-status': return `status: ${myPresence}`
+        case 'membros': return `${activeComm?.members?.length ?? 0} membro(s) neste servidor`
+        case 'canais': return `Canais: ${(activeComm?.channels ?? []).map(([, n]) => '#' + n).join(', ') || 'nenhum'}`
+        case 'dado':
+        case 'roll': {
+          const n = Number(args) || 6
+          if (n < 2 || n > 1000) return 'use /dado <2-1000>'
+          return `saiu ${1 + Math.floor(Math.random() * n)} (d${n})`
+        }
+        default: return `comando desconhecido: /${name} — use /ajuda`
+      }
+    } catch (e: any) { return String(e?.message ?? e) }
+  }, [identity, myPresence, activeComm])
+
   const resendMessage = useCallback(async (m: StoredMessage) => {
     if (!m.conv_id) return
     patchStatus(m.id, 'sending')
@@ -1058,6 +1167,104 @@ export default function MobileShell() {
   const social = useSocialWindow(messages, selConv)
   const actions = useMessageActions((ids) => social.refreshIds(ids))
   const { presence } = usePresence()
+
+  // ---- autocompletar @menção / :emoji: / /comando (paridade com o desktop) ----
+  const [activeAutocomplete, setActiveAutocomplete] = useState<{ kind: 'mention' | 'emoji' | 'slash'; query: string; start: number; end: number } | null>(null)
+  const [autocompleteIdx, setAutocompleteIdx] = useState(0)
+  const [serverEmojiMap, setServerEmojiMap] = useState<Record<string, string>>({})
+
+  // Emoji customizado do servidor: :nome: precisa renderizar no texto.
+  useEffect(() => {
+    if (!selCommunity) { setServerEmojiMap({}); return }
+    let alive = true
+    services.emojiList(selCommunity)
+      .then(list => {
+        if (!alive) return
+        const m: Record<string, string> = {}
+        for (const e of (list as any[])) m[e.name] = e.emoji || e.glyph || e.ch || '❔'
+        setServerEmojiMap(m)
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [selCommunity])
+
+  // Membros do servidor atual (para @menção).
+  const communityMembers = useMemo<{ fp: string; nickname: string }[]>(() => {
+    if (!activeComm) return []
+    return (activeComm.members ?? []).map(([fp, nick]) => ({ fp, nickname: nick || fp.slice(0, 8) }))
+  }, [activeComm])
+
+  const autocompleteItems = useMemo<AutoItemMobile[]>(() => {
+    const tok = activeAutocomplete
+    if (!tok) return []
+    const q = tok.query.toLowerCase()
+    if (tok.kind === 'mention') {
+      const out: AutoItemMobile[] = []
+      if (!q || 'everyone'.startsWith(q)) out.push({ key: 'm-everyone', kind: 'mention', label: 'everyone', hint: 'menciona todos do servidor', color: t.accent, insert: '@everyone ' })
+      if (!q || 'here'.startsWith(q)) out.push({ key: 'm-here', kind: 'mention', label: 'here', hint: 'menciona quem está online', color: t.accent, insert: '@here ' })
+      const seen = new Set<string>()
+      for (const p of communityMembers) {
+        const nm = p.nickname || p.fp
+        if (seen.has(nm)) continue
+        if (q && !nm.toLowerCase().includes(q) && !p.fp.startsWith(q)) continue
+        seen.add(nm)
+        out.push({ key: `m-c-${p.fp}`, kind: 'mention', label: nm, hint: p.fp.slice(0, 12), fp: p.fp, insert: `@${nm} ` })
+      }
+      return out.slice(0, 12)
+    }
+    if (tok.kind === 'emoji') {
+      const out: AutoItemMobile[] = []
+      for (const [name, glyph] of Object.entries(serverEmojiMap)) {
+        if (!q || name.toLowerCase().includes(q)) out.push({ key: `e-${name}`, kind: 'emoji', label: name, glyph, insert: `:${name}: ` })
+      }
+      for (const e of NAMED_EMOJI) {
+        if (!q || e.names.some(n => n.includes(q))) out.push({ key: `e-u-${e.char}`, kind: 'emoji', label: e.names[0], glyph: e.char, insert: e.char })
+        if (out.length >= 24) break
+      }
+      return out.slice(0, 24)
+    }
+    const SLASH: { name: string; summary: string }[] = [
+      { name: 'ajuda', summary: 'lista os comandos' },
+      { name: 'ping', summary: 'mede o tempo de resposta' },
+      { name: 'hora', summary: 'mostra a hora atual' },
+      { name: 'uptime', summary: 'há quanto tempo estou online' },
+      { name: 'meu-fp', summary: 'mostra meu fingerprint' },
+      { name: 'meu-status', summary: 'mostra minha presença' },
+      { name: 'membros', summary: 'conta os membros do servidor' },
+      { name: 'canais', summary: 'lista os canais' },
+      { name: 'dado', summary: 'rola um dado' },
+    ]
+    return SLASH
+      .filter(c => !q || c.name.toLowerCase().includes(q))
+      .map(c => ({ key: `s-${c.name}`, kind: 'slash' as const, label: c.name, hint: c.summary, insert: `/${c.name} ` }))
+      .slice(0, 12)
+  }, [activeAutocomplete, communityMembers, serverEmojiMap])
+  useEffect(() => { setAutocompleteIdx(0) }, [activeAutocomplete?.query, activeAutocomplete?.kind])
+
+  function applyAutocompleteMobile(it: AutoItemMobile) {
+    if (!activeAutocomplete) return
+    const { start, end } = activeAutocomplete
+    const next = input.slice(0, start) + it.insert + input.slice(end)
+    setInput(next)
+    setActiveAutocomplete(null)
+    const caret = start + it.insert.length
+    setTimeout(() => { try { composerRef.current?.setSelectionRange(caret, caret); composerRef.current?.focus() } catch { /* ignore */ } }, 0)
+  }
+
+  // Perfis (avatar + cor de destaque) — paridade Discord: o autor aparece com
+  // a identidade que ELE configurou, não com a cor gerada pelo fingerprint.
+  const [profilesByFp, setProfilesByFp] = useState<Record<string, ProfileView>>({})
+  useEffect(() => {
+    let alive = true
+    const load = () => {
+      services.profileList()
+        .then((p) => { if (alive) setProfilesByFp(Object.fromEntries((p as ProfileView[]).map(x => [x.fp, x]))) })
+        .catch(() => {})
+    }
+    load()
+    const h = window.setInterval(load, 15000)
+    return () => { alive = false; window.clearInterval(h) }
+  }, [])
   const myFp = identity?.fingerprint ?? ''
   const readState = useReadState(selConv, myFp)
   const unreadMarkTs = readState.lastRead
@@ -1156,11 +1363,19 @@ export default function MobileShell() {
         mine={mine}
         authorName={authorName}
         authorFp={authorFp}
+        authorAvatar={profilesByFp[authorFp]?.avatar_b64}
+        authorAccent={profilesByFp[authorFp]?.accent}
         body={body}
         meta={meta}
         reactions={social.reactions.get(m.id) ?? []}
         grouped={grouped}
         ctx={richCtx}
+        resolveName={(fp) => {
+          if (fp === identity?.fingerprint) return 'você'
+          const known = peers.find((p) => p.fp === fp)?.nickname
+            || peerNickCacheRef.current[fp]
+          return known || (fp === selConvObj?.peer_fp ? (selConvObj?.title ?? fp.slice(0, 8)) : fp.slice(0, 8))
+        }}
         replyTo={replyTo}
         highlighted={!!meta?.mentioned}
         isBot={!!m.bot_id}
@@ -1184,7 +1399,7 @@ export default function MobileShell() {
       />
       </div>
     )
-  }), [messages, identity, selConvObj, fileList, previews, downloadFile, resendMessage, social.reactions, social.meta, social.bodies, richCtx, selConv, selCommunity, actions, bots, myFp, setFlash])
+  }), [messages, identity, selConvObj, fileList, previews, downloadFile, resendMessage, social.reactions, social.meta, social.bodies, richCtx, selConv, selCommunity, actions, bots, myFp, setFlash, profilesByFp, peers, peerNickCacheRef])
 
   /** Refs de scroll: cada linha recebe id para o "pular para a citada". */
   useEffect(() => {
@@ -1338,6 +1553,15 @@ export default function MobileShell() {
           </div>
         ), () => setShowPins(false))}
 
+        {/* MARCADORES SALVOS — paridade com a inbox do desktop (Social.tsx) */}
+        {showBookmarks && sheetWrap('Mensagens salvas', (
+          <BookmarksPanel convId={selConv ?? ''} messages={messages} onClose={() => setShowBookmarks(false)} onJump={(id) => {
+            setShowBookmarks(false)
+            const el = document.getElementById(`mmsg-${id}`)
+            if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); setFlash(id) }
+          }} />
+        ), () => setShowBookmarks(false))}
+
         {/* THREAD */}
         {showThread && sheetWrap(threadFor?.name ? `Discussão — ${threadFor.name}` : 'Discussão', (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
@@ -1489,7 +1713,6 @@ export default function MobileShell() {
               </span>
             </>
           )}
-          <button aria-label="Buscar nesta conversa" title="Buscar mensagens (⌘K)" className="m-iconbtn" onClick={() => setShowSearch(true)}><Icon d={Icons.search} size={17} /></button>
           {isChannel && (
             <button aria-label="Membros" className="m-iconbtn" onClick={() => setShowMembers(v => !v)}><Icon d={Icons.users} size={17} /></button>
           )}
@@ -1500,6 +1723,11 @@ export default function MobileShell() {
                 {[
                   { id: 'search', label: '🔍  Buscar mensagens' },
                   { id: 'pins', label: `📌  Fixadas (${pinnedMsgs.length})` },
+                  // O contador vem no rótulo: o badge vivia num botão da barra
+                  // que foi removido, e umatransferência de arquivo em curso
+                  // sem nenhum sinal visível é a forma rápida de achar que a
+                  // rede travou.
+                  { id: 'downloads', label: dlCount > 0 ? `⬇️  Downloads (${dlCount})` : '⬇️  Downloads' },
                   ...(isChannel ? [{ id: 'members', label: '👥  Membros do canal' }] : []),
                   { id: 'status', label: '💬  Meu status' },
                 ].map((it) => (
@@ -1509,6 +1737,7 @@ export default function MobileShell() {
                       setTopMenu(false)
                       if (it.id === 'search') setShowSearch(true)
                       else if (it.id === 'pins') setShowPins(true)
+                      else if (it.id === 'downloads') setShowDownloads(true)
                       else if (it.id === 'members') setShowMembers(true)
                       else if (it.id === 'status') setProfilePeer({ fp: myFp, name: identity?.nickname ?? 'você' })
                     }}
@@ -1518,11 +1747,6 @@ export default function MobileShell() {
               </div>
             </div>
           )}
-          {/* v6: fila de downloads com progresso/pausa/resume */}
-          <button aria-label="Downloads" title="Downloads" className="m-iconbtn" onClick={() => setShowDownloads(true)} style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon d={Icons.download} size={17} />
-            {dlCount > 0 && <span style={{ position: 'absolute', top: 2, right: 2, background: t.accent, color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: 99, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount}</span>}
-          </button>
         </div>
 
         {/* drawer de membros do canal */}
@@ -1578,6 +1802,8 @@ export default function MobileShell() {
               <button className="m-btn red" style={{ padding: '9px 14px' }} onClick={() => callManager.leave()}>Sair</button>
             </div>
             <div style={{ fontSize: 11, color: t.muted }} role="status">rota: {callManager.getRungSummary()}</div>
+            <button onClick={() => setShowCallDiag((v) => !v)} aria-label="Diagnóstico da chamada" style={{ background: showCallDiag ? t.accent : t.input, border: `1px solid ${t.border}`, color: showCallDiag ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}>{showCallDiag ? 'Ocultar diagnóstico' : 'Diagnóstico'}</button>
+            {showCallDiag && <CallDiagnostics compact />}
             {(activeCall as any)?.relayActive && (
               <div title="Áudio via relay pela sinalização — latência alta, WebRTC indisponível" style={{ fontSize: 11, fontWeight: 800, background: '#f0b232', color: '#000', padding: '4px 8px', borderRadius: 8, textAlign: 'center' }}>via relay (latência alta)</div>
             )}
@@ -1592,7 +1818,7 @@ export default function MobileShell() {
               {(((activeCall as any)?.qualityNotice as string | undefined) || qualityError) && (
                 <span role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }}>{qualityError ?? ((activeCall as any)?.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}</span>
               )}
-              <button onClick={async () => { try { if (!supportsScreenShare() && !(activeCall as any)?.sharing) { setError(SCREEN_UNAVAILABLE_MSG); return } await callManager.toggleScreen() } catch (e: any) { setError(String(e?.message ?? e)) } }} disabled={!supportsScreenShare() && !(activeCall as any)?.sharing} title={supportsScreenShare() ? 'Compartilhar tela' : SCREEN_UNAVAILABLE_MSG} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: supportsScreenShare() || (activeCall as any)?.sharing ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
+              <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} disabled={!supportsScreenShare() && !(activeCall as any)?.sharing} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: supportsScreenShare() || (activeCall as any)?.sharing ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>
             {/* Receptor view-only: tela compartilhada chega como track de vídeo — exibe igual desktop */}
             {(() => {
@@ -1669,6 +1895,50 @@ export default function MobileShell() {
 
         {/* compositor estilo desktop — textarea (Shift+Enter quebra linha de verdade) */}
         <div style={{ padding: '8px 10px calc(10px + env(safe-area-inset-bottom))', background: t.main, borderTop: `1px solid ${t.border}`, flexShrink: 0, position: 'relative' }}>
+          {Object.values(typingPeers).length > 0 && (
+            <div role="status" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: t.muted, marginBottom: 6, paddingLeft: 2 }}>
+              <span className="spin" style={{ width: 9, height: 9, border: `2px solid ${t.muted}`, borderTopColor: t.accent, borderRadius: '50%', display: 'inline-block', flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {Object.values(typingPeers).map(p => p.nick).join(', ')} está digitando…
+              </span>
+            </div>
+          )}
+          {activeAutocomplete && autocompleteItems.length > 0 && (
+            <div role="listbox" style={{
+              position: 'absolute', bottom: 'calc(100% - 4px)', left: 10, right: 10, zIndex: 60,
+              background: t.rail, border: `1px solid ${t.border}`, borderRadius: 8,
+              boxShadow: '0 -8px 28px rgba(0,0,0,.55)', overflow: 'hidden', maxHeight: 210,
+              display: 'flex', flexDirection: 'column',
+            }}>
+              <div style={{ maxHeight: 190, overflowY: 'auto' }}>
+                {autocompleteItems.map((it, i) => (
+                  <button
+                    key={it.key}
+                    role="option"
+                    aria-selected={i === autocompleteIdx}
+                    onMouseDown={(e) => { e.preventDefault(); applyAutocompleteMobile(it) }}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                      background: i === autocompleteIdx ? t.accent : 'transparent',
+                      border: 'none', color: '#fff', textAlign: 'left',
+                      padding: '7px 10px', cursor: 'pointer', fontSize: 13,
+                    }}
+                  >
+                    <span style={{
+                      width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                      background: it.glyph ? 'transparent' : (it.color || t.accent),
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: it.glyph ? 14 : 10, fontWeight: 800,
+                    }}>{it.glyph || it.label.slice(0, 1).toUpperCase()}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontWeight: 700, display: 'block' }}>{it.label}</span>
+                      {it.hint && <span style={{ fontSize: 10, opacity: .75, fontFamily: MONO }}>{it.hint}</span>}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {composerEmoji && (
             <EmojiPicker
               open
@@ -1685,12 +1955,29 @@ export default function MobileShell() {
               value={input}
               rows={1}
               onChange={e => {
-                setInput(e.target.value)
+                const v = e.target.value
+                setInput(v)
                 const el = e.currentTarget
                 el.style.height = 'auto'
                 el.style.height = `${Math.min(140, el.scrollHeight)}px`
+                const caret = el.selectionStart ?? v.length
+                setActiveAutocomplete(activeToken(v, caret))
+                // avisa o outro lado que estou digitando (throttled 2s, como o
+                // desktop) — sem isto o indicador mobile nunca apareceria
+                notifyTyping(v)
               }}
               onKeyDown={e => {
+                // navegação do autocompletar tem prioridade sobre o envio
+                if (autocompleteItems.length > 0) {
+                  if (e.key === 'ArrowDown') { e.preventDefault(); setAutocompleteIdx(i => Math.min(i + 1, autocompleteItems.length - 1)); return }
+                  if (e.key === 'ArrowUp') { e.preventDefault(); setAutocompleteIdx(i => Math.max(i - 1, 0)); return }
+                  if (e.key === 'Enter' || e.key === 'Tab') {
+                    e.preventDefault()
+                    applyAutocompleteMobile(autocompleteItems[autocompleteIdx] ?? autocompleteItems[0]!)
+                    return
+                  }
+                  if (e.key === 'Escape') { e.preventDefault(); setActiveAutocomplete(null); return }
+                }
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
               }}
               placeholder={isChannel ? `Conversar em #${channelName}` : `Conversar com ${peerTitle || 'amigo'}`}
@@ -1820,6 +2107,16 @@ export default function MobileShell() {
 
         {tab === 'servers' && <>
           <div className="m-sec">SERVIDORES — {filteredComms.length}</div>
+          {/* Paridade com o desktop: no PC existe "criar servidor" (wizard com
+              nome/canais/cargos/regras). No mobile faltava entirely — só dava
+              para entrar por convite. */}
+          <button
+            onClick={() => { setNewServerName(''); setNewServerChannel('geral'); setShowNewServer(true) }}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: t.input, border: `1px solid ${t.border}`, color: t.text, borderRadius: 8, padding: '9px 12px', marginBottom: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
+          >
+            <span style={{ width: 22, height: 22, borderRadius: '50%', background: t.accent, color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>+</span>
+            Criar servidor
+          </button>
           {filteredComms.length === 0
             ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button></span>} />
             : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
@@ -2002,6 +2299,8 @@ export default function MobileShell() {
       )}
 
       {/* painel de privacidade — PRIVACY_MODES + privacyGet/privacySet (opções flat com radio, igual desktop) */}
+      <ScreenSharePicker open={showScreenPicker} onClose={() => setShowScreenPicker(false)} onError={setError} />
+
       {showPrivacy && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => setShowPrivacy(false)}>
           <div style={{ width: '100%', maxWidth: 460, maxHeight: '80dvh', overflowY: 'auto', background: t.sidebar, borderTop: `1px solid ${t.border}`, borderRadius: '12px 12px 0 0', padding: '12px 14px calc(16px + env(safe-area-inset-bottom))' }} onClick={e => e.stopPropagation()}>
@@ -2088,6 +2387,49 @@ export default function MobileShell() {
       )}
 
       {/* modal de convite público — token pré-preenchido via ?invite=TOKEN */}
+      {/* Criar servidor — paridade com o wizard do desktop (nome + canais). */}
+      {showNewServer && (
+        <div className="m-overlay" onClick={() => !newServerBusy && setShowNewServer(false)}>
+          <div className="m-modal" onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <h3 style={{ fontWeight: 800, color: t.heading, margin: 0, flex: 1, fontSize: 18 }}>Criar servidor</h3>
+              <button aria-label="Fechar" onClick={() => setShowNewServer(false)} style={{ background: 'transparent', border: 'none', color: t.muted, cursor: 'pointer', fontSize: 16 }}>x</button>
+            </div>
+            <div style={{ fontSize: 12, color: t.muted, lineHeight: 1.5 }}>O servidor é seu e dos seus amigos. Comece com um canal de texto.</div>
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: t.muted, marginBottom: 5 }}>NOME DO SERVIDOR</div>
+              <input className="m-input" value={newServerName} onChange={e => setNewServerName(e.target.value)} placeholder="Ex.: Grupo do jogo" maxLength={48} />
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: t.muted, marginBottom: 5 }}>PRIMEIRO CANAL</div>
+              <input className="m-input" value={newServerChannel} onChange={e => setNewServerChannel(e.target.value)} placeholder="geral" maxLength={32} />
+              <div style={{ fontSize: 10, color: t.muted, marginTop: 4 }}>Use vírgulas para vários: geral, random, memes</div>
+            </div>
+            {error && <div className="m-err" style={{ marginTop: 10 }}>{error}</div>}
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => setShowNewServer(false)}>Cancelar</button>
+              <button
+                className="m-btn" style={{ flex: 1, opacity: !newServerName.trim() || newServerBusy ? 0.5 : 1 }}
+                disabled={!newServerName.trim() || newServerBusy}
+                onClick={async () => {
+                  const name = newServerName.trim()
+                  const chans = newServerChannel.split(',').map(c => c.trim().replace(/^#/, '')).filter(Boolean)
+                  if (!name || !chans.length) return
+                  setNewServerBusy(true); setError(null)
+                  try {
+                    const id = await services.createCommunity(name, chans)
+                    setShowNewServer(false); setNewServerName(''); setNewServerChannel('geral')
+                    await refreshCommunities()
+                    setSelCommunity(id)
+                    setTab('servers')
+                  } catch (e: any) { setError(String(e?.message ?? e)) } finally { setNewServerBusy(false) }
+                }}
+              >{newServerBusy ? 'criando…' : 'Criar'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showInvite && (
         <div className="m-overlay" onClick={() => setShowInvite(false)}>
           <div className="m-modal" onClick={e => e.stopPropagation()}>

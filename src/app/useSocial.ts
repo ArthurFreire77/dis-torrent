@@ -119,6 +119,22 @@ export function useSocialWindow(messages: StoredMessage[], convId: string | null
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
 
+  // Reação do OUTRO lado chegando (mobile usa este hook em vez do
+  // MessageList): sem esta escuta a reação remota só aparecia ao reabrir a
+  // conversa. Re-lê só a mensagem afetada via refreshIds.
+  useEffect(() => {
+    if (!convId) return
+    const un = services.subscribe((ev: any) => {
+      try {
+        if (ev?.type !== 'reaction_changed' || ev?.conv_id !== convId) return
+        const mid = String(ev?.msg_id ?? '')
+        if (!mid) return
+        refreshIds([mid])
+      } catch { /* evento nunca derruba o hook */ }
+    })
+    return () => { try { (un as unknown as () => void)() } catch { /* ignore */ } }
+  }, [convId, refreshIds])
+
   return { reactions, meta, bodies, loading, error, reload, refreshIds }
 }
 

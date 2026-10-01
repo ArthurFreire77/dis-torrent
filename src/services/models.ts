@@ -93,6 +93,17 @@ export interface Identity {
   created_at: number
 }
 
+/** Endereços locais — espelha `local_addresses` (Rust). */
+export interface LocalAddresses {
+  /** `http://localhost:<porta>` — válido só nesta máquina. */
+  localhost: string
+  /** IP de LAN, ou null se não houver rede. É o que funciona no celular. */
+  lan: string | null
+  /** Todos os IPs encontrados, para o usuário escolher. */
+  lan_all: string[]
+  port: number
+}
+
 export interface NetworkStatusView {
   state: NetworkState
   online_peers: number
@@ -479,6 +490,12 @@ export interface ForgeServices {
   identityRename(nickname: string): Promise<Identity>
   vaultStatus(): Promise<{ has_identity: boolean; has_vault: boolean }>
   vaultUnlock(password: string): Promise<Identity>
+  /**
+   * Endereços alcançáveis deste computador: `localhost` (só aqui) e o IP de
+   * LAN (celular na mesma rede). `localhost` no celular é o próprio celular —
+   * por isso os dois são expostos separadamente, e nunca um no lugar do outro.
+   */
+  localAddresses(port?: number): Promise<LocalAddresses>
   networkStatus(): Promise<NetworkStatusView>
   peersList(): Promise<PeerView[]>
   /** Diagnóstico global: STUN (binding NAT) e endpoint anunciado */
