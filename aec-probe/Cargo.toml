@@ -1,0 +1,19 @@
+# Harness de MEDICAO do AEC.
+#
+# NAO e' copia do codigo de producao: `main.rs` faz `#[path]` do arquivo real
+# (`forge-core/src/net/media_dsp.rs`), entao o numero medido aqui e' o numero
+# do modulo que entra no binario. Existe porque `forge-core` esta, neste
+# momento, com um refactor EM CURSO em `engine.rs`/`protocol.rs`/`storage.rs`
+# que impede `cargo test -p forge-core --lib` de compilar; o DSP, por sorte, nao
+# depende de nada disso.
+[package]
+name = "aec-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aec-rs = "1.0.0"
+
+[profile.release]
+opt-level = 2

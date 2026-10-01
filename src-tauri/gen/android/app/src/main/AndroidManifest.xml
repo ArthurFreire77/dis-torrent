@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+    <!-- v6 Downloads: Android 13+ (API 33) substituiu READ_EXTERNAL_STORAGE
+         pelas permissões granulares de mídia. Declaramos as três porque o
+         chat trafega imagem, vídeo e áudio; sem isso o sistema nega a leitura
+         e o botão "Baixar" falha em silêncio. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- Scoped storage (Android 10+): escrever FORA dos diretórios do app
+         (ex: /sdcard/Download) exige SAF/MediaStore ou "All files access".
+         O save_file do Rust escreve de forma atômica no diretório que o
+         sistema libera e devolve erro honesto quando o caminho é negado —
+         sem crash, sem arquivo corrompido com nome final. -->
+
+    <!-- Chamadas de voz/vídeo: sem DECLARAR estas permissões o WebView nega o
+         pedido em runtime (RustWebChromeClient.onPermissionRequest) e o microfone
+         nunca abre — a chamada fica muda. Não exigimos hardware (required=false)
+         para não bloquear instalação em aparelhos/emuladores sem câmera. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Compartilhamento de TELA: em Android 13+ o WebView só libera o
+         getDisplayMedia (com que o app declare isto). Sem a declaração o
+         pedido é negado em runtime — o botão "Tela" não teria como funcionar.
+         Não pedimos nada ao usuário aqui: é o WebView que abre o consentimento
+         do sistema ("projetar esta tela") no gesto de compartir. -->
+    <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.forge"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+          android:name="androidx.core.content.FileProvider"
+          android:authorities="${applicationId}.fileprovider"
+          android:exported="false"
+          android:grantUriPermissions="true">
+          <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

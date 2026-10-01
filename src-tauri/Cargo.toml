@@ -1,0 +1,49 @@
+[package]
+name = "forge"
+version = "1.0.0"
+description = "FORGE — Comunicação descentralizada P2P"
+authors = ["FORGE"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2", features = [] }
+keyring = "2.3"
+hex = "0.4"
+base64 = "0.22"
+dirs = "5.0"
+forge-core = { path = "../forge-core" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,
+# `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do
+# `enable_webrtc` — que no WebKitGTK vem DESLIGADO por padrão. Resultado:
+# `typeof RTCPeerConnection === 'undefined'` dentro do app, e a chamada morre
+# com "falta WebRTC". A versão tem que bater exatamente com a do wry (2.0.2),
+# senão o trait `WebViewExt` não se aplica ao `WebView` dele.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+
+[lib]
+name = "forge_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[features]
+default = [ "custom-protocol" ]
+custom-protocol = [ "tauri/custom-protocol" ]
+
+# Release enxuto: remove símbolos do binário/lib nativos — corte grande no APK
+# (o .so ficava ~23 MB "not stripped"; sem símbolos fica bem menor) e também
+# no binário desktop. Não altera comportamento em runtime.
+[profile.release]
+strip = true

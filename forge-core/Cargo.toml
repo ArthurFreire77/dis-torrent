@@ -1,0 +1,73 @@
+[package]
+name = "forge-core"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "FORGE core — identidade, storage e rede P2P (sem dependência de UI)"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+blake3 = "1"
+hex = "0.4"
+thiserror = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+tracing = "0.1"
+igd = "0.12"
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], default-features = false }
+rumqttc = "0.25.1"
+mdns-sd = "0.21.1"
+mainline = "2"
+unicode-normalization = "0.1"
+zstd = "0.13"
+filetime = "0.2"
+
+# ---------------- mídia de voz nativa (webrtc-rs + cpal + Opus) ----------------
+#
+# LINUX ONLY, e isso é deliberado — não é esquecimento.
+#
+# WebRTC/Android/Windows/macOS já funcionam pelo navegador e são o caminho
+# testado nessas plataformas. A camada nativa só existe porque o WebKitGTK não
+# expõe `RTCPeerConnection`, então não há motivo nenhum para arrastar webrtc-rs,
+# cpal e libopus para o APK do Android ou para o binário do Windows/macOS.
+#
+# O ganho não é só "não quebra": é continuar EXATAMENTE igual. Sem estas
+# dependências, o build das outras plataformas não muda em uma linha — nem
+# tempo de compilação, nem tamanho de APK, nem biblioteca de C nova.
+#
+# `opusic-sys` (via `opus`) compila libopus com CMAKE, e o CMake exige
+# `ANDROID_NDK`/`ANDROID_NDK_ROOT` no ambiente para cross-compilar. Deixar
+# isso dentro do build do Android seria depender de uma variável de ambiente que
+# o `tauri android build` não garante — ou seja, o APK passaria a depender
+# dela. Fora do Android, nem entra na conta.
+[target.'cfg(target_os = "linux")'.dependencies]
+# `webrtc` = facade de alto nível, `rtc` = tipos/Negotiator/interceptor. O SDP e
+# o trickle ICE que saem daqui são PADRÃO, então conversam com o WebRTC de um
+# navegador sem tradutor.
+webrtc = "0.21"
+rtc = "0.21"
+opus = "0.4"
+# `Bytes` do RTP: o payload de Opus vai embrulhado em Bytes::from(...).
+bytes = "1"
+async-trait = "0.1"
+# cpal 0.15..0.17 não têm backend pipewire; `pipewire` só existe a partir de 0.18.
+cpal = { version = "0.18", features = ["pipewire"] }
+# AEC + supressao de ruido. `aec-rs` -> `aec-rs-sys`, que VEM com o codigo C do
+# speexdsp e compila com cmake: nao ha -dev, nem pkg-config, nem sudo.
+aec-rs = "1.0.0"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

@@ -1,0 +1,18 @@
+[package]
+name = "forge-host"
+version = "5.3.0"
+edition = "2021"
+rust-version = "1.77"
+description = "FORGE Community Host — nó headless (seed do F7)"
+license = "MIT"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "time", "sync"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "forge-host"
+path = "src/main.rs"

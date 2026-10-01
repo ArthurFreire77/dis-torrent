@@ -1,0 +1,40 @@
+{
+  "name": "distorent",
+  "private": true,
+  "version": "5.4.3",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "lint": "eslint .",
+    "test:rust": "cargo test -p forge-core --tests",
+    "test:rust:stable": "cargo test -p forge-core --test integration --test friends --test channels --test e2e_two_users --test relay_e2e --test direct_norelay_traffic --test punch_e2e --test ten_nodes_stress",
+    "test:e2e": "playwright test",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.2.0",
+    "@noble/hashes": "^2.4.0",
+    "@tauri-apps/api": "^2.11.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.23.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^26.4.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.3",
+    "eslint": "^9.11.0",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.68.0",
+    "vite": "^5.4.8"
+  }
+}

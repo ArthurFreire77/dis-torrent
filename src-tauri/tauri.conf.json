@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DisTorrent",
+  "version": "1.2.0",
+  "identifier": "com.forge.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "DisTorrent",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "useHttpsScheme": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "FORGE",
+    "category": "Utility",
+    "copyright": "FORGE",
+    "shortDescription": "FORGE P2P",
+    "longDescription": "FORGE — comunicação P2P descentralizada, identidade ed25519, sem servidor central",
+    "targets": [
+      "deb",
+      "appimage"
+    ],
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/48x48.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false,
+        "languages": [
+          "English",
+          "PortugueseBR"
+        ]
+      },
+      "wix": {
+        "language": "en-US"
+      }
+    }
+  }
+}

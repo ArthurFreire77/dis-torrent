@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=Utility;
+Comment=FORGE P2P
+Exec=env WEBKIT_DISABLE_DMABUF_RENDERER=1 /usr/bin/forge
+StartupWMClass=forge
+Icon=forge
+Name=DisTorrent
+Terminal=false
+Type=Application
