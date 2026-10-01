@@ -2807,6 +2807,17 @@ export class CallManager {
       this.setScreenError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG)
       throw new ScreenShareError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG, false)
     }
+    // Voz nativa em Rust (webrtc-rs) NÃO cria RTCPeerConnection: o `pcs` fica
+    // vazio e `seedScreenPeers` não teria para onde enviar. Sem esta guarda o
+    // app anunciava "COMPARTILHANDO" e não transmitia nada — tela preta com
+    //Status de sucesso. Aqui falhamos com o motivo real e retryable.
+    if (this.pcs.size === 0) {
+      const why = nativeVoiceAvailable === true
+        ? 'esta chamada usa a voz nativa em Rust (sem WebRTC na página), que hoje não codifica vídeo — compartilhe a tela numa chamada com WebRTC'
+        : 'nenhum participante conectado ainda — espere a chamada estabilizar e tente de novo'
+      this.setScreenError('unavailable', why)
+      throw new ScreenShareError('unavailable', why, true)
+    }
     this.screenOptions = normalizeOptions(opts, this.screenOptions)
 
     let stream: MediaStream
@@ -2912,25 +2923,63 @@ export class CallManager {
         if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
       } catch { /* peer isolado não derruba os demais */ }
     }
-    await this.seedScreenSystemAudio(stream)
+    await this.seedScreenAudio(stream)
     await this.applyScreenSenderTuning()
   }
 
   /**
-   * Áudio do sistema vira trilha separada (nunca mistura com o mic). Se o SO
-   * não entregar áudio, o vídeo segue normal — áudio nunca é pré-requisito.
+   * Áudio do compartilhamento nos 4 modos (só tela / +sistema / +mic / ambos).
+   *
+   * Sistema e microfone são trilhas SEPARADAS de propósito: nunca se misturam,
+   * cada um é opcional e a falta de um NUNCA derruba o outro nem o vídeo.
+   * `getDisplayMedia` só entrega o áudio do sistema; o mic vem sempre do
+   * `getUserMedia` (é o mesmo mic da chamada, não um segundo dispositivo).
    */
-  private async seedScreenSystemAudio(stream: MediaStream): Promise<void> {
-    const atrack = stream.getAudioTracks()[0]
-    if (!atrack) {
-      this.noteScreenEvent('áudio do sistema indisponível nesta fonte — compartilhando só o vídeo')
-      return
+  private async seedScreenAudio(stream: MediaStream): Promise<void> {
+    const mode = this.screenOptions.audio
+    if (mode === 'system' || mode === 'system+mic') {
+      const atrack = stream.getAudioTracks()[0]
+      if (!atrack) {
+        this.noteScreenEvent('áudio do sistema indisponível nesta fonte — o vídeo continua normalmente')
+      } else {
+        await this.sendAudioTrackToPeers(atrack, stream)
+      }
     }
+    if (mode === 'mic' || mode === 'system+mic') {
+      const mic = await this.ensureShareMicrophone()
+      if (!mic) this.noteScreenEvent('microfone indisponível — compartilhando sem a sua voz')
+    }
+  }
+
+  /**
+   * Garante que exista um mic VIVO para o compartilhamento. Reaproveita o da
+   * chamada quando ele já está no mesh (não abre um segundo microfone, o que
+   * brigaria com o áudio da voz); senão captura um e semeia nos peers.
+   */
+  private async ensureShareMicrophone(): Promise<MediaStreamTrack | null> {
+    const live = this.localStream?.getAudioTracks().find(t => t.readyState === 'live') ?? null
+    if (live) return live
+    let captured: MediaStream | null = null
+    try {
+      captured = await getLocalMedia({ audio: { ...AUDIO_CONSTRAINTS }, video: false })
+    } catch { return null }
+    const track = captured?.getAudioTracks()[0] ?? null
+    if (!track) return null
+    try {
+      if (this.localStream) this.localStream.addTrack(track)
+      else this.localStream = captured
+    } catch { /* segue: o que importa é enviar o áudio */ }
+    await this.sendAudioTrackToPeers(track, this.localStream ?? (captured as MediaStream))
+    return track
+  }
+
+  /** Manda uma trilha de áudio a todo o mesh, renegociando só o necessário. */
+  private async sendAudioTrackToPeers(track: MediaStreamTrack, stream: MediaStream): Promise<void> {
     for (const pc of this.pcs.values()) {
       try {
-        if (pc.getSenders().some(x => x.track === atrack)) continue
+        if (pc.getSenders().some(x => x.track === track)) continue
         if (pc.signalingState !== 'stable') continue
-        pc.addTrack(atrack, stream)
+        pc.addTrack(track, stream)
         const offer = await createTunedOffer(pc)
         await pc.setLocalDescription(offer)
         const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]

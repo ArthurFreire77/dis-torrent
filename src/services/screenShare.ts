@@ -239,6 +239,9 @@ export function buildDisplayMediaConstraints(
   opts: ScreenShareOptions,
   env: ScreenEnvironment,
 ): Record<string, unknown> {
+  // `getDisplayMedia` só entrega o ÁUDIO DO SISTEMA. O microfone vem sempre do
+  // `getUserMedia` (trilha separada) — por isso `audio` só liga nos modos que
+  // pedem som do sistema, e não nos que pedem só o mic.
   const wantsSystemAudio = opts.audio === 'system' || opts.audio === 'system+mic'
   const displaySurface = opts.source === 'window' ? 'window' : 'monitor'
   const constraints: Record<string, unknown> = {
@@ -249,9 +252,6 @@ export function buildDisplayMediaConstraints(
     surfaceSwitching: env.surfaceSwitching ? 'include' : 'exclude',
     monitorTypeSurfaces: opts.source === 'monitor' ? 'include' : 'exclude',
     preferCurrentTab: false,
-  }
-  if (opts.audio === 'system+mic' || opts.audio === 'mic') {
-    constraints.audio = wantsSystemAudio
   }
   return constraints
 }
