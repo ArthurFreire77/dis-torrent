@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TEMPLATE — copie para `.cargo/config.toml` e ajuste os caminhos da SUA máquina.
+#
+#   cp .cargo/config.toml.example .cargo/config.toml
+#
+# Este arquivo NÃO é versionado de propósito: os paths do NDK são específicos de
+# cada máquina. Sem ele, `tauri android build` não acha o linker clang do
+# Android para cross-compilar.
+#
+# Alternativa sem arquivo: exporte as variáveis antes do build.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Cross-compilation Windows (mingw). Só é necessário se for compilar para Windows.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+
+# Cross-compilation Android.
+#
+# Troque "$HOME/Android/Sdk" pelo seu SDK_ROOT e "<VERSAO>" pela versão do NDK
+# instalada. A versão importa: o NDK 28 usa clang com target Android API 24+.
+
+[target.aarch64-linux-android]
+linker = "$HOME/Android/Sdk/ndk/<VERSAO>/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+
+[target.armv7-linux-androideabi]
+linker = "$HOME/Android/Sdk/ndk/<VERSAO>/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang"
+
+[target.i686-linux-android]
+linker = "$HOME/Android/Sdk/ndk/<VERSAO>/toolchains/llvm/prebuilt/linux-x86_64/bin/i686-linux-android24-clang"
+
+[target.x86_64-linux-android]
+linker = "$HOME/Android/Sdk/ndk/<VERSAO>/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang"
