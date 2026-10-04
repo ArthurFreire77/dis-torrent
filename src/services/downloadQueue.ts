@@ -88,11 +88,9 @@ export function nextDownloadStatus(status: DownloadStatus, ev: DownloadEvent): D
       if (ev === 'cancel') return 'cancelled'
       return status
     case 'completed':
-      // `retry` num item já salvo volta para a fila: o usuário pode querer
-      // outra cópia do mesmo arquivo. Sem isto o botão de retry (visível
-      // quando `canRetry`) não fazia nada nos concluídos.
-      if (ev === 'retry') return 'queued'
-      if (ev === 'cancel') return 'cancelled'
+      // `completed` e `cancelled` sao terminais. `canRetry` e `canCancel`
+      // recusam os dois, entao nenhum evento chega aqui vindo da UI — e
+      // qualquer outro evento mantem o status.
       return status
     case 'failed':
       if (ev === 'retry' || ev === 'resume') return 'queued'
