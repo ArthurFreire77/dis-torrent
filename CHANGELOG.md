@@ -369,7 +369,7 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 
 ### Verificação
 - `cargo test`: 34/34 · `cargo check` (src-tauri): limpo · `tsc/lint/vite build`: limpos
-- 18 screenshots Playwright em `docs/screenshots/audit/` (onboarding → servidor → canais → cargos → bots → membros → configurações → mobile)
+- 18 screenshots Playwright de auditoria da UI (onboarding → servidor → canais → cargos → bots → membros → configurações → mobile)
 
 ## 2.1.6 — Botão Baixar 100% funcional + redesign upload/download (2026-08-31)
 

@@ -1,4 +1,4 @@
-# ARCHITECTURE — v2.0 Motor Real (2026-08-30)
+# ARCHITECTURE — arquitetura do motor
 
 > **FORGE é o Design System oficial e congelado.** `src/designs/ThemeShell.tsx` + `src/shared/icons.tsx` são imutáveis visualmente (cores, tipografia, espaçamento, ícones SVG, layout). Toda a evolução do produto acontece embaixo da UI.
 
@@ -15,9 +15,11 @@
 | **Estados de mensagem** PENDING/SENDING/SENT/DELIVERED/FAILED | REAL | ACK criptográfico real; outbox persistente reenvia após reconexão — testado |
 | **Keyring do SO** para chave privada | REAL (fallback SQLite documentado) | `src-tauri/src/main.rs::persist_secret` |
 | **UI FORGE ligada ao motor** | REAL | `services → hooks → ThemeShell`; `mocks.ts` DELETADO |
-| App desktop instalável | EM ANDAMENTO | `npm run tauri:build` (Tauri 2) — ver §6 |
-| Android / iOS | FASE FUTURA | Tauri 2 mobile |
-| Comunidades / canais / permissões / voz | FASE FUTURA | ver ROADMAP |
+| App desktop instalável | REAL | `npm run tauri:build` (Tauri 2) — `.deb` + `.AppImage` no Linux, `.msi`/NSIS no Windows |
+| Android | REAL | `npx tauri android build --apk`; voz nativa é só no Linux, no Android o WebRTC do navegador assume |
+| Comunidades / canais / cargos / bots | REAL | `forge-core/src/social.rs` + migrations v4/v6 |
+| Voz e vídeo (WebRTC + nativo Linux) | REAL | `net/media_voice.rs` (webrtc-rs + Opus + cpal + AEC) |
+| iOS | NÃO é alvo | Não há build iOS neste repositório |
 
 **Critério "REAL":** todo item acima tem teste automatizado rodando ou é verificável em execução. Nada é simulado.
 
@@ -31,7 +33,10 @@ P2P-first, local-first, crypto-first, modular. Nenhum backend central obrigatór
 |---|---|---|
 | Shell desktop | **Tauri 2 (Rust)** | WebKitGTK 4.1/soup3 (compila no Ubuntu 24.04); base para mobile |
 | **Motor** | **`forge-core` (crate Rust pura)** | Sem dependência de UI/Tauri → reusável pelo Community Host headless e testes |
-| Transporte P2P | **tokio TCP + frames length-prefixed** | Fase LAN. DHT/QUIC/relay (libp2p) entram na fase internet sem reescrever protocolo (envelope é independente de transporte) |
+| Transporte P2P | **tokio TCP + frames length-prefixed** | Base de toda a rede; o envelope é independente do transporte |
+| Descoberta | UDP broadcast + mDNS | `net/discovery.rs` |
+| Internet | UPnP/NAT-PMP, STUN, hole punching, DHT mainline, relay MQTT | `net/natpmp.rs`, `stun.rs`, `dht.rs`, `relay.rs` |
+| Torne virtual | Túnel X25519 com IP `fd9d::/64` derivado do fingerprint | `net/vtunnel.rs` |
 | Discovery | **UDP broadcast LAN** | Zero infraestrutura; rendezvous futuro em `AUX_SERVICES.md` |
 | Sessão | **X25519 efêmero → HKDF-SHA256 → ChaCha20Poly1305** (nonce por direção) | Primitivas maduras (RustCrypto), composição documentada no threat model |
 | Identidade | **ed25519-dalek 2 + blake3** | Fingerprint = `blake3(pubkey)[0..12]` hex — igual no Rust e no TS (noble) |
@@ -99,12 +104,12 @@ Windows/macOS: CI cross-build via GitHub Actions (fase distribuição).
 
 Motivo: Ubuntu 24.04 removeu `libsoup-2.4`/`webkit2gtk-4.0` — Tauri 1.6 não compila mais em distros atuais. Tauri 2 usa webkit2gtk-4.1 (soup3), é estável e habilita Android/iOS. Mudanças: config schema v2, `capabilities/`, `@tauri-apps/api@2`, `app.path()`, `Emitter::emit`.
 
-## 8. Próximas etapas (ordem)
+## 8. Em aberto
 
-1. Instaladores assinados por CI (GitHub Actions: Linux → Windows → macOS)
-2. Community Host headless (`host/` — binário CLI usando forge-core: `host init/start/status/invite`)
-3. Comunidades + canais + permissões (schema SQLite v2, autoridade = dono)
-4. Amigos/convites com verificação de fingerprint
-5. Sincronização (vector clock por log — mensagem já é append-only assinada)
-6. Voz/vídeo (WebRTC peer-to-peer; TURN self-host opcional)
-7. Android (Tauri 2 mobile)
+Ver [`ROADMAP.md`](ROADMAP.md) para a lista viva. Resumo do que falta:
+
+1. Instaladores assinados no CI (hoje só o `.deb`/`.AppImage` no Linux)
+2. Empacotamento Android assinado em CI (exige keystore em GitHub Secrets)
+3. Sincronização com resolução de conflito entre dois donos
+4. Rotas de mídia alternativas ao WebRTC (sem fallback de áudio pelo túnel)
+5. UI de moderação (o core tem as regras e a auditoria; a tela não foi montada)

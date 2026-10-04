@@ -1,4 +1,4 @@
-# PROTOCOL — FORGE v1 (implementado)
+# PROTOCOL — DisTorrent (implementado)
 
 Transporte e entidades REAIS. Este documento descreve o que roda — não o que é desejado.
 

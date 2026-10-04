@@ -1,4 +1,4 @@
-# EXECUTAR — DisTorrent v2.2.0
+# EXECUTAR — DisTorrent
 
 Guia direto para instalar dependências e rodar. Requisitos gerais: **Node 20+** e **Rust 1.77+**.
 
@@ -112,8 +112,8 @@ cd forge-core && cargo test --test e2e_two_users -- --nocapture
 
 ## 4) Testes completos
 ```bash
-cd forge-core && cargo test     # 34 testes: crypto, storage, protocolo, amigos,
-                                # canais/cargos/bots e E2E 2-usuários via proxy
+npm run test:rust      # 33 suites: crypto, storage, protocolo, amigos,
+                       # canais/cargos/bots e E2E 2-usuários via proxy
 npm run typecheck && npm run lint && npm run build
 ```
 
@@ -121,8 +121,8 @@ npm run typecheck && npm run lint && npm run build
 ```bash
 npm run tauri:build   # → src-tauri/target/release/bundle/ (deb/appimage/msi/nsis/dmg)
 ```
-Assets de versões anteriores ficam em `instalações/` na raiz do projeto original
-(não dentro de `proposta/`) — sempre gere instaladores novos com o comando acima.
+Instaladores não são versionados no repositório (`.gitignore` bloqueia `*.deb`,
+`*.AppImage`, `*.apk`) — gere sempre com o comando acima e publique como GitHub Release.
 
 ## 6) Configuração opcional
 Veja `.env.example`: bootstrap self-hosted, proxy SOCKS5/Tor (modos

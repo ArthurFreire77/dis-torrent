@@ -1,8 +1,8 @@
-# ROADMAP — fases com critério "REAL"
+# ROADMAP
 
 Cada fase só é marcada como FEITA quando testada/executável de verdade (não "a UI existe").
 
-- [x] **F1 — Design FORGE congelado** (UI aprovada, screenshots em `docs/screenshots/`)
+- [x] **Design FORGE congelado** (UI aprovada; tokens em `DESIGN_SYSTEM.md`)
 - [x] **F2 — Identidade real** (ed25519 + fingerprint blake3; keyring do SO; onboarding)
 - [x] **F3 — Storage real** (SQLite WAL bundled; repos no core; UI nunca acessa storage)
 - [x] **F4 — P2P real LAN** (discovery UDP + handshake autenticado + sessão cifrada + heartbeat/reconnect)
