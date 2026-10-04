@@ -46,7 +46,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev pkg-config build-essential cmake \
-            libglib2.0-dev libdbus-1-dev
+            libglib2.0-dev libdbus-1-dev \
+            libwayland-dev libxkbcommon-dev
       - run: cargo fmt --check
         working-directory: forge-core
       - run: cargo test
@@ -70,7 +71,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev pkg-config build-essential cmake \
-            libglib2.0-dev libdbus-1-dev
+            libglib2.0-dev libdbus-1-dev \
+            libwayland-dev libxkbcommon-dev
       - run: cargo check
         working-directory: host
 

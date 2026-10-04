@@ -28,743 +28,757 @@
 //! chamada. É essa assimetria — e nada mais — que mantém Windows/Android/macOS
 //! exatamente como estavam.
 
-
 pub mod probe {
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
-/// (link, indice do frame de 20 ms). O `link` distingue um par (sender, receiver)
-/// dentro do mesmo processo: num loopback in-process as duas pontas compartilham
-/// este registro, e cada direcao tem o seu proprio id.
-type Key = (u32, u64);
+    /// (link, indice do frame de 20 ms). O `link` distingue um par (sender, receiver)
+    /// dentro do mesmo processo: num loopback in-process as duas pontas compartilham
+    /// este registro, e cada direcao tem o seu proprio id.
+    type Key = (u32, u64);
 
-/// Janela de retencao de capturas ainda nao pareadas com um playout.
-const MAX_PENDING: usize = 8192;
+    /// Janela de retencao de capturas ainda nao pareadas com um playout.
+    const MAX_PENDING: usize = 8192;
 
-#[derive(Default)]
-pub struct LatencyProbe {
-    captured: Mutex<HashMap<Key, Instant>>,
-    played: Mutex<HashMap<Key, Instant>>,
-    released: Mutex<HashMap<Key, Instant>>,
-    deltas: Mutex<Vec<Duration>>,
-    /// (captura -> liberacao do jitter buffer) e (liberacao -> playout).
-    seg_a: Mutex<Vec<Duration>>,
-    seg_b: Mutex<Vec<Duration>>,
-}
-
-impl LatencyProbe {
-    pub fn new() -> Self {
-        Self::default()
+    #[derive(Default)]
+    pub struct LatencyProbe {
+        captured: Mutex<HashMap<Key, Instant>>,
+        played: Mutex<HashMap<Key, Instant>>,
+        released: Mutex<HashMap<Key, Instant>>,
+        deltas: Mutex<Vec<Duration>>,
+        /// (captura -> liberacao do jitter buffer) e (liberacao -> playout).
+        seg_a: Mutex<Vec<Duration>>,
+        seg_b: Mutex<Vec<Duration>>,
     }
 
-    pub fn reset(&self) {
-        self.captured.lock().unwrap().clear();
-        self.played.lock().unwrap().clear();
-        self.released.lock().unwrap().clear();
-        self.deltas.lock().unwrap().clear();
-        self.seg_a.lock().unwrap().clear();
-        self.seg_b.lock().unwrap().clear();
-    }
+    impl LatencyProbe {
+        pub fn new() -> Self {
+            Self::default()
+        }
 
-    /// Instante em que o jitter buffer entregou o frame a aplicacao.
-    pub fn stamp_release(&self, link: u32, idx: u64, at: Instant) {
-        self.released.lock().unwrap().insert((link, idx), at);
-    }
+        pub fn reset(&self) {
+            self.captured.lock().unwrap().clear();
+            self.played.lock().unwrap().clear();
+            self.released.lock().unwrap().clear();
+            self.deltas.lock().unwrap().clear();
+            self.seg_a.lock().unwrap().clear();
+            self.seg_b.lock().unwrap().clear();
+        }
 
-    /// Medianas, em ms, dos dois segmentos: (captura -> liberacao) e
-    /// (liberacao -> playout). Serve para localizar onde a latencia esta.
-    pub fn segments_ms(&self) -> Option<((f64, f64), (f64, f64))> {
-        let pct = |v: &[Duration], p: f64| -> f64 {
+        /// Instante em que o jitter buffer entregou o frame a aplicacao.
+        pub fn stamp_release(&self, link: u32, idx: u64, at: Instant) {
+            self.released.lock().unwrap().insert((link, idx), at);
+        }
+
+        /// Medianas, em ms, dos dois segmentos: (captura -> liberacao) e
+        /// (liberacao -> playout). Serve para localizar onde a latencia esta.
+        pub fn segments_ms(&self) -> Option<((f64, f64), (f64, f64))> {
+            let pct = |v: &[Duration], p: f64| -> f64 {
+                if v.is_empty() {
+                    return f64::NAN;
+                }
+                let mut x: Vec<u64> = v.iter().map(|d| d.as_micros() as u64).collect();
+                x.sort_unstable();
+                let i = (((x.len() - 1) as f64) * p).round() as usize;
+                x[i] as f64 / 1000.0
+            };
+            let a = { self.seg_a.lock().unwrap().clone() };
+            let b = { self.seg_b.lock().unwrap().clone() };
+            if a.is_empty() && b.is_empty() {
+                return None;
+            }
+            Some(((pct(&a, 0.5), pct(&a, 0.95)), (pct(&b, 0.5), pct(&b, 0.95))))
+        }
+
+        /// Instante de captura do frame `idx` da direcao `link`.
+        pub fn stamp_capture(&self, link: u32, idx: u64, at: Instant) {
+            let mut m = self.captured.lock().unwrap();
+            if m.len() >= MAX_PENDING {
+                // Esquece os mais antigos: um frame nunca pareado e audio perdido ou
+                // uma direcao que encerrou; nao vale a pena Crescer sem limite.
+                let mut keys: Vec<Key> = m.keys().copied().collect();
+                keys.sort_unstable_by_key(|k| k.1);
+                for k in keys.into_iter().take(MAX_PENDING / 2) {
+                    m.remove(&k);
+                }
+            }
+            m.insert((link, idx), at);
+        }
+
+        /// Instante de playout do frame `idx`. Casa com a captura e guarda o delta.
+        pub fn stamp_play(&self, link: u32, idx: u64, at: Instant) {
+            let captured = self.captured.lock().unwrap().remove(&(link, idx));
+            let released = self.released.lock().unwrap().remove(&(link, idx));
+            if let Some(c) = captured {
+                if let Some(d) = at.checked_duration_since(c) {
+                    self.deltas.lock().unwrap().push(d);
+                }
+                if let Some(r) = released {
+                    if let Some(d) = r.checked_duration_since(c) {
+                        self.seg_a.lock().unwrap().push(d);
+                    }
+                    if let Some(d) = at.checked_duration_since(r) {
+                        self.seg_b.lock().unwrap().push(d);
+                    }
+                }
+            } else {
+                let mut p = self.played.lock().unwrap();
+                if p.len() >= MAX_PENDING {
+                    p.clear();
+                }
+                p.insert((link, idx), at);
+            }
+        }
+
+        pub fn count(&self) -> usize {
+            self.deltas.lock().unwrap().len()
+        }
+
+        pub fn samples(&self) -> Vec<Duration> {
+            self.deltas.lock().unwrap().clone()
+        }
+
+        /// (mediana, p95) em ms. `None` enquanto nenhum frame foi pareado.
+        pub fn median_p95_ms(&self) -> Option<(f64, f64)> {
+            let mut v: Vec<u64> = self
+                .deltas
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|d| d.as_micros() as u64)
+                .collect();
             if v.is_empty() {
-                return f64::NAN;
+                return None;
             }
-            let mut x: Vec<u64> = v.iter().map(|d| d.as_micros() as u64).collect();
-            x.sort_unstable();
-            let i = (((x.len() - 1) as f64) * p).round() as usize;
-            x[i] as f64 / 1000.0
-        };
-        let a = { self.seg_a.lock().unwrap().clone() };
-        let b = { self.seg_b.lock().unwrap().clone() };
-        if a.is_empty() && b.is_empty() {
-            return None;
-        }
-        Some(((pct(&a, 0.5), pct(&a, 0.95)), (pct(&b, 0.5), pct(&b, 0.95))))
-    }
-
-    /// Instante de captura do frame `idx` da direcao `link`.
-    pub fn stamp_capture(&self, link: u32, idx: u64, at: Instant) {
-        let mut m = self.captured.lock().unwrap();
-        if m.len() >= MAX_PENDING {
-            // Esquece os mais antigos: um frame nunca pareado e audio perdido ou
-            // uma direcao que encerrou; nao vale a pena Crescer sem limite.
-            let mut keys: Vec<Key> = m.keys().copied().collect();
-            keys.sort_unstable_by_key(|k| k.1);
-            for k in keys.into_iter().take(MAX_PENDING / 2) {
-                m.remove(&k);
-            }
-        }
-        m.insert((link, idx), at);
-    }
-
-    /// Instante de playout do frame `idx`. Casa com a captura e guarda o delta.
-    pub fn stamp_play(&self, link: u32, idx: u64, at: Instant) {
-        let captured = self.captured.lock().unwrap().remove(&(link, idx));
-        let released = self.released.lock().unwrap().remove(&(link, idx));
-        if let Some(c) = captured {
-            if let Some(d) = at.checked_duration_since(c) {
-                self.deltas.lock().unwrap().push(d);
-            }
-            if let Some(r) = released {
-                if let Some(d) = r.checked_duration_since(c) {
-                    self.seg_a.lock().unwrap().push(d);
-                }
-                if let Some(d) = at.checked_duration_since(r) {
-                    self.seg_b.lock().unwrap().push(d);
-                }
-            }
-        } else {
-            let mut p = self.played.lock().unwrap();
-            if p.len() >= MAX_PENDING {
-                p.clear();
-            }
-            p.insert((link, idx), at);
+            v.sort_unstable();
+            let pct = |p: f64| -> f64 {
+                let i = (((v.len() - 1) as f64) * p).round() as usize;
+                v[i] as f64 / 1000.0
+            };
+            Some((pct(0.50), pct(0.95)))
         }
     }
 
-    pub fn count(&self) -> usize {
-        self.deltas.lock().unwrap().len()
-    }
+    static PROBE: OnceLock<LatencyProbe> = OnceLock::new();
 
-    pub fn samples(&self) -> Vec<Duration> {
-        self.deltas.lock().unwrap().clone()
-    }
-
-    /// (mediana, p95) em ms. `None` enquanto nenhum frame foi pareado.
-    pub fn median_p95_ms(&self) -> Option<(f64, f64)> {
-        let mut v: Vec<u64> = self
-            .deltas
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|d| d.as_micros() as u64)
-            .collect();
-        if v.is_empty() {
-            return None;
-        }
-        v.sort_unstable();
-        let pct = |p: f64| -> f64 {
-            let i = (((v.len() - 1) as f64) * p).round() as usize;
-            v[i] as f64 / 1000.0
-        };
-        Some((pct(0.50), pct(0.95)))
+    /// Sonda do processo. Um singleton de proposito: o callback de saida do cpal
+    /// (thread realtime) e as tasks de audio precisam chegar nela sem depender da
+    /// ordem em que os `VoiceMedia` foram criados.
+    pub fn probe() -> &'static LatencyProbe {
+        PROBE.get_or_init(LatencyProbe::new)
     }
 }
-
-static PROBE: OnceLock<LatencyProbe> = OnceLock::new();
-
-/// Sonda do processo. Um singleton de proposito: o callback de saida do cpal
-/// (thread realtime) e as tasks de audio precisam chegar nela sem depender da
-/// ordem em que os `VoiceMedia` foram criados.
-pub fn probe() -> &'static LatencyProbe {
-    PROBE.get_or_init(LatencyProbe::new)
-}
-
-}
-
 
 pub mod audio {
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use super::probe::probe;
+    use super::probe::probe;
 
-pub const SAMPLE_RATE: u32 = 48_000;
-pub const FRAME_MS: u32 = 20;
-pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * FRAME_MS as usize; // 960
-pub const FRAME: Duration = Duration::from_millis(FRAME_MS as u64);
+    pub const SAMPLE_RATE: u32 = 48_000;
+    pub const FRAME_MS: u32 = 20;
+    pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * FRAME_MS as usize; // 960
+    pub const FRAME: Duration = Duration::from_millis(FRAME_MS as u64);
 
-/// Tamanho de buffer EXPLICITO pedido ao cpal: 20 ms a 48 kHz.
-/// `BufferSize::Default` NUNCA e' usado — em ALSA/PipeWire ele pode resolver para
-/// 1024..=u32::MAX frames, o que joga 20 ms (ou muito mais) na latencia e quebra
-/// a hipotese de "uma callback = um frame".
-pub const DEVICE_BUFFER: u32 = FRAME_SAMPLES as u32; // 960
+    /// Tamanho de buffer EXPLICITO pedido ao cpal: 20 ms a 48 kHz.
+    /// `BufferSize::Default` NUNCA e' usado — em ALSA/PipeWire ele pode resolver para
+    /// 1024..=u32::MAX frames, o que joga 20 ms (ou muito mais) na latencia e quebra
+    /// a hipotese de "uma callback = um frame".
+    pub const DEVICE_BUFFER: u32 = FRAME_SAMPLES as u32; // 960
 
-/// Frame capturado, com o instante em que o PRIMEIRO sample dele foi capturado
-/// (nao em que a callback de device rodou).
-#[derive(Clone)]
-pub struct MicFrame {
-    pub pcm: Arc<Vec<i16>>,
-    pub captured_at: Instant,
-}
-
-/// Quadro decodificado pronto para o alto-falante. `id` identifica o frame para a
-/// sonda de latencia: `Some((link, idx))`.
-pub struct PcmFrame {
-    pub pcm: Arc<Vec<i16>>,
-    pub id: Option<(u32, u64)>,
-}
-
-// `cpal::Stream` em 0.18 e' um STRUCT por backend; o tipo do stream de um device
-// concreto e' o tipo associado `DeviceTrait::Stream`.
-type HStream = <cpal::Device as cpal::traits::DeviceTrait>::Stream;
-type SpkStream = Box<HStream>;
-type MicStream = Box<HStream>;
-type Inbox = Arc<Mutex<VecDeque<PcmFrame>>>;
-
-// ---------------------------------------------------------------- resampler
-
-/// Resampler linear com FASE PERSISTENTE entre callbacks.
-///
-/// Um resampler por callback perde a fase a cada callback; com taxa nao-inteira
-/// (44.1 kHz, por exemplo) a contagem de amostras por callback varia e o frame de
-/// 960 nunca fecha. A fase vive aqui, junto com o resto da entrada.
-struct Resampler {
-    step: f64,
-    pos: f64,
-    carry: Vec<i16>,
-}
-
-impl Resampler {
-    fn new(from: u32, to: u32) -> Self {
-        Self {
-            step: f64::from(from) / f64::from(to),
-            pos: 0.0,
-            carry: Vec::new(),
-        }
+    /// Frame capturado, com o instante em que o PRIMEIRO sample dele foi capturado
+    /// (nao em que a callback de device rodou).
+    #[derive(Clone)]
+    pub struct MicFrame {
+        pub pcm: Arc<Vec<i16>>,
+        pub captured_at: Instant,
     }
 
-    /// Consome mono i16 @ `from` Hz e devolve mono i16 @ 48 kHz.
-    fn process(&mut self, input: &[i16]) -> Vec<i16> {
-        if (self.step - 1.0).abs() < 1e-9 {
-            return input.to_vec();
-        }
-        self.carry.extend_from_slice(input);
-        let n = self.carry.len();
-        if n < 2 {
-            return Vec::new();
-        }
-        let mut out = Vec::with_capacity((n as f64 / self.step) as usize + 2);
-        while self.pos < (n - 1) as f64 {
-            let i = self.pos as usize;
-            let frac = (self.pos - i as f64) as f32;
-            let a = self.carry[i] as f32;
-            let b = self.carry[i + 1] as f32;
-            out.push((a + (b - a) * frac) as i16);
-            self.pos += self.step;
-        }
-        let consumed = (self.pos as usize).min(n);
-        self.carry.drain(..consumed);
-        self.pos -= consumed as f64;
-        out
+    /// Quadro decodificado pronto para o alto-falante. `id` identifica o frame para a
+    /// sonda de latencia: `Some((link, idx))`.
+    pub struct PcmFrame {
+        pub pcm: Arc<Vec<i16>>,
+        pub id: Option<(u32, u64)>,
     }
-}
 
-// ---------------------------------------------------------------- hub
+    // `cpal::Stream` em 0.18 e' um STRUCT por backend; o tipo do stream de um device
+    // concreto e' o tipo associado `DeviceTrait::Stream`.
+    type HStream = <cpal::Device as cpal::traits::DeviceTrait>::Stream;
+    type SpkStream = Box<HStream>;
+    type MicStream = Box<HStream>;
+    type Inbox = Arc<Mutex<VecDeque<PcmFrame>>>;
 
-/// Partes compartilhadas com os callbacks do cpal (threads de device).
-#[derive(Default)]
-struct HubShared {
-    subs: Mutex<Vec<(u64, UnboundedSender<MicFrame>)>>,
-    inboxes: Mutex<Vec<(u64, Inbox)>>,
-    name: Mutex<String>,
-    /// REFERENCIA do AEC: o audio que o alto-falante esta tocando agora.
+    // ---------------------------------------------------------------- resampler
+
+    /// Resampler linear com FASE PERSISTENTE entre callbacks.
     ///
-    /// Alimentado pelo callback de playout com exatamente os samples escritos
-    /// no device. Sem isto nao existe AEC que preste — o filtro adaptativo
-    /// precisa saber o que sairia pelo alto-falante para subtrair do mic.
-    play_ref: Arc<crate::net::media_dsp::RefRing>,
-}
-
-struct HubInner {
-    shared: Arc<HubShared>,
-    mic: Mutex<Option<MicStream>>,
-    spk: Mutex<Option<SpkStream>>,
-    mic_error: Mutex<Option<String>>,
-    has_capture: AtomicBool,
-    mic_attempted: AtomicBool,
-    next_sub_id: Mutex<u64>,
-    next_inbox_id: Mutex<u64>,
-}
-
-pub struct AudioHub {
-    inner: HubInner,
-}
-
-static HUB: OnceLock<AudioHub> = OnceLock::new();
-
-pub fn hub() -> &'static AudioHub {
-    HUB.get_or_init(|| AudioHub {
-        inner: HubInner {
-            shared: Arc::new(HubShared::default()),
-            mic: Mutex::new(None),
-            spk: Mutex::new(None),
-            mic_error: Mutex::new(None),
-            has_capture: AtomicBool::new(false),
-            mic_attempted: AtomicBool::new(false),
-            next_sub_id: Mutex::new(1),
-            next_inbox_id: Mutex::new(1),
-        },
-    })
-}
-
-impl AudioHub {
-    pub fn has_capture(&self) -> bool {
-        self.inner.has_capture.load(Ordering::SeqCst)
+    /// Um resampler por callback perde a fase a cada callback; com taxa nao-inteira
+    /// (44.1 kHz, por exemplo) a contagem de amostras por callback varia e o frame de
+    /// 960 nunca fecha. A fase vive aqui, junto com o resto da entrada.
+    struct Resampler {
+        step: f64,
+        pos: f64,
+        carry: Vec<i16>,
     }
 
-    pub fn mic_name(&self) -> String {
-        self.inner.shared.name.lock().unwrap().clone()
-    }
-
-    pub fn mic_error(&self) -> Option<String> {
-        self.inner.mic_error.lock().unwrap().clone()
-    }
-
-    /// Abre o microfone se ainda nao abriu. Sem microfone a sessao AINDA funciona,
-    /// so que so recebendo: e' por isso que o erro e' guardado, nao propagado.
-    pub fn ensure_mic(&self) -> Result<(), String> {
-        if self.inner.has_capture.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        // Permite exercitar o caminho "sem microfone" sem desligar o device.
-        if std::env::var("VOICE_NO_CAPTURE").as_deref() == Ok("1") {
-            let e = "VOICE_NO_CAPTURE=1: microfone desabilitado de proposito".to_string();
-            *self.inner.mic_error.lock().unwrap() = Some(e.clone());
-            self.inner.mic_attempted.store(true, Ordering::SeqCst);
-            return Err(e);
-        }
-        if self.inner.mic_attempted.swap(true, Ordering::SeqCst) {
-            return match &*self.inner.mic_error.lock().unwrap() {
-                Some(e) => Err(e.clone()),
-                None => Ok(()),
-            };
-        }
-        if let Err(e) = self.open_mic() {
-            *self.inner.mic_error.lock().unwrap() = Some(e.clone());
-            return Err(e);
-        }
-        Ok(())
-    }
-
-    /// Assina o fluxo do microfone. Devolve (id para `unsubscribe`, receptor).
-    pub fn subscribe(&self) -> Result<(u64, UnboundedReceiver<MicFrame>), String> {
-        self.ensure_mic()?;
-        let (tx, rx) = unbounded_channel();
-        let id = self.next_id(true);
-        self.inner.shared.subs.lock().unwrap().push((id, tx));
-        Ok((id, rx))
-    }
-
-    pub fn unsubscribe(&self, id: u64) {
-        self.inner.shared.subs.lock().unwrap().retain(|(i, _)| *i != id);
-    }
-
-    /// Quantos peers assinam o microfone agora (deve cair a 0 apos hangup).
-    pub fn subscriber_count(&self) -> usize {
-        self.inner.shared.subs.lock().unwrap().len()
-    }
-
-    /// Registra uma caixa de playout; o callback de saida mistura todas.
-    pub fn register_inbox(&self) -> u64 {
-        let id = self.next_id(false);
-        let inbox: Inbox = Arc::new(Mutex::new(VecDeque::new()));
-        self.inner.shared.inboxes.lock().unwrap().push((id, inbox));
-        id
-    }
-
-    pub fn unregister_inbox(&self, id: u64) {
-        self.inner.shared.inboxes.lock().unwrap().retain(|(i, _)| *i != id);
-    }
-
-    pub fn inbox(&self, id: u64) -> Option<Inbox> {
-        self.inner
-            .shared
-            .inboxes
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(i, _)| *i == id)
-            .map(|(_, b)| b.clone())
-    }
-
-    pub fn has_speaker(&self) -> bool {
-        self.inner.spk.lock().unwrap().is_some()
-    }
-
-    /// Anel de referencia do alto-falante, para o AEC.
-    pub fn play_ref(&self) -> Arc<crate::net::media_dsp::RefRing> {
-        self.inner.shared.play_ref.clone()
-    }
-
-    fn next_id(&self, sub: bool) -> u64 {
-        let mut n = if sub {
-            self.inner.next_sub_id.lock().unwrap()
-        } else {
-            self.inner.next_inbox_id.lock().unwrap()
-        };
-        let id = *n;
-        *n += 1;
-        id
-    }
-
-    // -------------------------------------------------------------- microfone
-
-    fn open_mic(&self) -> Result<(), String> {
-        let host = cpal::default_host();
-        let devs: Vec<cpal::Device> = host
-            .input_devices()
-            .map_err(|e| format!("input_devices: {e}"))?
-            .collect();
-
-        let mut chosen: Option<(cpal::Device, String)> = host
-            .default_input_device()
-            .and_then(|d| d.description().ok().map(|x| (d, x.name().to_owned())));
-        if chosen.is_none() {
-            for d in devs.iter() {
-                if pick_input_config(d).is_ok() {
-                    chosen = d.description().ok().map(|x| (d.clone(), x.name().to_owned()));
-                    break;
-                }
+    impl Resampler {
+        fn new(from: u32, to: u32) -> Self {
+            Self {
+                step: f64::from(from) / f64::from(to),
+                pos: 0.0,
+                carry: Vec::new(),
             }
         }
-        let (device, name) = chosen.ok_or_else(|| {
+
+        /// Consome mono i16 @ `from` Hz e devolve mono i16 @ 48 kHz.
+        fn process(&mut self, input: &[i16]) -> Vec<i16> {
+            if (self.step - 1.0).abs() < 1e-9 {
+                return input.to_vec();
+            }
+            self.carry.extend_from_slice(input);
+            let n = self.carry.len();
+            if n < 2 {
+                return Vec::new();
+            }
+            let mut out = Vec::with_capacity((n as f64 / self.step) as usize + 2);
+            while self.pos < (n - 1) as f64 {
+                let i = self.pos as usize;
+                let frac = (self.pos - i as f64) as f32;
+                let a = self.carry[i] as f32;
+                let b = self.carry[i + 1] as f32;
+                out.push((a + (b - a) * frac) as i16);
+                self.pos += self.step;
+            }
+            let consumed = (self.pos as usize).min(n);
+            self.carry.drain(..consumed);
+            self.pos -= consumed as f64;
+            out
+        }
+    }
+
+    // ---------------------------------------------------------------- hub
+
+    /// Partes compartilhadas com os callbacks do cpal (threads de device).
+    #[derive(Default)]
+    struct HubShared {
+        subs: Mutex<Vec<(u64, UnboundedSender<MicFrame>)>>,
+        inboxes: Mutex<Vec<(u64, Inbox)>>,
+        name: Mutex<String>,
+        /// REFERENCIA do AEC: o audio que o alto-falante esta tocando agora.
+        ///
+        /// Alimentado pelo callback de playout com exatamente os samples escritos
+        /// no device. Sem isto nao existe AEC que preste — o filtro adaptativo
+        /// precisa saber o que sairia pelo alto-falante para subtrair do mic.
+        play_ref: Arc<crate::net::media_dsp::RefRing>,
+    }
+
+    struct HubInner {
+        shared: Arc<HubShared>,
+        mic: Mutex<Option<MicStream>>,
+        spk: Mutex<Option<SpkStream>>,
+        mic_error: Mutex<Option<String>>,
+        has_capture: AtomicBool,
+        mic_attempted: AtomicBool,
+        next_sub_id: Mutex<u64>,
+        next_inbox_id: Mutex<u64>,
+    }
+
+    pub struct AudioHub {
+        inner: HubInner,
+    }
+
+    static HUB: OnceLock<AudioHub> = OnceLock::new();
+
+    pub fn hub() -> &'static AudioHub {
+        HUB.get_or_init(|| AudioHub {
+            inner: HubInner {
+                shared: Arc::new(HubShared::default()),
+                mic: Mutex::new(None),
+                spk: Mutex::new(None),
+                mic_error: Mutex::new(None),
+                has_capture: AtomicBool::new(false),
+                mic_attempted: AtomicBool::new(false),
+                next_sub_id: Mutex::new(1),
+                next_inbox_id: Mutex::new(1),
+            },
+        })
+    }
+
+    impl AudioHub {
+        pub fn has_capture(&self) -> bool {
+            self.inner.has_capture.load(Ordering::SeqCst)
+        }
+
+        pub fn mic_name(&self) -> String {
+            self.inner.shared.name.lock().unwrap().clone()
+        }
+
+        pub fn mic_error(&self) -> Option<String> {
+            self.inner.mic_error.lock().unwrap().clone()
+        }
+
+        /// Abre o microfone se ainda nao abriu. Sem microfone a sessao AINDA funciona,
+        /// so que so recebendo: e' por isso que o erro e' guardado, nao propagado.
+        pub fn ensure_mic(&self) -> Result<(), String> {
+            if self.inner.has_capture.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            // Permite exercitar o caminho "sem microfone" sem desligar o device.
+            if std::env::var("VOICE_NO_CAPTURE").as_deref() == Ok("1") {
+                let e = "VOICE_NO_CAPTURE=1: microfone desabilitado de proposito".to_string();
+                *self.inner.mic_error.lock().unwrap() = Some(e.clone());
+                self.inner.mic_attempted.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+            if self.inner.mic_attempted.swap(true, Ordering::SeqCst) {
+                return match &*self.inner.mic_error.lock().unwrap() {
+                    Some(e) => Err(e.clone()),
+                    None => Ok(()),
+                };
+            }
+            if let Err(e) = self.open_mic() {
+                *self.inner.mic_error.lock().unwrap() = Some(e.clone());
+                return Err(e);
+            }
+            Ok(())
+        }
+
+        /// Assina o fluxo do microfone. Devolve (id para `unsubscribe`, receptor).
+        pub fn subscribe(&self) -> Result<(u64, UnboundedReceiver<MicFrame>), String> {
+            self.ensure_mic()?;
+            let (tx, rx) = unbounded_channel();
+            let id = self.next_id(true);
+            self.inner.shared.subs.lock().unwrap().push((id, tx));
+            Ok((id, rx))
+        }
+
+        pub fn unsubscribe(&self, id: u64) {
+            self.inner
+                .shared
+                .subs
+                .lock()
+                .unwrap()
+                .retain(|(i, _)| *i != id);
+        }
+
+        /// Quantos peers assinam o microfone agora (deve cair a 0 apos hangup).
+        pub fn subscriber_count(&self) -> usize {
+            self.inner.shared.subs.lock().unwrap().len()
+        }
+
+        /// Registra uma caixa de playout; o callback de saida mistura todas.
+        pub fn register_inbox(&self) -> u64 {
+            let id = self.next_id(false);
+            let inbox: Inbox = Arc::new(Mutex::new(VecDeque::new()));
+            self.inner.shared.inboxes.lock().unwrap().push((id, inbox));
+            id
+        }
+
+        pub fn unregister_inbox(&self, id: u64) {
+            self.inner
+                .shared
+                .inboxes
+                .lock()
+                .unwrap()
+                .retain(|(i, _)| *i != id);
+        }
+
+        pub fn inbox(&self, id: u64) -> Option<Inbox> {
+            self.inner
+                .shared
+                .inboxes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, b)| b.clone())
+        }
+
+        pub fn has_speaker(&self) -> bool {
+            self.inner.spk.lock().unwrap().is_some()
+        }
+
+        /// Anel de referencia do alto-falante, para o AEC.
+        pub fn play_ref(&self) -> Arc<crate::net::media_dsp::RefRing> {
+            self.inner.shared.play_ref.clone()
+        }
+
+        fn next_id(&self, sub: bool) -> u64 {
+            let mut n = if sub {
+                self.inner.next_sub_id.lock().unwrap()
+            } else {
+                self.inner.next_inbox_id.lock().unwrap()
+            };
+            let id = *n;
+            *n += 1;
+            id
+        }
+
+        // -------------------------------------------------------------- microfone
+
+        fn open_mic(&self) -> Result<(), String> {
+            let host = cpal::default_host();
+            let devs: Vec<cpal::Device> = host
+                .input_devices()
+                .map_err(|e| format!("input_devices: {e}"))?
+                .collect();
+
+            let mut chosen: Option<(cpal::Device, String)> = host
+                .default_input_device()
+                .and_then(|d| d.description().ok().map(|x| (d, x.name().to_owned())));
+            if chosen.is_none() {
+                for d in devs.iter() {
+                    if pick_input_config(d).is_ok() {
+                        chosen = d
+                            .description()
+                            .ok()
+                            .map(|x| (d.clone(), x.name().to_owned()));
+                        break;
+                    }
+                }
+            }
+            let (device, name) = chosen.ok_or_else(|| {
             "nenhum microfone utilizavel: `default` ausente e nenhum device de entrada respondeu a supported_input_configs()".to_string()
         })?;
 
-        let cfg = pick_input_config(&device)?;
-        let hw_rate = cfg.sample_rate();
-        let hw_channels = cfg.channels();
-        *self.inner.shared.name.lock().unwrap() = name;
-        eprintln!(
-            "[voice] microfone: {hw_rate} Hz / {hw_channels}ch, buffer {DEVICE_BUFFER} frames"
-        );
+            let cfg = pick_input_config(&device)?;
+            let hw_rate = cfg.sample_rate();
+            let hw_channels = cfg.channels();
+            *self.inner.shared.name.lock().unwrap() = name;
+            eprintln!(
+                "[voice] microfone: {hw_rate} Hz / {hw_channels}ch, buffer {DEVICE_BUFFER} frames"
+            );
 
-        let shared = self.inner.shared.clone();
-        let downmix = hw_channels > 1;
-        let ch = hw_channels as usize;
-        let mut resampler = Resampler::new(hw_rate, SAMPLE_RATE);
-        let mut acc: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 4);
-        // Ancora de tempo do frame em formacao. Encadeada por +FRAME a cada frame
-        // emitido: o primeiro sample de cada frame e' datado pela callback que o
-        // entregou, nao pelo instante em que a callback rodou.
-        let mut next_frame_wall: Option<Instant> = None;
+            let shared = self.inner.shared.clone();
+            let downmix = hw_channels > 1;
+            let ch = hw_channels as usize;
+            let mut resampler = Resampler::new(hw_rate, SAMPLE_RATE);
+            let mut acc: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 4);
+            // Ancora de tempo do frame em formacao. Encadeada por +FRAME a cada frame
+            // emitido: o primeiro sample de cada frame e' datado pela callback que o
+            // entregou, nao pelo instante em que a callback rodou.
+            let mut next_frame_wall: Option<Instant> = None;
 
-        let stream = build_input_with_buffer_fallback(&device, cfg, move |data: &[f32]| {
-            let mono: Vec<i16> = if downmix {
-                data.chunks_exact(ch)
-                    .map(|c| {
-                        let avg: f32 = c.iter().sum::<f32>() / ch as f32;
-                        (avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-                    })
-                    .collect()
-            } else {
-                data.iter()
-                    .map(|s| ((*s).clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
-                    .collect()
-            };
-            if next_frame_wall.is_none() {
-                next_frame_wall = Some(Instant::now());
-            }
-            acc.extend_from_slice(&resampler.process(&mono));
-            while acc.len() >= FRAME_SAMPLES {
-                let frame: Vec<i16> = acc.drain(..FRAME_SAMPLES).collect();
-                let at = next_frame_wall.unwrap_or_else(Instant::now);
-                next_frame_wall = Some(at + FRAME);
-                let list = shared.subs.lock().unwrap();
-                if list.is_empty() {
-                    continue;
+            let stream = build_input_with_buffer_fallback(&device, cfg, move |data: &[f32]| {
+                let mono: Vec<i16> = if downmix {
+                    data.chunks_exact(ch)
+                        .map(|c| {
+                            let avg: f32 = c.iter().sum::<f32>() / ch as f32;
+                            (avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+                        })
+                        .collect()
+                } else {
+                    data.iter()
+                        .map(|s| ((*s).clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        .collect()
+                };
+                if next_frame_wall.is_none() {
+                    next_frame_wall = Some(Instant::now());
                 }
-                let shared_pcm = Arc::new(frame);
-                for (_, tx) in list.iter() {
-                    // Canal ilimitado: `send` nao bloqueia a thread realtime.
-                    let _ = tx.send(MicFrame {
-                        pcm: shared_pcm.clone(),
-                        captured_at: at,
-                    });
+                acc.extend_from_slice(&resampler.process(&mono));
+                while acc.len() >= FRAME_SAMPLES {
+                    let frame: Vec<i16> = acc.drain(..FRAME_SAMPLES).collect();
+                    let at = next_frame_wall.unwrap_or_else(Instant::now);
+                    next_frame_wall = Some(at + FRAME);
+                    let list = shared.subs.lock().unwrap();
+                    if list.is_empty() {
+                        continue;
+                    }
+                    let shared_pcm = Arc::new(frame);
+                    for (_, tx) in list.iter() {
+                        // Canal ilimitado: `send` nao bloqueia a thread realtime.
+                        let _ = tx.send(MicFrame {
+                            pcm: shared_pcm.clone(),
+                            captured_at: at,
+                        });
+                    }
+                }
+            })?;
+
+            stream.play().map_err(|e| format!("stream.play(): {e}"))?;
+            *self.inner.mic.lock().unwrap() = Some(stream);
+            self.inner.has_capture.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        // ------------------------------------------------------------ alto-falante
+
+        pub fn ensure_speaker(&self) -> Result<(), String> {
+            if self.inner.spk.lock().unwrap().is_some() {
+                return Ok(());
+            }
+            self.open_speaker()
+        }
+
+        fn open_speaker(&self) -> Result<(), String> {
+            let host = cpal::default_host();
+            let outs: Vec<cpal::Device> = host
+                .output_devices()
+                .map_err(|e| format!("output_devices: {e}"))?
+                .collect();
+            let mut chosen: Option<(cpal::Device, String)> = host
+                .default_output_device()
+                .and_then(|d| d.description().ok().map(|x| (d, x.name().to_owned())));
+            if chosen.is_none() {
+                for d in outs.iter() {
+                    if d.supported_output_configs()
+                        .is_ok_and(|mut i| i.next().is_some())
+                    {
+                        chosen = d
+                            .description()
+                            .ok()
+                            .map(|x| (d.clone(), x.name().to_owned()));
+                        break;
+                    }
                 }
             }
-        })?;
+            let (device, name) =
+                chosen.ok_or_else(|| "nenhum alto-falante utilizavel".to_string())?;
 
-        stream.play().map_err(|e| format!("stream.play(): {e}"))?;
-        *self.inner.mic.lock().unwrap() = Some(stream);
-        self.inner.has_capture.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
-    // ------------------------------------------------------------ alto-falante
-
-    pub fn ensure_speaker(&self) -> Result<(), String> {
-        if self.inner.spk.lock().unwrap().is_some() {
-            return Ok(());
-        }
-        self.open_speaker()
-    }
-
-    fn open_speaker(&self) -> Result<(), String> {
-        let host = cpal::default_host();
-        let outs: Vec<cpal::Device> = host
-            .output_devices()
-            .map_err(|e| format!("output_devices: {e}"))?
-            .collect();
-        let mut chosen: Option<(cpal::Device, String)> = host
-            .default_output_device()
-            .and_then(|d| d.description().ok().map(|x| (d, x.name().to_owned())));
-        if chosen.is_none() {
-            for d in outs.iter() {
-                if d.supported_output_configs().is_ok_and(|mut i| i.next().is_some()) {
-                    chosen = d.description().ok().map(|x| (d.clone(), x.name().to_owned()));
-                    break;
-                }
+            let ranges: Vec<_> = device
+                .supported_output_configs()
+                .map_err(|e| format!("supported_output_configs: {e}"))?
+                .collect();
+            if ranges.is_empty() {
+                return Err("alto-falante sem configs de saida".to_string());
             }
-        }
-        let (device, name) = chosen.ok_or_else(|| "nenhum alto-falante utilizavel".to_string())?;
-
-        let ranges: Vec<_> = device
-            .supported_output_configs()
-            .map_err(|e| format!("supported_output_configs: {e}"))?
-            .collect();
-        if ranges.is_empty() {
-            return Err("alto-falante sem configs de saida".to_string());
-        }
-        let sr = SAMPLE_RATE;
-        let cfg = ranges
-            .iter()
-            .find(|r| r.min_sample_rate() <= sr && r.max_sample_rate() >= sr)
-            .map(|r| r.clone().with_sample_rate(sr))
-            .unwrap_or_else(|| {
-                let r = &ranges[0];
-                r.clone()
-                    .with_sample_rate(r.max_sample_rate().min(sr).max(r.min_sample_rate()))
-            });
-        let hw_rate = cfg.sample_rate();
-        let hw_channels = cfg.channels().max(1);
-        eprintln!(
+            let sr = SAMPLE_RATE;
+            let cfg = ranges
+                .iter()
+                .find(|r| r.min_sample_rate() <= sr && r.max_sample_rate() >= sr)
+                .map(|r| r.clone().with_sample_rate(sr))
+                .unwrap_or_else(|| {
+                    let r = &ranges[0];
+                    r.clone()
+                        .with_sample_rate(r.max_sample_rate().min(sr).max(r.min_sample_rate()))
+                });
+            let hw_rate = cfg.sample_rate();
+            let hw_channels = cfg.channels().max(1);
+            eprintln!(
             "[voice] alto-falante: {name}, {hw_rate} Hz / {hw_channels}ch, buffer {DEVICE_BUFFER} frames"
         );
 
-        let shared = self.inner.shared.clone();
-        let ch = hw_channels as usize;
-        let step = f64::from(SAMPLE_RATE) / f64::from(hw_rate);
-        let mut phase: f64 = 0.0; // fase persistente da saida
-        let mut mono: Vec<f32> = vec![0.0; FRAME_SAMPLES * 16];
-        let mut hw: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 16);
+            let shared = self.inner.shared.clone();
+            let ch = hw_channels as usize;
+            let step = f64::from(SAMPLE_RATE) / f64::from(hw_rate);
+            let mut phase: f64 = 0.0; // fase persistente da saida
+            let mut mono: Vec<f32> = vec![0.0; FRAME_SAMPLES * 16];
+            let mut hw: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 16);
 
-        let ref_ring = self.inner.shared.play_ref.clone();
-        let stream = build_output_with_buffer_fallback(&device, cfg, move |out: &mut [f32]| {
-            let need = (out.len() / ch).max(1).min(mono.len());
-            // Lote de amostras para o ring: UM lock por callback, nunca por amostra.
-            let mut ref_buf: Vec<i16> = Vec::with_capacity(need);
-            let mut filled = 0usize;
+            let ref_ring = self.inner.shared.play_ref.clone();
+            let stream =
+                build_output_with_buffer_fallback(&device, cfg, move |out: &mut [f32]| {
+                    let need = (out.len() / ch).max(1).min(mono.len());
+                    // Lote de amostras para o ring: UM lock por callback, nunca por amostra.
+                    let mut ref_buf: Vec<i16> = Vec::with_capacity(need);
+                    let mut filled = 0usize;
 
-            {
-                let list = shared.inboxes.lock().unwrap();
-                for (_, ib) in list.iter() {
-                    if filled >= need {
-                        break;
-                    }
-                    let mut q = ib.lock().unwrap();
-                    while filled < need {
-                        let Some(frame) = q.pop_front() else { break };
-                        let at = Instant::now();
-                        if let Some((link, idx)) = frame.id {
-                            probe().stamp_play(link, idx, at);
+                    {
+                        let list = shared.inboxes.lock().unwrap();
+                        for (_, ib) in list.iter() {
+                            if filled >= need {
+                                break;
+                            }
+                            let mut q = ib.lock().unwrap();
+                            while filled < need {
+                                let Some(frame) = q.pop_front() else { break };
+                                let at = Instant::now();
+                                if let Some((link, idx)) = frame.id {
+                                    probe().stamp_play(link, idx, at);
+                                }
+                                let take = (need - filled).min(frame.pcm.len());
+                                for &s in frame.pcm.iter().take(take) {
+                                    mono[filled] = f32::from(s) / f32::from(i16::MAX);
+                                    filled += 1;
+                                }
+                                if take < frame.pcm.len() {
+                                    // Sobrou parte do frame: devolve para a proxima
+                                    // callback em vez de perder audio.
+                                    let resto: Vec<i16> = frame.pcm[take..].to_vec();
+                                    q.push_front(PcmFrame {
+                                        pcm: Arc::new(resto),
+                                        id: None,
+                                    });
+                                }
+                            }
                         }
-                        let take = (need - filled).min(frame.pcm.len());
-                        for &s in frame.pcm.iter().take(take) {
-                            mono[filled] = f32::from(s) / f32::from(i16::MAX);
-                            filled += 1;
-                        }
-                        if take < frame.pcm.len() {
-                            // Sobrou parte do frame: devolve para a proxima
-                            // callback em vez de perder audio.
-                            let resto: Vec<i16> = frame.pcm[take..].to_vec();
-                            q.push_front(PcmFrame {
-                                pcm: Arc::new(resto),
-                                id: None,
-                            });
-                        }
                     }
-                }
-            }
 
-            // underrun: silencia, nunca bloqueia a thread realtime
-            for v in mono.iter_mut().take(need).skip(filled) {
-                *v = 0.0;
-            }
-
-            // 48 kHz -> taxa do hardware (fase preservada entre callbacks)
-            if (step - 1.0).abs() < 1e-9 {
-                hw.clear();
-                hw.extend_from_slice(&mono[..need]);
-            } else {
-                hw.clear();
-                while hw.len() < need {
-                    let i = phase as usize;
-                    if i + 1 >= need {
-                        break;
+                    // underrun: silencia, nunca bloqueia a thread realtime
+                    for v in mono.iter_mut().take(need).skip(filled) {
+                        *v = 0.0;
                     }
-                    let frac = (phase - i as f64) as f32;
-                    let a = mono[i];
-                    let b = mono[i + 1];
-                    hw.push(a + (b - a) * frac);
-                    phase += step;
-                }
-                phase -= hw.len() as f64;
-                hw.resize(need, 0.0);
-            }
 
-            // REFERENCIA DO AEC: captura o MESMO sinal que vai para o device.
-            //
-            // Push acontece AQUI, depois do downmix e DEPOIS do resample para a
-            // taxa do hardware: e' esse o sinal que a sala ouve e que volta no
-            // microfone. Se fosse capturado antes, o filtro adaptativo aprenderia
-            // o caminho errado e a referencia nao bateria com o eco real.
-            for &v in hw.iter().take(need) {
-                ref_buf.push((v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-            }
-            // UM lock por callback (nao por amostra): a thread de audio nunca
-            // espera, e o ring e' o unico ponto de compartilhamento com o AEC.
-            if !ref_buf.is_empty() {
-                ref_ring.push(&ref_buf);
-            }
+                    // 48 kHz -> taxa do hardware (fase preservada entre callbacks)
+                    if (step - 1.0).abs() < 1e-9 {
+                        hw.clear();
+                        hw.extend_from_slice(&mono[..need]);
+                    } else {
+                        hw.clear();
+                        while hw.len() < need {
+                            let i = phase as usize;
+                            if i + 1 >= need {
+                                break;
+                            }
+                            let frac = (phase - i as f64) as f32;
+                            let a = mono[i];
+                            let b = mono[i + 1];
+                            hw.push(a + (b - a) * frac);
+                            phase += step;
+                        }
+                        phase -= hw.len() as f64;
+                        hw.resize(need, 0.0);
+                    }
 
-            // mono -> canais intercalados (o device repete o mesmo sinal)
-            for (i, o) in out.iter_mut().enumerate() {
-                *o = hw[i / ch];
-            }
-        })?;
+                    // REFERENCIA DO AEC: captura o MESMO sinal que vai para o device.
+                    //
+                    // Push acontece AQUI, depois do downmix e DEPOIS do resample para a
+                    // taxa do hardware: e' esse o sinal que a sala ouve e que volta no
+                    // microfone. Se fosse capturado antes, o filtro adaptativo aprenderia
+                    // o caminho errado e a referencia nao bateria com o eco real.
+                    for &v in hw.iter().take(need) {
+                        ref_buf.push((v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                    }
+                    // UM lock por callback (nao por amostra): a thread de audio nunca
+                    // espera, e o ring e' o unico ponto de compartilhamento com o AEC.
+                    if !ref_buf.is_empty() {
+                        ref_ring.push(&ref_buf);
+                    }
 
-        stream.play().map_err(|e| format!("output play(): {e}"))?;
-        *self.inner.spk.lock().unwrap() = Some(stream);
-        Ok(())
-    }
-}
+                    // mono -> canais intercalados (o device repete o mesmo sinal)
+                    for (i, o) in out.iter_mut().enumerate() {
+                        *o = hw[i / ch];
+                    }
+                })?;
 
-// ---------------------------------------------------------------- device cfg
-
-fn pick_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
-    let ranges: Vec<_> = dev
-        .supported_input_configs()
-        .map_err(|e| format!("supported_input_configs: {e}"))?
-        .collect();
-    if ranges.is_empty() {
-        return Err("device sem configs de entrada".to_string());
-    }
-    let sr = SAMPLE_RATE;
-    for r in &ranges {
-        if r.channels() == 1 && r.min_sample_rate() <= sr && r.max_sample_rate() >= sr {
-            return Ok(r.clone().with_sample_rate(sr));
+            stream.play().map_err(|e| format!("output play(): {e}"))?;
+            *self.inner.spk.lock().unwrap() = Some(stream);
+            Ok(())
         }
     }
-    for r in &ranges {
-        if r.min_sample_rate() <= sr && r.max_sample_rate() >= sr {
-            return Ok(r.clone().with_sample_rate(sr));
+
+    // ---------------------------------------------------------------- device cfg
+
+    fn pick_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+        let ranges: Vec<_> = dev
+            .supported_input_configs()
+            .map_err(|e| format!("supported_input_configs: {e}"))?
+            .collect();
+        if ranges.is_empty() {
+            return Err("device sem configs de entrada".to_string());
         }
+        let sr = SAMPLE_RATE;
+        for r in &ranges {
+            if r.channels() == 1 && r.min_sample_rate() <= sr && r.max_sample_rate() >= sr {
+                return Ok(r.clone().with_sample_rate(sr));
+            }
+        }
+        for r in &ranges {
+            if r.min_sample_rate() <= sr && r.max_sample_rate() >= sr {
+                return Ok(r.clone().with_sample_rate(sr));
+            }
+        }
+        let r = &ranges[0];
+        let rate = r.max_sample_rate().min(sr).max(r.min_sample_rate());
+        Ok(r.clone().with_sample_rate(rate))
     }
-    let r = &ranges[0];
-    let rate = r.max_sample_rate().min(sr).max(r.min_sample_rate());
-    Ok(r.clone().with_sample_rate(rate))
-}
 
-/// StreamConfig com tamanho de buffer EXPLICITO. `BufferSize::Default` nunca entra.
-fn config_with_buffer(cfg: cpal::SupportedStreamConfig, buffer: u32) -> cpal::StreamConfig {
-    let mut sc = cfg.config();
-    sc.buffer_size = cpal::BufferSize::Fixed(buffer);
-    sc
-}
+    /// StreamConfig com tamanho de buffer EXPLICITO. `BufferSize::Default` nunca entra.
+    fn config_with_buffer(cfg: cpal::SupportedStreamConfig, buffer: u32) -> cpal::StreamConfig {
+        let mut sc = cfg.config();
+        sc.buffer_size = cpal::BufferSize::Fixed(buffer);
+        sc
+    }
 
-/// Tenta 960 frames (20 ms @ 48 kHz) e, se o backend recusar, outros tamanhos
-/// EXPLICITOS. `Default` continua fora de questao.
-const FALLBACK_BUFFERS: [u32; 4] = [DEVICE_BUFFER, 480, 240, 1920];
+    /// Tenta 960 frames (20 ms @ 48 kHz) e, se o backend recusar, outros tamanhos
+    /// EXPLICITOS. `Default` continua fora de questao.
+    const FALLBACK_BUFFERS: [u32; 4] = [DEVICE_BUFFER, 480, 240, 1920];
 
-fn build_input_with_buffer_fallback<F>(
-    device: &cpal::Device,
-    cfg: cpal::SupportedStreamConfig,
-    cb: F,
-) -> Result<MicStream, String>
-where
-    F: FnMut(&[f32]) + Send + 'static,
-{
-    // O callback precisa sobreviver a uma tentativa que falhou: um backend que
-    // recusa 960 frames ainda pode aceitar 480, e o estado do callback (fase do
-    // resampler etc.) nao pode ser perdido entre as tentativas.
-    let cb = Arc::new(Mutex::new(cb));
-    let mut last = String::new();
-    for buffer in FALLBACK_BUFFERS {
-        let sc = config_with_buffer(cfg, buffer);
-        let c = cb.clone();
-        match device.build_input_stream::<f32, _, _>(
-            sc,
-            move |data: &[f32], _info| (c.lock().unwrap())(data),
-            |_e| {},
-            None,
-        ) {
-            Ok(s) => {
-                if buffer != DEVICE_BUFFER {
-                    eprintln!(
+    fn build_input_with_buffer_fallback<F>(
+        device: &cpal::Device,
+        cfg: cpal::SupportedStreamConfig,
+        cb: F,
+    ) -> Result<MicStream, String>
+    where
+        F: FnMut(&[f32]) + Send + 'static,
+    {
+        // O callback precisa sobreviver a uma tentativa que falhou: um backend que
+        // recusa 960 frames ainda pode aceitar 480, e o estado do callback (fase do
+        // resampler etc.) nao pode ser perdido entre as tentativas.
+        let cb = Arc::new(Mutex::new(cb));
+        let mut last = String::new();
+        for buffer in FALLBACK_BUFFERS {
+            let sc = config_with_buffer(cfg, buffer);
+            let c = cb.clone();
+            match device.build_input_stream::<f32, _, _>(
+                sc,
+                move |data: &[f32], _info| (c.lock().unwrap())(data),
+                |_e| {},
+                None,
+            ) {
+                Ok(s) => {
+                    if buffer != DEVICE_BUFFER {
+                        eprintln!(
                         "[voice] AVISO: microfone recusou {DEVICE_BUFFER} frames; usando {buffer}"
                     );
+                    }
+                    return Ok(Box::new(s));
                 }
-                return Ok(Box::new(s));
+                Err(e) => last = format!("build_input_stream({buffer}): {e}"),
             }
-            Err(e) => last = format!("build_input_stream({buffer}): {e}"),
         }
+        Err(last)
     }
-    Err(last)
-}
 
-fn build_output_with_buffer_fallback<F>(
-    device: &cpal::Device,
-    cfg: cpal::SupportedStreamConfig,
-    cb: F,
-) -> Result<SpkStream, String>
-where
-    F: FnMut(&mut [f32]) + Send + 'static,
-{
-    let cb = Arc::new(Mutex::new(cb));
-    let mut last = String::new();
-    for buffer in FALLBACK_BUFFERS {
-        let sc = config_with_buffer(cfg, buffer);
-        let c = cb.clone();
-        match device.build_output_stream::<f32, _, _>(
-            sc,
-            move |out: &mut [f32], _info| (c.lock().unwrap())(out),
-            |_e| {},
-            None,
-        ) {
-            Ok(s) => {
-                if buffer != DEVICE_BUFFER {
-                    eprintln!(
+    fn build_output_with_buffer_fallback<F>(
+        device: &cpal::Device,
+        cfg: cpal::SupportedStreamConfig,
+        cb: F,
+    ) -> Result<SpkStream, String>
+    where
+        F: FnMut(&mut [f32]) + Send + 'static,
+    {
+        let cb = Arc::new(Mutex::new(cb));
+        let mut last = String::new();
+        for buffer in FALLBACK_BUFFERS {
+            let sc = config_with_buffer(cfg, buffer);
+            let c = cb.clone();
+            match device.build_output_stream::<f32, _, _>(
+                sc,
+                move |out: &mut [f32], _info| (c.lock().unwrap())(out),
+                |_e| {},
+                None,
+            ) {
+                Ok(s) => {
+                    if buffer != DEVICE_BUFFER {
+                        eprintln!(
                         "[voice] AVISO: alto-falante recusou {DEVICE_BUFFER} frames; usando {buffer}"
                     );
+                    }
+                    return Ok(Box::new(s));
                 }
-                return Ok(Box::new(s));
+                Err(e) => last = format!("build_output_stream({buffer}): {e}"),
             }
-            Err(e) => last = format!("build_output_stream({buffer}): {e}"),
         }
+        Err(last)
     }
-    Err(last)
 }
-
-}
-
-
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use self::audio::{FRAME, FRAME_SAMPLES, MicFrame, PcmFrame, SAMPLE_RATE};
+use self::audio::{MicFrame, PcmFrame, FRAME, FRAME_SAMPLES, SAMPLE_RATE};
+use self::probe::{probe, LatencyProbe};
 use bytes::Bytes;
-use self::probe::{LatencyProbe, probe};
 
 thread_local! {
     static DBG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -795,23 +809,23 @@ use rtc::ice::mdns::MulticastDnsMode;
 use rtc::interceptor::{JitterBufferBuilder, Slot};
 use rtc::media::Sample;
 use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::RTCIceTransportPolicy;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::RTCConfigurationBuilder;
+use rtc::peer_connection::configuration::RTCIceTransportPolicy;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::{RTCIceCandidateInit, RTCIceCandidateType, RTCIceServer};
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
-use rtc::statistics::StatsSelector;
 use rtc::statistics::report::RTCStatsReportEntry;
+use rtc::statistics::StatsSelector;
 use tokio::sync::mpsc::UnboundedReceiver;
-use webrtc::media_stream::Track;
-use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
+use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
+use webrtc::media_stream::Track;
 use webrtc::peer_connection::{
     PeerConnection, PeerConnectionBuilder, PeerConnectionEventHandler, RTCIceGatheringState,
     RTCPeerConnectionIceEvent, RTCPeerConnectionState,
@@ -1007,14 +1021,10 @@ impl PeerConnectionEventHandler for H {
                 if !mid.is_empty() {
                     *self.sh.mid.lock().unwrap() = mid.clone();
                 }
-                self.sh
-                    .out
-                    .lock()
-                    .unwrap()
-                    .push_back(OutboundSignal::Ice {
-                        candidate: init.candidate,
-                        mid,
-                    });
+                self.sh.out.lock().unwrap().push_back(OutboundSignal::Ice {
+                    candidate: init.candidate,
+                    mid,
+                });
             }
             Err(e) => eprintln!("[voice] ICE candidate para JSON falhou: {e}"),
         }
@@ -1024,14 +1034,10 @@ impl PeerConnectionEventHandler for H {
         if s == RTCIceGatheringState::Complete {
             // Fim de candidatos, como o navegador sinaliza.
             let mid = self.sh.mid.lock().unwrap().clone();
-            self.sh
-                .out
-                .lock()
-                .unwrap()
-                .push_back(OutboundSignal::Ice {
-                    candidate: String::new(),
-                    mid,
-                });
+            self.sh.out.lock().unwrap().push_back(OutboundSignal::Ice {
+                candidate: String::new(),
+                mid,
+            });
         }
     }
 
@@ -1100,9 +1106,8 @@ impl Core {
         let wrapped = std::panic::AssertUnwindSafe(fut);
         let h = self.handle.clone();
         let job: Box<dyn FnOnce() + Send> = Box::new(move || {
-            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                h.block_on(wrapped)
-            }));
+            let out =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || h.block_on(wrapped)));
             let _ = tx.send(out);
         });
         self.tx
@@ -1236,10 +1241,7 @@ impl VoiceMedia {
                 .get(&(c.clone(), p.clone()))
                 .ok_or_else(|| "sessao inexistente".to_string())?;
             let desc = RTCSessionDescription::answer(s).map_err(err)?;
-            sess.pc
-                .set_remote_description(desc)
-                .await
-                .map_err(err)?;
+            sess.pc.set_remote_description(desc).await.map_err(err)?;
             Ok(())
         })?
     }
@@ -1292,7 +1294,12 @@ impl VoiceMedia {
 
     /// Fecha as PeerConnections, aborta as tasks de audio e limpa o estado.
     pub fn hangup(&self, call_id: &str) {
-        let keys: Vec<Key> = self.inner.of_call(call_id).into_iter().map(|s| s.key()).collect();
+        let keys: Vec<Key> = self
+            .inner
+            .of_call(call_id)
+            .into_iter()
+            .map(|s| s.key())
+            .collect();
         for k in keys {
             self.close_key(k);
         }
@@ -1425,15 +1432,26 @@ fn ice_servers() -> Vec<RTCIceServer> {
         // openrelay: TURN público com credencial estática documentada.
         format!("{TURN_DEFAULT_HOST}:{TURN_DEFAULT_PORT}")
     });
-    let turn_user = std::env::var("VOICE_TURN_USER").unwrap_or_else(|_| TURN_DEFAULT_USER.to_string());
-    let turn_pass = std::env::var("VOICE_TURN_PASS").unwrap_or_else(|_| TURN_DEFAULT_SECRET.to_string());
-    for url in turn_urls.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    let turn_user =
+        std::env::var("VOICE_TURN_USER").unwrap_or_else(|_| TURN_DEFAULT_USER.to_string());
+    let turn_pass =
+        std::env::var("VOICE_TURN_PASS").unwrap_or_else(|_| TURN_DEFAULT_SECRET.to_string());
+    for url in turn_urls
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let urls = if url.starts_with("turn:") || url.starts_with("turns:") {
             vec![url.to_string()]
         } else {
             vec![format!("turn:{url}")]
         };
-        v.push(RTCIceServer { urls, username: turn_user.clone(), credential: turn_pass.clone(), ..Default::default() });
+        v.push(RTCIceServer {
+            urls,
+            username: turn_user.clone(),
+            credential: turn_pass.clone(),
+            ..Default::default()
+        });
     }
     v
 }
@@ -1459,7 +1477,11 @@ fn udp_addrs() -> Vec<String> {
 /// da PeerConnection, e o par (call, peer) ja e' unico la.
 fn ssrc_for(call_id: &str, peer_fp: &str) -> u32 {
     let mut h: u32 = 0x811C_9DC5;
-    for b in call_id.bytes().chain(b"|".iter().copied()).chain(peer_fp.bytes()) {
+    for b in call_id
+        .bytes()
+        .chain(b"|".iter().copied())
+        .chain(peer_fp.bytes())
+    {
         h ^= u32::from(b);
         h = h.wrapping_mul(0x0100_0193);
     }
@@ -1502,7 +1524,9 @@ async fn build_session(
     // Caixa de playout. Falha no alto-falante nao impede a sessao: so nao ha audio
     // saindo no host.
     let inbox_id = hub.register_inbox();
-    let inbox = hub.inbox(inbox_id).ok_or_else(|| "inbox nao registrado".to_string())?;
+    let inbox = hub
+        .inbox(inbox_id)
+        .ok_or_else(|| "inbox nao registrado".to_string())?;
     let _ = hub.ensure_speaker();
 
     let sh = Arc::new(Shared::new(inbox));
@@ -1578,10 +1602,7 @@ async fn build_session(
         out_link: Mutex::new(*inner.probe_out.lock().unwrap()),
         muted: AtomicBool::new(false),
         closed: AtomicBool::new(false),
-        tx: TxState {
-            track: tl,
-            sender,
-        },
+        tx: TxState { track: tl, sender },
         tasks: Mutex::new(Vec::new()),
         probe: probe(),
     });
@@ -1633,10 +1654,10 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 // ---------------------------------------------------------------- envio
 
 fn new_encoder() -> Result<opus::Encoder, String> {
-    let mut enc =
-        opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(err)?;
-    enc.set_bitrate(opus::Bitrate::Bits(BITRATE_BPS)).map_err(err)?;
+    let mut enc = opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)
+        .map_err(err)?;
+    enc.set_bitrate(opus::Bitrate::Bits(BITRATE_BPS))
+        .map_err(err)?;
     // DTX DESLIGADO: com DTX ligado o Opus manda um frame a cada ~400 ms no
     // silencio, o que e' 20x a duracao do frame e some com a interatividade.
     enc.set_dtx(false).map_err(err)?;
@@ -1698,8 +1719,10 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             }
         }
         if descartados > 0 {
-            eprintln!("[voice] {}/{}: {descartados} frames do mic acumulados no ICE foram descartados",
-                sess.call_id, sess.peer_fp);
+            eprintln!(
+                "[voice] {}/{}: {descartados} frames do mic acumulados no ICE foram descartados",
+                sess.call_id, sess.peer_fp
+            );
         }
 
         // O envio e' DISPARADO pelo frame, nao por um relogio de slots. Um relogio
