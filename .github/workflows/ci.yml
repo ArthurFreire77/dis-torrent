@@ -157,7 +157,9 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev libayatana-appindicator3-dev \
             librsvg2-dev libasound2-dev pkg-config build-essential cmake \
-            libglib2.0-dev libdbus-1-dev
+            libglib2.0-dev libdbus-1-dev \
+            libpipewire-0.3-dev libclang-dev clang \
+            libwayland-dev libxkbcommon-dev
       - run: npm ci
       - run: npm run tauri:build
       - uses: actions/upload-artifact@v4
@@ -181,6 +183,20 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
+      # O MSI do Windows exige pre-release NUMERICO ("pre-alpha.1" e' rejeitado:
+      #   optional pre-release identifier must be numeric-only and <= 65535).
+      # Para o artefato de CI, usa-se 1.0.0. O repositorio mantem a versao
+      # declarativa em package.json / tauri.conf.json.
+      - name: Versao numerica para o MSI
+        run: |
+          node -e "
+            const fs=require('fs');
+            for (const f of ['package.json','src-tauri/tauri.conf.json']) {
+              const d=JSON.parse(fs.readFileSync(f,'utf8'));
+              d.version='1.0.0';
+              fs.writeFileSync(f, JSON.stringify(d,null,2));
+            }
+          "
       - run: npm run tauri:build
       - uses: actions/upload-artifact@v4
         with:
