@@ -1,19 +1,133 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Segredos — NUNCA versionar
+# ─────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+key.properties
+keystore.properties
+android-keystore/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuração local do Cargo (o template .example É versionado)
+# ─────────────────────────────────────────────────────────────────────────────
+.cargo/config.toml
+.cargo/config
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node / Vite / React / TypeScript
+# ─────────────────────────────────────────────────────────────────────────────
 node_modules/
 dist/
-src-tauri/target/
+dist-ssr/
+.vite/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
-.DS_Store
-.env
-.env.local
-.env.*.local
-forge.db
-*.db
-*.log
-forge-core/target/
-host/target/
-test-results/
-.playwright-mcp/
+.envrc
+.direnv/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rust / Cargo (forge-core, src-tauri, host, aec-probe)
+# ─────────────────────────────────────────────────────────────────────────────
+target/
+**/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tauri
+# ─────────────────────────────────────────────────────────────────────────────
+src-tauri/target/
+src-tauri/gen/schemas/*.tmp
+# Gerado pelo `tauri android init` — contém path absoluto do cargo registry
+src-tauri/gen/android/tauri.settings.gradle
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/app/src/main/**/generated/
+src-tauri/gen/android/app/src/main/jniLibs/**/*.so
+src-tauri/gen/android/app/src/main/assets/tauri.conf.json
+src-tauri/gen/android/app/tauri.build.gradle.kts
+src-tauri/gen/android/app/proguard-tauri.pro
+src-tauri/gen/android/app/tauri.properties
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Android SDK / Gradle / NDK (instalados fora do repositório)
+# ─────────────────────────────────────────────────────────────────────────────
+cmdline-tools/
+.gradle/
+**/.gradle/
+local.properties
 *.apk
+*.aab
 *.idsig
+*.ap_
+*.dex
+# A chave de debug do Android é pública e o template do Tauri precisa dela:
+!src-tauri/gen/android/app/debug.keystore
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instaladores e artefatos de distribuição
+# ─────────────────────────────────────────────────────────────────────────────
+*.deb
+*.AppImage
+*.appimage
+*.rpm
+*.msi
+*.msix
+*.dmg
+# Cofres portables e backups de identidade do usuário
+*.stormvault
+*.vps
+instalações/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Playwright / E2E
+# ─────────────────────────────────────────────────────────────────────────────
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.playwright-mcp/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Caches de ferramentas
+# ─────────────────────────────────────────────────────────────────────────────
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+__pycache__/
+*.py[cod]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Banco de dados local / logs / dados de runtime
+# ─────────────────────────────────────────────────────────────────────────────
+/forge.db
+/forge.db-journal
+/forge.db-wal
+/forge.db-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sistema operacional / editores / sobras de merge
+# ─────────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+*.bak
+*.orig
+*.rej
