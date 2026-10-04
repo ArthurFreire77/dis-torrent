@@ -104,7 +104,20 @@ Windows/macOS: CI cross-build via GitHub Actions (fase distribuição).
 
 Motivo: Ubuntu 24.04 removeu `libsoup-2.4`/`webkit2gtk-4.0` — Tauri 1.6 não compila mais em distros atuais. Tauri 2 usa webkit2gtk-4.1 (soup3), é estável e habilita Android/iOS. Mudanças: config schema v2, `capabilities/`, `@tauri-apps/api@2`, `app.path()`, `Emitter::emit`.
 
-## 8. Em aberto
+## 8. Documentação relacionada
+
+| Doc | Assunto |
+|---|---|
+| [`PROTOCOL.md`](PROTOCOL.md) | Frames, handshake, composição da sessão |
+| [`THREAT_MODEL.md`](THREAT_MODEL.md) | Ameaças, garantias e limitações honestas |
+| [`AUX_SERVICES.md`](AUX_SERVICES.md) | Infraestrutura opcional e como auto-hospedar |
+| [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | Tokens, tipografia, breakpoints |
+| [`docs/AEC.md`](docs/AEC.md) | Cancelamento de eco e supressão de ruído: escolha e trade-offs |
+| [`docs/SECURITY_LAYER.md`](docs/SECURITY_LAYER.md) | Nomes, anti-spam, moderação, auditoria |
+| [`docs/STORMVAULT.md`](docs/STORMVAULT.md) | Cofre portátil `.stormvault` + como migrar de aparelho |
+| [`EXECUTAR.md`](EXECUTAR.md) | Instalação detalhada, troubleshooting, Android |
+
+## 9. Em aberto
 
 Ver [`ROADMAP.md`](ROADMAP.md) para a lista viva. Resumo do que falta:
 
