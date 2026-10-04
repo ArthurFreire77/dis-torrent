@@ -82,7 +82,9 @@ local.properties
 # Cofres portables e backups de identidade do usuário
 *.stormvault
 *.vps
-instalações/
+# Pastas de distribution com acento (historico do projeto)
+[instalacoes]*/
+[*nstalacoes]*/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Playwright / E2E
