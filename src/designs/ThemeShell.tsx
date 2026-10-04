@@ -4,12 +4,7 @@ import { activeToken, applyFormat } from '../shared/markdown'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import MessageList, { type MessageListHandle } from '../components/social/MessageList'
-import {
-  BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel,
-  PinsPanel, ProfileModal,
-  SearchPanel, ThreadList, ThreadViewModal, displayNameOf, useShortcuts,
-  type Command, type InboxTab,
-} from '../components/social/Social'
+import { BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel, PinsPanel, ProfileModal, SearchPanel, ThreadList, ThreadViewModal, useShortcuts, type Command, type InboxTab } from '../components/social/Social'
 import { services } from '../services'
 import type { Identity, MessageStatus, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
@@ -34,7 +29,7 @@ import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
 import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
-import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, isVideoName, mediaAutoFetchCap, isMediaName } from '../services/fileSwarm'
+import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, isVideoName, mediaAutoFetchCap } from '../services/fileSwarm'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import { throttleTrailing } from '../shared/perf'
 import { attachStream } from '../shared/mediaAttach'
@@ -69,14 +64,6 @@ const SERVER_TEMPLATES = [
   { id: 'friends', icon: 'M3 8h18 M3 12h18 M3 16h18', label: 'Amigos', desc: 'Só vocês, sem complicação.', channels: 'geral' },
 ]
 
-function statusGlyph(s: MessageStatus) {
-  if (s === 'delivered') return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={t.green} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12l5 5L17 7"/><path d="M9 12l5 5L24 7" transform="translate(-3,0) scale(0.9)"/></svg>
-  if (s === 'sent') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.muted} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12l5 5L20 7"/></svg>
-  if (s === 'sending') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.muted} strokeWidth="2.4" strokeLinecap="round"><circle cx="12" cy="12" r="9" strokeDasharray="40 16"/></svg>
-  if (s === 'pending') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.yellow} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-  if (s === 'failed') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.red} strokeWidth="2.4" strokeLinecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5 M12 16h.01"/></svg>
-  return null
-}
 
 function avatarColor(fp: string): string {
   const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
@@ -85,105 +72,6 @@ function avatarColor(fp: string): string {
   return palette[h % palette.length]
 }
 
-/**
- * Prévia inline de mídia no chat (igual Discord): imagem/vídeo anexado
- * RENDERIZA no card do arquivo — auto-fetch pelo swarm (respeitando o cap
- * de tamanho), blob URL e <img>/<video controls>. Sem isso o usuário tinha
- * que "Baixar" para ver o que recebeu. Erros são honestos e nunca quebram
- * o card (o botão Baixar segue disponível).
- */
-function MediaInlinePreview({ fileId, name, size, onTick }: { fileId: string; name: string; size: number; onTick?: () => void }) {
-  const [url, setUrl] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  const [imgErr, setImgErr] = useState(false)
-  const [zoom, setZoom] = useState(false)
-  const madeRef = useRef<string | null>(null)
-  const tickRef = useRef(onTick)
-  tickRef.current = onTick
-  useEffect(() => {
-    let alive = true
-    let cancelled = false
-    setErr(null)
-    setImgErr(false)
-    const have = fileSwarm.blobFor(fileId)
-    if (have) {
-      const u = URL.createObjectURL(have)
-      madeRef.current = u
-      if (alive) setUrl(u)
-      return () => { alive = false }
-    }
-    // O arquivo pode não estar em memória, mas já ter sido baixado antes e
-    // estar no spool em disco — `prepareMedia` reidrata antes de qualquer
-    // rede, e só depois decide se cabe no cap. Sem isso, reabrir o app
-    // rebaixava do swarm mídia que o usuário já tinha.
-    const sf = fileSwarm.files.get(fileId)
-    if (!sf) {
-      // anúncio ainda não chegou: a UI monta o card assim que ele chegar.
-      if (alive) setErr('anúncio ainda não chegou — aguarde o swarm')
-      return () => { alive = false }
-    }
-    let retries = 0
-    const attempt = () => {
-      if (cancelled || !alive) return
-      fileSwarm.prepareMedia(sf, undefined, 30_000)
-        .then(() => {
-          if (!alive || cancelled) return
-          const b = fileSwarm.blobFor(fileId)
-          if (b) {
-            const u = URL.createObjectURL(b)
-            madeRef.current = u
-            setUrl(u)
-            try { tickRef.current?.() } catch { /* ignore */ }
-          } else if (retries < 3) {
-            retries++
-            window.setTimeout(attempt, 1500 * retries)
-          } else {
-            setErr('anúncio ainda não chegou — aguarde o swarm')
-          }
-        })
-        .catch((e) => {
-          if (!alive || cancelled) return
-          const msg = String((e as Error)?.message ?? e)
-          if (retries < 3) {
-            retries++
-            window.setTimeout(attempt, 1500 * retries)
-          } else if (alive) {
-            setErr(msg)
-          }
-        })
-    }
-    const t = window.setTimeout(attempt, 400)
-    return () => { alive = false; cancelled = true; window.clearTimeout(t) }
-  }, [fileId, name, size])
-  useEffect(() => () => {
-    if (madeRef.current) { try { URL.revokeObjectURL(madeRef.current) } catch { /* ignore */ } madeRef.current = null }
-  }, [])
-  useEffect(() => {
-    if (!url) return
-    return () => {}
-  }, [url])
-  if (url) {
-    if (isVideoName(name)) {
-      return <video src={url} controls preload="metadata" style={{ marginTop: 10, maxWidth: 380, width: '100%', borderRadius: 10, background: '#000', display: 'block' }} />
-    }
-    if (imgErr) return <div style={{ marginTop: 8, fontSize: 11, color: '#ff9c9c' }}>prévia quebrou ao carregar — use Baixar</div>
-    return (
-      <>
-        <img src={url} alt={name} loading="lazy" onError={() => setImgErr(true)} onClick={() => setZoom(true)} title="clique para ampliar" style={{ marginTop: 10, maxWidth: 320, width: '100%', borderRadius: 10, display: 'block', cursor: 'zoom-in', aspectRatio: '16 / 10', objectFit: 'cover', background: '#1e1f22' }} />
-        {zoom && (
-          <div onClick={() => setZoom(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 90, cursor: 'zoom-out' }}>
-            <img src={url} alt={name} style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 12, objectFit: 'contain' }} />
-          </div>
-        )}
-      </>
-    )
-  }
-  if (err) return <div style={{ marginTop: 8, fontSize: 11, color: '#ff9c9c' }}>prévia: {err}</div>
-  if (size > mediaAutoFetchCap(name)) {
-    return <div style={{ marginTop: 8, fontSize: 11, color: '#949ba4' }}>prévia grande ({formatFileSize(size)}) — clique em Baixar para ver</div>
-  }
-  return <div style={{ marginTop: 8, fontSize: 11, color: '#949ba4' }}>carregando prévia via swarm…</div>
-}
 
 function Avatar({ name, fp, size }: { name: string; fp: string; size: number }) {
   const initial = (name || '?').trim().charAt(0).toUpperCase()
@@ -199,9 +87,6 @@ function PeerDot({ s }: { s: NetworkState }) {
   return <span style={{ position: 'absolute', right: -2, bottom: -2, width: 12, height: 12, background: c, border: '3px solid var(--sidebar)', borderRadius: '50%' }} />
 }
 
-function fmtTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
 
 // ---------- telas de conta ----------
 

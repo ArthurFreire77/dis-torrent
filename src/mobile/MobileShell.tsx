@@ -15,7 +15,7 @@ import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, type FileMsgM
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
-import MobileMessage, { avatarColor as mAvatarColor } from './MobileMessage'
+import MobileMessage from './MobileMessage'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { activeToken } from '../shared/markdown'
