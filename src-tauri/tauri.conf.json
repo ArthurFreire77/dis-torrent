@@ -28,11 +28,11 @@
   },
   "bundle": {
     "active": true,
-    "publisher": "FORGE",
-    "category": "Utility",
-    "copyright": "FORGE",
-    "shortDescription": "FORGE P2P",
-    "longDescription": "FORGE — comunicação P2P descentralizada, identidade ed25519, sem servidor central",
+    "publisher": "DisTorrent",
+    "category": "SocialNetworking",
+    "copyright": "Copyright © 2026 DisTorrent (MIT)",
+    "shortDescription": "DisTorrent — comunicação P2P cifrada fim-a-fim",
+    "longDescription": "DisTorrent — comunicação P2P descentralizada, local-first e cifrada fim-a-fim. Identidade ed25519 sem cadastro, sem servidor central, com voz, vídeo, servidores, canais e compartilhamento de arquivos em swarm.",
     "targets": [
       "deb",
       "appimage"
