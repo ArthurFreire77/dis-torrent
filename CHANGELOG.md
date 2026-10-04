@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 1.0.0-pre-alpha.1 — Primeira alpha pública
+
+Republicação do projeto com histórico limpo e documentação revisada.
+
+- **Histórico reescrito**: as chaves privadas de assinatura Android
+  (`*.jks`) estavam versionadas e foram removidas de todos os commits.
+- **Documentação corrigida**: `DESIGN_SYSTEM.md` descrevia 6 designs que nunca
+  existiram (há 1); `AUX_SERVICES.md` citava libp2p/QUIC/DCUtR (inexistentes
+  neste projeto); `PROTOCOL.md` classificava comunidades e sync como "não
+  implementado" (são reais, schema v8); `THREAT_MODEL.md` dizia que Tor estava
+  fora de escopo (existe modo de 7 saltos).
+- **Código morto removido**: 8 arquivos de frontend e 8 funções `pub` do Rust
+  sem nenhum chamador.
+- **Configuração**: `.gitignore` reescrito para a stack real; `.env.example`
+  sem o endpoint padrão morto; CI em 4 jobs.
+- **Instaladores** passam a ser GitHub Releases em vez de arquivos no repositório.
+
+Nota de numeração: as entradas abaixo são o registro histórico do projeto sob
+nomes e numerações anteriores (FORGE 2.x–5.x). A partir daqui a numeração é
+`1.0.0-pre-alpha.N` e o CHANGELOG passa a ser gerado em ordem cronológica a
+partir das tags do Git.
+
 ## 2.0.0 — Voz nativa em Rust: chamada funciona no Linux sem WebRTC
 
 O ponto de virada: o WebKitGTK do Ubuntu **não expõe `RTCPeerConnection`**, então
