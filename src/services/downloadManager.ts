@@ -157,15 +157,35 @@ class DownloadManager {
     this.emit()
   }
 
-  /** Remove da fila tudo que já acabou (completed/failed/cancelled). */
+  /**
+   * Remove da fila tudo que já acabou (completed/failed/cancelled).
+   *
+   * Solta também os CHUNKS do swarm: `fileSwarm.files` guardava cada arquivo
+   * com o `Map<data>` inteiro em RAM (até 200 MB por arquivo) e o
+   * `forge:filemeta:*` no localStorage crescia para sempre — e como
+   * `restoreLocalFiles()` re-registrava tudo a cada boot, o cache LRU do spool
+   * sofria churn de evicção constante. Só libera os chunks; o item continua
+   * re-adicionável (o metadado fica, para o re-download).
+   */
   clearFinished(): void {
+    const done: string[] = []
     for (const [fid, it] of [...this.items.entries()]) {
       if (it.status === 'completed' || it.status === 'failed' || it.status === 'cancelled') {
         this.items.delete(fid)
+        done.push(fid)
       }
+    }
+    for (const fid of done) {
+      try { fileSwarm.releaseChunks(fid) } catch { /* best-effort */ }
     }
     this.persist()
     this.emit()
+  }
+
+  /** Solta os chunks de um item removido da fila (RAM e spool em disco). */
+  releaseIfRemoved(fileId: string): void {
+    if (this.items.has(fileId)) return
+    try { fileSwarm.releaseChunks(fileId) } catch { /* best-effort */ }
   }
 
   activeCount(): number {
@@ -324,6 +344,10 @@ class DownloadManager {
       this.persist()
       this.emit()
       this.notifyDone(cur)
+      // Arquivo já está em disco: os chunks em RAM não servem mais para nada.
+      // Sem isto, `files` guardava o `Map<data>` inteiro (200 MB por arquivo)
+      // pelo resto da sessão, e `restoreLocalFiles` o re-registrava a cada boot.
+      try { fileSwarm.releaseChunks(fileId) } catch { /* best-effort */ }
     } catch (e: any) {
       const cur = this.items.get(fileId)
       if (cur) this.setStatus(cur, 'save-fail', String(e?.message ?? e))

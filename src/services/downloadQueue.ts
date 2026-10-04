@@ -74,11 +74,24 @@ export function nextDownloadStatus(status: DownloadStatus, ev: DownloadEvent): D
     case 'verifying':
       if (ev === 'verify-ok') return 'saving'
       if (ev === 'verify-fail') return 'failed'
+      // `save-fail`/`fail` TAMBÉM acontecem a partir de `verifying`: o
+      // `finalize` marca `verifying` e qualquer erro depois disso (blob OOM,
+      // divergência na montagem, falha de `arrayBuffer`) caía num `return
+      // status` — o item ficava PRESO em 'verifying' com 100% e sem botão de
+      // retry (`canRetry` só aceita 'failed').
+      if (ev === 'save-fail' || ev === 'fail') return 'failed'
       if (ev === 'cancel') return 'cancelled'
       return status
     case 'saving':
       if (ev === 'save-ok') return 'completed'
       if (ev === 'save-fail') return 'failed'
+      if (ev === 'cancel') return 'cancelled'
+      return status
+    case 'completed':
+      // `retry` num item já salvo volta para a fila: o usuário pode querer
+      // outra cópia do mesmo arquivo. Sem isto o botão de retry (visível
+      // quando `canRetry`) não fazia nada nos concluídos.
+      if (ev === 'retry') return 'queued'
       if (ev === 'cancel') return 'cancelled'
       return status
     case 'failed':

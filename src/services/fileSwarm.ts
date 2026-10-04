@@ -707,6 +707,36 @@ export class FileSwarm {
   }
 
   // Remove arquivo local (cancela download / limpa, inclusive o spool em disco)
+  /**
+   * Solta SÓ os chunks (RAM + spool em disco), mantendo metadado e registro.
+   *
+   * `remove()` apaga o arquivo inteiro, mas ele NUNCA era chamado pela UI —
+   * então `files` crescia a sessão toda guarda o `Map<data>` completo (200 MB
+   * por arquivo) e o `restoreLocalFiles` re-registrava tudo a cada boot. Este
+   * caminho é o "depois de salvar/falhar, o arquivo não precisa mais estar na
+   * RAM": o metadado continua, então um re-download funciona normal.
+   */
+  releaseChunks(file_id: string): void {
+    const sf = this.files.get(file_id)
+    if (!sf) return
+    // Nada em voo: chunk chegando agora preencheria de novo sem ninguém pedir.
+    this.clearRetry(file_id)
+    this.clearFileTimers(file_id)
+    sf.data.clear()
+    sf.have.clear()
+    if (services.kind === 'native') {
+      for (let i = 0; i < sf.chunks; i++) {
+        void services.cacheDelete(spoolKey(file_id, i)).catch(() => { /* best-effort */ })
+      }
+    }
+    this.hydratedFiles.delete(file_id)
+    const prefix = `${file_id}:`
+    for (const k of [...this.attempts.keys()]) if (k.startsWith(prefix)) this.attempts.delete(k)
+    for (const k of [...this.badPeers.keys()]) if (k.startsWith(prefix)) this.badPeers.delete(k)
+    for (const k of [...this.reqPeer.keys()]) if (k.startsWith(prefix)) this.reqPeer.delete(k)
+    this.onChange?.()
+  }
+
   remove(file_id: string) {
     const sf = this.files.get(file_id)
     this.files.delete(file_id)
@@ -778,10 +808,23 @@ export class FileSwarm {
       // Tauri nativo: salva em Downloads via backend (não depende de gesto de download)
       if (isTauri()) {
         try {
-          // converte blob -> base64 sem FileReader (mais confiável)
-          const ab = await blob.arrayBuffer()
-          const bytes = new Uint8Array(ab)
-          const dataB64 = b64(bytes)
+          // Monta o base64 a partir dos CHUNKS já em memória, sem `blob` nem
+          // `arrayBuffer()` intermediários. Antes: blob (N) + arrayBuffer (N)
+          // + Uint8Array (N) + string base64 (1.33N) ficavam vivos ao mesmo
+          // tempo — ~4.3x o arquivo. Num arquivo de 200 MB isso é ~860 MB
+          // vivos e o WebView morria ("save_file travou em decode") ou o
+          // desktop engasgava. Agora o pico é ~1.33x.
+          let bin = ''
+          const parts: string[] = []
+          for (let i = 0; i < sf.chunks; i++) {
+            const c = sf.data.get(i)
+            if (!c) throw new Error(`chunk ${i} sumiu antes do salvamento`)
+            parts.push(b64(c))
+            if (parts.length >= 16) { bin += parts.join(''); parts.length = 0 }
+          }
+          if (parts.length) bin += parts.join('')
+          parts.length = 0
+          const dataB64 = bin
           const saved = await tauriInvoke<string>('save_file', { name: safeName, dataB64 })
           const savedPath = typeof saved === 'string' && saved.trim() ? saved : safeName
           // Android: o Rust só escreve na área PRIVADA (scoped storage nega
