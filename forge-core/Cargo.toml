@@ -78,7 +78,7 @@ gstreamer-app = "0.22"
 # Captura de tela. Wayland SEM xdg-desktop-portal nao funciona (e' limitacao do
 # compositor, nao nossa) — o watchdog de 15s reporta isso em vez de fingir que
 # esta enviando.
-xcap = "3"
+xcap = "0.9"
 # Conversao de frame para JPEG (preview da UI).
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 jpeg-encoder = "0.6"
