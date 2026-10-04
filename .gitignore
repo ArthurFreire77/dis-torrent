@@ -83,8 +83,8 @@ local.properties
 *.stormvault
 *.vps
 # Pastas de distribution com acento (historico do projeto)
-[instalacoes]*/
-[*nstalacoes]*/
+/instalacoes/
+/instalac\u00e7\u00f5es/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Playwright / E2E
