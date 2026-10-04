@@ -67,6 +67,21 @@ cpal = { version = "0.18", features = ["pipewire"] }
 # AEC + supressao de ruido. `aec-rs` -> `aec-rs-sys`, que VEM com o codigo C do
 # speexdsp e compila com cmake: nao ha -dev, nem pkg-config, nem sudo.
 aec-rs = "1.0.0"
+# ---------------- video nativo (GStreamer + xcap) ----------------
+#
+# Encode/decode de video roda em GStreamer em vez de libav direto porque o
+# GStreamer ja e' dependencia do sistema no Linux (gst-plugins-good/base) e
+# traz vp8/h264/x264 prontos. `gstreamer-app` da o appsrc/appsink, que e' o
+# que liga o pipeline ao RTP do webrtc-rs.
+gstreamer = "0.22"
+gstreamer-app = "0.22"
+# Captura de tela. Wayland SEM xdg-desktop-portal nao funciona (e' limitacao do
+# compositor, nao nossa) — o watchdog de 15s reporta isso em vez de fingir que
+# esta enviando.
+xcap = "3"
+# Conversao de frame para JPEG (preview da UI).
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+jpeg-encoder = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
