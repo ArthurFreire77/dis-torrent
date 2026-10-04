@@ -1518,7 +1518,11 @@ impl VoiceMedia {
         source: &str,
         monitor_id: Option<u32>,
     ) -> Result<String, String> {
-        let source = if source == "screen" { "screen" } else { "camera" };
+        let source = if source == "screen" {
+            "screen"
+        } else {
+            "camera"
+        };
         let sess = self
             .inner
             .get(&(call_id.to_owned(), peer_fp.to_owned()))
@@ -2470,8 +2474,10 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
             if n <= 3 || n % 200 == 0 {
                 tracing::debug!(
                     "[video] recv pacote #{n} ssrc={} seq={} pt={} payload={}",
-                    pkt.header.ssrc, pkt.header.sequence_number,
-                    pkt.header.payload_type, pkt.payload.len()
+                    pkt.header.ssrc,
+                    pkt.header.sequence_number,
+                    pkt.header.payload_type,
+                    pkt.payload.len()
                 );
             }
             if dec.is_none() {
@@ -2493,7 +2499,10 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                     .as_deref()
                     .and_then(crate::net::media_video::extract_h264_sprop);
                 *sh.video_codec.lock().unwrap() = Some(mime.clone());
-                tracing::debug!("[video] decoder abrindo mime={mime} pt={pt} sprop={}", sprop.is_some());
+                tracing::debug!(
+                    "[video] decoder abrindo mime={mime} pt={pt} sprop={}",
+                    sprop.is_some()
+                );
                 let built = tokio::task::spawn_blocking(move || {
                     crate::net::media_video::VideoDecoder::new_with_pt(codec, pt, sprop.as_deref())
                 })
@@ -2530,8 +2539,12 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                         .await
                         {
                             let seq = sh_task.video_seq.fetch_add(1, Ordering::Relaxed);
-                            *sh_task.video_frame.lock().unwrap() =
-                                Some(VideoFrame { jpeg: jpg, w, h, seq });
+                            *sh_task.video_frame.lock().unwrap() = Some(VideoFrame {
+                                jpeg: jpg,
+                                w,
+                                h,
+                                seq,
+                            });
                             sh_task.frames_in.fetch_add(1, Ordering::Relaxed);
                         }
                     });

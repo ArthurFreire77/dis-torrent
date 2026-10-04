@@ -42,6 +42,13 @@ fn contrato_da_api() {
         plc_frames: 0u64,
         decode_errors: 0u64,
         rtt_ms: None,
+        mic_error: None,
+        video_state: None,
+        video_codec: None,
+        video_source: None,
+        video_error: None,
+        frames_in: None,
+        frames_out: None,
     };
     assert_eq!(s.jitter_depth_ms, VoiceMedia::jitter_depth_ms());
 

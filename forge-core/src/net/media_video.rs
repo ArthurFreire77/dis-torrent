@@ -223,76 +223,77 @@ fn build_encoder(desc: &str, camera: bool, payload_type: u8) -> Result<VideoEnco
 }
 
 impl VideoEncoder {
-/// Empurra um frame RGBA de tela (do xcap) no encoder. Só em encoder de tela.
-///
-/// `block=false` + `max-buffers=2` no appsrc: quando o encoder atrasa, o frame
-/// é DESCARTADO em vez de acumular latência — o comportamento certo para
-/// videochamada (tela parada vale mais que tela com 2 s de atraso).
-pub fn push_screen_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
-    if self.camera {
-        return Err("push_screen_frame chamado em encoder de câmera".into());
+    /// Empurra um frame RGBA de tela (do xcap) no encoder. Só em encoder de tela.
+    ///
+    /// `block=false` + `max-buffers=2` no appsrc: quando o encoder atrasa, o frame
+    /// é DESCARTADO em vez de acumular latência — o comportamento certo para
+    /// videochamada (tela parada vale mais que tela com 2 s de atraso).
+    pub fn push_screen_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
+        if self.camera {
+            return Err("push_screen_frame chamado em encoder de câmera".into());
+        }
+        let Some(src) = self.appsrc.as_ref() else {
+            return Err("encoder sem appsrc".into());
+        };
+        let need = (w as usize) * (h as usize) * 3;
+        if rgba.len() < need {
+            return Err(format!(
+                "frame de tela curto: {} bytes para {w}x{h} (esperado {need})",
+                rgba.len()
+            ));
+        }
+        let buf = gstreamer::Buffer::from_mut_slice(rgba.to_vec());
+        // FlowSuccess::Ok = enfileirado; Flushing/Eos = o encoder esta' fechando.
+        match src.push_buffer(buf) {
+            Ok(gst::FlowSuccess::Ok) => Ok(()),
+            Ok(other) => Err(format!("appsrc recusou o frame ({other:?})")),
+            Err(e) => Err(format!("appsrc recusou o frame: {e}")),
+        }
     }
-    let Some(src) = self.appsrc.as_ref() else {
-        return Err("encoder sem appsrc".into());
-    };
-    let need = (w as usize) * (h as usize) * 3;
-    if rgba.len() < need {
-        return Err(format!(
-            "frame de tela curto: {} bytes para {w}x{h} (esperado {need})",
-            rgba.len()
-        ));
+
+    /// Puxa pacotes RTP prontos (não bloqueia mais que `timeout`).
+    pub fn poll_rtp(&mut self, timeout: Duration) -> Option<Vec<u8>> {
+        let sample = self.sink.try_pull_sample(gst::ClockTime::from_nseconds(
+            timeout.as_nanos().min(u64::MAX as u128) as u64,
+        ))?;
+        let map = sample.buffer()?.map_readable().ok()?;
+        Some(map.as_slice().to_vec())
     }
-    let buf = gstreamer::Buffer::from_mut_slice(rgba.to_vec());
-    // FlowSuccess::Ok = enfileirado; Flushing/Eos = o encoder esta' fechando.
-    match src.push_buffer(buf) {
-        Ok(gst::FlowSuccess::Ok) => Ok(()),
-        Ok(other) => Err(format!("appsrc recusou o frame ({other:?})")),
-        Err(e) => Err(format!("appsrc recusou o frame: {e}")),
+
+    /// Último erro publicado no bus do encoder, se houver.
+    ///
+    /// Um pipeline quebrado não devolve sample — sem esta checagem, o chamador só
+    /// via "parou de chegar pacote" e não sabe se foi device, codec ou pipeline.
+    pub fn take_error(&mut self) -> Option<String> {
+        let Some(bus) = self.pipeline.bus() else {
+            return None;
+        };
+        let mut iter =
+            bus.iter_timed_filtered(Some(gst::ClockTime::ZERO), &[gst::MessageType::Error]);
+        let Some(msg) = iter.next() else {
+            return None;
+        };
+        // `Message` em 0.22 não tem `parse`: o erro vem na estrutura, campo
+        // "debug".
+        let detail = msg
+            .structure()
+            .and_then(|st| st.get::<String>("debug").ok())
+            .unwrap_or_else(|| "(sem detalhe)".to_string());
+        let domain = msg
+            .structure()
+            .and_then(|st| st.get::<&str>("domain").ok())
+            .unwrap_or("gstreamer");
+        Some(format!("encoder de vídeo [{domain}]: {detail}"))
     }
-}
 
-/// Puxa pacotes RTP prontos (não bloqueia mais que `timeout`).
-pub fn poll_rtp(&mut self, timeout: Duration) -> Option<Vec<u8>> {
-    let sample = self.sink.try_pull_sample(gst::ClockTime::from_nseconds(
-        timeout.as_nanos().min(u64::MAX as u128) as u64,
-    ))?;
-    let map = sample.buffer()?.map_readable().ok()?;
-    Some(map.as_slice().to_vec())
-}
-
-/// Último erro publicado no bus do encoder, se houver.
-///
-/// Um pipeline quebrado não devolve sample — sem esta checagem, o chamador só
-/// via "parou de chegar pacote" e não sabe se foi device, codec ou pipeline.
-pub fn take_error(&mut self) -> Option<String> {
-    let Some(bus) = self.pipeline.bus() else {
-        return None;
-    };
-    let mut iter = bus.iter_timed_filtered(Some(gst::ClockTime::ZERO), &[gst::MessageType::Error]);
-    let Some(msg) = iter.next() else {
-        return None;
-    };
-    // `Message` em 0.22 não tem `parse`: o erro vem na estrutura, campo
-    // "debug".
-    let detail = msg
-        .structure()
-        .and_then(|st| st.get::<String>("debug").ok())
-        .unwrap_or_else(|| "(sem detalhe)".to_string());
-    let domain = msg
-        .structure()
-        .and_then(|st| st.get::<&str>("domain").ok())
-        .unwrap_or("gstreamer");
-    Some(format!("encoder de vídeo [{domain}]: {detail}"))
-}
-
-/// Para o pipeline e FECHA o device.
-///
-/// `set_state(Null)` é o que realmente libera o v4l2. Sem ele a próxima
-/// `new_camera` falha com "device busy" — e o sintoma é "liguei a câmera de novo
-/// e ela não abre mais".
-pub fn stop(&mut self) {
-    let _ = self.pipeline.set_state(gstreamer::State::Null);
-}
+    /// Para o pipeline e FECHA o device.
+    ///
+    /// `set_state(Null)` é o que realmente libera o v4l2. Sem ele a próxima
+    /// `new_camera` falha com "device busy" — e o sintoma é "liguei a câmera de novo
+    /// e ela não abre mais".
+    pub fn stop(&mut self) {
+        let _ = self.pipeline.set_state(gstreamer::State::Null);
+    }
 }
 
 // ---------------------------------------------------------------- decoder
@@ -485,7 +486,12 @@ pub fn grab_screen_frame(monitor: Option<u32>) -> Option<(Vec<u8>, u32, u32)> {
     }
     // Reduz para o tamanho de envio: tela 4K em videochamada e' CPU que nao
     // volta (e enche o encoder de quadros que serao descartados).
-    let small = image::imageops::resize(&rgba, CAPTURE_W, CAPTURE_H, image::imageops::FilterType::Triangle);
+    let small = image::imageops::resize(
+        &rgba,
+        CAPTURE_W,
+        CAPTURE_H,
+        image::imageops::FilterType::Triangle,
+    );
     let mut rgb = Vec::with_capacity((CAPTURE_W * CAPTURE_H * 3) as usize);
     for px in small.as_raw().chunks_exact(4) {
         rgb.extend_from_slice(&px[..3]);

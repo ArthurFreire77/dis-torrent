@@ -5,13 +5,6 @@ pub mod mdns;
 /// AEC + supressao de ruido (speexdsp). Mesmo gate linux-only de `media_voice`.
 #[cfg(target_os = "linux")]
 pub mod media_dsp;
-/// Camada de voz NATIVA (webrtc-rs + cpal + Opus).
-///
-/// Linux only, e por decisão: ver o bloco de dependências em Cargo.toml. Nos
-/// outros sistemas o WebRTC do navegador é o dono das chamadas e este módulo
-/// sequer existe — é o que garante que aquele caminho não muda em nada.
-#[cfg(target_os = "linux")]
-pub mod media_voice;
 /// Video nativo (GStreamer + xcap). Mesmo gate linux-only de `media_voice`.
 ///
 /// Ainda não é referenciado por `media_voice`: o encoder/decoder existem e
@@ -19,6 +12,13 @@ pub mod media_voice;
 /// `write_sample`, watchdog). Ver README do módulo.
 #[cfg(target_os = "linux")]
 pub mod media_video;
+/// Camada de voz NATIVA (webrtc-rs + cpal + Opus).
+///
+/// Linux only, e por decisão: ver o bloco de dependências em Cargo.toml. Nos
+/// outros sistemas o WebRTC do navegador é o dono das chamadas e este módulo
+/// sequer existe — é o que garante que aquele caminho não muda em nada.
+#[cfg(target_os = "linux")]
+pub mod media_voice;
 pub mod natpmp;
 pub mod peer_relay;
 pub mod relay;
