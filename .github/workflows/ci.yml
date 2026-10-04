@@ -48,7 +48,11 @@ jobs:
             libasound2-dev pkg-config build-essential cmake \
             libglib2.0-dev libdbus-1-dev \
             libwayland-dev libxkbcommon-dev \
-            libpipewire-0.3-dev libclang-dev clang
+            libpipewire-0.3-dev libclang-dev clang \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
       - run: cargo fmt --check
         working-directory: forge-core
       - run: cargo test
@@ -74,7 +78,11 @@ jobs:
             libasound2-dev pkg-config build-essential cmake \
             libglib2.0-dev libdbus-1-dev \
             libwayland-dev libxkbcommon-dev \
-            libpipewire-0.3-dev libclang-dev clang
+            libpipewire-0.3-dev libclang-dev clang \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
       - run: cargo check
         working-directory: host
 
