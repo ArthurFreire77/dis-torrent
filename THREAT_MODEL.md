@@ -1,10 +1,16 @@
-# THREAT MODEL — FORGE v1 (texto P2P LAN)
+# THREAT MODEL — DisTorrent
 
 ## Garantias EXATAS (nem mais, nem menos)
 
-- **PSEUDONIMIDADE** — sua identidade é um par de chaves. Nenhum email/telefone. Mas seu IP é visível a quem você conecta. **Não é anonimato** (para anonimato seria preciso Tor/mixnets — fora do escopo).
+- **PSEUDONIMIDADE** — sua identidade é um par de chaves. Nenhum e-mail, nenhum
+  telefone, nenhum cadastro. Mas seu IP é visível a quem você conecta.
+- **Torneamento opcional de rede** — existe um modo **Tor de 7 saltos**
+  (`privacy.mode = full`): todo tráfego Direct **e** o relay saem pelo SOCKS5 do
+  Tor, e announce + descoberta LAN ficam desligados. Isso protege o transporte,
+  **não** cobre WebRTC/STUN — ver "Limitações assumidas" abaixo.
 - **Privacidade de conteúdo** — mensagens DM são cifradas fim-a-fim (X25519 efêmero + HKDF + ChaCha20Poly1305). Observador de rede vê metadados (quem fala com quem, quando, tamanho) — mitigações futuras: padding, transporte variado.
-- **Privacidade local** — chave privada no keyring do SO (Secret Service/Keychain/DPAPI). Fallback SQLite sem cifrar é **documentado e visível** (Linux sem secret service). Backup/export seguro: existe desde a 5.4 (.stormvault v1 — ver `docs/STORMVAULT.md`).
+- **Privacidade local** — chave privada no keyring do SO (Secret Service/Keychain/DPAPI). Fallback SQLite sem cifrar é **documentado e visível** (Linux sem secret service). Backup/export seguro: cofre portátil `.stormvault` v1 (Argon2id + ChaCha20Poly1305) — ver
+[`docs/STORMVAULT.md`](docs/STORMVAULT.md).
 
 ## Ameaças e mitigações (estado atual)
 
@@ -28,8 +34,13 @@
 
 ## Bootstrap HTTP (FORGE_BOOTSTRAP_URL) — o que sai do seu dispositivo
 
-Opcional (ativa por padrão com o endpoint público `forge-bootstrap.fly.dev`; pode ser
-desativado apontando `FORGE_BOOTSTRAP_URL` para vazio/endpoint próprio):
+**Desligado por padrão.** Não existe endpoint embutido: sem `FORGE_BOOTSTRAP_URL`
+apontando para um tracker que você mesmo hospeda (`host --bootstrap PORTA`), o
+announce e o lookup de amigos por tracker não rodam — o motor funciona só com
+LAN (UDP/mDNS), MQTT, STUN/UPnP/NAT-PMP e hole punching. Para ativar, aponte a
+variável para a sua instância (ver `.env.example`).
+
+Quando ativado:
 
 - **Announce** (a cada 30s, modos `normal`/`encrypted` APENAS): envia ao serviço de
   terceiros seu **fingerprint, IP público (via UPnP ou api.ipify), nickname e porta TCP**.
@@ -48,7 +59,10 @@ Nunca logamos: chave privada, corpos de mensagem, segredos de sessão. Logs cobr
 
 ## Limitações assumidas (honestidade > marketing)
 
-1. **NÃO é anonimato.** Pseudônimo + E2E de conteúdo.
+1. **Não é anonimato.** É pseudônimo + E2E de conteúdo. O modo Tor protege o
+   transporte e esconde o IP de quem observa a rede, mas não cobre o WebRTC/STUN
+   da chamada — que faz STUN direto para o servidor de STUN, potencialmente
+   associado ao seu IP real. Para chamada com Tor, é preciso TURN via Tor.
 2. **Discovery LAN expõe presença** na rede local.
 3. **Fallback de keyring** (sem secret service) guarda a chave em SQLite plano — visível na UI/documentação; mitigue exportando um .stormvault (cifrado) e guardando fora do device.
 4. Cripto é feita **apenas** com primitivas maduras (ed25519-dalek, x25519-dalek, chacha20poly1305, hkdf, blake3). Nenhuma primitiva própria. A **composição** (handshake) é nossa e está documentada aqui e em `protocol.rs`.

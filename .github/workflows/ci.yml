@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   web:
@@ -18,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+      - run: npm run test:unit
       - run: npm run build
 
   core:
@@ -31,6 +35,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: forge-core
+      - run: cargo fmt --check
+        working-directory: forge-core
       - run: cargo test
         working-directory: forge-core
       - run: cargo clippy -- -D warnings
@@ -66,3 +72,15 @@ jobs:
   #   runs-on: windows-latest
   # desktop-macos:
   #   runs-on: macos-latest
+
+  host:
+    name: host (check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+      - run: cargo check
+        working-directory: host

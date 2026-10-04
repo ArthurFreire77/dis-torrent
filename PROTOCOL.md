@@ -37,10 +37,33 @@ Receptor valida SEMPRE: `author_fp == peer da conexão`, `verify(sig, pubkey do 
 - Mensagem (out): `pending → sending → sent → delivered` (ou `failed`); (in): `ok`
 - Outbox: mensagens `pending` são reenviadas ao reconectar (até ACK); dedupe por `id` no receptor.
 
-## Storage (SQLite — schema v1)
-`kv, peers, conversations, messages, outbox` — ver `forge-core/src/storage.rs`. Append-only para mensagens.
+## Storage (SQLite — schema v8)
 
-## Fases seguintes (desenho, não implementado)
-- Comunidades: `Community{community_id, owner_fp, ...}`, canais/categorias; mensagens de canal assinadas pelo autor e autorizadas pelo host (permissões no core).
-- Convites: token assinado pelo dono `{community_id, exp, uses}` — sem segredo permanente em URL.
-- Sync: vector clock por log; `MessageEnvelope` já é append-only e verificável fora de banda.
+`forge-core/src/storage.rs`. Tabelas por versão de migration:
+
+| v | Adiciona |
+|---|---|
+| 1 | `kv`, `peers`, `conversations`, `messages`, `outbox` |
+| 2 | identidade local (apelido, segredo) |
+| 3 | contatos e mensagens com anexos/metadados |
+| 4 | `communities`, `channels`, `community_members`, `bots` |
+| 5 | `server_rules`, `audit_log`, `reputation`, `reports` |
+| 6 | wizard de criação de servidor (categorias, cargos, bots) |
+| 7 | `thread_id` (threads) |
+| 8 | mute global de conta |
+
+`MessageEnvelope` é append-only e verificável fora de banda (a assinatura é do
+autor e o receptor revalida sempre).
+
+## Comunidades, canais e convites (implementado)
+
+Não é roadmap — está no core, com migration, comando Tauri e teste:
+
+- **Comunidades** — `Community{community_id, owner_fp, …}` em `social.rs`; canais
+  com categoria e posição; criação via wizard (`channels.rs`, `community_meta.rs`).
+- **Convites** — token assinado pelo dono com expiração e número de usos
+  (`forge/v1|invite|community|member|exp`); nenhum segredo permanente em URL.
+- **Permissões** — validadas no core (`moderation.rs`), nunca na UI. Kick, ban,
+  mute e shadow-ban com registro em `audit_log`.
+- **Cargos e bots** — persistidos e sincronizados do dono para os membros, com
+  fallback explícito para `localStorage` no modo navegador.

@@ -94,7 +94,7 @@ direto com o IP do outro aparelho.
 
 **Tracker bootstrap self-hosted (1 comando, zero dependência de terceiros):**
 ```bash
-cargo run -p forge-host -- --bootstrap 8090        # no seu VPS público
+npm run host -- --bootstrap 8090        # no seu VPS público
 # nos clientes:
 FORGE_BOOTSTRAP_URL=http://seu-vps:8090 npm run tauri:dev
 ```
