@@ -338,16 +338,46 @@ pub mod audio {
                 return Err(e);
             }
             if self.inner.mic_attempted.swap(true, Ordering::SeqCst) {
-                return match &*self.inner.mic_error.lock().unwrap() {
-                    Some(e) => Err(e.clone()),
-                    None => Ok(()),
-                };
+                // Ja' ha uma abertura EM CURSO (ou ja' falhou). Antes esta porta
+                // devolvia `Ok(())` sempre que `mic_error` ainda era `None` — ou
+                // seja, SUCESSO com o mic ainda fechando. O `subscribe`
+                // acreditava, o sender nascia, e `packets_out` ficava em 0 para
+                // sempre ("Linux nao envia nada", sem erro nenhum).
+                // Aqui: espera a abertura terminar (estamos numa task
+                // bloqueante do voice-core; abrir o device leva ~1 s).
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    if self.inner.has_capture.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    if let Some(e) = &*self.inner.mic_error.lock().unwrap() {
+                        return Err(e.clone());
+                    }
+                    if Instant::now() >= deadline {
+                        tracing::warn!("[voice] microfone ainda nao abriu apos 3s de espera");
+                        return Err("microfone demorando demais para abrir".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
             }
             if let Err(e) = self.open_mic() {
                 *self.inner.mic_error.lock().unwrap() = Some(e.clone());
                 return Err(e);
             }
             Ok(())
+        }
+
+        /// Re-tenta abrir o microfone (ver `VoiceMedia::retry_mic`).
+        pub fn retry_mic(&self) {
+            if self.inner.has_capture.load(Ordering::SeqCst) {
+                return;
+            }
+            self.inner.mic_attempted.store(false, Ordering::SeqCst);
+            if self.ensure_mic().is_ok() {
+                // Sucesso agora: limpa o erro velho para o painel nao mostrar
+                // motivo de uma falha que ja' passou.
+                *self.inner.mic_error.lock().unwrap() = None;
+            }
         }
 
         /// Assina o fluxo do microfone. Devolve (id para `unsubscribe`, receptor).
@@ -873,6 +903,26 @@ pub struct VoiceStats {
     pub plc_frames: u64, // frames mascarados por perda
     pub decode_errors: u64,
     pub rtt_ms: Option<u64>,
+    /// Ultimo erro de ABERTURA do microfone (cpal). `Some` com
+    /// `packets_out == 0` = este lado nao envia audio — o painel mostra o motivo
+    /// em vez de "conectando" mudo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_error: Option<String>,
+    /// "off" | "starting" | "live" | "failed". "live" com `frames_out == 0`
+    /// NAO e' sinal de saude: e' encoder que subiu sem produzir. O watchdog de
+    /// 15s converte isso em "failed" com o motivo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames_out: Option<u64>,
 }
 
 /// Gerenciador de midia de voz. Estado interno por (call_id, peer_fp): varios
@@ -913,6 +963,29 @@ struct Shared {
     /// do outro lado SEM alterar o payload (continua Opus puro, e um navegador
     /// continua entendendo o RTP).
     base_ts: Mutex<Option<u32>>,
+    /// SDP REMOTO: so' para o `sprop-parameter-sets` do H264. Sem ele o decoder
+    /// so' funciona quando o peer manda SPS in-band, e H264 ficava preto mesmo
+    /// com o RTP chegando.
+    remote_sdp: Mutex<Option<String>>,
+    // ---- video nativo ----
+    /// Pedido de video pendente/ativo: ("camera"|"screen", monitor).
+    video_want: Mutex<Option<(String, Option<u32>)>>,
+    /// "off" | "starting" | "live" | "failed".
+    video_state: Mutex<String>,
+    video_codec: Mutex<Option<String>>,
+    video_error: Mutex<Option<String>>,
+    video_source: Mutex<Option<String>>,
+    frames_in: AtomicU64,
+    frames_out: AtomicU64,
+    video_seq: AtomicU64,
+    /// Ultimo frame remoto decodificado (a UI faz polling).
+    video_frame: Mutex<Option<VideoFrame>>,
+    /// Tasks de RECEBIMENTO (audio + decode de video). Antes os handles eram
+    /// descartados no `on_track` e o pipeline GStreamer de decode sobrevivia ao
+    /// hangup — e cada renegociacao abria OUTRO decoder no mesmo `Shared`.
+    recv_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+    /// Track local de video (criada na renegociacao; a task de envio escreve nela).
+    video_track: Mutex<Option<Arc<TrackLocalStaticSample>>>,
 }
 
 impl Shared {
@@ -933,6 +1006,18 @@ impl Shared {
             inbox,
             in_link: Mutex::new(None),
             base_ts: Mutex::new(None),
+            remote_sdp: Mutex::new(None),
+            video_want: Mutex::new(None),
+            video_state: Mutex::new("off".to_string()),
+            video_codec: Mutex::new(None),
+            video_error: Mutex::new(None),
+            video_source: Mutex::new(None),
+            frames_in: AtomicU64::new(0),
+            frames_out: AtomicU64::new(0),
+            video_seq: AtomicU64::new(0),
+            video_frame: Mutex::new(None),
+            recv_tasks: Mutex::new(Vec::new()),
+            video_track: Mutex::new(None),
         }
     }
 
@@ -950,6 +1035,13 @@ impl Shared {
             plc_frames: self.plc_frames.load(Ordering::Relaxed),
             decode_errors: self.decode_errors.load(Ordering::Relaxed),
             rtt_ms: *self.rtt_ms.lock().unwrap(),
+            mic_error: self::audio::hub().mic_error(),
+            video_state: Some(self.video_state.lock().unwrap().clone()),
+            video_codec: self.video_codec.lock().unwrap().clone(),
+            video_source: self.video_source.lock().unwrap().clone(),
+            video_error: self.video_error.lock().unwrap().clone(),
+            frames_in: Some(self.frames_in.load(Ordering::Relaxed)),
+            frames_out: Some(self.frames_out.load(Ordering::Relaxed)),
         }
     }
 }
@@ -1042,7 +1134,15 @@ impl PeerConnectionEventHandler for H {
     }
 
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
-        spawn_recv(track, self.sh.clone(), *self.sh.in_link.lock().unwrap());
+        let kind = track.kind().await;
+        tracing::debug!("[voice] on_track kind={kind:?}");
+        if kind == RtpCodecKind::Video {
+            let h = spawn_video_recv(track, self.sh.clone());
+            self.sh.recv_tasks.lock().unwrap().push(h);
+        } else {
+            let h = spawn_recv(track, self.sh.clone(), *self.sh.in_link.lock().unwrap());
+            self.sh.recv_tasks.lock().unwrap().push(h);
+        }
     }
 }
 
@@ -1205,13 +1305,14 @@ impl VoiceMedia {
             // Mesmo de `create_offer`: insere antes dos passos que podem falhar
             // para que `close_key` possa desfazer microfone/inbox/sockets.
             i.insert((c.clone(), p.clone()), sess.clone());
-            let desc = match RTCSessionDescription::offer(s) {
+            let desc = match RTCSessionDescription::offer(s.clone()) {
                 Ok(d) => d,
                 Err(e) => return Err(err(e)),
             };
             if let Err(e) = sess.pc.set_remote_description(desc).await {
                 return Err(err(e));
             }
+            *sess.sh.remote_sdp.lock().unwrap() = Some(s);
             match sess.pc.create_answer(None).await {
                 Ok(answer) => match sess.pc.set_local_description(answer).await {
                     Ok(()) => wait_local_sdp(&sess.pc).await,
@@ -1320,6 +1421,14 @@ impl VoiceMedia {
             for h in sess.tasks.lock().unwrap().drain(..) {
                 h.abort();
             }
+            // Receiving + decode de video tambem morrem aqui (ver
+            // `Shared::recv_tasks`): sem isso o pipeline GStreamer vazava a cada
+            // hangup/renegociacao.
+            for h in sess.sh.recv_tasks.lock().unwrap().drain(..) {
+                h.abort();
+            }
+            *sess.sh.video_state.lock().unwrap() = "off".to_string();
+            *sess.sh.video_frame.lock().unwrap() = None;
             sess.mic_sub.lock().unwrap().take();
             if sess.mic_id != 0 {
                 self::audio::hub().unsubscribe(sess.mic_id);
@@ -1382,6 +1491,98 @@ impl VoiceMedia {
     pub fn jitter_depth_ms() -> u32 {
         JITTER_DEPTH.as_millis() as u32
     }
+
+    /// Re-tenta abrir o microfone.
+    ///
+    /// Sem isto, uma falha no boot (PipeWire ainda subindo, device ocupado por
+    /// outro app) marcava `mic_attempted` para sempre e TODAS as chamadas
+    /// seguintes nasciam so-recebendo ate reiniciar o app. Barato quando o mic
+    /// ja' esta' aberto (sai no primeiro `if` do `ensure_mic`).
+    pub fn retry_mic(&self) {
+        self::audio::hub().retry_mic();
+    }
+
+    // ---------------- video nativo ----------------
+    //
+    // O encoder e o decoder vivem em `media_video` (GStreamer). Aqui so' mora
+    // o ESTADO por sessao e o laco que liga o encoder a PeerConnection.
+
+    /// Liga o envio de video ("camera"|"screen", `monitor_id` so' p/ tela).
+    /// Idempotente: se ja' esta' no ar, devolve o codec sem subir um segundo
+    /// encoder (dois encoders no mesmo stream RTP congelavam o video pelo resto
+    /// da chamada — o jitter buffer do receptor via seq intercalado).
+    pub fn video_start(
+        &self,
+        call_id: &str,
+        peer_fp: &str,
+        source: &str,
+        monitor_id: Option<u32>,
+    ) -> Result<String, String> {
+        let source = if source == "screen" { "screen" } else { "camera" };
+        let sess = self
+            .inner
+            .get(&(call_id.to_owned(), peer_fp.to_owned()))
+            .ok_or_else(|| "sessao inexistente".to_string())?;
+        {
+            // Check-then-act ATOMICO: mesmo Mutex do `video_state`, e
+            // "starting" e' gravado ANTES de qualquer `await`.
+            let mut st = sess.sh.video_state.lock().unwrap();
+            if st.as_str() == "live" || st.as_str() == "starting" {
+                let codec = sess
+                    .sh
+                    .video_codec
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "video/VP8".to_string());
+                return Ok(codec);
+            }
+            *sess.sh.video_want.lock().unwrap() = Some((source.to_string(), monitor_id));
+            *st = "starting".to_string();
+            *sess.sh.video_error.lock().unwrap() = None;
+        }
+        // `Session` e' `Arc`: clona para dar a um lado a sessao (a task) e ao
+        // outro o handle para abortar. Sem o registro em `sess.tasks`, a task de
+        // video sobrevivia ao hangup (so' o `close_key` a encerra).
+        let for_task = sess.clone();
+        let for_abort = sess.clone();
+        let want = source.to_string();
+        self.inner.core.run(async move {
+            let h = tokio::spawn(async move { video_send_task(for_task, want).await });
+            for_abort.tasks.lock().unwrap().push(h.abort_handle());
+            Ok::<(), String>(())
+        })??;
+        Ok("starting".to_string())
+    }
+
+    /// Desliga o envio de video (o recebimento continua; o tile some na UI).
+    pub fn video_stop(&self, call_id: &str, peer_fp: &str) {
+        if let Some(sess) = self.inner.get(&(call_id.to_owned(), peer_fp.to_owned())) {
+            *sess.sh.video_state.lock().unwrap() = "off".to_string();
+            *sess.sh.video_want.lock().unwrap() = None;
+        }
+    }
+
+    /// Ultimo frame remoto decodificado (JPEG + dimensoes + seq). O frontend
+    /// faz polling (~10 fps) — sem inundar o IPC com eventos.
+    pub fn video_frame(&self, call_id: &str, peer_fp: &str) -> Option<VideoFrame> {
+        self.inner
+            .get(&(call_id.to_owned(), peer_fp.to_owned()))?
+            .sh
+            .video_frame
+            .lock()
+            .unwrap()
+            .clone()
+    }
+}
+
+/// Ultimo frame remoto decodificado (a UI faz polling; nao emitimos evento).
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct VideoFrame {
+    pub jpeg: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    pub seq: u64,
 }
 
 impl Inner {
@@ -1977,6 +2178,370 @@ fn push_pcm(sh: &Arc<Shared>, pcm: &[i16], n: usize, id: Option<(u32, u64)>) {
 }
 
 // ---------------------------------------------------------------- stats
+
+// ---------------------------------------------------------------- video
+
+/// Marca falha de video com motivo (o painel mostra em vez de tile preto).
+fn video_fail(sh: &Arc<Shared>, msg: String) {
+    tracing::warn!("[video] {msg}");
+    *sh.video_state.lock().unwrap() = "failed".to_string();
+    *sh.video_error.lock().unwrap() = Some(msg);
+}
+
+/// Teto de FPS do envio de video.
+const VIDEO_FPS: u32 = 30;
+/// Intervalo entre quadros: 30 fps => ~33 ms.
+const VIDEO_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Janela do watchdog de envio: encoder "live" que nao cospe pacote nenhum
+/// durante isto e' envio morto. Camera escura AINDA gera frames, entao 15 s
+/// sem pacote = captura travada de verdade.
+const VIDEO_STALL: Duration = Duration::from_secs(15);
+
+/// Cria a track de video, registra o sender e devolve o codec/PT que a
+/// PeerConnection REALMENTE escolheu.
+///
+/// Separate do laco porque o PT so' existe depois do answer: `add_track` roda
+/// aqui e so' com a renegociacao feita que o sender diz qual codec e qual PT.
+/// Montar o encoder antes seria chute — e chute de PT e' exatamente o que fazia
+/// o video "funcionar contra o nosso build e sumir contra o Android".
+async fn add_video_transceiver(sess: &Arc<Session>) -> Result<(String, u8), String> {
+    let sh = sess.sh.clone();
+    let vtl = TrackLocalStaticSample::new(
+        Instant::now(),
+        MediaStreamTrack::new(
+            format!("{}-video", sess.peer_fp),
+            "video".to_string(),
+            "video0".to_string(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc_for(&sess.call_id, &sess.peer_fp)),
+                    ..Default::default()
+                },
+                // VP8 primeiro: e' o codec que TODOS os navegadores aceitam e o
+                // unico que o pipeline do GStreamer garante aqui. O PT real e'
+                // reescrito pela renegociacao; este e' so' a proposta.
+                codec: RTCRtpCodec {
+                    mime_type: "video/VP8".to_owned(),
+                    clock_rate: 90_000,
+                    channels: 0,
+                    sdp_fmtp_line: String::new(),
+                    rtcp_feedback: vec![],
+                },
+                ..Default::default()
+            }],
+        ),
+    )
+    .map_err(|e| format!("track de video recusada: {e}"))?;
+    let vtl: Arc<TrackLocalStaticSample> = Arc::new(vtl);
+    let sender = sess
+        .pc
+        .add_track(Arc::clone(&vtl) as Arc<dyn TrackLocal>)
+        .await
+        .map_err(|e| format!("peer recusou a track de video: {e}"))?;
+
+    let params = sender
+        .get_parameters()
+        .await
+        .map_err(|e| format!("vídeo: sender sem parâmetros: {e}"))?;
+    let c = params
+        .rtp_parameters
+        .codecs
+        .iter()
+        .find(|c| c.rtp_codec.mime_type.starts_with("video"))
+        .ok_or_else(|| {
+            format!(
+                "vídeo não foi negociado no SDP (o sender ficou só com: {})",
+                params
+                    .rtp_parameters
+                    .codecs
+                    .iter()
+                    .map(|c| c.rtp_codec.mime_type.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let mime = c.rtp_codec.mime_type.clone();
+    let pt = c.payload_type;
+    *sh.video_track.lock().unwrap() = Some(vtl);
+    Ok((mime, pt))
+}
+
+/// Envia video pela MESMA PeerConnection da voz.
+///
+/// Espera conectar -> cria track e descobre codec/PT -> monta encoder ->
+/// laco que puxa pacotes RTP e escreve na track, com watchdog de 15 s.
+async fn video_send_task(sess: Arc<Session>, want_source: String) {
+    let sh = sess.sh.clone();
+    let Some((_, want_monitor)) = sh.video_want.lock().unwrap().clone() else {
+        *sh.video_state.lock().unwrap() = "off".to_string();
+        return;
+    };
+    let is_screen = want_source == "screen";
+    if !wait_connected(&sh, Duration::from_secs(30)).await {
+        video_fail(&sh, "vídeo não iniciou: a chamada não conectou".into());
+        return;
+    }
+    // Re-avalia: o usuario pode ter desligado a camera enquanto o ICE subia.
+    if sh.video_state.lock().unwrap().as_str() != "starting" {
+        return;
+    }
+
+    let (mime, pt) = match add_video_transceiver(&sess).await {
+        Ok(v) => v,
+        Err(e) => {
+            video_fail(&sh, e);
+            return;
+        }
+    };
+    let codec = crate::net::media_video::VideoCodec::from_mime(&mime);
+    let want = codec.mime();
+    *sh.video_codec.lock().unwrap() = Some(want.to_string());
+    *sh.video_source.lock().unwrap() = Some(want_source.clone());
+    sh.frames_out.store(0, Ordering::Relaxed);
+    tracing::debug!("[video] enviando ({want}, {want_source}) pt={pt}");
+
+    let Some(vtl) = sh.video_track.lock().unwrap().clone() else {
+        video_fail(&sh, "vídeo: track local não foi criada".into());
+        return;
+    };
+
+    // Encoder: construcao bloqueante (v4l2src/xscreen abrem device), fora do
+    // laco quente e fora do worker de audio.
+    let built = tokio::task::spawn_blocking(move || {
+        if is_screen {
+            crate::net::media_video::new_screen(codec, pt, VIDEO_FPS)
+        } else {
+            crate::net::media_video::new_camera(codec, pt, VIDEO_FPS)
+        }
+    })
+    .await;
+    let mut enc: Option<crate::net::media_video::VideoEncoder> = match built {
+        Ok(Ok(e)) => Some(e),
+        Ok(Err(e)) => {
+            video_fail(&sh, e);
+            return;
+        }
+        Err(_) => {
+            video_fail(&sh, "encoder de vídeo: tarefa de construção caiu".into());
+            return;
+        }
+    };
+
+    *sh.video_state.lock().unwrap() = "live".to_string();
+    let mut last_progress = Instant::now();
+    let mut grab_miss: u32 = 0;
+
+    loop {
+        if sess.closed.load(Ordering::SeqCst) {
+            break;
+        }
+        if sh.video_state.lock().unwrap().as_str() != "live" {
+            break;
+        }
+        // `take()`: o encoder e' MOVIDO para dentro da `spawn_blocking` (ele
+        // precisa estar la para o poll_rtp). O `Option` existe para o `break`
+        // do meio do laco nao deixar um valor ja movido.
+        let Some(mut enc2) = enc.take() else { break };
+        // Iteracao bloqueante: tick de tela + pacotes RTP prontos. A cadencia
+        // do loop (~poll 60 ms + captura) dita ~10 fps de tela sozinha.
+        let pumped = tokio::task::spawn_blocking(
+            move || -> (Vec<Vec<u8>>, Option<String>, bool, crate::net::media_video::VideoEncoder) {
+            let mut grab_ok = !is_screen;
+            if is_screen {
+                match crate::net::media_video::grab_screen_frame(want_monitor) {
+                    Some((rgb, w, h)) => {
+                        let _ = enc2.push_screen_frame(&rgb, w, h);
+                        grab_ok = true;
+                    }
+                    None => grab_ok = false,
+                }
+            }
+            let mut pkts = Vec::new();
+            // Primeiro com espera curta (cadencia), resto sem esperar.
+            if let Some(p) = enc2.poll_rtp(Duration::from_millis(60)) {
+                pkts.push(p);
+                while pkts.len() < 64 {
+                    match enc2.poll_rtp(Duration::ZERO) {
+                        Some(p) => pkts.push(p),
+                        None => break,
+                    }
+                }
+            }
+            let err = enc2.take_error();
+            (pkts, err, grab_ok, enc2)
+            },
+        )
+        .await;
+        let (pkts, enc_err, grab_ok, encoder) = match pumped {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        // Devolve o encoder ao laco ANTES de qualquer `break`: ele foi movido
+        // para dentro da `spawn_blocking`, e sem este passo o `enc.stop()` do
+        // fim nao acha o encoder e o device de video fica aberto.
+        enc = Some(encoder);
+        if let Some(e) = enc_err {
+            video_fail(&sh, e);
+            break;
+        }
+        if grab_ok {
+            grab_miss = 0;
+        } else {
+            grab_miss = grab_miss.saturating_add(1);
+        }
+        // `write_sample` pede ssrc + payload type: sao os do transceiver que
+        // acabamos de negociar, e NAO um chute.
+        let Some(ssrc) = vtl.ssrcs().await.first().copied() else {
+            video_fail(&sh, "vídeo: a track local ficou sem ssrc".into());
+            break;
+        };
+        let now_ts = rtp_ts_video();
+        let sent = pkts.len();
+        for p in pkts {
+            let sample = Sample {
+                data: Bytes::from(p),
+                // `Sample::duration` = duracao REAL de wall clock; e' dela que
+                // o packetizer deriva o timestamp RTP de video (90 kHz).
+                duration: VIDEO_FRAME_INTERVAL,
+                timestamp: Instant::now(),
+                packet_timestamp: now_ts,
+                prev_dropped_packets: 0,
+                prev_padding_packets: 0,
+            };
+            if vtl.write_sample(ssrc, pt, &sample, &[]).await.is_err() {
+                break;
+            }
+            sh.frames_out.fetch_add(1, Ordering::Relaxed);
+        }
+        if sent > 0 {
+            last_progress = Instant::now();
+        } else if last_progress.elapsed() > VIDEO_STALL {
+            // 15 s sem nenhum pacote: captura morta. Mensagem por fonte para o
+            // painel dizer o motivo em vez de "live" com frames_out zerado.
+            // (Wayland sem portal: o grab falha sempre; camera desplugada no
+            // meio da chamada: o encoder seca do mesmo jeito.)
+            let msg = if is_screen {
+                format!(
+                    "tela sem frames há {} s (captura vazia em {grab_miss} ticks — Wayland sem portal/permissão, ou o monitor sumiu)",
+                    VIDEO_STALL.as_secs()
+                )
+            } else {
+                format!(
+                    "câmera sem frames há {} s (device travou ou foi removido no meio da chamada)",
+                    VIDEO_STALL.as_secs()
+                )
+            };
+            video_fail(&sh, msg);
+            break;
+        }
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+    }
+
+    // FECHA o device: sem `set_state(Null)` a proxima `new_camera` falha com
+    // "device busy" e a camera nao abre mais ate reiniciar o app.
+    if let Some(mut e) = enc {
+        e.stop();
+    }
+    let _ = vtl.stop();
+    if sh.video_state.lock().unwrap().as_str() == "live" {
+        *sh.video_state.lock().unwrap() = "off".to_string();
+    }
+    tracing::debug!("[video] envio encerrado");
+}
+
+/// Timestamp RTP de video (relogio de 90 kHz, ancorado no processo).
+fn rtp_ts_video() -> u32 {
+    static ANCHOR: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let a = ANCHOR.get_or_init(std::time::Instant::now);
+    (a.elapsed().as_micros() as u64 / 11_111) as u32
+}
+
+/// Recebimento: pacotes RTP -> decode GStreamer -> JPEG mais recente p/ a UI.
+fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task::AbortHandle {
+    let h = tokio::spawn(async move {
+        let mut dec: Option<crate::net::media_video::VideoDecoder> = None;
+        let mut n = 0u64;
+        while let Some(ev) = track.poll().await {
+            let TrackRemoteEvent::OnRtpPacket(pkt) = ev else {
+                continue;
+            };
+            n += 1;
+            if n <= 3 || n % 200 == 0 {
+                tracing::debug!(
+                    "[video] recv pacote #{n} ssrc={} seq={} pt={} payload={}",
+                    pkt.header.ssrc, pkt.header.sequence_number,
+                    pkt.header.payload_type, pkt.payload.len()
+                );
+            }
+            if dec.is_none() {
+                let mime = track
+                    .codec(pkt.header.ssrc)
+                    .await
+                    .map(|c| c.mime_type.clone())
+                    .unwrap_or_else(|| "video/VP8".to_string());
+                let codec = crate::net::media_video::VideoCodec::from_mime(&mime);
+                // PT NEGOCIADO + sprop do SDP remoto: sem os dois, o
+                // `rtp*depay` rejeita tudo (PT != 96) ou o H264 fica preto ate'
+                // chegar SPS in-band. Era o "video so funciona quando o outro
+                // lado e' o nosso proprio build".
+                let pt = pkt.header.payload_type;
+                let sprop = sh
+                    .remote_sdp
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .and_then(crate::net::media_video::extract_h264_sprop);
+                *sh.video_codec.lock().unwrap() = Some(mime.clone());
+                tracing::debug!("[video] decoder abrindo mime={mime} pt={pt} sprop={}", sprop.is_some());
+                let built = tokio::task::spawn_blocking(move || {
+                    crate::net::media_video::VideoDecoder::new_with_pt(codec, pt, sprop.as_deref())
+                })
+                .await;
+                match built {
+                    Ok(Ok(d)) => {
+                        tracing::debug!("[video] recebendo ({mime})");
+                        dec = Some(d);
+                    }
+                    _ => {
+                        *sh.video_error.lock().unwrap() =
+                            Some(format!("decode {mime} indisponivel"));
+                        break;
+                    }
+                }
+            }
+            if let Some(d) = dec.as_mut() {
+                use rtc::shared::marshal::Marshal;
+                if let Ok(bytes) = pkt.marshal() {
+                    d.push_rtp(&bytes);
+                }
+                // Drena frames sem bloquear: fica so o mais recente. O JPEG de
+                // CADA frame decoded sai por um `spawn_blocking` DEDICADO —
+                // encode de 640x480 custa ~2-4 ms de CPU e, rodando aqui,
+                // competia com a pilha de audio/RTP (o audio engasgava
+                // exatamente quando o video ligava).
+                while let Some((rgb, w, h)) = d.poll_frame(Duration::ZERO) {
+                    let rgb = std::sync::Arc::new(rgb);
+                    let sh_task = sh.clone();
+                    tokio::spawn(async move {
+                        if let Ok(Ok(jpg)) = tokio::task::spawn_blocking(move || {
+                            crate::net::media_video::jpeg_encode(&rgb, w, h)
+                        })
+                        .await
+                        {
+                            let seq = sh_task.video_seq.fetch_add(1, Ordering::Relaxed);
+                            *sh_task.video_frame.lock().unwrap() =
+                                Some(VideoFrame { jpeg: jpg, w, h, seq });
+                            sh_task.frames_in.fetch_add(1, Ordering::Relaxed);
+                        }
+                    });
+                }
+            }
+        }
+        tracing::debug!("[video] recebimento encerrado");
+    });
+    h.abort_handle()
+}
 
 fn spawn_stats_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
     let pc = sess.pc.clone();

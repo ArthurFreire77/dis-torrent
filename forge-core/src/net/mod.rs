@@ -12,6 +12,13 @@ pub mod media_dsp;
 /// sequer existe — é o que garante que aquele caminho não muda em nada.
 #[cfg(target_os = "linux")]
 pub mod media_voice;
+/// Video nativo (GStreamer + xcap). Mesmo gate linux-only de `media_voice`.
+///
+/// Ainda não é referenciado por `media_voice`: o encoder/decoder existem e
+/// compilam, mas falta ligar a task de envio e a de recebimento (track,
+/// `write_sample`, watchdog). Ver README do módulo.
+#[cfg(target_os = "linux")]
+pub mod media_video;
 pub mod natpmp;
 pub mod peer_relay;
 pub mod relay;
