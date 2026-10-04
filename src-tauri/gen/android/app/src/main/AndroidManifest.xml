@@ -4,16 +4,14 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
-    <!-- v6 Downloads: Android 13+ (API 33) substituiu READ_EXTERNAL_STORAGE
-         pelas permissões granulares de mídia. Declaramos as três porque o
-         chat trafega imagem, vídeo e áudio; sem isso o sistema nega a leitura
-         e o botão "Baixar" falha em silêncio. -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Sem permissões de LEITURA de mídia.
+         O app grava o que baixa via plugin:downloads, que usa a pasta do próprio
+         app e o seletor do sistema (SAF) — não precisa ler a galeria. Declarar
+         READ_EXTERNAL_STORAGE / READ_MEDIA_* num APK distribuido fora da Play
+         Store faz o Play Protect BLOQUEAR a instalação (hard block), não só
+         avisar: é a regra "sensitive permissions + internet-sideloading" do
+         Google. Como nada aqui lê mídia, foram removidas. -->
 
     <!-- Scoped storage (Android 10+): escrever FORA dos diretórios do app
          (ex: /sdcard/Download) exige SAF/MediaStore ou "All files access".
