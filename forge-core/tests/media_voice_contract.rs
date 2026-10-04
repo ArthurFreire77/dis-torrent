@@ -70,7 +70,10 @@ fn contrato_da_api() {
     set_muted(&m, "call", true);
     set_muted(&m, "call", false);
     assert!(stats(&m, "call").is_some(), "stats da sessao existente");
-    assert!(stats(&m, "outra-call").is_none(), "stats de call inexistente");
+    assert!(
+        stats(&m, "outra-call").is_none(),
+        "stats de call inexistente"
+    );
     hangup(&m, "call");
     assert!(stats(&m, "call").is_none(), "estado limpo apos hangup");
 }

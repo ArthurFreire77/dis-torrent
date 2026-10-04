@@ -280,7 +280,10 @@ impl MqttRelay {
     /// Perna MQTT com identidade estável: `forge-{fp[:12]}-{host}`.
     pub fn new_with_fp(host: &str, port: u16, fp: &str) -> Self {
         let fp12: String = fp.chars().take(12).collect();
-        let short = sanitize_client_part(host).chars().take(16).collect::<String>();
+        let short = sanitize_client_part(host)
+            .chars()
+            .take(16)
+            .collect::<String>();
         Self::new_with_client_id(host, port, &format!("forge-{fp12}-{short}"))
     }
 
@@ -353,8 +356,11 @@ async fn mqtt_pump(
                             entry.push(text);
                         } else if st.inbox.len() > 256 {
                             // muitos tópicos distintos: poda o mais cheio
-                            if let Some((k, _)) =
-                                st.inbox.iter().max_by_key(|(_, v)| v.len()).map(|(k, v)| (k.clone(), v.len()))
+                            if let Some((k, _)) = st
+                                .inbox
+                                .iter()
+                                .max_by_key(|(_, v)| v.len())
+                                .map(|(k, v)| (k.clone(), v.len()))
                             {
                                 st.inbox.remove(&k);
                             }
@@ -556,7 +562,10 @@ impl MultiRelay {
         let mk = |host: &'static str, port: u16| {
             let tun = SocksTunnel::spawn(proxy.to_string(), host.to_string(), port);
             let fp12: String = fp.chars().take(12).collect();
-            let short = sanitize_client_part(host).chars().take(16).collect::<String>();
+            let short = sanitize_client_part(host)
+                .chars()
+                .take(16)
+                .collect::<String>();
             MqttRelay::new_with_client_id(
                 &tun.local_addr.to_string(),
                 tun.local_addr.port(),
@@ -1634,8 +1643,10 @@ mod tests {
             let mut st = r.shared.lock().unwrap_or_else(|e| e.into_inner());
             st.subscribed.insert("distorrent_r_aaa".to_string());
             st.subscribed.insert("distorrent_a_aaa".to_string());
-            st.inbox
-                .insert("distorrent_r_aaa".to_string(), vec!["R1".to_string(), "R2".to_string()]);
+            st.inbox.insert(
+                "distorrent_r_aaa".to_string(),
+                vec!["R1".to_string(), "R2".to_string()],
+            );
             st.inbox
                 .insert("distorrent_a_aaa".to_string(), vec!["A1".to_string()]);
         }

@@ -31,9 +31,15 @@ fn reacoes_toggle_e_agregacao() {
     s.insert_message(&env, "out", "delivered").unwrap();
 
     // toggle: 1ª vez adiciona, 2ª remove
-    assert!(s.reaction_toggle(&env.id, "dm1", "🔥", &a.fingerprint()).unwrap());
-    assert!(s.reaction_toggle(&env.id, "dm1", "🔥", &b.fingerprint()).unwrap());
-    assert!(!s.reaction_toggle(&env.id, "dm1", "🔥", &b.fingerprint()).unwrap());
+    assert!(s
+        .reaction_toggle(&env.id, "dm1", "🔥", &a.fingerprint())
+        .unwrap());
+    assert!(s
+        .reaction_toggle(&env.id, "dm1", "🔥", &b.fingerprint())
+        .unwrap());
+    assert!(!s
+        .reaction_toggle(&env.id, "dm1", "🔥", &b.fingerprint())
+        .unwrap());
 
     let sum = s.reactions_for_msg(&env.id).unwrap();
     assert_eq!(sum.len(), 1);
@@ -63,7 +69,10 @@ fn resposta_edicao_exclusao_e_pin() {
 
     // edição
     s.msg_edit(&p2.id, "c1", "segunda (editada)").unwrap();
-    assert_eq!(s.effective_body(&p2.id, "segunda").unwrap(), "segunda (editada)");
+    assert_eq!(
+        s.effective_body(&p2.id, "segunda").unwrap(),
+        "segunda (editada)"
+    );
     assert!(s.msg_meta(&p2.id).unwrap().unwrap().edited_at > 0);
 
     // pin
@@ -75,8 +84,16 @@ fn resposta_edicao_exclusao_e_pin() {
     // exclusão lógica: some da busca mas o registro continua
     s.msg_delete(&p2.id, "c1").unwrap();
     assert!(s.msg_meta(&p2.id).unwrap().unwrap().deleted);
-    let hits = s.message_search(&SearchQuery { text: "editada".into(), ..Default::default() }).unwrap();
-    assert!(hits.is_empty(), "mensagem apagada não pode aparecer na busca");
+    let hits = s
+        .message_search(&SearchQuery {
+            text: "editada".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        hits.is_empty(),
+        "mensagem apagada não pode aparecer na busca"
+    );
 }
 
 #[test]
@@ -84,28 +101,66 @@ fn busca_com_filtros_estilo_discord() {
     let s = Store::open_in_memory().unwrap();
     let a = fx("alice");
     let b = fx("bob");
-    for body in ["olá mundo", "segunda com link https://exemplo.dev", "terceira @alguem", "quarta"] {
+    for body in [
+        "olá mundo",
+        "segunda com link https://exemplo.dev",
+        "terceira @alguem",
+        "quarta",
+    ] {
         let e = env_for(&a, "c1", body);
         s.insert_message(&e, "out", "delivered").unwrap();
     }
     let mine = env_for(&b, "c1", "resposta do bob");
     s.insert_message(&mine, "in", "ok").unwrap();
 
-    let all = s.message_search(&SearchQuery { text: String::new(), limit: 50, ..Default::default() }).unwrap();
+    let all = s
+        .message_search(&SearchQuery {
+            text: String::new(),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(all.len(), 5);
 
-    let links = s.message_search(&SearchQuery { text: String::new(), has: "link".into(), limit: 50, ..Default::default() }).unwrap();
+    let links = s
+        .message_search(&SearchQuery {
+            text: String::new(),
+            has: "link".into(),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(links.len(), 1);
     assert!(links[0].body.contains("https://"));
 
-    let mentions = s.message_search(&SearchQuery { text: String::new(), has: "mention".into(), limit: 50, ..Default::default() }).unwrap();
+    let mentions = s
+        .message_search(&SearchQuery {
+            text: String::new(),
+            has: "mention".into(),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(mentions.len(), 1);
 
-    let by_author = s.message_search(&SearchQuery { text: String::new(), from: b.fingerprint(), limit: 50, ..Default::default() }).unwrap();
+    let by_author = s
+        .message_search(&SearchQuery {
+            text: String::new(),
+            from: b.fingerprint(),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(by_author.len(), 1);
     assert_eq!(by_author[0].author_fp, b.fingerprint());
 
-    let text = s.message_search(&SearchQuery { text: "terceira".into(), limit: 50, ..Default::default() }).unwrap();
+    let text = s
+        .message_search(&SearchQuery {
+            text: "terceira".into(),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(text.len(), 1);
     assert!(text[0].body.contains("terceira"));
 }
@@ -133,7 +188,8 @@ fn cursor_de_leitura_gera_nao_lidas() {
 fn presenca_extendida_e_perfil() {
     let s = Store::open_in_memory().unwrap();
     let a = fx("alice");
-    s.presence_set(&a.fingerprint(), "dnd", "programando", "🦀").unwrap();
+    s.presence_set(&a.fingerprint(), "dnd", "programando", "🦀")
+        .unwrap();
     let p = s.presence_get(&a.fingerprint()).unwrap();
     assert_eq!(p.status, "dnd");
     assert_eq!(p.custom, "programando");
@@ -142,14 +198,20 @@ fn presenca_extendida_e_perfil() {
     s.presence_offline(&a.fingerprint()).unwrap();
     assert_eq!(s.presence_get(&a.fingerprint()).unwrap().status, "offline");
 
-    s.profile_set(&a.fingerprint(), "Alice B", "bio", "", "", "#ff0000").unwrap();
+    s.profile_set(&a.fingerprint(), "Alice B", "bio", "", "", "#ff0000")
+        .unwrap();
     let prof = s.profile_get(&a.fingerprint()).unwrap();
     assert_eq!(prof.display_name, "Alice B");
     assert_eq!(prof.accent, "#ff0000");
     // avatar vazio NÃO apaga o anterior
-    s.profile_set(&a.fingerprint(), "Alice", "", "AVATAR_B64", "", "").unwrap();
-    s.profile_set(&a.fingerprint(), "Alice2", "", "", "", "").unwrap();
-    assert_eq!(s.profile_get(&a.fingerprint()).unwrap().avatar_b64, "AVATAR_B64");
+    s.profile_set(&a.fingerprint(), "Alice", "", "AVATAR_B64", "", "")
+        .unwrap();
+    s.profile_set(&a.fingerprint(), "Alice2", "", "", "", "")
+        .unwrap();
+    assert_eq!(
+        s.profile_get(&a.fingerprint()).unwrap().avatar_b64,
+        "AVATAR_B64"
+    );
 }
 
 #[test]
@@ -172,7 +234,8 @@ fn threads_criacao_e_mensagem() {
     assert_eq!(s.thread_get("th1").unwrap().unwrap().name, "sobre rust");
 
     let env = env_for(&a, "th1", "opinião sobre X");
-    s.insert_message_in_thread(&env, "th1", "out", "delivered").unwrap();
+    s.insert_message_in_thread(&env, "th1", "out", "delivered")
+        .unwrap();
     let msgs = s.list_messages_thread("th1", 50).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].thread_id, "th1");
@@ -186,7 +249,8 @@ fn ban_temporario_expira_e_timeout_limpa() {
     let s = Store::open_in_memory().unwrap();
     let now = forge_core::identity::now_ms();
     // ban temporário já expirado →Some(none)
-    s.ban_set("com1", "spam", "spam", "dono", now - 1000).unwrap();
+    s.ban_set("com1", "spam", "spam", "dono", now - 1000)
+        .unwrap();
     assert!(s.ban_get("com1", "spam").unwrap().is_none());
     // ban permanente
     s.ban_set("com1", "mal", "malware", "dono", 0).unwrap();
@@ -196,7 +260,8 @@ fn ban_temporario_expira_e_timeout_limpa() {
     assert!(s.ban_get("com1", "mal").unwrap().is_none());
 
     // timeout ativo e depois expirado
-    s.timeout_set("com1", "ruim", now + 60_000, "fala demais", "mod").unwrap();
+    s.timeout_set("com1", "ruim", now + 60_000, "fala demais", "mod")
+        .unwrap();
     assert!(s.timeout_active("com1", "ruim").unwrap() > 0);
     s.timeout_set("com1", "ruim", now - 1, "", "mod").unwrap();
     assert_eq!(s.timeout_active("com1", "ruim").unwrap(), 0);
@@ -213,7 +278,10 @@ fn slowmode_bloqueia_segunda_mensagem() {
     assert_eq!(s.slowmode_gate("ch1", &a.fingerprint(), 30).unwrap(), 0);
     // 2ª bloqueada com espera real
     let wait = s.slowmode_gate("ch1", &a.fingerprint(), 30).unwrap();
-    assert!(wait > 0 && wait <= 30_000, "slowmode deve devolver espera: {wait}");
+    assert!(
+        wait > 0 && wait <= 30_000,
+        "slowmode deve devolver espera: {wait}"
+    );
     // outro fingerprint não é afetado
     assert_eq!(s.slowmode_gate("ch1", "outro-fp", 30).unwrap(), 0);
 }
@@ -302,7 +370,8 @@ fn marcadores_e_purga_de_conversa() {
     let a = fx("alice");
     let env = env_for(&a, "c1", "para marcar");
     s.insert_message(&env, "out", "delivered").unwrap();
-    s.reaction_toggle(&env.id, "c1", "👍", &a.fingerprint()).unwrap();
+    s.reaction_toggle(&env.id, "c1", "👍", &a.fingerprint())
+        .unwrap();
     s.msg_pin(&env.id, "c1", true, &a.fingerprint()).unwrap();
     s.read_set("c1", 1).unwrap();
     s.bookmark_set("c1", "importante", &env.id).unwrap();
@@ -319,20 +388,63 @@ fn marcadores_e_purga_de_conversa() {
 fn frames_sociais_resserializam() {
     // round-trip do enum: variantes novas precisam sobreviver ao serde
     let cases = vec![
-        SecureFrame::React { conv_id: "c".into(), msg_id: "m".into(), emoji: "🔥".into(), add: true, reactor_fp: "f".into() },
-        SecureFrame::MsgEdit { conv_id: "c".into(), msg_id: "m".into(), body: "novo".into() },
-        SecureFrame::MsgDelete { conv_id: "c".into(), msg_id: "m".into() },
-        SecureFrame::MsgPin { conv_id: "c".into(), msg_id: "m".into(), pinned: true },
-        SecureFrame::PresenceSet { status: "dnd".into(), custom: "x".into(), custom_emoji: "🦀".into() },
+        SecureFrame::React {
+            conv_id: "c".into(),
+            msg_id: "m".into(),
+            emoji: "🔥".into(),
+            add: true,
+            reactor_fp: "f".into(),
+        },
+        SecureFrame::MsgEdit {
+            conv_id: "c".into(),
+            msg_id: "m".into(),
+            body: "novo".into(),
+        },
+        SecureFrame::MsgDelete {
+            conv_id: "c".into(),
+            msg_id: "m".into(),
+        },
+        SecureFrame::MsgPin {
+            conv_id: "c".into(),
+            msg_id: "m".into(),
+            pinned: true,
+        },
+        SecureFrame::PresenceSet {
+            status: "dnd".into(),
+            custom: "x".into(),
+            custom_emoji: "🦀".into(),
+        },
         SecureFrame::PresencePing,
         SecureFrame::ThreadCreate {
-            community_id: "c".into(), thread_id: "t".into(), parent_channel: "p".into(),
-            name: "n".into(), kind: "thread".into(), tags: String::new(),
+            community_id: "c".into(),
+            thread_id: "t".into(),
+            parent_channel: "p".into(),
+            name: "n".into(),
+            kind: "thread".into(),
+            tags: String::new(),
         },
-        SecureFrame::MemberBan { community_id: "c".into(), target_fp: "t".into(), until_ms: 0, reason: "r".into() },
-        SecureFrame::MemberTimeout { community_id: "c".into(), target_fp: "t".into(), until_ms: 10, reason: String::new() },
-        SecureFrame::ChannelCfg { community_id: "c".into(), channel_id: "ch".into(), slowmode_secs: 5, nsfw: false },
-        SecureFrame::EventInterest { community_id: "c".into(), event_id: "e".into() },
+        SecureFrame::MemberBan {
+            community_id: "c".into(),
+            target_fp: "t".into(),
+            until_ms: 0,
+            reason: "r".into(),
+        },
+        SecureFrame::MemberTimeout {
+            community_id: "c".into(),
+            target_fp: "t".into(),
+            until_ms: 10,
+            reason: String::new(),
+        },
+        SecureFrame::ChannelCfg {
+            community_id: "c".into(),
+            channel_id: "ch".into(),
+            slowmode_secs: 5,
+            nsfw: false,
+        },
+        SecureFrame::EventInterest {
+            community_id: "c".into(),
+            event_id: "e".into(),
+        },
     ];
     for f in cases {
         let json = serde_json::to_string(&f).unwrap();
@@ -345,7 +457,12 @@ fn spawn_engine(nick: &str) -> (Arc<forge_core::net::engine::NetworkEngine>, Tem
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("forge.db")).unwrap());
     let kp = Keypair::generate();
-    let engine = forge_core::net::engine::NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
+    let engine = forge_core::net::engine::NetworkEngine::new(
+        store,
+        kp,
+        nick.to_string(),
+        dir.path().to_path_buf(),
+    );
     engine.start_with_discovery(false).unwrap();
     std::thread::sleep(Duration::from_millis(150));
     (engine, dir)
@@ -390,7 +507,10 @@ async fn rede_social_reacoes_entre_dois_nos() {
     let conv = Store::dm_conversation_id(&fp_a, &fp_b);
     a.store.ensure_dm_conversation(&fp_a, &fp_b, "Bob").unwrap();
     let m = a.send_dm(&conv, "oi bob").unwrap();
-    assert_ne!(m.status, "pending", "DM ficou na outbox — sessão não Established");
+    assert_ne!(
+        m.status, "pending",
+        "DM ficou na outbox — sessão não Established"
+    );
 
     a.social_react(&conv, &m.id, "\u{1f525}").unwrap();
     a.announce_presence();
@@ -402,11 +522,20 @@ async fn rede_social_reacoes_entre_dois_nos() {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!left.is_zero(), "react={got_react} pres={got_pres}");
         match tokio::time::timeout(left, ev_b.recv()).await {
-            Ok(Ok(EngineEvent::ReactionChanged { emoji, add, reactor_fp, .. })) => {
-                if emoji == "\u{1f525}" && add && reactor_fp == fp_a { got_react = true; }
+            Ok(Ok(EngineEvent::ReactionChanged {
+                emoji,
+                add,
+                reactor_fp,
+                ..
+            })) => {
+                if emoji == "\u{1f525}" && add && reactor_fp == fp_a {
+                    got_react = true;
+                }
             }
             Ok(Ok(EngineEvent::PresenceChanged { status, .. })) => {
-                if status == "online" || status == "idle" || status == "dnd" { got_pres = true; }
+                if status == "online" || status == "idle" || status == "dnd" {
+                    got_pres = true;
+                }
             }
             Ok(Ok(_)) => continue,
             Ok(Err(_)) => continue,

@@ -29,8 +29,8 @@ use crate::net::relay::{
 };
 use crate::net::transport::Session;
 use crate::net::vtunnel::{
-    decode_envelope, encode_frag, encode_full, tunnel_key, tunnel_transcript, virtual_ipv6,
-    TunMsg, TunnelPending, TunnelReassembler, TunnelSession, TUN_FRAME_MAX, TUN_FRAG_MAX,
+    decode_envelope, encode_frag, encode_full, tunnel_key, tunnel_transcript, virtual_ipv6, TunMsg,
+    TunnelPending, TunnelReassembler, TunnelSession, TUN_FRAG_MAX, TUN_FRAME_MAX,
 };
 use crate::protocol::{HandshakeFrame, MessageEnvelope, SecureFrame};
 use crate::storage::{
@@ -193,14 +193,24 @@ pub enum EngineEvent {
     /// Túnel virtual com o peer ESTABELECIDO (handshake X25519 via relay ok).
     /// `virtual_ip` = fd9d::/8 determinístico do fp (Fase 1: pacotes via relay;
     /// Fase 2+: UDP direto quando o furo abrir).
-    TunnelUp { fp: String, virtual_ip: String },
+    TunnelUp {
+        fp: String,
+        virtual_ip: String,
+    },
     /// Pong do túnel (resposta ao ping): prova ponta a ponta cifrada.
-    TunnelPong { fp: String, id: u64, rtt_ms: i64 },
+    TunnelPong {
+        fp: String,
+        id: u64,
+        rtt_ms: i64,
+    },
     /// Endpoint NAT próprio (re)descoberto no tick de announce — a UI usa
     /// para o degrau da mídia. `source`: "upnp" (local, sem servidor) ou
     /// "stun" (reflexo público). Serializa como `nat_endpoint` (sem sufixo
     /// Ev, sem alias no TS).
-    NatEndpoint { addr: String, source: String },
+    NatEndpoint {
+        addr: String,
+        source: String,
+    },
     VoiceJoined {
         community_id: String,
         channel_id: String,
@@ -768,8 +778,12 @@ fn native_voice_platform_ok() -> bool {
 #[cfg(target_os = "linux")]
 #[inline]
 fn in_multi_thread_runtime() -> bool {
-    tokio::runtime::Handle::try_current()
-        .is_ok_and(|h| matches!(h.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread))
+    tokio::runtime::Handle::try_current().is_ok_and(|h| {
+        matches!(
+            h.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        )
+    })
 }
 
 /// Kill-switch de emergência (`FORGE_NO_NATIVE_VOICE=1`): desliga a mídia
@@ -815,11 +829,19 @@ fn build_voice_media() -> Option<Arc<VoiceMedia>> {
             // é o log que responde "por que a chamada não usa voz nativa?".
             eprintln!(
                 "[forge] voz nativa: ATIVA (microfone: {})",
-                if v.has_capture() { "sim" } else { "não — somente recebendo" }
+                if v.has_capture() {
+                    "sim"
+                } else {
+                    "não — somente recebendo"
+                }
             );
             info!(
                 "voz nativa: ativa (microfone: {})",
-                if v.has_capture() { "sim" } else { "não — só recebendo" }
+                if v.has_capture() {
+                    "sim"
+                } else {
+                    "não — só recebendo"
+                }
             );
             Some(v)
         }
@@ -858,9 +880,7 @@ impl NetworkEngine {
             shutdown: Arc::new(Notify::new()),
             handles: StdMutex::new(Vec::new()),
             relay_in: StdMutex::new(HashMap::new()),
-            relay_backend: StdMutex::new(Arc::new(MultiRelay::default_routes_with_fp(
-                &relay_fp,
-            ))),
+            relay_backend: StdMutex::new(Arc::new(MultiRelay::default_routes_with_fp(&relay_fp))),
             relay_backend_custom: AtomicBool::new(false),
             relay_proxied: AtomicBool::new(false),
             relay_disabled: AtomicBool::new(!env_relay_enabled()),
@@ -890,16 +910,14 @@ impl NetworkEngine {
             tunnel_pings: StdMutex::new(HashMap::new()),
             tunnel_meta: StdMutex::new(HashMap::new()),
             tunnel_reasm: StdMutex::new(TunnelReassembler::new()),
-            tunnel_disabled: AtomicBool::new(
-                matches!(
-                    std::env::var("FORGE_NO_TUNNEL")
-                        .ok()
-                        .as_deref()
-                        .map(|s| s.trim().to_ascii_lowercase())
-                        .as_deref(),
-                    Some("1" | "true" | "yes" | "on")
-                ),
-            ),
+            tunnel_disabled: AtomicBool::new(matches!(
+                std::env::var("FORGE_NO_TUNNEL")
+                    .ok()
+                    .as_deref()
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref(),
+                Some("1" | "true" | "yes" | "on")
+            )),
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
             #[cfg(target_os = "linux")]
@@ -936,9 +954,7 @@ impl NetworkEngine {
             shutdown: Arc::new(Notify::new()),
             handles: StdMutex::new(Vec::new()),
             relay_in: StdMutex::new(HashMap::new()),
-            relay_backend: StdMutex::new(Arc::new(MultiRelay::default_routes_with_fp(
-                &relay_fp,
-            ))),
+            relay_backend: StdMutex::new(Arc::new(MultiRelay::default_routes_with_fp(&relay_fp))),
             relay_backend_custom: AtomicBool::new(false),
             relay_proxied: AtomicBool::new(false),
             relay_disabled: AtomicBool::new(!env_relay_enabled()),
@@ -968,16 +984,14 @@ impl NetworkEngine {
             tunnel_pings: StdMutex::new(HashMap::new()),
             tunnel_meta: StdMutex::new(HashMap::new()),
             tunnel_reasm: StdMutex::new(TunnelReassembler::new()),
-            tunnel_disabled: AtomicBool::new(
-                matches!(
-                    std::env::var("FORGE_NO_TUNNEL")
-                        .ok()
-                        .as_deref()
-                        .map(|s| s.trim().to_ascii_lowercase())
-                        .as_deref(),
-                    Some("1" | "true" | "yes" | "on")
-                ),
-            ),
+            tunnel_disabled: AtomicBool::new(matches!(
+                std::env::var("FORGE_NO_TUNNEL")
+                    .ok()
+                    .as_deref()
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref(),
+                Some("1" | "true" | "yes" | "on")
+            )),
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
             #[cfg(target_os = "linux")]
@@ -1256,10 +1270,7 @@ impl NetworkEngine {
     /// rota alternativa (relay/tunel) — o caminho real atras de CGNAT.
     pub fn direct_unreachable(&self, peer_fp: &str) -> bool {
         let (count, first_ms) = {
-            let map = self
-                .dial_failures
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let map = self.dial_failures.lock().unwrap_or_else(|e| e.into_inner());
             map.get(peer_fp).copied().unwrap_or((0, 0))
         };
         if count < DIRECT_UNREACHABLE_THRESHOLD {
@@ -1687,10 +1698,9 @@ impl NetworkEngine {
                 }
             }
         } else if currently_proxied {
-            *self.relay_backend.lock().unwrap_or_else(|e| e.into_inner()) =
-                Arc::new(MultiRelay::default_routes_with_fp(
-                    &self.identity.fingerprint,
-                ));
+            *self.relay_backend.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(
+                MultiRelay::default_routes_with_fp(&self.identity.fingerprint),
+            );
             self.relay_proxied.store(false, Ordering::Relaxed);
             debug!("relay: modo normal/encrypted — rotas públicas diretas restauradas");
         }
@@ -1878,8 +1888,7 @@ impl NetworkEngine {
         if !self.tunnel_enabled() || !self.tunnel_established(peer_fp) {
             return false;
         }
-        self.peer_state(peer_fp) == NetworkState::Connected
-            && self.is_peer_via_relay(peer_fp)
+        self.peer_state(peer_fp) == NetworkState::Connected && self.is_peer_via_relay(peer_fp)
     }
 
     /// Serializa → fragmenta → cifra → emite como TunnelData (via sessão
@@ -1890,8 +1899,7 @@ impl NetworkEngine {
             Ok(v) if v.len() <= TUN_FRAME_MAX => v,
             _ => return false,
         };
-        static FRAG_ID: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(1);
+        static FRAG_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         let (nonce_list, sealed) = {
             let map = self
                 .tunnel_sessions
@@ -2097,9 +2105,9 @@ impl NetworkEngine {
                 .tunnel_sessions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let sess = map.get(peer_fp).ok_or_else(|| {
-                ForgeError::Protocol("tunel: sem sessão com o peer".into())
-            })?;
+            let sess = map
+                .get(peer_fp)
+                .ok_or_else(|| ForgeError::Protocol("tunel: sem sessão com o peer".into()))?;
             sess.seal(
                 &self.identity.fingerprint,
                 peer_fp,
@@ -2108,17 +2116,11 @@ impl NetworkEngine {
         };
         let (nonce, ct) = sealed;
         {
-            let mut p = self
-                .tunnel_pings
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut p = self.tunnel_pings.lock().unwrap_or_else(|e| e.into_inner());
             if p.len() > 256 {
                 p.clear();
             }
-            p.insert(
-                (peer_fp.to_string(), id),
-                crate::identity::now_ms(),
-            );
+            p.insert((peer_fp.to_string(), id), crate::identity::now_ms());
         }
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         self.send_to_peer(
@@ -2153,7 +2155,10 @@ impl NetworkEngine {
             fp: peer_fp.to_string(),
             virtual_ip: Self::tunnel_virtual_ip(peer_fp),
         });
-        info!(peer_fp, "tunel: sessão ESTABELECIDA (via relay; UDP direto na Fase 2)");
+        info!(
+            peer_fp,
+            "tunel: sessão ESTABELECIDA (via relay; UDP direto na Fase 2)"
+        );
     }
 
     /// Apelido conhecido do peer (para dispatch de frames vindos pelo túnel):
@@ -3165,7 +3170,7 @@ impl NetworkEngine {
         }
         let role_id = match role_id.map(str::trim) {
             Some("") | None => None,
-            Some(r) => Some(r.to_string())
+            Some(r) => Some(r.to_string()),
         };
         let discriminator: String = {
             use rand::Rng;
@@ -3809,11 +3814,17 @@ impl NetworkEngine {
                 context: channel_id.into(),
                 reason: format!(
                     "você está banido{}",
-                    if b.reason.is_empty() { String::new() } else { format!(": {}", b.reason) }
+                    if b.reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", b.reason)
+                    }
                 ),
                 until_ms: b.until_ms,
             });
-            return Err(ForgeError::Protocol("você está banido deste servidor".into()));
+            return Err(ForgeError::Protocol(
+                "você está banido deste servidor".into(),
+            ));
         }
         let until = self.store.timeout_active(community_id, me).unwrap_or(0);
         if until > 0 {
@@ -3846,7 +3857,9 @@ impl NetworkEngine {
 
     fn to_social_peers(&self, conv_id: &str, frame: SecureFrame) {
         for fp in self.social_peers_of(conv_id) {
-            self.cmd_tx.send(EngineCmd::SendToPeer(fp, frame.clone())).ok();
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(fp, frame.clone()))
+                .ok();
         }
     }
 
@@ -3882,7 +3895,9 @@ impl NetworkEngine {
         // outro lado desconectado = reação perdida para sempre.
         for fp in self.social_peers_of(conv_id) {
             if self.link_tx(&fp).is_none() {
-                let _ = self.store.queue_pending_react(&fp, conv_id, msg_id, emoji, added);
+                let _ = self
+                    .store
+                    .queue_pending_react(&fp, conv_id, msg_id, emoji, added);
             }
         }
         Ok(added)
@@ -4051,12 +4066,8 @@ impl NetworkEngine {
     pub fn social_presence_set(&self, status: &str, custom: &str, emoji: &str) -> Result<()> {
         let me = self.identity.fingerprint.clone();
         let st = normalize_presence(status);
-        self.store.presence_set(
-            &me,
-            st,
-            &cap_str(custom, 128),
-            &cap_str(emoji, 16),
-        )?;
+        self.store
+            .presence_set(&me, st, &cap_str(custom, 128), &cap_str(emoji, 16))?;
         self.events
             .send(EngineEvent::PresenceChanged {
                 fp: me,
@@ -4126,7 +4137,11 @@ impl NetworkEngine {
         if self.store.member_role(community_id, &me).is_none() {
             return Err(ForgeError::Protocol("você não é membro".into()));
         }
-        let id = format!("th_{}", &crate::protocol::new_message_id(&me, community_id, crate::identity::now_ms(), name)[..24]);
+        let id = format!(
+            "th_{}",
+            &crate::protocol::new_message_id(&me, community_id, crate::identity::now_ms(), name)
+                [..24]
+        );
         let t = crate::social::ThreadRow {
             id,
             community_id: community_id.into(),
@@ -4135,7 +4150,11 @@ impl NetworkEngine {
             author_fp: me,
             created_at: crate::identity::now_ms(),
             archived: false,
-            kind: if kind == "forum" { "forum".into() } else { "thread".into() },
+            kind: if kind == "forum" {
+                "forum".into()
+            } else {
+                "thread".into()
+            },
             tags: cap_str(tags, 200),
         };
         self.store.thread_upsert(&t)?;
@@ -4343,7 +4362,15 @@ impl NetworkEngine {
         if opts.len() < 2 {
             return Err(ForgeError::Protocol("enquete precisa de 2+ opções".into()));
         }
-        let id = format!("pl_{}", &crate::protocol::new_message_id(&me, community_id, crate::identity::now_ms(), question)[..24]);
+        let id = format!(
+            "pl_{}",
+            &crate::protocol::new_message_id(
+                &me,
+                community_id,
+                crate::identity::now_ms(),
+                question
+            )[..24]
+        );
         let p = crate::social::PollRow {
             id: id.clone(),
             community_id: community_id.into(),
@@ -4830,7 +4857,12 @@ impl NetworkEngine {
                 target_fp: target_fp.into(),
             },
         );
-            #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
+        // Mic pode ter falhado no boot e nunca mais tentado: cada chamada nova
+        // re-tenta abrir antes de negociar, senão ela nasce só-recebendo.
+        self.voice_retry_mic();
+        #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
         // Chamada NATIVA: eu sou o chamador, o offer nasce aqui. Se a mídia
         // nativa não existir, `voice_begin_offer` devolve None e a WebView faz
         // a offer dela normalmente — nenhum outro código muda de rota.
@@ -4849,7 +4881,7 @@ impl NetworkEngine {
     pub fn call_accept(&self, call_id: &str, from_fp: &str) -> Result<()> {
         self.store.join_call(call_id, &self.identity.fingerprint)?;
         self.store.join_call(call_id, from_fp)?;
-            #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
         // Chamada NATIVA: eu sou o convidado. Só REGISTRO o par aqui — a offer
         // do outro lado ainda vai chegar, e é o arm de `CallOffer` que a
         // absorve. Se a mídia nativa não existir, o par não é registrado e o
@@ -4861,6 +4893,11 @@ impl NetworkEngine {
                 call_id: call_id.into(),
             },
         );
+        #[cfg(target_os = "linux")]
+        // Mesmo retry do chamador: quem atende também pode ter perdido o mic
+        // no boot e estaria entrando mudo sem saber por quê.
+        self.voice_retry_mic();
+        #[cfg(target_os = "linux")]
         let _ = self.events.send(EngineEvent::CallAcceptedEv {
             call_id: call_id.into(),
             from_fp: self.identity.fingerprint.clone(),
@@ -4893,7 +4930,7 @@ impl NetworkEngine {
             );
         }
         self.store.end_call(call_id)?;
-            #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
         // Encerra a mídia nativa ANTES do evento: se sobrasse sessão viva, o
         // alto-falante continuaria tocando áudio de uma chamada morta.
         self.voice_hangup(call_id);
@@ -4932,7 +4969,7 @@ impl NetworkEngine {
         // registra o novo participante na chamada (host autoritativo)
         let _ = self.store.join_call(call_id, fp);
         let _ = self.store.join_call(call_id, target_fp);
-            #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
         // Grupo em modo nativo: o convidado e o host passam a trocar SDP/ICE
         // pela camada Rust. Sem registro, nada muda para o navegador.
         if self.voice_register(call_id, target_fp) && self.voice_register(call_id, fp) {
@@ -5089,13 +5126,8 @@ impl NetworkEngine {
     /// `true` = o offer foi absorvido pela mídia (o JS NÃO deve criar
     /// `RTCPeerConnection`). `false` = o offer não é nosso: o arm emite o
     /// `EngineEvent` de sempre.
-            #[cfg(target_os = "linux")]
-    async fn voice_absorb_offer(
-        &self,
-        call_id: &str,
-        peer_fp: &str,
-        sdp: &str,
-    ) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    async fn voice_absorb_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> Result<bool> {
         if !self.voice_is_native(call_id, peer_fp) {
             return Ok(false);
         }
@@ -5124,7 +5156,7 @@ impl NetworkEngine {
     }
 
     /// Idem para `CallAnswer` e `CallIce`.
-            #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     async fn voice_absorb_answer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> bool {
         if !self.voice_is_native(call_id, peer_fp) {
             return false;
@@ -5139,7 +5171,7 @@ impl NetworkEngine {
         ok
     }
 
-            #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     async fn voice_absorb_ice(&self, call_id: &str, peer_fp: &str, cand: &str, mid: &str) -> bool {
         if !self.voice_is_native(call_id, peer_fp) {
             return false;
@@ -5153,7 +5185,8 @@ impl NetworkEngine {
             cand.to_string(),
             mid.to_string(),
         );
-        let res = tokio::task::spawn_blocking(move || v.add_ice_candidate(&cid, &pfp, &c, &m)).await;
+        let res =
+            tokio::task::spawn_blocking(move || v.add_ice_candidate(&cid, &pfp, &c, &m)).await;
         let ok = matches!(res, Ok(Ok(())));
         self.voice_flush_signals(call_id, peer_fp);
         ok
@@ -5161,7 +5194,7 @@ impl NetworkEngine {
 
     // --------------------------------------- voz nativa (comandos da UI)
 
-            #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     pub fn voice_media_available(&self) -> bool {
         self.native_voice_available()
     }
@@ -5169,19 +5202,19 @@ impl NetworkEngine {
     /// Estado agregado da chamada. `None` quando não há sessão nativa — a UI
     /// então cai no relatório de `RTCPeerConnection` do navegador, que é o
     /// comportamento de sempre.
-            #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     pub fn voice_media_stats(&self, call_id: &str) -> Option<VoiceStats> {
         self.voice.as_ref().and_then(|v| v.stats_agg(call_id))
     }
 
-            #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     pub fn voice_set_muted(&self, call_id: &str, muted: bool) {
         if let Some(v) = self.voice.as_ref() {
             v.set_muted(call_id, muted);
         }
     }
 
-            #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
     pub fn voice_hangup(&self, call_id: &str) {
         if let Some(v) = self.voice.as_ref() {
             v.hangup(call_id);
@@ -5189,6 +5222,51 @@ impl NetworkEngine {
         self.voice_forget_call(call_id);
     }
 
+    // ---------------- video nativo (só Linux) ----------------
+
+    /// Liga o envio de video. `source` = "camera" | "screen".
+    #[cfg(target_os = "linux")]
+    pub fn native_video_start(
+        &self,
+        call_id: &str,
+        peer_fp: &str,
+        source: &str,
+        monitor_id: Option<u32>,
+    ) -> Result<String, String> {
+        let v = self
+            .voice
+            .as_ref()
+            .ok_or_else(|| "voz nativa indisponivel".to_string())?;
+        v.video_start(call_id, peer_fp, source, monitor_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn native_video_stop(&self, call_id: &str, peer_fp: &str) {
+        if let Some(v) = self.voice.as_ref() {
+            v.video_stop(call_id, peer_fp);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn native_video_frame(
+        &self,
+        call_id: &str,
+        peer_fp: &str,
+    ) -> Option<crate::net::media_voice::VideoFrame> {
+        self.voice
+            .as_ref()
+            .and_then(|v| v.video_frame(call_id, peer_fp))
+    }
+
+    /// Re-tenta abrir o microfone. chamado no invite e no accept: uma falha no
+    /// boot (PipeWire subindo, device ocupado) marcava `mic_attempted` para
+    /// sempre e TODAS as chamadas seguintes nasciam só-recebendo.
+    #[cfg(target_os = "linux")]
+    pub fn voice_retry_mic(&self) {
+        if let Some(v) = self.voice.as_ref() {
+            v.retry_mic();
+        }
+    }
 
     /// true se o frame é sinalização de chamada/voz efêmera (fila pending_calls).
     fn is_call_frame(frame: &SecureFrame) -> bool {
@@ -5235,10 +5313,12 @@ impl NetworkEngine {
         if Self::evict_one(q, |f| matches!(f, SecureFrame::CallIce { .. })) {
             return;
         }
-        if Self::evict_one(
-            q,
-            |f| matches!(f, SecureFrame::CallEnd { .. } | SecureFrame::CallInvite { .. }),
-        ) {
+        if Self::evict_one(q, |f| {
+            matches!(
+                f,
+                SecureFrame::CallEnd { .. } | SecureFrame::CallInvite { .. }
+            )
+        }) {
             return;
         }
         let newest_offer = q.iter().rposition(Self::is_offer_frame);
@@ -5838,8 +5918,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             .and_then(|s| s.trim().parse().ok())
             .filter(|p: &u16| *p != 0)
             .unwrap_or(51413);
-        let mut candidates: Vec<u16> =
-            (0..10).map(|i| preferred.wrapping_add(i)).collect();
+        let mut candidates: Vec<u16> = (0..10).map(|i| preferred.wrapping_add(i)).collect();
         candidates.push(0);
         let mut bound = None;
         for p in candidates {
@@ -6017,8 +6096,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 //    Sem anúncio, o relay/DHT/túnel continuam funcionando — são
                 //    rotas que não dependem de porta aberta.
                 let announced: Option<(String, u16)> = if ext_port != 0 {
-                    let ip = public_ip
-                        .or_else(|| stun_addr.map(|s| s.ip().to_string()));
+                    let ip = public_ip.or_else(|| stun_addr.map(|s| s.ip().to_string()));
                     ip.map(|ip| (format!("{ip}:{ext_port}"), ext_port))
                 } else if let Some(ip) = public_ip {
                     Some((format!("{ip}:{port_clone}"), port_clone))
@@ -7475,10 +7553,7 @@ async fn register_and_run(
     // Guarda o proto do peer (gate dos frames do túnel: Tunnel* exige >= 2).
     // MAX = nunca rebaixa por flapping de sessão (peer novo não vira legado).
     {
-        let mut map = engine
-            .peer_protos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = engine.peer_protos.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(peer_fp.to_string())
             .and_modify(|v| {
                 if peer_proto_v > *v {
@@ -8041,7 +8116,12 @@ impl NetworkEngine {
             .roles_list(community_id)
             .map(|roles| {
                 roles.iter().any(|r| {
-                    role_ids.iter().any(|rid| rid == &r.id) && (r.permissions & (crate::moderation::PERM_BAN | crate::moderation::PERM_MUTE | crate::moderation::PERM_DELETE)) != 0
+                    role_ids.iter().any(|rid| rid == &r.id)
+                        && (r.permissions
+                            & (crate::moderation::PERM_BAN
+                                | crate::moderation::PERM_MUTE
+                                | crate::moderation::PERM_DELETE))
+                            != 0
                 })
             })
             .unwrap_or(false)
@@ -8112,7 +8192,9 @@ impl NetworkEngine {
                 continue;
             }
             if self.link_tx(&fp).is_some() {
-                self.cmd_tx.send(EngineCmd::SendToPeer(fp, frame.clone())).ok();
+                self.cmd_tx
+                    .send(EngineCmd::SendToPeer(fp, frame.clone()))
+                    .ok();
             }
         }
     }
@@ -8136,7 +8218,9 @@ impl NetworkEngine {
                 continue;
             }
             if self.link_tx(&peer.fp).is_some() {
-                self.cmd_tx.send(EngineCmd::SendToPeer(peer.fp, frame.clone())).ok();
+                self.cmd_tx
+                    .send(EngineCmd::SendToPeer(peer.fp, frame.clone()))
+                    .ok();
             }
         }
     }
@@ -8171,10 +8255,7 @@ fn handle_tunnel_offer(
         return;
     }
     {
-        let mut meta = engine
-            .tunnel_meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut meta = engine.tunnel_meta.lock().unwrap_or_else(|e| e.into_inner());
         if meta.len() > 512 {
             meta.clear();
         }
@@ -8192,8 +8273,7 @@ fn handle_tunnel_offer(
         Err(_) => return,
     };
     let my_fp = engine.identity.fingerprint.clone();
-    let answer_transcript =
-        tunnel_transcript(peer_fp, &eph, &nonce, &my_fp, &my_eph, &my_nonce);
+    let answer_transcript = tunnel_transcript(peer_fp, &eph, &nonce, &my_fp, &my_eph, &my_nonce);
     let answer_sig = engine.keypair.sign(&answer_transcript);
     engine.tunnel_store_session(peer_fp, key);
     debug!(peer_fp, "tunel: oferta aceita, resposta enviada");
@@ -8238,8 +8318,7 @@ fn handle_tunnel_answer(
             .unwrap_or_else(|e| e.into_inner());
         match pend.remove(peer_fp) {
             Some(p)
-                if p.nonce == for_nonce
-                    && crate::identity::now_ms() - p.created_ms < 120_000 =>
+                if p.nonce == for_nonce && crate::identity::now_ms() - p.created_ms < 120_000 =>
             {
                 p
             }
@@ -8247,17 +8326,20 @@ fn handle_tunnel_answer(
         }
     };
     let my_fp = engine.identity.fingerprint.clone();
-    let transcript =
-        tunnel_transcript(&my_fp, &x25519_dalek::PublicKey::from(&pending.secret).to_bytes(), &pending.nonce, peer_fp, &eph, &nonce);
+    let transcript = tunnel_transcript(
+        &my_fp,
+        &x25519_dalek::PublicKey::from(&pending.secret).to_bytes(),
+        &pending.nonce,
+        peer_fp,
+        &eph,
+        &nonce,
+    );
     if Keypair::verify(peer_pubkey, &transcript, sig).unwrap_or(false) != true {
         debug!(peer_fp, "tunel: resposta com assinatura inválida — ignora");
         return;
     }
     {
-        let mut meta = engine
-            .tunnel_meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut meta = engine.tunnel_meta.lock().unwrap_or_else(|e| e.into_inner());
         if meta.len() > 512 {
             meta.clear();
         }
@@ -8274,8 +8356,7 @@ fn handle_tunnel_answer(
     engine.tunnel_store_session(peer_fp, key);
 }
 
-fn handle_tunnel_data(
-    engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct_b64: &str) {
+fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct_b64: &str) {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     if !engine.tunnel_enabled() {
         return;
@@ -8293,7 +8374,12 @@ fn handle_tunnel_data(
             Some(s) => s,
             None => return,
         };
-        match sess.open(&peer_fp.to_string(), &engine.identity.fingerprint, nonce, &ct) {
+        match sess.open(
+            &peer_fp.to_string(),
+            &engine.identity.fingerprint,
+            nonce,
+            &ct,
+        ) {
             Ok(v) => v,
             Err(_) => return, // replay/forjado — descarta em silêncio
         }
@@ -8311,14 +8397,7 @@ fn handle_tunnel_data(
                     .tunnel_reasm
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                reasm.insert(
-                    peer_fp,
-                    id,
-                    idx,
-                    total,
-                    chunk,
-                    crate::identity::now_ms(),
-                )
+                reasm.insert(peer_fp, id, idx, total, chunk, crate::identity::now_ms())
             };
             match full {
                 Some(v) => v,
@@ -8349,7 +8428,8 @@ fn handle_tunnel_data(
                 })
             };
             if let Some((n, sealed_ct)) = sealed {
-                engine.cmd_tx
+                engine
+                    .cmd_tx
                     .send(EngineCmd::SendToPeer(
                         peer_fp.to_string(),
                         SecureFrame::TunnelData {
@@ -8393,10 +8473,7 @@ fn handle_tunnel_data(
         d.tunnel_rx_frames = d.tunnel_rx_frames.saturating_add(1);
     });
     let (tun_pubkey, tun_nick) = {
-        let meta = engine
-            .tunnel_meta
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let meta = engine.tunnel_meta.lock().unwrap_or_else(|e| e.into_inner());
         meta.get(peer_fp)
             .cloned()
             .unwrap_or_else(|| (String::new(), peer_fp.chars().take(8).collect()))
@@ -8404,21 +8481,13 @@ fn handle_tunnel_data(
     let engine_inner = engine.clone();
     let fp_owned = peer_fp.to_string();
     tokio::spawn(async move {
-        if let Err(e) = handle_frame(
-            &engine_inner,
-            &fp_owned,
-            &tun_pubkey,
-            &tun_nick,
-            frame,
-        )
-        .await
+        if let Err(e) = handle_frame(&engine_inner, &fp_owned, &tun_pubkey, &tun_nick, frame).await
         {
             debug!(%fp_owned, "tunel: frame interno falhou: {e}");
         }
     });
     engine.tunnel_housekeep(peer_fp);
 }
-
 
 async fn handle_frame(
     engine: &Arc<NetworkEngine>,
@@ -9528,7 +9597,9 @@ async fn handle_frame(
                 .map(|(_, s)| s == "accepted")
                 .unwrap_or(false);
             if !shared && !is_friend {
-                return Err(ForgeError::Protocol("reação fora de conversa compartilhada".into()));
+                return Err(ForgeError::Protocol(
+                    "reação fora de conversa compartilhada".into(),
+                ));
             }
             // teto deente de reatores por emoji (anti-abuso)
             let mine = engine
@@ -9546,7 +9617,11 @@ async fn handle_frame(
             let added = engine
                 .store
                 .reaction_apply(&msg_id, &conv_id, &em, peer_fp, add_from_peer)
-                .map_err(|e| ForgeError::Storage(rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))))?;
+                .map_err(|e| {
+                    ForgeError::Storage(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        std::io::Error::new(std::io::ErrorKind::Other, e),
+                    )))
+                })?;
             let _ = engine.events.send(EngineEvent::ReactionChanged {
                 msg_id: msg_id.clone(),
                 conv_id: conv_id.clone(),
@@ -9573,7 +9648,11 @@ async fn handle_frame(
                 }
             }
         }
-        SecureFrame::Reply { conv_id, msg_id, reply_to } => {
+        SecureFrame::Reply {
+            conv_id,
+            msg_id,
+            reply_to,
+        } => {
             if engine.is_blocked(peer_fp) {
                 return Ok(());
             }
@@ -9583,10 +9662,14 @@ async fn handle_frame(
             // alheia (vazamento de contexto) ou fixava um id órfão que a UI
             // não resolvia nunca.
             let Some(mine) = engine.store.message_by_id(&msg_id).ok().flatten() else {
-                return Err(ForgeError::Protocol("citação de mensagem inexistente".into()));
+                return Err(ForgeError::Protocol(
+                    "citação de mensagem inexistente".into(),
+                ));
             };
             if mine.conv_id != *conv_id {
-                return Err(ForgeError::Protocol("citação de conversa divergente".into()));
+                return Err(ForgeError::Protocol(
+                    "citação de conversa divergente".into(),
+                ));
             }
             if mine.author_fp != peer_fp {
                 return Err(ForgeError::Protocol("só o autor cita assim".into()));
@@ -9595,7 +9678,8 @@ async fn handle_frame(
             if target.as_ref().map(|t| &t.conv_id) != Some(&conv_id) {
                 return Err(ForgeError::Protocol("alvo de citação inexistente".into()));
             }
-            engine.store.msg_set_reply(&msg_id, &conv_id, &reply_to)?;            let _ = engine.events.send(EngineEvent::MessageReply {
+            engine.store.msg_set_reply(&msg_id, &conv_id, &reply_to)?;
+            let _ = engine.events.send(EngineEvent::MessageReply {
                 msg_id: msg_id.clone(),
                 reply_to: reply_to.clone(),
             });
@@ -9624,7 +9708,9 @@ async fn handle_frame(
                 return Ok(());
             }
             let Some(orig) = engine.store.message_by_id(&msg_id).ok().flatten() else {
-                return Err(ForgeError::Protocol("edição de mensagem inexistente".into()));
+                return Err(ForgeError::Protocol(
+                    "edição de mensagem inexistente".into(),
+                ));
             };
             if orig.conv_id != conv_id {
                 return Err(ForgeError::Protocol("conversa divergente".into()));
@@ -9758,9 +9844,12 @@ async fn handle_frame(
                 return Ok(());
             }
             let st = normalize_presence(&status);
-            let _ = engine
-                .store
-                .presence_set(peer_fp, st, &cap_str(&custom, 128), &cap_str(&custom_emoji, 16));
+            let _ = engine.store.presence_set(
+                peer_fp,
+                st,
+                &cap_str(&custom, 128),
+                &cap_str(&custom_emoji, 16),
+            );
             let _ = engine.events.send(EngineEvent::PresenceChanged {
                 fp: peer_fp.to_string(),
                 status: st.to_string(),
@@ -9770,15 +9859,22 @@ async fn handle_frame(
         }
         SecureFrame::PresencePing => {
             let p = engine.store.presence_get(peer_fp).unwrap_or_default();
-            let st = if p.status == "offline" { "online".to_string() } else { p.status.clone() };
-            engine.cmd_tx.send(EngineCmd::SendToPeer(
-                peer_fp.into(),
-                SecureFrame::PresenceSet {
-                    status: st,
-                    custom: p.custom,
-                    custom_emoji: p.custom_emoji,
-                },
-            )).ok();
+            let st = if p.status == "offline" {
+                "online".to_string()
+            } else {
+                p.status.clone()
+            };
+            engine
+                .cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    peer_fp.into(),
+                    SecureFrame::PresenceSet {
+                        status: st,
+                        custom: p.custom,
+                        custom_emoji: p.custom_emoji,
+                    },
+                ))
+                .ok();
         }
         SecureFrame::Typing { conv_id, until_ms } => {
             if engine.is_blocked(peer_fp) {
@@ -9787,7 +9883,11 @@ async fn handle_frame(
             // Sanidade: só faz sentido para conversa/canal que o peer realmente
             // participa. Sem isto, qualquer peer conectado consegue "digitar" em
             // qualquer DM/canal e a UI mostra o nome de alguém que não está lá.
-            if !engine.social_peers_of(&conv_id).iter().any(|p| p == peer_fp) {
+            if !engine
+                .social_peers_of(&conv_id)
+                .iter()
+                .any(|p| p == peer_fp)
+            {
                 return Ok(());
             }
             // O prazo é do remetente, mas um relógio adiantado/esquecido não pode
@@ -9800,7 +9900,10 @@ async fn handle_frame(
                         .cmd_tx
                         .send(EngineCmd::SendToPeer(
                             fp,
-                            SecureFrame::Typing { conv_id: conv_id.clone(), until_ms: until },
+                            SecureFrame::Typing {
+                                conv_id: conv_id.clone(),
+                                until_ms: until,
+                            },
                         ))
                         .ok();
                 }
@@ -9874,7 +9977,11 @@ async fn handle_frame(
                 author_fp: peer_fp.to_string(),
                 created_at: crate::identity::now_ms(),
                 archived: false,
-                kind: if kind == "forum" { "forum".into() } else { "thread".into() },
+                kind: if kind == "forum" {
+                    "forum".into()
+                } else {
+                    "thread".into()
+                },
                 tags: cap_str(&tags, 200),
             };
             let _ = engine.store.thread_upsert(&t);
@@ -9943,9 +10050,13 @@ async fn handle_frame(
             if !is_owner {
                 return Err(ForgeError::Protocol("só o dono baneia".into()));
             }
-            let _ = engine
-                .store
-                .ban_set(&community_id, &target_fp, &cap_str(&reason, 300), peer_fp, until_ms);
+            let _ = engine.store.ban_set(
+                &community_id,
+                &target_fp,
+                &cap_str(&reason, 300),
+                peer_fp,
+                until_ms,
+            );
             // tira o membro localmente (a comunidade já não é acessível)
             let _ = engine.store.remove_member(&community_id, &target_fp);
             let _ = engine.events.send(EngineEvent::ModerationApplied {
@@ -9974,9 +10085,13 @@ async fn handle_frame(
             if !engine.is_moderator(&community_id, peer_fp) {
                 return Err(ForgeError::Protocol("sem permissão de moderação".into()));
             }
-            let _ = engine
-                .store
-                .timeout_set(&community_id, &target_fp, until_ms, &cap_str(&reason, 300), peer_fp);
+            let _ = engine.store.timeout_set(
+                &community_id,
+                &target_fp,
+                until_ms,
+                &cap_str(&reason, 300),
+                peer_fp,
+            );
             let _ = engine.events.send(EngineEvent::ModerationApplied {
                 community_id: community_id.clone(),
                 target_fp: target_fp.clone(),
@@ -10010,9 +10125,12 @@ async fn handle_frame(
             if !is_owner {
                 return Err(ForgeError::Protocol("só o dono configura".into()));
             }
-            let _ = engine
-                .store
-                .channel_cfg_set(&channel_id, slowmode_secs.clamp(0, 21_600), nsfw, false);
+            let _ = engine.store.channel_cfg_set(
+                &channel_id,
+                slowmode_secs.clamp(0, 21_600),
+                nsfw,
+                false,
+            );
             engine.broadcast_social(
                 &community_id,
                 SecureFrame::ChannelCfg {
@@ -10106,7 +10224,10 @@ async fn handle_frame(
                 },
             );
         }
-        SecureFrame::EventUpsert { community_id, event } => {
+        SecureFrame::EventUpsert {
+            community_id,
+            event,
+        } => {
             let is_owner = engine
                 .store
                 .get_community(&community_id)
@@ -10135,14 +10256,22 @@ async fn handle_frame(
                 },
             );
         }
-        SecureFrame::EventInterest { community_id, event_id } => {
-            let _ = engine.store.event_interest(&community_id, &event_id, peer_fp);
+        SecureFrame::EventInterest {
+            community_id,
+            event_id,
+        } => {
+            let _ = engine
+                .store
+                .event_interest(&community_id, &event_id, peer_fp);
             let _ = engine.events.send(EngineEvent::EventUpdated {
                 community_id: community_id.clone(),
                 event_id: event_id.clone(),
             });
         }
-        SecureFrame::EmojiUpsert { community_id, emoji } => {
+        SecureFrame::EmojiUpsert {
+            community_id,
+            emoji,
+        } => {
             if !engine.is_moderator(&community_id, peer_fp) {
                 return Err(ForgeError::Protocol("sem permissão".into()));
             }
@@ -10677,7 +10806,10 @@ mod tests {
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("nat_endpoint"));
-        assert_eq!(v.get("addr").and_then(|a| a.as_str()), Some("203.0.113.7:51234"));
+        assert_eq!(
+            v.get("addr").and_then(|a| a.as_str()),
+            Some("203.0.113.7:51234")
+        );
         assert_eq!(v.get("source").and_then(|s| s.as_str()), Some("upnp"));
     }
 
@@ -10800,7 +10932,13 @@ mod tests {
 
         // Offer REAL, gerado pela mesma API que o par chamador usaria.
         let oferta = v.create_offer("outra-call", "peer-fantasma").unwrap();
-        let r = block_on(handle_frame(&e, PEER, "pubkey", "Peer", offer_frame(call_id, oferta)));
+        let r = block_on(handle_frame(
+            &e,
+            PEER,
+            "pubkey",
+            "Peer",
+            offer_frame(call_id, oferta),
+        ));
         assert!(r.is_ok(), "frame rejeitado: {r:?}");
         assert!(
             proximo_evento(&mut rx).is_none(),

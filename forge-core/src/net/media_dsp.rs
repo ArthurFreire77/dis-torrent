@@ -223,9 +223,7 @@ impl EchoCanceller {
         self.starved = 0;
 
         let inner = self.inner.as_mut().expect("inneracima do early-return");
-        inner
-            .aec
-            .cancel_echo(mic, &self.playbuf, &mut self.out);
+        inner.aec.cancel_echo(mic, &self.playbuf, &mut self.out);
         &self.out
     }
 
@@ -245,10 +243,13 @@ pub fn dbfs(x: &[i16]) -> f64 {
     if x.is_empty() {
         return f64::NEG_INFINITY;
     }
-    let acc: f64 = x.iter().map(|&v| {
-        let n = f64::from(v) / f64::from(i16::MAX);
-        n * n
-    }).sum();
+    let acc: f64 = x
+        .iter()
+        .map(|&v| {
+            let n = f64::from(v) / f64::from(i16::MAX);
+            n * n
+        })
+        .sum();
     let rms = (acc / x.len() as f64).sqrt();
     if rms <= 0.0 {
         f64::NEG_INFINITY
@@ -293,20 +294,43 @@ mod tests {
             let t = i as f64 / SAMPLE_RATE as f64;
             let vib = 1.0 + 0.06 * (2.0 * std::f64::consts::PI * 5.0 * t).sin();
             let src = bruto[i] * env[i];
-            for (fc, r, which) in [(700.0f64, 0.982f32, 0u8), (1220.0, 0.975, 1), (2600.0, 0.968, 2)] {
+            for (fc, r, which) in [
+                (700.0f64, 0.982f32, 0u8),
+                (1220.0, 0.975, 1),
+                (2600.0, 0.968, 2),
+            ] {
                 let th = 2.0 * std::f64::consts::PI * fc * vib / SAMPLE_RATE as f64;
                 let a1 = 2.0 * r * th.cos() as f32;
                 let a2 = -(r * r);
                 let _ = (fc, r);
                 let v = match which {
-                    0 => { let v = src + a1 * a1p + a2 * a1q; a1q = a1p; a1p = v; v }
-                    1 => { let v = src + a1 * b1p + a2 * b1q; b1q = b1p; b1p = v; v }
-                    _ => { let v = src + a1 * c1p + a2 * c1q; c1q = c1p; c1p = v; v }
+                    0 => {
+                        let v = src + a1 * a1p + a2 * a1q;
+                        a1q = a1p;
+                        a1p = v;
+                        v
+                    }
+                    1 => {
+                        let v = src + a1 * b1p + a2 * b1q;
+                        b1q = b1p;
+                        b1p = v;
+                        v
+                    }
+                    _ => {
+                        let v = src + a1 * c1p + a2 * c1q;
+                        c1q = c1p;
+                        c1p = v;
+                        v
+                    }
                 };
-                if which == 2 { out.push(v); }
+                if which == 2 {
+                    out.push(v);
+                }
             }
         }
-        let rms_real = (out.iter().map(|v| v * v).sum::<f32>() / n as f32).sqrt().max(1e-9);
+        let rms_real = (out.iter().map(|v| v * v).sum::<f32>() / n as f32)
+            .sqrt()
+            .max(1e-9);
         let g = rms / rms_real;
         out.iter().map(|v| (v * g).clamp(-1.0, 1.0)).collect()
     }
@@ -381,7 +405,10 @@ mod tests {
         // sem nenhum push no ring: referencia morta
         let out = ec.process(&mic).to_vec();
         assert_eq!(out, mic, "sem referencia o microfone nao pode ser alterado");
-        assert!(ec.last_starved, "deveria ter registrado frames sem referencia");
+        assert!(
+            ec.last_starved,
+            "deveria ter registrado frames sem referencia"
+        );
     }
 
     /// AEC desligado (fone de ouvido) = pass-through exato, sem custo de CPU.
@@ -391,7 +418,9 @@ mod tests {
         ring.push(&vec![1000i16; FRAME_SAMPLES * 20]);
         let mut ec = EchoCanceller::new(ring.clone(), false);
         assert!(!ec.is_enabled());
-        let mic: Vec<i16> = (0..FRAME_SAMPLES).map(|i| (i as i16).wrapping_mul(3)).collect();
+        let mic: Vec<i16> = (0..FRAME_SAMPLES)
+            .map(|i| (i as i16).wrapping_mul(3))
+            .collect();
         assert_eq!(ec.process(&mic), &mic[..]);
     }
 

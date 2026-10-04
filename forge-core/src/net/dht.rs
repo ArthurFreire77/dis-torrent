@@ -129,8 +129,7 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
             if let Some(port) = engine.dht_announce_port() {
                 let eng = engine.clone();
                 let own = identity_infohash(&engine.identity().fingerprint);
-                let r =
-                    tokio::task::spawn_blocking(move || eng.bit_dht_announce(own, port)).await;
+                let r = tokio::task::spawn_blocking(move || eng.bit_dht_announce(own, port)).await;
                 if let Ok(Ok(())) = r {
                     engine.diag_record_net(|d| {
                         d.dht_ok = Some(true);

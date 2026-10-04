@@ -5,7 +5,7 @@
 //! poderia estar contando a assinatura de outra sessão ao mesmo tempo, e a
 //! asserção viraria flakiness em vez de prova.
 
-use forge_core::net::media_voice::{VoiceMedia, audio};
+use forge_core::net::media_voice::{audio, VoiceMedia};
 
 #[test]
 fn sdp_recusado_nao_deixa_microfone_assinado() {
@@ -13,7 +13,8 @@ fn sdp_recusado_nao_deixa_microfone_assinado() {
 
     let antes = audio::hub().subscriber_count();
     assert!(
-        m.handle_offer("call-ruim", "peer-x", "isto-nao-e-um-sdp").is_err(),
+        m.handle_offer("call-ruim", "peer-x", "isto-nao-e-um-sdp")
+            .is_err(),
         "SDP invalido tem de ser recusado"
     );
     assert_eq!(

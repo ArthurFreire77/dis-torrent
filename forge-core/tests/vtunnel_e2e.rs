@@ -129,13 +129,15 @@ async fn tunel_handshake_ping_via_relay() {
         60,
     )
     .await;
-    let EngineEvent::TunnelPong { id: got, rtt_ms, .. } = pong else {
+    let EngineEvent::TunnelPong {
+        id: got, rtt_ms, ..
+    } = pong
+    else {
         unreachable!()
     };
     assert_eq!(got, id);
     assert!(rtt_ms >= 0, "RTT honesto e não-negativo");
 }
-
 
 // ─────────── Fase 2: DM e sinalização viajando PELO túnel ───────────────────
 
@@ -159,26 +161,57 @@ async fn tunel_dm_e_chamada_via_tunnel() {
         60,
     )
     .await;
-    let EngineEvent::FriendRequestIn { fp, .. } = req else { unreachable!() };
+    let EngineEvent::FriendRequestIn { fp, .. } = req else {
+        unreachable!()
+    };
     b.friend_respond(&fp, true).unwrap();
-    wait_event(&mut ev_a, "aceite", |e| matches!(e, EngineEvent::FriendAccepted { fp, .. } if fp == &fp_b), 60).await;
+    wait_event(
+        &mut ev_a,
+        "aceite",
+        |e| matches!(e, EngineEvent::FriendAccepted { fp, .. } if fp == &fp_b),
+        60,
+    )
+    .await;
 
     // túnel sobe (handshake via relay)
     a.tunnel_request(&fp_b);
-    wait_event(&mut ev_b, "túnel B", |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_a), 60).await;
-    wait_event(&mut ev_a, "túnel A", |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_b), 60).await;
+    wait_event(
+        &mut ev_b,
+        "túnel B",
+        |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_a),
+        60,
+    )
+    .await;
+    wait_event(
+        &mut ev_a,
+        "túnel A",
+        |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_b),
+        60,
+    )
+    .await;
     assert!(a.tunnel_established(&fp_b));
 
     // Baseline: antes, sessão é via relay e ninguém usou o túnel ainda.
-    assert!(a.is_peer_via_relay(&fp_b), "sessão A→B é relay (carrier do túnel)");
+    assert!(
+        a.is_peer_via_relay(&fp_b),
+        "sessão A→B é relay (carrier do túnel)"
+    );
     let before_rx = b.peer_diag(&fp_a).tunnel_rx_frames;
     let before_tx = a.peer_diag(&fp_b).tunnel_tx_frames;
 
     // DM: send_dm → SendToPeer → com peer só-via-relay, DEVE tunelizar.
     let dm = a.open_dm(&fp_b, "TunelB").unwrap();
     let m1 = a.send_dm(&dm.id, "oi via TÚNEL!").unwrap();
-    let rec = wait_event(&mut ev_b, "B recebe DM via túnel", |e| matches!(e, EngineEvent::MessageNew(_)), 60).await;
-    let EngineEvent::MessageNew(in_b) = rec else { unreachable!() };
+    let rec = wait_event(
+        &mut ev_b,
+        "B recebe DM via túnel",
+        |e| matches!(e, EngineEvent::MessageNew(_)),
+        60,
+    )
+    .await;
+    let EngineEvent::MessageNew(in_b) = rec else {
+        unreachable!()
+    };
     assert_eq!(in_b.body, "oi via TÚNEL!");
     wait_event(&mut ev_a, "ACK volta via túnel", |e| matches!(e, EngineEvent::MessageStatus { msg_id, status } if msg_id == &m1.id && status == "delivered"), 60).await;
 
@@ -186,20 +219,46 @@ async fn tunel_dm_e_chamada_via_tunnel() {
     // + replay-window + AAD), não pelo corpo livre do relay.
     let d_b = b.peer_diag(&fp_a);
     let d_a = a.peer_diag(&fp_b);
-    assert!(d_b.tunnel_rx_frames > before_rx, "B deve ter RECEBIDO frame via túnel");
-    assert!(d_a.tunnel_tx_frames > before_tx, "A deve ter ENVIADO frame via túnel");
+    assert!(
+        d_b.tunnel_rx_frames > before_rx,
+        "B deve ter RECEBIDO frame via túnel"
+    );
+    assert!(
+        d_a.tunnel_tx_frames > before_tx,
+        "A deve ter ENVIADO frame via túnel"
+    );
 
     // Sinalização de CHAMADA pelo mesmo caminho: CallInvite via túnel.
     let call_id = a.call_invite(&fp_b, "voice").unwrap();
-    let inc = wait_event(&mut ev_b, "B recebe CallInvite", |e| matches!(e, EngineEvent::CallIncoming { from_fp, .. } if from_fp == &fp_a), 60).await;
-    let EngineEvent::CallIncoming { call_id: got, .. } = inc else { unreachable!() };
+    let inc = wait_event(
+        &mut ev_b,
+        "B recebe CallInvite",
+        |e| matches!(e, EngineEvent::CallIncoming { from_fp, .. } if from_fp == &fp_a),
+        60,
+    )
+    .await;
+    let EngineEvent::CallIncoming { call_id: got, .. } = inc else {
+        unreachable!()
+    };
     assert_eq!(got, call_id);
     b.call_reject(&call_id, &fp_a, "teste").unwrap();
-    wait_event(&mut ev_a, "A recebe CallReject", |e| matches!(e, EngineEvent::CallRejected { call_id: c, .. } if c == &call_id), 60).await;
+    wait_event(
+        &mut ev_a,
+        "A recebe CallReject",
+        |e| matches!(e, EngineEvent::CallRejected { call_id: c, .. } if c == &call_id),
+        60,
+    )
+    .await;
 
     // PONG de um ping pelo túnel mostra RTT real do caminho completo.
     let _ = a.tunnel_ping(&fp_b).unwrap();
-    wait_event(&mut ev_a, "pong final", |e| matches!(e, EngineEvent::TunnelPong { fp, .. } if fp == &fp_b), 60).await;
+    wait_event(
+        &mut ev_a,
+        "pong final",
+        |e| matches!(e, EngineEvent::TunnelPong { fp, .. } if fp == &fp_b),
+        60,
+    )
+    .await;
 }
 
 /// Frame GRANDE de sinalização (SDP real tem ~2KB) fragmenta e remonta pelo
@@ -217,21 +276,51 @@ async fn tunel_fragmenta_frame_grande() {
 
     let outcome = a.friend_request(&fp_b).unwrap();
     assert_eq!(format!("{outcome:?}"), "QueuedOffline");
-    let req = wait_event(&mut ev_b, "pedido B", |e| matches!(e, EngineEvent::FriendRequestIn { fp, .. } if fp == &fp_a), 60).await;
-    let EngineEvent::FriendRequestIn { fp, .. } = req else { unreachable!() };
+    let req = wait_event(
+        &mut ev_b,
+        "pedido B",
+        |e| matches!(e, EngineEvent::FriendRequestIn { fp, .. } if fp == &fp_a),
+        60,
+    )
+    .await;
+    let EngineEvent::FriendRequestIn { fp, .. } = req else {
+        unreachable!()
+    };
     b.friend_respond(&fp, true).unwrap();
-    wait_event(&mut ev_a, "aceite", |e| matches!(e, EngineEvent::FriendAccepted { fp, .. } if fp == &fp_b), 60).await;
+    wait_event(
+        &mut ev_a,
+        "aceite",
+        |e| matches!(e, EngineEvent::FriendAccepted { fp, .. } if fp == &fp_b),
+        60,
+    )
+    .await;
 
     a.tunnel_request(&fp_b);
-    wait_event(&mut ev_b, "túnel B", |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_a), 60).await;
-    wait_event(&mut ev_a, "túnel A", |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_b), 60).await;
+    wait_event(
+        &mut ev_b,
+        "túnel B",
+        |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_a),
+        60,
+    )
+    .await;
+    wait_event(
+        &mut ev_a,
+        "túnel A",
+        |e| matches!(e, EngineEvent::TunnelUp { fp, .. } if fp == &fp_b),
+        60,
+    )
+    .await;
 
     // SDP grande (200KB > frag 48KB): fragmenta e remonta.
     let sdp = "v=0 ".to_string() + &"a=".repeat(200_000);
-    a.call_signal(&fp_b, forge_core::protocol::SecureFrame::CallOffer {
-        call_id: "dummy-call".into(),
-        sdp: sdp.clone(),
-    }).unwrap();
+    a.call_signal(
+        &fp_b,
+        forge_core::protocol::SecureFrame::CallOffer {
+            call_id: "dummy-call".into(),
+            sdp: sdp.clone(),
+        },
+    )
+    .unwrap();
     let ev_offer = wait_event(
         &mut ev_b,
         "B recebe CallOffer grande via túnel",
