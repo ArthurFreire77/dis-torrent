@@ -90,6 +90,7 @@ jobs:
             gstreamer1.0-libav
       # Sem rede externa o runner erra por timeout; corta o broker publico.
       - name: Suites deterministicas
+        working-directory: forge-core
         run: |
           for t in integration identity_crypto storage_protocol friends \
                    channels community_meta security_layer social_layer \
