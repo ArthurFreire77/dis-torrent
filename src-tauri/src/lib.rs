@@ -2805,6 +2805,130 @@ fn save_file(
     Ok(path.to_string_lossy().to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Escrita em LOTES (streaming) — o gargalo de arquivo grande.
+//
+// `save_file` recebe o arquivo INTEIRO em base64 numa unica chamada. O pico de
+// memoria era ~8.7x o tamanho do arquivo: Uint8Array montado (1x) + arrayBuffer
+// (1x) + string base64 (1.33x) + JSON do IPC (1.33x) + Vec decodificado no Rust
+// (1x), com as copias anteriores ainda vivas. Em 200 MB sao ~1.7 GB; o renderer
+// do WebView morre e o item fica preso em "verifying".
+//
+// `save_file_stream` recebe o mesmo arquivo em N pedacos: o frontend mantem no
+// maximo um lote em memoria (16 chunks = 4 MB) e o Rust、追加 no .tmp que ja
+// existia. O pico cai para ~1.15x e o teto deixa de ser o gargalo.
+// ---------------------------------------------------------------------------
+
+/// Acumula lotes de um arquivo ate fechar o download.
+///
+/// Chame com `data_b64` por pedaco e `flush: false`; o ultimo lote traz
+/// `flush: true`. A primeira chamada cria o .tmp, o `job_id` devolve o caminho
+/// temporario e as seguintes reabrem esse mesmo arquivo em append. `flush: true`
+/// faz rename atomico e devolve o caminho final.
+///
+/// Se o app morrer no meio, sobra um `.forge-part` (mesmo comportamento de antes,
+/// que ja gravava em .tmp) — nunca um arquivo corrompido com nome final.
+#[tauri::command]
+fn save_file_stream(
+    app: AppHandle,
+    job_id: String,
+    name: String,
+    data_b64: String,
+    flush: bool,
+    total_bytes: u64,
+) -> Result<String, String> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use base64::{engine::general_purpose, Engine as _};
+
+    // Sanitização anti-traversal ANTES de qualquer escrita (mesma regra do
+    // save_file: o nome vem de peer remoto).
+    let safe = std::path::Path::new(&name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "save_file_stream: nome de arquivo inválido".to_string())?
+        .to_string();
+    if safe.is_empty()
+        || safe.starts_with('.')
+        || safe.contains('\\')
+        || safe.contains('/')
+        || safe.contains('\0')
+        || safe.len() > 255
+    {
+        return Err("save_file_stream: nome de arquivo inválido (traversal bloqueado)".into());
+    }
+
+    let bytes = general_purpose::STANDARD
+        .decode(&data_b64)
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(&data_b64))
+        .map_err(|e| format!("save_file_stream travou em decode base64: {e}"))?;
+
+    // Teto anti-OOM por LOTE e por TOTAL. Sem teto, um peer malicioso manda
+    // um lote de 4 GB e o decode derruba o processo.
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err("save_file_stream: lote acima de 32 MB".into());
+    }
+    if total_bytes > MAX_STREAM_FILE_BYTES {
+        return Err(format!(
+            "arquivo grande demais para salvar (máx {})",
+            crate::fmt_mb(MAX_STREAM_FILE_BYTES)
+        ));
+    }
+
+    let _ = &app;
+    let downloads = {
+        #[cfg(target_os = "android")]
+        {
+            let base = app
+                .path()
+                .app_data_dir()
+                .or_else(|_| app.path().app_local_data_dir())
+                .map_err(|e| format!("save_file_stream: pasta do app indisponível: {e}"))?;
+            base.join("Download")
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            resolve_downloads_dir()?
+        }
+    };
+    fs::create_dir_all(&downloads)
+        .map_err(|e| format!("save_file_stream travou em mkdir: {e}"))?;
+
+    let tmp = downloads.join(format!(".{safe}.{job_id}.forge-part"));
+
+    if flush {
+        if let Err(e) = fs::rename(&tmp, &unique_download_path(&downloads, &safe)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("save_file_stream travou em rename: {e}"));
+        }
+        return Ok(safe);
+    }
+
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&tmp)
+        .map_err(|e| format!("save_file_stream travou em open {}: {e}", tmp.display()))?;
+    f.write_all(&bytes)
+        .map_err(|e| format!("save_file_stream travou em write: {e}"))?;
+    f.sync_all().ok();
+    Ok(tmp.to_string_lossy().to_string())
+}
+
+/// Teto do fluxo em lotes. Espelha a validacao do frontend (VITE_FORGE_MAX_FILE_MB,
+/// default 2 GB) — este e' o que impede um peer de nos fazer preencher o disco.
+const MAX_STREAM_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Formata bytes como "X MB"/"X GB" para as mensagens de erro.
+pub(crate) fn fmt_mb(b: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    if b >= 1024 * MB {
+        format!("{} GB", b / (1024 * MB))
+    } else {
+        format!("{} MB", b / MB)
+    }
+}
+
 /// Resolve a pasta Downloads do DESKTOP com estágios honestos.
 /// Ordem: dirs::download_dir() → ~/Download(s) via home_dir() → erro dizendo
 /// exatamente o que faltou.
@@ -3377,6 +3501,7 @@ fn main() {
             relay_status,
             connect_addr,
             disconnect_peer,
+            save_file_stream,
             friends_list,
             friend_request,
             friend_respond,

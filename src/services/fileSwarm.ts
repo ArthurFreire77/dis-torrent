@@ -55,6 +55,9 @@ const RETRY_BASE_MS = 1000
 const RETRY_MAX_MS = 8000
 // Teto de tentativas por chunk: impede retry infinito em background.
 const MAX_CHUNK_ATTEMPTS = 8
+// Teto de ciclos de retry por arquivo (cada ciclo = 8 tentativas por chunk).
+// Evita re-agendar para sempre quando nao ha seeder vivo algum.
+const MAX_RETRY_CYCLES = 6
 
 // Validação anti-DoS compartilhada (envio local e anúncio remoto).
 // Retorna a mensagem de erro ou null se válido.
@@ -280,6 +283,8 @@ export class FileSwarm {
   private chunkTimers = new Map<string, number>()
   // 1 timer de re-kick por arquivo, com backoff exponencial.
   private retryTimer = new Map<string, number>()
+  // Serializa fetchSwarm por arquivo — ver o comentário em fetchSwarm.
+  private fetching = new Map<string, Promise<unknown>>()
   private retryAttempts = new Map<string, number>()
   // Cursor round-robin por arquivo para distribuir pedidos entre seeders.
   private rr = new Map<string, number>()
@@ -514,6 +519,23 @@ export class FileSwarm {
     const file_id = sf.file_id
     // pausado pela fila: não faz novos pedidos (chunks em voo ainda entram).
     if (this.pausedFiles.has(file_id)) return
+    // TRAVA POR ARQUIVO. `fetchSwarm` era chamado de `onChunkData` a CADA chunk
+    // que chegava (24+ concorrentes num burst) e do poll do downloadManager a
+    // cada 400 ms. Todas faziam `await this.ensureHydrated(sf)` ANTES de
+    // computar `inFlight`/`budget` — e como sao todas awaited sobre o mesmo
+    // `inFlight` obsoleto, todas passavam do teto de MAX_IN_FLIGHT. Cada uma
+    // alocava 341 KB de base64 na heap + 1 IPC + 1 SecureFrame de 341 KB numa
+    // fila sem backpressure (engine.rs) -> latencia > 5 s -> cascata de timeouts.
+    // Serializar por arquivo resolve: a 2a chamada ve o `inFlight` ja atualizado.
+    const anterior = this.fetching.get(file_id) ?? Promise.resolve()
+    const atual = anterior.then(() => this.fetchSwarmInner(sf)).catch(() => {})
+    this.fetching.set(file_id, atual)
+    try { await atual } finally { if (this.fetching.get(file_id) === atual) this.fetching.delete(file_id) }
+  }
+
+  private async fetchSwarmInner(sf: SwarmFile): Promise<void> {
+    const file_id = sf.file_id
+    if (this.pausedFiles.has(file_id)) return
     // resume em disco antes de pedir à rede (1x por arquivo por sessão)
     await this.ensureHydrated(sf)
     const missing = Array.from({ length: sf.chunks }, (_, i) => i).filter(i => !sf.have.has(i))
@@ -529,8 +551,22 @@ export class FileSwarm {
     // chunks que ainda não esgotaram as tentativas (evita loop infinito em background)
     const eligible = missing.filter((i) => (this.attempts.get(this.key(file_id, i)) ?? 0) < MAX_CHUNK_ATTEMPTS)
     if (eligible.length === 0) {
-      this.lastError = 'sem progresso após várias tentativas — verifique os peers e toque em Baixar de novo'
-      return // não reagenda: novo gesto do usuário reseta as tentativas
+      this.lastError = 'sem progresso após várias tentativas — todos os chunks deste arquivo esgotaram o retry. Toque em Baixar de novo.'
+      // DAVA CONGELADO EM UM PORCENTUAL. Este return era seguido de NENHUM
+      // scheduleRetry: quando o ULTIMO chunk faltando esgotava as 8 tentativas,
+      // o arquivo ficava parado em 99% para sempre — so saia com um novo gesto
+      // do usuario em "Baixar". Agenda de novo com backoff maior para o
+      // swarm tentar outra vez sozinho.
+      // Backoff ja e' limitado por 2^n (RETRY_MAX_MS). Um teto de ciclos evita
+      // que o arquivo fique re-agendando eternamente sem nenhum seeder vivo.
+      const ciclos = (this.retryAttempts.get(sf.file_id) ?? 0)
+      if (ciclos >= MAX_RETRY_CYCLES) {
+        this.lastError = `sem progresso apos ${MAX_RETRY_CYCLES} ciclos de retry — nenhum seeder respondeu. Verifique se quem tem o arquivo esta online, ou pause e retome.`
+        return
+      }
+      this.attempts.clear()
+      this.scheduleRetry(sf)
+      return
     }
 
     // concorrência ADAPTATIVA: mais chunks em voo quando há mais seeders
@@ -847,19 +883,28 @@ export class FileSwarm {
           // tempo — ~4.3x o arquivo. Num arquivo de 200 MB isso é ~860 MB
           // vivos e o WebView morria ("save_file travou em decode") ou o
           // desktop engasgava. Agora o pico é ~1.33x.
-          let bin = ''
-          const parts: string[] = []
+          // Lotes de 16 chunks (4 MB). O frontend segura no maximo um lote; o
+          // Rust acrescenta no .tmp. Antes era a string base64 do arquivo
+          // inteiro — pico de ~8.7x o tamanho (Uint8Array + arrayBuffer +
+          // base64 + JSON do IPC + Vec no Rust, todos vivos ao mesmo tempo).
+          const LOTE = 16
+          const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+          let savedPath = safeName
+          let parts: string[] = []
           for (let i = 0; i < sf.chunks; i++) {
             const c = sf.data.get(i)
             if (!c) throw new Error(`chunk ${i} sumiu antes do salvamento`)
             parts.push(b64(c))
-            if (parts.length >= 16) { bin += parts.join(''); parts.length = 0 }
+            const ultimo = i === sf.chunks - 1
+            if (parts.length >= LOTE || ultimo) {
+              const lote = parts.join('')
+              parts = []
+              savedPath = await tauriInvoke<string>('save_file_stream', {
+                jobId, name: safeName, dataB64: lote, flush: ultimo, totalBytes: sf.size,
+              })
+            }
           }
-          if (parts.length) bin += parts.join('')
-          parts.length = 0
-          const dataB64 = bin
-          const saved = await tauriInvoke<string>('save_file', { name: safeName, dataB64 })
-          const savedPath = typeof saved === 'string' && saved.trim() ? saved : safeName
+          if (typeof savedPath !== 'string' || !savedPath.trim()) savedPath = safeName
           // Android: o Rust só escreve na área PRIVADA (scoped storage nega
           // /sdcard/Download). O plugin Kotlin copia para o Downloads real.
           if (isAndroid()) {

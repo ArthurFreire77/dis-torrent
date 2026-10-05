@@ -13,7 +13,12 @@ use std::sync::Mutex;
 
 use crate::{ForgeError, Result};
 
-const DEFAULT_CAP_BYTES: u64 = 256 * 1024 * 1024; // 256 MB
+/// Spool de disco para chunks baixados. Precisa ser MAIOR que o maior arquivo
+/// em andamento, senao o LRU come os proprios chunks que estao sendo baixados:
+/// um arquivo de 300 MB com cap de 256 MB nunca completava.
+const DEFAULT_CAP_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
+/// 16 MB e' o piso: abaixo disso o cache sai do disco e o `cacheSetCap` do
+/// painel (Configurações → Metrics) nunca consegue subir de volta.
 const MIN_CAP_BYTES: u64 = 16 * 1024 * 1024; // 16 MB — abaixo disso nem cache
 
 #[derive(Debug)]

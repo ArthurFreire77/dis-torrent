@@ -1234,16 +1234,18 @@ fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
 // ---------------------------------------------------------------- impl
 
 impl VoiceMedia {
-    /// Cria o gerenciador. Tenta abrir microfone e alto-falante mas NAO falha por
-    /// causa deles: sem microfone a sessao funciona so recebendo.
+    /// Cria o gerenciador. NAO abre microfone nem alto-falante aqui — a abertura
+    /// e preguicosa (ver abaixo). Sem microfone a sessao funciona so' recebendo,
+    /// e `retry_mic` existe para o device que so' fica pronto depois.
     pub fn new() -> Result<Arc<Self>, String> {
         let core = Core::new();
-        core.run(async {
-            let h = self::audio::hub();
-            let _ = h.ensure_speaker();
-            let _ = h.ensure_mic();
-            Ok::<(), String>(())
-        })??;
+        // NAO abre microfone/speaker aqui. `NetworkEngine::new()` chama isto, e
+        // abrir device de audio leva segundos (ou trava) quando nao ha servidor
+        // de audio — Deixando todo engine nascer lento,  e no pior caso travar a
+        // main thread antes de o app aparecer. A abertura e preguicosa: acontece
+        // em `subscribe()`/`build_session`, no primeiro `create_offer`, e
+        // `retry_mic` cobre o caso de device que so' fica pronto depois.
+        // Em troca, o status inicial e' honesto: "iniciando", nao "ativa".
         Ok(Arc::new(VoiceMedia {
             inner: Arc::new(Inner {
                 core,
@@ -1499,7 +1501,17 @@ impl VoiceMedia {
     /// seguintes nasciam so-recebendo ate reiniciar o app. Barato quando o mic
     /// ja' esta' aberto (sai no primeiro `if` do `ensure_mic`).
     pub fn retry_mic(&self) {
-        self::audio::hub().retry_mic();
+        // Precisa passar pela fila do voice-core como TODO o resto. Chamar direto
+        // abria device de audio na thread que chamou: `call_invite` e um comando
+        // Tauri SINCRONO (roda na main thread), e `open_mic` enumera os devices
+        // de entrada chamando `supported_input_configs()` em cada um. Sem
+        // servidor de audio (JACK, device ocupado,Wayland sem pipewire) isso
+        // leva segundos ou bloqueia — e enquanto bloqueia, a UI inteira fica
+        // presa em "Chamando...", porque o `invoke` nao resolve.
+        let _ = self
+            .inner
+            .core
+            .run(async { self::audio::hub().retry_mic() });
     }
 
     // ---------------- video nativo ----------------

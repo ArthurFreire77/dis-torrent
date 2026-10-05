@@ -33,6 +33,13 @@ class DownloadManager {
   /** fileId → item da fila. */
   private items = new Map<string, DownloadItem>()
   private running = new Set<string>()
+  // `kick` remove o id de `running` no `.finally` ENQUANTO o `finalize` ainda
+  // roda (é `void this.finalize(...)` + return). O proximo poll de `onChunk`
+  // — ou um resume/retry/load do usuario — entrava de novo e iniciava um
+  // SEGUNDO finalize concorrente: duas montagens, dois base64, dois save_file.
+  // O segundo batia no guard `saving` do fileSwarm, lanceava, e o item ia para
+  // `failed` mesmo com o primeiro tendo dado certo. Este set fecha a corrida.
+  private finalizing = new Set<string>()
   private pausedFps = new Set<string>()
   private cancelled = new Set<string>()
   /** fileId → {bytes, at} da janela de velocidade. */
@@ -321,6 +328,12 @@ class DownloadManager {
 
   /** Verificação blake3 do arquivo montado + salvamento + notificação. */
   private async finalize(fileId: string, sf: import('./fileSwarm').SwarmFile): Promise<void> {
+    if (this.finalizing.has(fileId)) return
+    this.finalizing.add(fileId)
+    try { await this.finalizeInner(fileId, sf) } finally { this.finalizing.delete(fileId) }
+  }
+
+  private async finalizeInner(fileId: string, sf: import('./fileSwarm').SwarmFile): Promise<void> {
     const it = this.items.get(fileId)
     if (!it) return
     this.setStatus(it, 'chunks-complete')

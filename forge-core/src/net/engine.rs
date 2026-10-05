@@ -432,7 +432,6 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
             | VoiceState { .. }
             | TunnelOffer { .. }
             | TunnelAnswer { .. }
-            | TunnelData { .. }
             | Ping { .. }
             | Pong { .. } => 0,
         // 1 — controle social/conexão
@@ -483,6 +482,14 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | FileChunkRequest { .. }
         | FileChunkData { .. }
         | FileHave { .. }
+        // TunnelData transporta o PAYLOAD de um frame serializado (ate
+        // TUN_FRAME_MAX) fragmentado em pedacos de 48KB. Um chunk de arquivo
+        // de 341KB vira ~8 TunnelData. Com a classe 0 (realtime) eles entravam
+        // NA FRENTE de CallOffer/CallIce/Ping, que tem CLASS_CAP de 8 frames por
+        // lote: um download via relay segurava a negociacao da chamada, e o ping
+        // atrasado derrubava a sessao (timeout em transport.rs). O handshake do
+        // tunel (Offer/Answer) continua realtime; so' os dados vao para o bulk.
+        | TunnelData { .. }
         | CommunityState { .. } => 3,
     }
 }
