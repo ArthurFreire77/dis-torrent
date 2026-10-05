@@ -177,22 +177,25 @@ jobs:
       - run: npm ci
       - run: npm run tauri:build
 
-      # `zip` nao existe no windows-latest. tar.exe (bsdtar, nativo do Win10+)
-      # cria zip com -a. No Linux usa-se zip -9.
+      # Dois cuidados: `zip` nao existe no windows-latest (exit 127), e `find`
+      # do Git Bash e' o find.exe do Windows (outro programa) — nao serve.
+      # Globbing do bash resolve os dois. No Windows, tar.exe (bsdtar, nativo do
+      # Win10+) cria zip com -a; no Linux, zip -9.
       - name: Empacotar em ZIP + SHA256
         shell: bash
         run: |
           set -uo pipefail
+          shopt -s nullglob
           DEST="$RUNNER_TEMP/dist"
           rm -rf "$DEST"; mkdir -p "$DEST"
-          echo "--- bundle ---"
-          find src-tauri/target/release/bundle -type f 2>&1 | head -20
+          files=(src-tauri/target/release/bundle/*/*)
           count=0
-          while IFS= read -r f; do
+          for f in "${files[@]}"; do
             case "$f" in
               *.deb|*.AppImage|*.msi|*setup.exe|*.rpm|*.dmg) ;;
               *) continue ;;
             esac
+            [ -f "$f" ] || continue
             base=$(basename "$f")
             cp "$f" "$DEST/$base"
             if [ "$RUNNER_OS" = "Windows" ]; then
@@ -202,11 +205,11 @@ jobs:
             fi
             rm -f "$DEST/$base"
             count=$((count+1))
-          done < <(find src-tauri/target/release/bundle -type f)
-          echo "--- empacotados: $count ---"
+          done
+          echo "--- empacotados: $count de ${#files[@]} candidatos ---"
           if [ "$count" -eq 0 ]; then
             echo "::error::nenhum instalador encontrado"
-            ls -R src-tauri/target/release/bundle || true
+            ls -R src-tauri/target/release/bundle 2>&1 | head -30 || true
             exit 1
           fi
           ( cd "$DEST" && sha256sum ./*.zip > SHA256SUMS.txt )
