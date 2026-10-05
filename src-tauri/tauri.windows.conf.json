@@ -2,7 +2,6 @@
   "bundle": {
     "targets": ["nsis", "msi"],
     "windows": {
-      "//": "downloadBootstrapper = 1.5 MB. offlineInstaller embutia o WebView2 Runtime inteiro (212 MB) e transformava o instalador em um arquivo gigante — sinal que levanta suspeita em SmartScreen/AV e deixa o download lento. O WebView2 já vem instalado no Windows 10 1803+ e no 11; o bootstrapper só baixa se faltar.",
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
