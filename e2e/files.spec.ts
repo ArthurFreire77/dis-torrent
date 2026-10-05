@@ -64,20 +64,21 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
 test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   await createAccount(page, 'Carol');
 
-  // 200MB+ barrado
+  // Acima do teto (o default e' 2 GB, configuravel por VITE_FORGE_MAX_FILE_MB).
+  // Usa 8 GB para ser barrado independente do teto configurado.
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('forge:bus', { detail: {
       type: 'file_announce', file_id: 'evil-big', name: 'big.bin',
-      size: 300 * 1024 * 1024, chunks: 1200, hash: 'a'.repeat(32), from_fp: 'abcdef123456',
+      size: 8 * 1024 * 1024 * 1024, chunks: 32768, hash: 'a'.repeat(32), from_fp: 'abcdef123456',
     } }))
   );
-  await expect(page.getByText('arquivo muito grande (limite 200MB)')).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText(/arquivo muito grande \(limite/)).toBeVisible({ timeout: 10000 });
 
   // chunks acima do limite rejeitado
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('forge:bus', { detail: {
       type: 'file_announce', file_id: 'evil-chunks', name: 'x.bin',
-      size: 1024, chunks: 5000, hash: 'b'.repeat(32), from_fp: 'abcdef123456',
+      size: 1024, chunks: 40000, hash: 'b'.repeat(32), from_fp: 'abcdef123456',
     } }))
   );
   await expect(page.getByText(/chunks acima do limite/)).toBeVisible({ timeout: 10000 });

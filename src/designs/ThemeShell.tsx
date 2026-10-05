@@ -2226,18 +2226,22 @@ export default function ThemeShell({ designId }: {designId:string}){
                 onToast={setNotice}
                 onResend={(m) => { void resendMessage(m) }}
                 pollChannel={view === 'servidores' && selCommunity ? { communityId: selCommunity, channelId: selConv } : undefined}
-                renderFile={(m, grouped) => (
+                renderFile={(m, grouped) => {
+                  const fmeta = parseFileBody(m.body)
+                  if (!fmeta) return null
+                  return (
                   <div style={{ marginTop: 6, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', maxWidth: 400 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <span style={{ display: 'flex', flexShrink: 0, color: muted }}><Icon d={Icons.attach} size={20} /></span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 800, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>arquivo swarm</div>
-                        <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{m.body.slice(0, 90)}</div>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmeta.name}</div>
+                        <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{formatFileSize(fmeta.size)} · {fmeta.chunks} {fmeta.chunks === 1 ? 'chunk' : 'chunks'}</div>
                       </div>
                     </div>
                     <button onClick={() => setShowDownloads(true)} style={{ marginTop: 8, background: t.accent, color: '#fff', border: 'none', padding: '7px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 800 }}>Abrir downloads</button>
                   </div>
-                )}
+                  )
+                }}
               />
               </>
           )}

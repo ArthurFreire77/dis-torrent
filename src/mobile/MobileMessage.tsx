@@ -12,6 +12,7 @@ import { RichText, type InlineCtx } from '../shared/richText'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import { QUICK_REACTIONS } from '../shared/emojiSet'
 import { ReactionWhoPopover, LinkUnfurl } from '../components/social/Social'
+import { FILE_PREFIX } from '../services/fileSwarm'
 
 const T = {
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
@@ -107,7 +108,10 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   const [emojiOpen, setEmojiOpen] = useState(false)
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const isFile = !!renderFile && !body
+  // Mensagem de arquivo tem TEXTO no corpo (o marker __FORGE_FILE__:base64).
+  // Checar `!body` nunca era verdadeiro, entao o card nunca aparecia e o
+  // RichText imprimia o marker cru. Detecta pelo prefixo, como o desktop.
+  const isFile = !!renderFile && body.startsWith(FILE_PREFIX)
   const deleted = !!meta?.deleted
   const edited = !!meta?.edited_at && !deleted
 

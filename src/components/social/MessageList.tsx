@@ -5,6 +5,7 @@
 
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { services } from '../../services'
+import { FILE_PREFIX } from '../../services/fileSwarm'
 import type {
   EmojiView,
   MsgMetaView,
@@ -27,7 +28,7 @@ import {
   fmtClock,
 } from './Social'
 
-const FILE_PREFIX = '{"file"'
+
 const QUICK = ['👍', '❤️', '🔥', '😂', '🎉', '👀']
 
 export interface MessageListProps {

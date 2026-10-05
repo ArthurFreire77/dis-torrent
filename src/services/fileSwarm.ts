@@ -7,11 +7,44 @@ import { services } from './index'
 import { blake3 } from '@noble/hashes/blake3.js'
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 
+
+/**
+ * Teto de tamanho por arquivo. Configuravel por FORGE_MAX_FILE_MB (bundle nao
+ * tem terminal: exporte antes de subir o app, ou use um launcher).
+ *
+ * PADRAO: 2 GB. O teto nao e' arbitrario — e' a validacao anti-DoS: sem ele, um
+ * peer anuncia "size: 500 GB" num frame de 200 bytes e o motor tenta alocar o
+ * buffer inteiro. `validateAnnounce` roda no envio local E no anuncio remoto,
+ * entao o teto protege dos dois lados. Quem controla o proprio swarm pode subir
+ * o valor; quem so recebe, fica com o que o remetente respeitou.
+ */
+const MAX_FILE_MB = (() => {
+  const raw = (() => {
+    try {
+      const meta = import.meta as unknown as { env?: Record<string, string> }
+      return meta.env?.VITE_FORGE_MAX_FILE_MB
+    } catch { return undefined }
+  })()
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : 2048
+})()
+
+export const MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
 const CHUNK = 256 * 1024
 
-export const MAX_FILE_SIZE = 200 * 1024 * 1024 // 200MB — barrado com erro visível
-export const MAX_CHUNKS = 1024 // 1024 × 256KB = 256MB (folga sobre os 200MB); acima disso é rejeitado
+export const MAX_CHUNKS = Math.ceil(MAX_FILE_SIZE / CHUNK) + 1 // folga de 1 chunk
+export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_MB) >= 1024
+  ? `${(MAX_FILE_MB / 1024).toFixed(MAX_FILE_MB % 1024 === 0 ? 0 : 1)} GB`
+  : `${Math.round(MAX_FILE_MB)} MB`
 export const FILE_MARKER = '__FORGE_FILE__'
+
+/**
+ * Prefixo do corpo de mensagem de arquivo, como gerado por `encodeFileBody`:
+ *   "<emoji clipe> <nome> (<tamanho>) __FORGE_FILE__:<base64>"
+ * A UI usa isto para decidir se a mensagem e' um arquivo (e renderizar o card)
+ * em vez de passar o texto pelo markdown. Importar daqui evita divergencia.
+ */
+export const FILE_PREFIX = '\u{1F4CE} '
 
 // Swarm: não inundar o peer. Teto de chunks em voo por arquivo (relay-friendly),
 // com concorrência ADAPTATIVA em fetchSwarm (8 por seeder, máx. este teto) e
@@ -27,9 +60,9 @@ const MAX_CHUNK_ATTEMPTS = 8
 // Retorna a mensagem de erro ou null se válido.
 export function validateAnnounce(size: number, chunks: number): string | null {
   if (!Number.isFinite(size) || size < 0) return 'tamanho de arquivo inválido'
-  if (size > MAX_FILE_SIZE) return 'arquivo muito grande (limite 200MB)'
+  if (size > MAX_FILE_SIZE) return `arquivo muito grande (limite ${MAX_FILE_MB_LABEL})`
   if (!Number.isFinite(chunks) || chunks <= 0) return 'anúncio de arquivo inválido (chunks)'
-  if (chunks > MAX_CHUNKS) return `arquivo rejeitado: chunks acima do limite (${chunks} > ${MAX_CHUNKS})`
+  if (chunks > MAX_CHUNKS) return `arquivo rejeitado: ${chunks} chunks acima do limite de ${MAX_FILE_MB_LABEL}`
   const expected = Math.max(1, Math.ceil(size / CHUNK))
   if (chunks !== expected) return 'arquivo rejeitado: chunks incompatíveis com o tamanho'
   return null

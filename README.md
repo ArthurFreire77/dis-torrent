@@ -178,6 +178,7 @@ Todas opcionais. Veja [`.env.example`](.env.example) com comentários.
 | `FORGE_DISCOVERY_BROADCASTS` | — | Broadcasts extras de discovery (VPN/ZeroTier) |
 | `FORGE_NO_RELAY` / `FORGE_NO_TUNNEL` / `FORGE_NO_ANNOUNCE` / `FORGE_NO_DHT` | `0` | Kill-switches de feature |
 | `FORGE_NO_NATIVE_VOICE` | `0` | Força o WebRTC do navegador no lugar da voz nativa |
+| `VITE_FORGE_MAX_FILE_MB` | `2048` | Teto de tamanho por arquivo no swarm, em MB (2 GB). Não remova o teto sem motivo: é a validação anti-DoS (ver abaixo) |
 | `RUST_LOG` | `info` | Filtro de log |
 
 ---
