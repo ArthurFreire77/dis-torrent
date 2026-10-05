@@ -260,6 +260,10 @@ jobs:
       # do Git Bash e' o find.exe do Windows (outro programa) — nao serve.
       # Globbing do bash resolve os dois. No Windows, tar.exe (bsdtar, nativo do
       # Win10+) cria zip com -a; no Linux, zip -9.
+      # Dois cuidados: `zip` nao existe no windows-latest (exit 127), e `find`
+      # do Git Bash e' o find.exe do Windows (outro programa) — nao serve.
+      # Globbing do bash resolve os dois. No Windows, tar.exe (bsdtar, nativo do
+      # Win10+) cria zip com -a; no Linux, zip -9.
       - name: Empacotar em ZIP + SHA256
         shell: bash
         run: |
@@ -277,8 +281,13 @@ jobs:
             [ -f "$f" ] || continue
             base=$(basename "$f")
             cp "$f" "$DEST/$base"
+            # O windows-latest tem 7-Zip em C:\Program Files\7-Zip\7z.exe, que
+            # e' o caminho suportado na documentacao do runner. Nem `zip` (nao
+            # existe no PATH) nem o tar.exe do Git Bash (le 'D:\' como host) nem
+            # Compress-Archive (que brigava com o path) funcionam.
             if [ "$RUNNER_OS" = "Windows" ]; then
-              tar.exe -a -c -f "$DEST/$base.zip" -C "$DEST" "$base"
+              "/c/Program Files/7-Zip/7z.exe" a -tzip -bso0 -bsp0 \
+                "$DEST/$base.zip" "$DEST/$base"
             else
               ( cd "$DEST" && zip -9 -q "$base.zip" "$base" )
             fi
