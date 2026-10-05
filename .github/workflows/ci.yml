@@ -177,41 +177,40 @@ jobs:
       - run: npm ci
       - run: npm run tauri:build
 
-      # No Windows nao existe `zip` (exit 127). tar.exe (bsdtar, incluso no
-      # Windows 10+) cria zip com -a. No Linux usa-se zip -9.
+      # `zip` nao existe no windows-latest. tar.exe (bsdtar, nativo do Win10+)
+      # cria zip com -a. No Linux usa-se zip -9.
       - name: Empacotar em ZIP + SHA256
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/dist"
-          found=0
-          for f in src-tauri/target/release/bundle/*/*; do
+          set -uo pipefail
+          DEST="$RUNNER_TEMP/dist"
+          rm -rf "$DEST"; mkdir -p "$DEST"
+          echo "--- bundle ---"
+          find src-tauri/target/release/bundle -type f 2>&1 | head -20
+          count=0
+          while IFS= read -r f; do
             case "$f" in
               *.deb|*.AppImage|*.msi|*setup.exe|*.rpm|*.dmg) ;;
               *) continue ;;
             esac
-            base="$(basename "$f")"
-            cp "$f" "$RUNNER_TEMP/dist/$base"
-            pushd "$RUNNER_TEMP/dist" >/dev/null
+            base=$(basename "$f")
+            cp "$f" "$DEST/$base"
             if [ "$RUNNER_OS" = "Windows" ]; then
-              tar.exe -a -c -f "$base.zip" "$base"
+              tar.exe -a -c -f "$DEST/$base.zip" -C "$DEST" "$base"
             else
-              zip -9 -q "$base.zip" "$base"
+              ( cd "$DEST" && zip -9 -q "$base.zip" "$base" )
             fi
-            popd >/dev/null
-            rm -f "$RUNNER_TEMP/dist/$base"
-            found=1
-          done
-          if [ "$found" -eq 0 ]; then
-            echo "::error::nenhum instalador encontrado em src-tauri/target/release/bundle"
+            rm -f "$DEST/$base"
+            count=$((count+1))
+          done < <(find src-tauri/target/release/bundle -type f)
+          echo "--- empacotados: $count ---"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::nenhum instalador encontrado"
+            ls -R src-tauri/target/release/bundle || true
             exit 1
           fi
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            ( cd "$RUNNER_TEMP/dist" && sha256sum *.zip > SHA256SUMS.txt )
-          else
-            ( cd "$RUNNER_TEMP/dist" && sha256sum *.zip > SHA256SUMS.txt )
-          fi
-          ls -lh "$RUNNER_TEMP/dist"
+          ( cd "$DEST" && sha256sum ./*.zip > SHA256SUMS.txt )
+          ls -lh "$DEST"
       - uses: actions/upload-artifact@v4
         with:
           name: distorrent-linux
