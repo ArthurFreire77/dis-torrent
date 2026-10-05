@@ -490,9 +490,11 @@ export default function MobileShell() {
   const [selCommunity, setSelCommunity] = useState<string | null>(null)
   const [showDrawer, setShowDrawer] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
-  const [friendsTab, setFriendsTab] = useState<'online' | 'todos' | 'pendentes' | 'adicionar'>('online')
+  const [friendsTab, setFriendsTab] = useState<'online' | 'todos' | 'pendentes' | 'bloqueados' | 'adicionar'>('online')
   const [friendRequests, setFriendRequests] = useState<{ fp: string, nickname: string }[]>([])
   const [friendsAccepted, setFriendsAccepted] = useState<{ fp: string, nickname: string }[]>([])
+  // O core mantem `blocked`; nenhum dos dois shells buscava esse status.
+  const [friendsBlocked, setFriendsBlocked] = useState<{ fp: string, nickname: string }[]>([])
   const [pendingOut, setPendingOut] = useState<{ fp: string, nickname: string }[]>([])
   const [friendFpInput, setFriendFpInput] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -742,7 +744,7 @@ export default function MobileShell() {
   // no máximo 1 execução/5s (leading imediato = sync ao vivo preservado,
   // trailing único absorve a tempestade), polling espaçado p/ 10s e pausado com
   // a aba oculta (WebView em background não gasta bateria).
-  const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []) } catch { /* ignore */ } }, [])
+  const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []) } catch { /* ignore */ } }, [])
   const refreshFriends = useMemo(() => coalesceAsyncRefresh(refreshFriendsImpl, 5000), [refreshFriendsImpl])
   async function refreshCommunities() { try { setCommunities(await services.communitiesList() ?? []) } catch { /* ignore */ } }
   useEffect(() => { if (phase !== 'app') return; refreshFriends(); refreshCommunities(); const id = window.setInterval(() => { if (!document.hidden) refreshFriends() }, 10000); return () => window.clearInterval(id) }, [phase, refreshFriends])
@@ -2145,10 +2147,11 @@ export default function MobileShell() {
 
         {tab === 'friends' && <>
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', padding: '12px 0 8px' }}>
-            {([['online', 'Online'], ['todos', 'Todos'], ['pendentes', 'Pendentes']] as const).map(([id, label]) => (
+            {([['online', 'Online'], ['todos', 'Todos'], ['pendentes', 'Pendentes'], ['bloqueados', 'Bloqueados']] as const).map(([id, label]) => (
               <button key={id} className={'m-tab' + (friendsTab === id ? ' on' : '')} onClick={() => setFriendsTab(id)}>
                 {label}
                 {id === 'pendentes' && friendRequests.length > 0 && <span className="m-badge">{friendRequests.length}</span>}
+                {id === 'bloqueados' && friendsBlocked.length > 0 && <span className="m-badge">{friendsBlocked.length}</span>}
               </button>
             ))}
             <button className={'m-tab add' + (friendsTab === 'adicionar' ? ' on' : '')} onClick={() => setFriendsTab('adicionar')}>Adicionar amigo</button>
@@ -2218,6 +2221,23 @@ export default function MobileShell() {
                     </div>
                     <button title="Aceitar" aria-label="Aceitar" className="row-icon ok" onClick={() => respond(r.fp, true)}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12l5 5L20 7"/></svg></button>
                     <button title="Recusar" aria-label="Recusar" className="row-icon no" onClick={() => respond(r.fp, false)}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : friendsTab === 'bloqueados' ? (
+            friendsBlocked.length === 0 ? (
+              <EmptyBlock msg="Ninguém bloqueado." />
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {friendsBlocked.map(f => (
+                  <div key={f.fp} className="friend-row">
+                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
+                      <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{f.fp.slice(0, 12)} · não consegue te achar</div>
+                    </div>
+                    <button title="Desbloquear" aria-label="Desbloquear" className="row-icon ok" onClick={async () => { try { await services.friendRemove(f.fp); refreshFriends() } catch { /* erro mostrado no aviso */ } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M4 12l5 5L20 7" /></svg></button>
                   </div>
                 ))}
               </div>

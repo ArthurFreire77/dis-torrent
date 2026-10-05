@@ -579,7 +579,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   // v6: o assistente (CreateServerWizard) tem o próprio formulário; estes
   // estados legados do passo 'create' antigo foram removidos.
   const [serverFlow, setServerFlow] = useState<'choose'|'create'|'join'|'invite'>('choose')
-  const [friendsTab, setFriendsTab] = useState<'online'|'todos'|'pendentes'|'adicionar'>('online')
+  const [friendsTab, setFriendsTab] = useState<'online'|'todos'|'pendentes'|'bloqueados'|'adicionar'>('online')
   const [unreadServers, setUnreadServers] = useState<Set<string>>(new Set())
   const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
@@ -621,6 +621,10 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [newPass, setNewPass] = useState('')
   const [friendRequests, setFriendRequests] = useState<{fp:string,nickname:string}[]>([])
   const [friendsAccepted, setFriendsAccepted] = useState<{fp:string,nickname:string}[]>([])
+  // O core tem `blocked` (4 usos em engine.rs: is_blocked/friend_block), mas a UI
+  // nunca buscava esse status — refreshFriends so pedia pending_in/accepted/
+  // pending_out. Bloquear um peer sumia da lista sem lugar para desfazer.
+  const [friendsBlocked, setFriendsBlocked] = useState<{fp:string,nickname:string}[]>([])
   const [showProfile, setShowProfile] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
   // --- Canais / Cargos / Bots ---
@@ -713,14 +717,16 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   async function refreshFriends() {
     try {
-      const [inReq, acc, outReq] = await Promise.all([
+      const [inReq, acc, outReq, blk] = await Promise.all([
         services.friendsList('pending_in').catch(()=>[] as any),
         services.friendsList('accepted').catch(()=>[] as any),
         services.friendsList('pending_out').catch(()=>[] as any),
+        services.friendsList('blocked').catch(()=>[] as any),
       ])
       setFriendRequests(inReq ?? [])
       setFriendsAccepted(acc ?? [])
       setPendingOut(outReq ?? [])
+      setFriendsBlocked(blk ?? [])
     } catch { /* engine ainda não iniciou */ }
   }
 
@@ -2076,10 +2082,11 @@ export default function ThemeShell({ designId }: {designId:string}){
               <span style={{ color: muted, display: 'flex' }}><Icon d={Icons.users} size={20} /></span>
               <span style={{ fontWeight: 700, color: t.heading }}>Amigos</span>
               <div style={{ width: 1, height: 20, background: borderColor, margin: '0 6px' }} />
-              {([['online', 'Online'], ['todos', 'Todos'], ['pendentes', 'Pendentes']] as const).map(([id, label]) => (
+              {([['online', 'Online'], ['todos', 'Todos'], ['pendentes', 'Pendentes'], ['bloqueados', 'Bloqueados']] as const).map(([id, label]) => (
                 <button key={id} onClick={() => setFriendsTab(id)} className={'tab-btn' + (friendsTab === id ? ' active' : '')}>
                   {label}
                   {id === 'pendentes' && friendRequests.length > 0 && <span className="tab-badge">{friendRequests.length}</span>}
+                  {id === 'bloqueados' && friendsBlocked.length > 0 && <span className="tab-badge">{friendsBlocked.length}</span>}
                 </button>
               ))}
               <button onClick={() => setFriendsTab('adicionar')} className={'tab-btn add' + (friendsTab === 'adicionar' ? ' active' : '')}>Adicionar amigo</button>
@@ -2164,6 +2171,19 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <button onClick={() => respondFriend(r.fp, false)} title="Recusar" className="row-icon no"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
                   </div>
                 ))
+              ) : friendsTab === 'bloqueados' ? (
+                friendsBlocked.length === 0 ? (
+                  <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>Ninguém bloqueado.</div>
+                ) : friendsBlocked.map(f => (
+                  <div key={f.fp} className="friend-row">
+                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
+                      <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono' }}>{f.fp.slice(0, 12)} · não consegue te achar</div>
+                    </div>
+                    <button title="Desbloquear" className="row-icon ok" onClick={async e => { e.stopPropagation(); try { await services.friendRemove(f.fp); refreshFriends(); setFriendSuccess('Desbloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M4 12l5 5L20 7" /></svg></button>
+                  </div>
+                ))
               ) : shownFriends.length === 0 ? (
                 <div style={{ padding: 32, textAlign: 'center', color: muted }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: t.heading }}>
@@ -2184,6 +2204,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono' }}>{f.fp.slice(0, 12)}</div>
                   </div>
                   <button title="Conversar" className="row-icon" onClick={e => { e.stopPropagation(); openDm(f) }}><Icon d={Icons.send} size={15} /></button>
+                  <button title="Bloquear" className="row-icon no" onClick={async e => { e.stopPropagation(); if (!confirm(`Bloquear ${f.nickname || f.fp}? Ele não consegue mais te achar e suas mensagens são rejeitadas.`)) return; try { await services.friendBlock(f.fp); await services.friendRemove(f.fp); refreshFriends(); refreshConvos(); setFriendSuccess('Amigo bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="9" /><path d="M5.6 5.6l12.8 12.8" /></svg></button>
                   <button title="Remover amigo" className="row-icon no" onClick={async e => { e.stopPropagation(); if (!confirm(`Remover ${f.nickname || f.fp} dos amigos?`)) return; try { await services.friendRemove(f.fp); refreshFriends(); refreshConvos(); setFriendSuccess('Amigo removido') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
                 </div>
               ))}
