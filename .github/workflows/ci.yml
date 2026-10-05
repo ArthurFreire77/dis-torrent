@@ -199,7 +199,11 @@ jobs:
             base=$(basename "$f")
             cp "$f" "$DEST/$base"
             if [ "$RUNNER_OS" = "Windows" ]; then
-              tar.exe -a -c -f "$DEST/$base.zip" -C "$DEST" "$base"
+              # Compress-Archive (PowerShell). O tar.exe do Git Bash e' o GNU
+              # tar, que le \`D:\` como host remoto ("Cannot connect to D:") —
+              # o bsdtar nativo ficaria em C:\Windows\System32\tar.exe.
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path '$DEST/$base' -DestinationPath '$DEST/$base.zip' -Force"
             else
               ( cd "$DEST" && zip -9 -q "$base.zip" "$base" )
             fi
