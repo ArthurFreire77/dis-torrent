@@ -52,7 +52,8 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav
+            gstreamer1.0-libav \
+            zip unzip coreutils
       - run: cargo fmt --check
         working-directory: forge-core
       # clippy sem -D warnings: o crate tem ~59 avisos pré-existentes
@@ -87,7 +88,8 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav
+            gstreamer1.0-libav \
+            zip unzip coreutils
       # Sem rede externa o runner erra por timeout; corta o broker publico.
       - name: Suites deterministicas
         working-directory: forge-core
@@ -136,7 +138,8 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav
+            gstreamer1.0-libav \
+            zip unzip coreutils
       - name: check (erros de compilam o build)
         run: cargo check
         working-directory: host
@@ -169,13 +172,37 @@ jobs:
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstrtspserver-1.0-dev \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-            gstreamer1.0-libav
+            gstreamer1.0-libav \
+            zip unzip coreutils
       - run: npm ci
       - run: npm run tauri:build
+
+      - name: Empacotar em ZIP + SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist"
+          shopt -s nullglob
+          found=0
+          for f in src-tauri/target/release/bundle/*/*; do
+            case "$f" in
+              *.deb|*.AppImage|*.msi|*setup.exe|*.rpm|*.dmg) ;;
+              *) continue ;;
+            esac
+            cp "$f" "$RUNNER_TEMP/dist/"
+            ( cd "$RUNNER_TEMP/dist" && zip -9 -q "$(basename "$f").zip" "$(basename "$f")" && rm -f "$(basename "$f")" )
+            found=1
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::nenhum instalador encontrado em src-tauri/target/release/bundle"
+            exit 1
+          fi
+          ( cd "$RUNNER_TEMP/dist" && sha256sum *.zip > SHA256SUMS.txt )
+          ls -lh "$RUNNER_TEMP/dist"
       - uses: actions/upload-artifact@v4
         with:
           name: distorrent-linux
-          path: src-tauri/target/release/bundle/**/*
+          path: ${{ runner.temp }}/dist
           if-no-files-found: error
 
   desktop-windows:
@@ -208,10 +235,33 @@ jobs:
             }
           "
       - run: npm run tauri:build
+
+      - name: Empacotar em ZIP + SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist"
+          shopt -s nullglob
+          found=0
+          for f in src-tauri/target/release/bundle/*/*; do
+            case "$f" in
+              *.deb|*.AppImage|*.msi|*setup.exe|*.rpm|*.dmg) ;;
+              *) continue ;;
+            esac
+            cp "$f" "$RUNNER_TEMP/dist/"
+            ( cd "$RUNNER_TEMP/dist" && zip -9 -q "$(basename "$f").zip" "$(basename "$f")" && rm -f "$(basename "$f")" )
+            found=1
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::nenhum instalador encontrado em src-tauri/target/release/bundle"
+            exit 1
+          fi
+          ( cd "$RUNNER_TEMP/dist" && sha256sum *.zip > SHA256SUMS.txt )
+          ls -lh "$RUNNER_TEMP/dist"
       - uses: actions/upload-artifact@v4
         with:
           name: distorrent-windows
-          path: src-tauri/target/release/bundle/**/*
+          path: ${{ runner.temp }}/dist
           if-no-files-found: error
 
   # Android e macOS ficam de fora por enquanto:
