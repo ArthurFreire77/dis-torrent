@@ -198,12 +198,13 @@ jobs:
             [ -f "$f" ] || continue
             base=$(basename "$f")
             cp "$f" "$DEST/$base"
+            # O windows-latest tem 7-Zip em C:\Program Files\7-Zip\7z.exe, que
+            # e' o caminho suportado na documentacao do runner. Nem `zip` (nao
+            # existe no PATH) nem o tar.exe do Git Bash (le 'D:\' como host) nem
+            # Compress-Archive (que brigava com o path) funcionam.
             if [ "$RUNNER_OS" = "Windows" ]; then
-              # Compress-Archive (PowerShell). O tar.exe do Git Bash e' o GNU
-              # tar, que le \`D:\` como host remoto ("Cannot connect to D:") —
-              # o bsdtar nativo ficaria em C:\Windows\System32\tar.exe.
-              powershell -NoProfile -Command \
-                "Compress-Archive -Path '$DEST/$base' -DestinationPath '$DEST/$base.zip' -Force"
+              "/c/Program Files/7-Zip/7z.exe" a -tzip -bso0 -bsp0 \
+                "$DEST/$base.zip" "$DEST/$base"
             else
               ( cd "$DEST" && zip -9 -q "$base.zip" "$base" )
             fi
