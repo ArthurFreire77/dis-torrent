@@ -242,17 +242,24 @@ jobs:
       - run: npm ci
       # O MSI do Windows exige pre-release NUMERICO ("pre-alpha.1" e' rejeitado:
       #   optional pre-release identifier must be numeric-only and <= 65535).
-      # Para o artefato de CI, usa-se 1.0.0. O repositorio mantem a versao
-      # declarativa em package.json / tauri.conf.json.
+      # Deriva do package.json: "1.1.0-pre-alpha.1" -> "1.1.0-1". O numero
+      # final do pre-release vira o identificador numerico do MSI — assim o
+      # instalador SOBE de versao a cada pre-alpha (hardcode "1.0.0" fazia o
+      # MSI 1.0.0 recusar upgrade sobre a 1.0.0 ja instalada).
       - name: Versao numerica para o MSI
         run: |
           node -e "
             const fs=require('fs');
+            const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
+            const m=pkg.version.match(/^(\d+\.\d+\.\d+)(?:-[^\d.]*\.?(\d+))?$/);
+            if(!m){console.error('versao nao parseavel: '+pkg.version);process.exit(1)}
+            const v=m[1]+'-'+(m[2]||'1');
             for (const f of ['package.json','src-tauri/tauri.conf.json']) {
               const d=JSON.parse(fs.readFileSync(f,'utf8'));
-              d.version='1.0.0';
+              d.version=v;
               fs.writeFileSync(f, JSON.stringify(d,null,2));
             }
+            console.log('MSI version: '+v);
           "
       - run: npm run tauri:build
 
