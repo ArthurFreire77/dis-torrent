@@ -25,4 +25,9 @@ pub mod relay;
 pub mod socks5;
 pub mod stun;
 pub mod transport;
+/// Retenção de sinalização de chamada (offer/ICE pré-aceite) + re-arm da
+/// mídia nativa. O módulo compila em toda plataforma: fora do Linux tudo é
+/// no-op (a offer flui para o JS como sempre) — mas o método
+/// `resume_held_call` PRECISA existir em todas, o comando Tauri chama direto.
+pub mod voice_gate;
 pub mod vtunnel;

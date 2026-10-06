@@ -647,6 +647,7 @@ export interface ForgeServices {
   voiceMediaAvailable(): Promise<boolean>
   voiceMediaStats(callId: string): Promise<VoiceMediaStats | null>
   voiceSetMuted(callId: string, muted: boolean): Promise<void>
+  voiceSetDeafened(callId: string, deafened: boolean): Promise<void>
   voiceHangup(callId: string): Promise<void>
 
   // ================= CAMADA SOCIAL v3 (paridade Discord) =================

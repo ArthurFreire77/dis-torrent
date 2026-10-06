@@ -271,6 +271,8 @@ pub mod audio {
         subs: Mutex<Vec<(u64, UnboundedSender<MicFrame>)>>,
         inboxes: Mutex<Vec<(u64, Inbox)>>,
         name: Mutex<String>,
+        /// Inboxes ensurdecidas: o playout pula E drena (sem acumular backlog).
+        deafened: std::sync::Mutex<std::collections::HashSet<u64>>,
         /// REFERENCIA do AEC: o audio que o alto-falante esta tocando agora.
         ///
         /// Alimentado pelo callback de playout com exatamente os samples escritos
@@ -433,6 +435,17 @@ pub mod audio {
 
         pub fn has_speaker(&self) -> bool {
             self.inner.spk.lock().unwrap().is_some()
+        }
+
+        /// Inbox ensurdecida: o playout pula e drena. O usuário deixa de ouvir
+        /// o par de verdade (antes o "deafen" só calava o mic local).
+        pub fn set_inbox_muted(&self, id: u64, muted: bool) {
+            let mut set = self.inner.shared.deafened.lock().unwrap();
+            if muted {
+                set.insert(id);
+            } else {
+                set.remove(&id);
+            }
         }
 
         /// Anel de referencia do alto-falante, para o AEC.
@@ -598,93 +611,107 @@ pub mod audio {
             let shared = self.inner.shared.clone();
             let ch = hw_channels as usize;
             let step = f64::from(SAMPLE_RATE) / f64::from(hw_rate);
-            let mut phase: f64 = 0.0; // fase persistente da saida
-            let mut mono: Vec<f32> = vec![0.0; FRAME_SAMPLES * 16];
+            let same_rate = (step - 1.0).abs() < 1e-9;
+            // buffer 48k persistente: sobra do callback anterior + amostras novas
+            let mut buf: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 16);
+            let mut phase: f64 = 0.0;
             let mut hw: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 16);
 
             let ref_ring = self.inner.shared.play_ref.clone();
             let stream =
                 build_output_with_buffer_fallback(&device, cfg, move |out: &mut [f32]| {
-                    let need = (out.len() / ch).max(1).min(mono.len());
-                    // Lote de amostras para o ring: UM lock por callback, nunca por amostra.
-                    let mut ref_buf: Vec<i16> = Vec::with_capacity(need);
-                    let mut filled = 0usize;
+                    let need = (out.len() / ch).max(1);
+                    // amostras 48k que ESTA callback consome, derivadas da
+                    // FASE acumulada (a fração da rodada anterior conta aqui:
+                    // alvo constante vazava ~2 amostras/callback em taxa
+                    // não-inteira). +2 = âncoras de interpolação.
+                    let target = if same_rate {
+                        need
+                    } else {
+                        (phase + (need as f64) * step).floor() as usize + 2
+                    };
 
+                    // 1) completa o buffer ATÉ O ALVO somando as inboxes
+                    //    (mesh: todos falando junto). Ensurdecidas: pula e drena.
                     {
+                        let fill_from = buf.len();
+                        if target > fill_from {
+                            buf.resize(target, 0.0);
+                        }
+                        let deaf = shared.deafened.lock().unwrap();
                         let list = shared.inboxes.lock().unwrap();
-                        for (_, ib) in list.iter() {
-                            if filled >= need {
-                                break;
-                            }
+                        for (id, ib) in list.iter() {
+                            let muted = deaf.contains(id);
                             let mut q = ib.lock().unwrap();
-                            while filled < need {
+                            let mut pos = fill_from;
+                            while pos < buf.len() {
                                 let Some(frame) = q.pop_front() else { break };
-                                let at = Instant::now();
+                                if muted {
+                                    continue;
+                                }
                                 if let Some((link, idx)) = frame.id {
-                                    probe().stamp_play(link, idx, at);
+                                    probe().stamp_play(link, idx, Instant::now());
                                 }
-                                let take = (need - filled).min(frame.pcm.len());
-                                for &s in frame.pcm.iter().take(take) {
-                                    mono[filled] = f32::from(s) / f32::from(i16::MAX);
-                                    filled += 1;
+                                let take = (buf.len() - pos).min(frame.pcm.len());
+                                for (k, &s) in frame.pcm.iter().take(take).enumerate() {
+                                    buf[pos + k] += f32::from(s) / f32::from(i16::MAX);
                                 }
+                                pos += take;
                                 if take < frame.pcm.len() {
-                                    // Sobrou parte do frame: devolve para a proxima
-                                    // callback em vez de perder audio.
                                     let resto: Vec<i16> = frame.pcm[take..].to_vec();
                                     q.push_front(PcmFrame {
                                         pcm: Arc::new(resto),
                                         id: None,
                                     });
+                                    break;
                                 }
                             }
                         }
                     }
 
-                    // underrun: silencia, nunca bloqueia a thread realtime
-                    for v in mono.iter_mut().take(need).skip(filled) {
-                        *v = 0.0;
-                    }
-
-                    // 48 kHz -> taxa do hardware (fase preservada entre callbacks)
-                    if (step - 1.0).abs() < 1e-9 {
-                        hw.clear();
-                        hw.extend_from_slice(&mono[..need]);
+                    // 2) Resample 48k -> hw. `phase` vive no domínio da
+                    //    ENTRADA e o não-consumido sobrevive no `buf`.
+                    hw.clear();
+                    let consumed;
+                    if same_rate {
+                        hw.extend_from_slice(&buf[..need]);
+                        consumed = need;
                     } else {
-                        hw.clear();
                         while hw.len() < need {
                             let i = phase as usize;
-                            if i + 1 >= need {
+                            if i + 1 >= buf.len() {
                                 break;
                             }
                             let frac = (phase - i as f64) as f32;
-                            let a = mono[i];
-                            let b = mono[i + 1];
+                            let a = buf[i];
+                            let b = buf[i + 1];
                             hw.push(a + (b - a) * frac);
                             phase += step;
                         }
-                        phase -= hw.len() as f64;
-                        hw.resize(need, 0.0);
+                        consumed = (phase as usize).min(buf.len().saturating_sub(1));
+                        phase -= consumed as f64;
+                        if hw.len() < need {
+                            hw.resize(need, 0.0);
+                        }
                     }
 
-                    // REFERENCIA DO AEC: captura o MESMO sinal que vai para o device.
-                    //
-                    // Push acontece AQUI, depois do downmix e DEPOIS do resample para a
-                    // taxa do hardware: e' esse o sinal que a sala ouve e que volta no
-                    // microfone. Se fosse capturado antes, o filtro adaptativo aprenderia
-                    // o caminho errado e a referencia nao bateria com o eco real.
-                    for &v in hw.iter().take(need) {
-                        ref_buf.push((v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                    // 3) Referência do AEC no domínio de 48 kHz (pré-resample):
+                    //    o filtro roda na taxa do mic — referência em outra
+                    //    taxa não converge.
+                    {
+                        let mut ref_buf: Vec<i16> = Vec::with_capacity(consumed);
+                        for &v in buf.iter().take(consumed) {
+                            ref_buf.push((v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                        }
+                        if !ref_buf.is_empty() {
+                            ref_ring.push(&ref_buf);
+                        }
                     }
-                    // UM lock por callback (nao por amostra): a thread de audio nunca
-                    // espera, e o ring e' o unico ponto de compartilhamento com o AEC.
-                    if !ref_buf.is_empty() {
-                        ref_ring.push(&ref_buf);
-                    }
+                    buf.drain(..consumed);
 
-                    // mono -> canais intercalados (o device repete o mesmo sinal)
+                    // 4) mono -> canais intercalados
                     for (i, o) in out.iter_mut().enumerate() {
-                        *o = hw[i / ch];
+                        *o = hw[i / ch].clamp(-1.0, 1.0);
                     }
                 })?;
 
@@ -952,6 +979,12 @@ struct Shared {
     /// Fila de trickle ICE drenada por `drain_outbound`.
     out: Mutex<VecDeque<OutboundSignal>>,
     connected: Arc<tokio::sync::Notify>,
+    /// PeerConnection da sessão (o handler de estado precisa dela p/ ICE
+    /// restart automático). `None` só no intervalo entre construir o PC e
+    /// registrar — o handler nunca roda antes disso.
+    pc: Mutex<Option<std::sync::Arc<dyn PeerConnection>>>,
+    /// ICE restarts já tentados nesta sessão (teto anti-loop).
+    ice_restarts: AtomicU32,
 
     /// Caixa de playout deste peer, escrita pela task de decode e lida pelo
     /// callback de saida do cpal.
@@ -1003,6 +1036,8 @@ impl Shared {
             rtt_ms: Mutex::new(None),
             out: Mutex::new(VecDeque::new()),
             connected: Arc::new(tokio::sync::Notify::new()),
+            pc: Mutex::new(None),
+            ice_restarts: AtomicU32::new(0),
             inbox,
             in_link: Mutex::new(None),
             base_ts: Mutex::new(None),
@@ -1086,6 +1121,52 @@ struct H {
     sh: Arc<Shared>,
 }
 
+impl H {
+    /// Reconexão nativa: `Failed` com SDP remoto aplicado → nova offer com
+    /// `ice_restart` (novas credenciais ICE) sai pela fila `out` — o drainer
+    /// do engine envia, o par re-responde na MESMA sessão. Troca de rede
+    /// deixa de matar a chamada. Teto de 3 tentativas por sessão.
+    fn schedule_ice_restart(&self) {
+        let sh = self.sh.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await; // flap curto se resolve sozinho
+            if sh.state.lock().unwrap().as_str() != "failed" {
+                return;
+            }
+            if sh.remote_sdp.lock().unwrap().is_none() {
+                return; // nunca negociou: não há o que reiniciar
+            }
+            if sh.ice_restarts.fetch_add(1, Ordering::SeqCst) >= 3 {
+                return;
+            }
+            let pc = sh.pc.lock().unwrap().clone();
+            let Some(pc) = pc else { return };
+            let opts = rtc::peer_connection::configuration::RTCOfferOptions {
+                ice_restart: true,
+            };
+            match pc.create_offer(Some(opts)).await {
+                Ok(offer) => {
+                    if let Err(e) = pc.set_local_description(offer).await {
+                        eprintln!("[voice] ICE restart: set_local falhou: {e}");
+                        return;
+                    }
+                    let sdp = match wait_local_sdp(&pc).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[voice] ICE restart: {e}");
+                            return;
+                        }
+                    };
+                    sh.out.lock().unwrap().push_back(OutboundSignal::Offer { sdp });
+                    sh.set_state("connecting");
+                    eprintln!("[voice] ICE restart: nova offer na fila (rede trocou?)");
+                }
+                Err(e) => eprintln!("[voice] ICE restart: create_offer falhou: {e}"),
+            }
+        });
+    }
+}
+
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for H {
     async fn on_connection_state_change(&self, s: RTCPeerConnectionState) {
@@ -1093,12 +1174,14 @@ impl PeerConnectionEventHandler for H {
             RTCPeerConnectionState::Connected => {
                 self.sh.connected_flag.store(true, Ordering::SeqCst);
                 self.sh.set_state("connected");
+                self.sh.ice_restarts.store(0, Ordering::SeqCst);
                 self.sh.connected.notify_waiters();
             }
             RTCPeerConnectionState::Connecting => self.sh.set_state("connecting"),
             RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
                 self.sh.set_state("failed");
                 self.sh.connected.notify_waiters();
+                self.schedule_ice_restart();
             }
             RTCPeerConnectionState::New => self.sh.set_state("idle"),
             _ => {}
@@ -1264,15 +1347,22 @@ impl VoiceMedia {
     pub fn create_offer(&self, call_id: &str, peer_fp: &str) -> Result<String, String> {
         let (i, c, p) = (self.inner.clone(), call_id.to_owned(), peer_fp.to_owned());
         let key: Key = (c.clone(), p.clone());
+        let fresh = Arc::new(AtomicBool::new(false));
+        let fresh_flag = fresh.clone();
         let out: Result<String, String> = self.inner.core.run(async move {
-            let sess = match build_session(&i, &c, &p).await {
-                Ok(s) => s,
-                Err(e) => return Err(e),
+            // Sessão viva? REUSA (renegociação/ICE restart na mesma PC). Criar
+            // outra e sobrescrever no mapa vazava mic, tasks e a PC antiga.
+            let sess = match i.get(&(c.clone(), p.clone())) {
+                Some(s) if !s.closed.load(Ordering::SeqCst) => s.clone(),
+                _ => match build_session(&i, &c, &p).await {
+                    Ok(s) => {
+                        fresh_flag.store(true, Ordering::SeqCst);
+                        i.insert((c.clone(), p.clone()), s.clone());
+                        s
+                    }
+                    Err(e) => return Err(e),
+                },
             };
-            // Insere ANTES dos passos que podem falhar: se o SDP não fechar,
-            // `close_key` encontra a sessão e desfaz o que `build_session`
-            // abriu (microfone, inbox, sockets).
-            i.insert((c.clone(), p.clone()), sess.clone());
             match sess.pc.create_offer(None).await {
                 Ok(offer) => match sess.pc.set_local_description(offer).await {
                     Ok(()) => wait_local_sdp(&sess.pc).await,
@@ -1284,7 +1374,11 @@ impl VoiceMedia {
         match out {
             Ok(sdp) => Ok(sdp),
             Err(e) => {
-                self.close_key(key);
+                // Só desfaz o que FOI construído agora: fechar uma sessão viva
+                // porque uma renegociação falhou matava a chamada em curso.
+                if fresh.load(Ordering::SeqCst) {
+                    self.close_key(key);
+                }
                 Err(e)
             }
         }
@@ -1299,14 +1393,22 @@ impl VoiceMedia {
             sdp.to_owned(),
         );
         let key: Key = (c.clone(), p.clone());
+        let fresh = Arc::new(AtomicBool::new(false));
+        let fresh_flag = fresh.clone();
         let out: Result<String, String> = self.inner.core.run(async move {
-            let sess = match build_session(&i, &c, &p).await {
-                Ok(s) => s,
-                Err(e) => return Err(e),
+            // Idem `create_offer`: reusa a sessão — offer de ICE restart do par
+            // cai na MESMA PC (senão o estado ICE/DTLS se perdia a cada re-oferta).
+            let sess = match i.get(&(c.clone(), p.clone())) {
+                Some(s) if !s.closed.load(Ordering::SeqCst) => s.clone(),
+                _ => match build_session(&i, &c, &p).await {
+                    Ok(s) => {
+                        fresh_flag.store(true, Ordering::SeqCst);
+                        i.insert((c.clone(), p.clone()), s.clone());
+                        s
+                    }
+                    Err(e) => return Err(e),
+                },
             };
-            // Mesmo de `create_offer`: insere antes dos passos que podem falhar
-            // para que `close_key` possa desfazer microfone/inbox/sockets.
-            i.insert((c.clone(), p.clone()), sess.clone());
             let desc = match RTCSessionDescription::offer(s.clone()) {
                 Ok(d) => d,
                 Err(e) => return Err(err(e)),
@@ -1326,7 +1428,10 @@ impl VoiceMedia {
         match out {
             Ok(sdp) => Ok(sdp),
             Err(e) => {
-                self.close_key(key);
+                // Idem create_offer: só desfaz sessão construída AGORA.
+                if fresh.load(Ordering::SeqCst) {
+                    self.close_key(key);
+                }
                 Err(e)
             }
         }
@@ -1395,6 +1500,15 @@ impl VoiceMedia {
         }
     }
 
+    /// Ensurdecer a chamada: cala o playout das sessões dela (o mic o mute
+    /// normal cuida). Antes o "deafen" só silenciava o mic local — o usuário
+    /// ensurdecido continuava ouvindo tudo.
+    pub fn set_deafened(&self, call_id: &str, deafened: bool) {
+        for s in self.inner.of_call(call_id) {
+            self::audio::hub().set_inbox_muted(s.inbox_id, deafened);
+        }
+    }
+
     /// Fecha as PeerConnections, aborta as tasks de audio e limpa o estado.
     pub fn hangup(&self, call_id: &str) {
         let keys: Vec<Key> = self
@@ -1406,6 +1520,12 @@ impl VoiceMedia {
         for k in keys {
             self.close_key(k);
         }
+    }
+
+    /// Fecha a sessão com UM par da chamada (o `CallEnd` dele) — as demais
+    /// sessões do mesh continuam de pé.
+    pub fn hangup_peer(&self, call_id: &str, peer_fp: &str) {
+        self.close_key((call_id.to_owned(), peer_fp.to_owned()));
     }
 
     /// Fecha UMA sessão e a tira do mapa.
@@ -1761,6 +1881,7 @@ async fn build_session(
         .await
         .map_err(err)?;
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
+    *sh.pc.lock().unwrap() = Some(pc.clone());
 
     // Faixa de saida. Sem microfone ela e' criada assim mesmo e o loop de envio
     // simplesmente nao recebe frames: a sessao so recebe.
@@ -1973,9 +2094,15 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             if sess.closed.load(Ordering::SeqCst) {
                 return;
             }
-            // Mudo nao escreve nada: o clock RTP para de andar e o receptor
-            // preenche com PLC. E' o que se quer de um mute (zero banda).
+            // Mudo não escreve nada: o clock RTP para e o receptor preenche
+            // com PLC (zero banda). DRENA o canal: o hub continua empurrando
+            // 50 frames/s num canal ilimitado — sem drenar era ~360MB/hora de
+            // chamada mutada, e o backlog inteiro disparava em rajada ao
+            // desmutar (áudio velho + estouro do jitter buffer).
             if sess.muted.load(Ordering::SeqCst) {
+                if let Some(rx) = mic_rx.as_mut() {
+                    while rx.try_recv().is_ok() {}
+                }
                 tokio::time::sleep(FRAME).await;
                 continue;
             }

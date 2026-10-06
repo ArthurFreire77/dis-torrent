@@ -24,6 +24,9 @@ pub mod vault;
 pub use identity::{Identity, Keypair};
 pub use net::engine::{EngineEvent, NetworkEngine, NetworkState};
 pub use protocol::{MessageEnvelope, SecureFrame};
+/// Erro do canal de eventos — o shell Tauri precisa distinguir `Lagged`
+/// (recuperável) de `Closed` sem depender de tokio direto.
+pub use tokio::sync::broadcast::error::RecvError as BroadcastRecvError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgeError {

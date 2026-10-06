@@ -712,10 +712,16 @@ export default function MobileShell() {
         window.setTimeout(() => setNotice(null), 6000)
       } catch { /* ignore */ }
     }
-    return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce }
+    const unIncomingGone = callManager.onIncomingGone
+    callManager.onIncomingGone = (callId: string) => {
+      setIncomingCall((cur: any) => (cur && cur.call_id === callId ? null : cur))
+      try { sfxRingStop() } catch { /* ignore */ }
+    }
+    return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone }
   }, [])
   useEffect(() => {
     if (!activeCall) return
+    setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000))
     const timer = window.setInterval(() => { setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000)); setNowMs(Date.now()) }, 1000)
     return () => window.clearInterval(timer)
   }, [activeCall?.callId])
@@ -849,7 +855,10 @@ export default function MobileShell() {
       }
       sfxRingStart()
     }
-    if (ev.type === 'call_ended') { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
+    if (ev.type === 'call_ended') {
+      const mine = activeCall?.callId === ev.call_id || incomingCall?.call_id === ev.call_id
+      if (mine) { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
+    }
     if (ev.type === 'file_announce') {
       const ok = fileSwarm.onAnnounce(ev.file_id, ev.name, ev.size, ev.chunks, ev.hash, ev.from_fp, (ev as any).chunk_hashes ?? undefined)
       if (!ok && fileSwarm.lastError) setError(fileSwarm.lastError)
@@ -926,22 +935,26 @@ export default function MobileShell() {
   }
   async function handleIncomingAccept() {
     if (!incomingCall) return
-    sfxRingStop()
-    // Relay-only aceita via acceptInbound (que já liga o relay); 'none' mostra o que falta.
     const support = getCallsSupport()
     if (support === 'none') { setError(getCallsUnavailableMessage()); return }
     try {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
-      try {
-        await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
-      } catch (e: any) {
-        // Sem estado local fabricado: sem acceptInbound não há chamada — o
-        // overlay só abre com estado real no CallManager (senão Sair não fecha).
-        setError(String(e?.message ?? e))
-      }
+      await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
+      sfxRingStop()
       setIncomingCall(null)
       sfxCallConnect()
-    } catch (e: any) { setError(String(e?.message ?? e)) }
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+      sfxRingStop()
+      setIncomingCall(null)
+    }
+  }
+
+  function handleIncomingReject() {
+    if (!incomingCall) return
+    sfxRingStop()
+    callManager.rejectIncoming(incomingCall.call_id, incomingCall.from_fp)
+    setIncomingCall(null)
   }
   function renderIncomingModal() {
     if (!incomingCall) return null
@@ -962,7 +975,7 @@ export default function MobileShell() {
           </div>
           {qualityError && <div style={{ fontSize: 11, color: '#ff9c9c', marginTop: 8 }}>{qualityError}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-            <button className="m-btn red" style={{ flex: 1 }} onClick={() => { services.callReject(incomingCall.call_id, incomingCall.from_fp, 'ocupado').catch(() => {}); setIncomingCall(null); sfxRingStop() }}>Recusar</button>
+            <button className="m-btn red" style={{ flex: 1 }} onClick={handleIncomingReject}>Recusar</button>
             <button className="m-btn green" style={{ flex: 1 }} onClick={handleIncomingAccept}>Aceitar</button>
           </div>
         </div>

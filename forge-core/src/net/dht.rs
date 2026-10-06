@@ -16,7 +16,11 @@ use crate::net::engine::NetworkEngine;
 /// FPS que ainda não tem sessão.
 pub async fn spawn_pex(engine: Arc<NetworkEngine>) {
     let mut tick = interval(Duration::from_secs(20));
+    let cancel = engine.cancel_subscribe();
     loop {
+        if engine.is_cancelled(&cancel) {
+            return;
+        }
         tick.tick().await;
         // privacidade: em proxy/full não gossipamos IPs
         let mode = engine.privacy_mode();
@@ -99,8 +103,12 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
         return;
     }
     let mut next_announce = 0i64;
+    let cancel = engine.cancel_subscribe();
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
+        if engine.is_cancelled(&cancel) {
+            return;
+        }
         // Modo anônimo: UDP/DHT vazaria o IP real — desliga e diz por quê.
         let mode = engine.privacy_mode();
         if matches!(mode.as_str(), "proxy" | "full") {

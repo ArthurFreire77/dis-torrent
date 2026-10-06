@@ -284,7 +284,9 @@ async fn friend_request_cruzado_aceita_sozinho() {
     a.friend_request(&fp_b).unwrap();
     b.friend_request(&fp_a).unwrap();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    // 30s: o tick de amizade é 5s e a suíte roda dezenas de engines em
+    // paralelo — 15s estourava só por CPU starvation (flaky, não bug).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if friend_status(&a, &fp_b) == "accepted" && friend_status(&b, &fp_a) == "accepted" {
             break;

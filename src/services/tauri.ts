@@ -310,6 +310,7 @@ export const tauriServices: ForgeServices = {
   voiceMediaAvailable: () => invoke<boolean>('voice_media_available'),
   voiceMediaStats: (callId) => invoke<VoiceMediaStats | null>('voice_media_stats', { callId }),
   voiceSetMuted: (callId, muted) => invoke<void>('voice_set_muted', { callId, muted }),
+  voiceSetDeafened: (callId, deafened) => invoke<void>('voice_set_deafened', { callId, deafened }),
   voiceHangup: (callId) => invoke<void>('voice_hangup', { callId }),
   // ================= CAMADA SOCIAL v3 =================
   react: (convId, msgId, emoji) => invoke<boolean>('social_react', { convId, msgId, emoji }),

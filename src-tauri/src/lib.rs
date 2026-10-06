@@ -598,7 +598,15 @@ fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
                         tracing::warn!("emit falhou: {e}");
                     }
                 }
-                Err(_) => break,
+                // Lagged = a UI ficou >256 eventos atrás (ex.: transferência de
+                // arquivo). O canal segue VIVO: seguir é obrigatório. Antes o
+                // `break` matava o pump para sempre — nenhum evento chegava
+                // mais à WebView (sem ring, sem sinalização) até REINICIAR o
+                // app, que é exatamente o sintoma reportado.
+                Err(forge_core::BroadcastRecvError::Lagged(n)) => {
+                    tracing::warn!("eventos descartados na UI ({n}) — pump segue vivo");
+                }
+                Err(forge_core::BroadcastRecvError::Closed) => break,
             }
         }
     });
@@ -1961,6 +1969,17 @@ fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identit
                 .map_err(err)?;
             store.kv_set("vault.on", "1").map_err(err)?;
 
+            // O motor ainda anuncia/responde com a identidade ANTIGA. Sem isto,
+            // peers conectavam com quem a UI nem mostrava mais.
+            {
+                let guard = state.engine.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(e) = guard.as_ref() {
+                    e.shutdown();
+                }
+            }
+            *state.engine.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = false;
+
             return Ok(imported_identity);
         }
     }
@@ -2380,13 +2399,36 @@ fn group_add(conv_id: String, fp: String, state: State<AppState>) -> Result<(), 
 }
 
 #[tauri::command]
-fn call_invite(target_fp: String, kind: String, state: State<AppState>) -> Result<String, String> {
-    engine(&state)?.call_invite(&target_fp, &kind).map_err(err)
+async fn call_invite(
+    target_fp: String,
+    kind: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // `call_invite` negocia mídia nativa (offer/ICE) e pode levar segundos:
+    // fora da main thread, senão a UI congela em "Chamando...".
+    let e = engine(&state)?;
+    tauri::async_runtime::spawn_blocking(move || e.call_invite(&target_fp, &kind))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
 }
 
 #[tauri::command]
-fn call_accept(call_id: String, from_fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.call_accept(&call_id, &from_fp).map_err(err)
+async fn call_accept(
+    call_id: String,
+    from_fp: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let e = engine(&state)?;
+    let e2 = e.clone();
+    let (cid, fp) = (call_id.clone(), from_fp.clone());
+    tauri::async_runtime::spawn_blocking(move || e.call_accept(&cid, &fp))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)?;
+    // Absorve a offer/ICE retidos no pré-aceite (ver net/voice_gate.rs).
+    e2.resume_held_call(&call_id, &from_fp).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2402,8 +2444,12 @@ fn call_reject(
 }
 
 #[tauri::command]
-fn call_end(call_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.call_end(&call_id).map_err(err)
+async fn call_end(call_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let e = engine(&state)?;
+    tauri::async_runtime::spawn_blocking(move || e.call_end(&call_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2483,12 +2529,20 @@ fn call_add_participant(
 
 #[cfg(target_os = "linux")]
 #[tauri::command]
-fn voice_media_available(_state: State<AppState>) -> Result<bool, String> {
-    // Capacidade do BUILD, não do motor. O motor é `None` enquanto o cofre
-    // está trancado — consultar aqui respondia `false` no boot, o JS cacheava
-    // "indisponível" para sempre, e o botão ficava morto mesmo com a voz nativa
-    // já ativa depois do desbloqueio. Era exatamente esse o sintoma.
-    Ok(forge_core::net::engine::native_voice_capable())
+fn voice_media_available(state: State<AppState>) -> Result<bool, String> {
+    // Sem motor (cofre trancado): capacidade do build — o JS re-checa a cada
+    // chamada, então o botão não mente depois do desbloqueio. Com motor: só
+    // a verdade VIVA. Antes respondia `true` com a mídia morta (falhou no
+    // boot), a UI confiava e toda chamada nascia sem offer nenhum.
+    match state
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        Some(e) => Ok(e.voice_media_available()),
+        None => Ok(forge_core::net::engine::native_voice_capable()),
+    }
 }
 
 /// `null` quando a chamada não é nativa (ou não há mídia nativa): nesse caso a
@@ -2518,6 +2572,13 @@ fn voice_hangup(call_id: String, state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_set_deafened(call_id: String, deafened: bool, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.voice_set_deafened(&call_id, deafened);
+    Ok(())
+}
+
 // Fora do Linux a camada nativa NÃO EXISTE (webrtc-rs/cpal/libopus nem entram
 // no build — ver forge-core/Cargo.toml). Estes stubs respondem exatamente o que
 // o Linux responderia com a camada desligada, então a UI não tem nenhum caminho
@@ -2544,6 +2605,20 @@ fn voice_set_muted(_call_id: String, _muted: bool, _state: State<AppState>) -> R
 #[tauri::command]
 fn voice_hangup(_call_id: String, _state: State<AppState>) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_set_deafened(_call_id: String, _deafened: bool, _state: State<AppState>) -> Result<(), String> {
+    Ok(())
+}
+
+/// Indicador "digitando…" — o frame Typing existia no protocolo e o engine
+/// já o emitia, mas NÃO havia comando: o frontend invocava `send_typing` e o
+/// catch engolia o erro para sempre (indicador morto no app nativo).
+#[tauri::command]
+fn send_typing(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.social_typing(&conv_id).map_err(err)
 }
 
 /// v6 — sinal dedicado de TELA (estado on/off via campo sdp em JSON).
@@ -3560,6 +3635,8 @@ fn main() {
             voice_media_stats,
             voice_set_muted,
             voice_hangup,
+            voice_set_deafened,
+            send_typing,
             screen_share_offer,
             screen_share_answer,
             channel_create,

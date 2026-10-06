@@ -1355,6 +1355,7 @@ export const browserServices: ForgeServices = {
   voiceMediaAvailable: () => Promise.resolve(false),
   voiceMediaStats: () => Promise.resolve(null),
   voiceSetMuted: () => Promise.resolve(),
+  voiceSetDeafened: () => Promise.resolve(),
   voiceHangup: () => Promise.resolve(),
 
   // ================= CAMADA SOCIAL v3 =================

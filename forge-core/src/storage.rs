@@ -1798,6 +1798,20 @@ impl Store {
         Ok(rows)
     }
 
+    /// O peer está em alguma chamada ativa? Enquanto estiver, o heartbeat da
+    /// sessão não desacelera (detecção de sessão morta tem de ficar rápida).
+    pub fn peer_in_active_call(&self, fp: &str) -> bool {
+        self.locked()
+            .query_row(
+                "SELECT 1 FROM call_participants cp \
+                 JOIN calls c ON c.call_id = cp.call_id \
+                 WHERE cp.fp = ?1 AND c.ended_at IS NULL LIMIT 1",
+                params![fp],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
     // ---------- voice states ----------
     pub fn set_voice_state(
         &self,

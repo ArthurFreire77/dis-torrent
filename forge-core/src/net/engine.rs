@@ -23,6 +23,8 @@ use crate::identity::{Identity, Keypair};
 use crate::net::discovery::{DiscoveredPeer, Discovery};
 #[cfg(target_os = "linux")]
 use crate::net::media_voice::{OutboundSignal, VoiceMedia, VoiceStats};
+#[cfg(target_os = "linux")]
+use super::voice_gate::HeldCall;
 use crate::net::relay::{
     relay_post_loop, relay_topic, MultiRelay, PeerRelayBackend, Reassembler, RelayBackend,
     RelayStream,
@@ -572,6 +574,12 @@ pub struct NetworkEngine {
     started: StdMutex<bool>,
     shutdown: Arc<Notify>,
     handles: StdMutex<Vec<JoinHandle<()>>>,
+    /// Cancelamento cooperativo das tasks destacadas do `run_engine`
+    /// (accept loop, relay manager, announce, maintain, punch). Sem isto,
+    /// `restart_engine` deixava o engine VELHO vivo: dois listeners TCP na
+    /// mesma porta (SO_REUSEPORT) e dois relay managers com o mesmo client_id
+    /// MQTT se engolindo — as conexões viravam caos até reiniciar o app.
+    cancel_tx: tokio::sync::watch::Sender<bool>,
     /// Entradas de frames do relay por peer (poller → sessão). Quando vazio,
     /// o poller cria sessão respondente para Hello recém-chegado.
     relay_in: StdMutex<HashMap<String, mpsc::UnboundedSender<Vec<u8>>>>,
@@ -680,20 +688,22 @@ pub struct NetworkEngine {
     /// Anti-spam: último `(hash_do_conteúdo, ts_ms)` por peer — repetida
     /// em <60s é descartada.
     spam_dup: StdMutex<HashMap<String, (String, i64)>>,
-    /// Mídia de voz NATIVA (webrtc-rs + cpal + Opus). `None` = indisponível
-    /// (sem microfone, sem device, ou desligado por `FORGE_NO_NATIVE_VOICE=1`)
-    /// — e aí o WebRTC do navegador é o dono das chamadas, como antes.
+    /// Mídia nativa viva, ou `None` (verbatim do boot). Mutável para o re-arm
+    /// em `voice_gate` (dispositivo de áudio que aparece depois do boot).
     #[cfg(target_os = "linux")]
-    voice: Option<Arc<VoiceMedia>>,
+    pub(super) voice: StdMutex<Option<Arc<VoiceMedia>>>,
     /// PARES `(call_id, peer_fp)` cuja sinalização é DESTA camada nativa.
     ///
-    /// Esta é a REGRA DE COEXISTÊNCIA, e é ela sozinha que mantém o navegador
+    /// Esta é a REGRA DE COEXISTÊNCIA, e ela sozinha que mantém o navegador
     /// no comando: um `CallOffer`/`CallAnswer`/`CallIce` só é absorvido pela
     /// mídia nativa se o par estiver AQUI. Sem registro, o frame segue intacto
     /// para o JS e a WebView cria a `RTCPeerConnection` como sempre. Nada mais
     /// no motor precisa saber disso.
     #[cfg(target_os = "linux")]
-    voice_calls: StdMutex<HashMap<String, HashSet<String>>>,
+    pub(super) voice_calls: StdMutex<HashMap<String, HashSet<String>>>,
+    /// Ofers/ICE retidos até o aceite (ver `net/voice_gate.rs`).
+    #[cfg(target_os = "linux")]
+    pub(super) held_calls: StdMutex<HashMap<String, HeldCall>>,
 }
 
 enum EngineCmd {
@@ -826,7 +836,7 @@ fn native_voice_env_ok() -> bool {
 /// motor também é o caminho de texto/arquivos. Com `None` o app continua
 /// sinalizando chamada normalmente e a WebView faz a voz como sempre.
 #[cfg(target_os = "linux")]
-fn build_voice_media() -> Option<Arc<VoiceMedia>> {
+pub(super) fn build_voice_media() -> Option<Arc<VoiceMedia>> {
     if !(native_voice_platform_ok() && native_voice_env_ok()) {
         return None;
     }
@@ -900,6 +910,7 @@ impl NetworkEngine {
             punch_upgrades: StdMutex::new(HashMap::new()),
             punch_rate: StdMutex::new(HashMap::new()),
             pending_calls: StdMutex::new(HashMap::new()),
+            cancel_tx: tokio::sync::watch::channel(false).0,
             public_addr: StdMutex::new(None),
             nat_external_port: Arc::new(AtomicU16::new(0)),
             punch_enabled: AtomicBool::new(env_punch_enabled()),
@@ -928,9 +939,11 @@ impl NetworkEngine {
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
             #[cfg(target_os = "linux")]
-            voice: build_voice_media(),
+            voice: StdMutex::new(build_voice_media()),
             #[cfg(target_os = "linux")]
             voice_calls: StdMutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            held_calls: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -974,6 +987,7 @@ impl NetworkEngine {
             punch_upgrades: StdMutex::new(HashMap::new()),
             punch_rate: StdMutex::new(HashMap::new()),
             pending_calls: StdMutex::new(HashMap::new()),
+            cancel_tx: tokio::sync::watch::channel(false).0,
             public_addr: StdMutex::new(None),
             nat_external_port: Arc::new(AtomicU16::new(0)),
             punch_enabled: AtomicBool::new(env_punch_enabled()),
@@ -1002,9 +1016,11 @@ impl NetworkEngine {
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
             #[cfg(target_os = "linux")]
-            voice: build_voice_media(),
+            voice: StdMutex::new(build_voice_media()),
             #[cfg(target_os = "linux")]
             voice_calls: StdMutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            held_calls: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -1122,6 +1138,14 @@ impl NetworkEngine {
     /// Encerra o engine limpamente: aborta tasks, fecha conexões, libera portas.
     /// Chamado por `restart_engine` e no Drop do AppState.
     pub fn shutdown(&self) {
+        let _ = self.cancel_tx.send(true);
+        let port = self.listen_port.load(Ordering::Relaxed);
+        if port != 0 {
+            process_ports()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&port);
+        }
         self.shutdown.notify_waiters();
         // desconecta todos os peers
         for fp in self.online_peer_fps() {
@@ -3177,7 +3201,21 @@ impl NetworkEngine {
         }
         let role_id = match role_id.map(str::trim) {
             Some("") | None => None,
-            Some(r) => Some(r.to_string()),
+            Some(r) => {
+                // cargo tem que EXISTIR na comunidade — bot com cargo fantasma
+                // quebrava a lista de cargos do dono na réplica dos membros.
+                let exists = self
+                    .store
+                    .roles_list(community_id)
+                    .map(|rs| rs.iter().any(|x| x.id == r))
+                    .unwrap_or(false);
+                if !exists {
+                    return Err(ForgeError::Protocol(format!(
+                        "cargo {r} não existe nesta comunidade"
+                    )));
+                }
+                Some(r.to_string())
+            }
         };
         let discriminator: String = {
             use rand::Rng;
@@ -3315,7 +3353,12 @@ impl NetworkEngine {
             .get(peer_fp)
             .cloned();
         if let Some(l) = link {
-            l.drop_notify.notify_waiters();
+            // notify_one guarda permit: a queda nunca se perde (notify_waiters
+            // evaporava se o reader estava dentro de handle_frame). Bye = fim limpo.
+            if let Some(tx) = &l.tx {
+                let _ = tx.send((0, SecureFrame::Bye));
+            }
+            l.drop_notify.notify_one();
         }
     }
 
@@ -4846,7 +4889,7 @@ impl NetworkEngine {
         Ok(())
     }
 
-    pub fn call_invite(&self, target_fp: &str, kind: &str) -> Result<String> {
+    pub fn call_invite(self: &Arc<Self>, target_fp: &str, kind: &str) -> Result<String> {
         let short = self
             .identity
             .fingerprint
@@ -4865,10 +4908,13 @@ impl NetworkEngine {
             },
         );
         #[cfg(target_os = "linux")]
-        // Mic pode ter falhado no boot e nunca mais tentado: cada chamada nova
-        // re-tenta abrir antes de negociar, senão ela nasce só-recebendo.
-        self.voice_retry_mic();
-        #[cfg(target_os = "linux")]
+        {
+            // Mic pode ter falhado no boot e nunca mais tentado: cada chamada
+            // nova re-tenta abrir antes de negociar, senão ela nasce
+            // só-recebendo. Re-arm cobre o device que subiu depois do boot.
+            self.voice_rearm();
+            self.voice_retry_mic();
+        }
         #[cfg(target_os = "linux")]
         // Chamada NATIVA: eu sou o chamador, o offer nasce aqui. Se a mídia
         // nativa não existir, `voice_begin_offer` devolve None e a WebView faz
@@ -4885,7 +4931,7 @@ impl NetworkEngine {
         Ok(call_id)
     }
 
-    pub fn call_accept(&self, call_id: &str, from_fp: &str) -> Result<()> {
+    pub fn call_accept(self: &Arc<Self>, call_id: &str, from_fp: &str) -> Result<()> {
         self.store.join_call(call_id, &self.identity.fingerprint)?;
         self.store.join_call(call_id, from_fp)?;
         #[cfg(target_os = "linux")]
@@ -4901,9 +4947,12 @@ impl NetworkEngine {
             },
         );
         #[cfg(target_os = "linux")]
-        // Mesmo retry do chamador: quem atende também pode ter perdido o mic
-        // no boot e estaria entrando mudo sem saber por quê.
-        self.voice_retry_mic();
+        {
+            // Mesmo retry do chamador: quem atende também pode ter perdido o
+            // mic no boot e estaria entrando mudo sem saber por quê.
+            self.voice_rearm();
+            self.voice_retry_mic();
+        }
         #[cfg(target_os = "linux")]
         let _ = self.events.send(EngineEvent::CallAcceptedEv {
             call_id: call_id.into(),
@@ -4913,6 +4962,8 @@ impl NetworkEngine {
     }
 
     pub fn call_reject(&self, call_id: &str, from_fp: &str, reason: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.forget_held_call(call_id);
         self.queue_or_send_call_frame(
             from_fp,
             SecureFrame::CallReject {
@@ -4924,6 +4975,8 @@ impl NetworkEngine {
     }
 
     pub fn call_end(&self, call_id: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.forget_held_call(call_id);
         let participants = self.store.call_participants(call_id).unwrap_or_default();
         for fp in participants {
             if fp == self.identity.fingerprint {
@@ -4961,7 +5014,7 @@ impl NetworkEngine {
     /// convidado — CallIncoming no receptor); vazio = só badge de roster
     /// para quem já está na chamada. Persiste o participante em call_participants.
     pub fn call_add_participant(
-        &self,
+        self: &Arc<Self>,
         target_fp: &str,
         call_id: &str,
         fp: &str,
@@ -5005,8 +5058,17 @@ impl NetworkEngine {
 
     /// Gerenciador de mídia nativa, ou `None` quando ela não existe aqui.
     #[cfg(target_os = "linux")]
-    pub fn voice(&self) -> Option<&Arc<VoiceMedia>> {
-        self.voice.as_ref()
+    pub fn voice(&self) -> Option<Arc<VoiceMedia>> {
+        self.voice_media()
+    }
+
+    /// Clone barato (Arc) da mídia nativa viva, ou `None`.
+    #[cfg(target_os = "linux")]
+    pub(super) fn voice_media(&self) -> Option<Arc<VoiceMedia>> {
+        self.voice
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// A camada nativa PODE assumir chamadas agora?
@@ -5017,14 +5079,14 @@ impl NetworkEngine {
     /// nenhum frame de sinalização é absorvido.
     #[cfg(target_os = "linux")]
     pub fn native_voice_available(&self) -> bool {
-        self.voice.is_some()
+        self.voice_media().is_some()
     }
 
     /// `(call_id, peer_fp)` é uma sessão NATIVA? — a única pergunta que os
     /// arms de `CallOffer`/`CallAnswer`/`CallIce` fazem.
     #[cfg(target_os = "linux")]
-    fn voice_is_native(&self, call_id: &str, peer_fp: &str) -> bool {
-        self.voice.is_some()
+    pub(super) fn voice_is_native(&self, call_id: &str, peer_fp: &str) -> bool {
+        self.voice_media().is_some()
             && self
                 .voice_calls
                 .lock()
@@ -5035,18 +5097,23 @@ impl NetworkEngine {
 
     /// Marca o par como nativo. Devolve `false` (e não registra nada) se a
     /// mídia não existe — nesse caso a chamada é 100% navegador, de ponta a
-    /// ponta, e nada mais precisa ser feito.
+    /// ponta, e nada mais precisa ser feito. Ao registrar, sobe o drenador
+    /// periódico de trickle ICE (ver `spawn_voice_signal_drainer`).
     #[cfg(target_os = "linux")]
-    fn voice_register(&self, call_id: &str, peer_fp: &str) -> bool {
-        if self.voice.is_none() {
+    fn voice_register(self: &Arc<Self>, call_id: &str, peer_fp: &str) -> bool {
+        if self.voice_media().is_none() {
             return false;
         }
-        self.voice_calls
+        let first = self
+            .voice_calls
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(call_id.to_string())
             .or_default()
             .insert(peer_fp.to_string());
+        if first {
+            self.spawn_voice_signal_drainer(call_id, peer_fp);
+        }
         true
     }
 
@@ -5062,8 +5129,8 @@ impl NetworkEngine {
     /// `SecureFrame::Call*` que o navegador usa — nenhum frame novo no
     /// protocolo, nenhum branch no peer distante.
     #[cfg(target_os = "linux")]
-    fn voice_flush_signals(&self, call_id: &str, peer_fp: &str) {
-        let Some(v) = self.voice.clone() else { return };
+    pub(super) fn voice_flush_signals(&self, call_id: &str, peer_fp: &str) {
+        let Some(v) = self.voice_media() else { return };
         let signals = v.drain_outbound(call_id, peer_fp);
         if signals.is_empty() {
             return;
@@ -5091,11 +5158,11 @@ impl NetworkEngine {
     /// Registra o par como nativo e devolve o offer da mídia, se houver.
     /// `Ok(None)` = chamada segue pelo navegador (mídia indisponível).
     #[cfg(target_os = "linux")]
-    fn voice_begin_offer(&self, call_id: &str, peer_fp: &str) -> Result<Option<String>> {
+    fn voice_begin_offer(self: &Arc<Self>, call_id: &str, peer_fp: &str) -> Result<Option<String>> {
         if !self.voice_register(call_id, peer_fp) {
             return Ok(None);
         }
-        let Some(v) = self.voice.clone() else {
+        let Some(v) = self.voice_media() else {
             return Ok(None);
         };
         // `create_offer` BLOQUEIA (espera o SDP local + o ICE). Se estivermos
@@ -5134,14 +5201,18 @@ impl NetworkEngine {
     /// `RTCPeerConnection`). `false` = o offer não é nosso: o arm emite o
     /// `EngineEvent` de sempre.
     #[cfg(target_os = "linux")]
-    async fn voice_absorb_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> Result<bool> {
+    pub(super) async fn voice_absorb_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> Result<bool> {
         if !self.voice_is_native(call_id, peer_fp) {
             return Ok(false);
         }
-        let Some(v) = self.voice.clone() else {
+        let Some(v) = self.voice_media() else {
             return Ok(false);
         };
-        let (cid, pfp, s) = (call_id.to_string(), peer_fp.to_string(), sdp.to_string());
+        let (cid, pfp, s) = (
+            call_id.to_string(),
+            peer_fp.to_string(),
+            unwrap_wire_sdp(sdp),
+        );
         let res = tokio::task::spawn_blocking(move || v.handle_offer(&cid, &pfp, &s)).await;
         match res {
             Ok(Ok(answer)) => {
@@ -5168,10 +5239,14 @@ impl NetworkEngine {
         if !self.voice_is_native(call_id, peer_fp) {
             return false;
         }
-        let Some(v) = self.voice.clone() else {
+        let Some(v) = self.voice_media() else {
             return false;
         };
-        let (cid, pfp, s) = (call_id.to_string(), peer_fp.to_string(), sdp.to_string());
+        let (cid, pfp, s) = (
+            call_id.to_string(),
+            peer_fp.to_string(),
+            unwrap_wire_sdp(sdp),
+        );
         let res = tokio::task::spawn_blocking(move || v.handle_answer(&cid, &pfp, &s)).await;
         let ok = matches!(res, Ok(Ok(())));
         self.voice_flush_signals(call_id, peer_fp);
@@ -5179,11 +5254,11 @@ impl NetworkEngine {
     }
 
     #[cfg(target_os = "linux")]
-    async fn voice_absorb_ice(&self, call_id: &str, peer_fp: &str, cand: &str, mid: &str) -> bool {
+    pub(super) async fn voice_absorb_ice(&self, call_id: &str, peer_fp: &str, cand: &str, mid: &str) -> bool {
         if !self.voice_is_native(call_id, peer_fp) {
             return false;
         }
-        let Some(v) = self.voice.clone() else {
+        let Some(v) = self.voice_media() else {
             return false;
         };
         let (cid, pfp, c, m) = (
@@ -5211,19 +5286,19 @@ impl NetworkEngine {
     /// comportamento de sempre.
     #[cfg(target_os = "linux")]
     pub fn voice_media_stats(&self, call_id: &str) -> Option<VoiceStats> {
-        self.voice.as_ref().and_then(|v| v.stats_agg(call_id))
+        self.voice_media().and_then(|v| v.stats_agg(call_id))
     }
 
     #[cfg(target_os = "linux")]
     pub fn voice_set_muted(&self, call_id: &str, muted: bool) {
-        if let Some(v) = self.voice.as_ref() {
+        if let Some(v) = self.voice_media() {
             v.set_muted(call_id, muted);
         }
     }
 
     #[cfg(target_os = "linux")]
     pub fn voice_hangup(&self, call_id: &str) {
-        if let Some(v) = self.voice.as_ref() {
+        if let Some(v) = self.voice_media() {
             v.hangup(call_id);
         }
         self.voice_forget_call(call_id);
@@ -5241,15 +5316,14 @@ impl NetworkEngine {
         monitor_id: Option<u32>,
     ) -> std::result::Result<String, String> {
         let v = self
-            .voice
-            .as_ref()
+            .voice_media()
             .ok_or_else(|| "voz nativa indisponivel".to_string())?;
         v.video_start(call_id, peer_fp, source, monitor_id)
     }
 
     #[cfg(target_os = "linux")]
     pub fn native_video_stop(&self, call_id: &str, peer_fp: &str) {
-        if let Some(v) = self.voice.as_ref() {
+        if let Some(v) = self.voice_media() {
             v.video_stop(call_id, peer_fp);
         }
     }
@@ -5260,8 +5334,7 @@ impl NetworkEngine {
         call_id: &str,
         peer_fp: &str,
     ) -> Option<crate::net::media_voice::VideoFrame> {
-        self.voice
-            .as_ref()
+        self.voice_media()
             .and_then(|v| v.video_frame(call_id, peer_fp))
     }
 
@@ -5270,7 +5343,7 @@ impl NetworkEngine {
     /// sempre e TODAS as chamadas seguintes nasciam só-recebendo.
     #[cfg(target_os = "linux")]
     pub fn voice_retry_mic(&self) {
-        if let Some(v) = self.voice.as_ref() {
+        if let Some(v) = self.voice_media() {
             v.retry_mic();
         }
     }
@@ -5383,6 +5456,9 @@ impl NetworkEngine {
             let q = map.entry(peer_fp.to_string()).or_default();
             if q.len() >= Self::PENDING_CALL_MAX {
                 Self::evict_call_frame(q);
+                if q.len() >= Self::PENDING_CALL_MAX {
+                    q.remove(0); // sem vítima elegível: o teto vale mesmo assim
+                }
             }
             q.push(frame);
         }
@@ -5929,6 +6005,14 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         candidates.push(0);
         let mut bound = None;
         for p in candidates {
+            if p != 0
+                && process_ports()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&p)
+            {
+                continue; // outro engine DESTE processo já ligou esta porta
+            }
             let attempt = (|| -> Result<tokio::net::TcpListener> {
                 let sock = tokio::net::TcpSocket::new_v4()?;
                 #[cfg(unix)]
@@ -5944,6 +6028,12 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             })();
             match attempt {
                 Ok(l) => {
+                    if p != 0 {
+                        process_ports()
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(p);
+                    }
                     bound = Some(l);
                     break;
                 }
@@ -5963,10 +6053,18 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     {
         let port_upnp = port;
         let ext_port = engine.nat_external_port.clone();
+        let engine_nat = engine.clone();
         tokio::spawn(async move {
+            let mut cancel = engine_nat.cancel_tx.subscribe();
             loop {
+                if cancelled(&cancel) {
+                    break;
+                }
                 nat_map_port(port_upnp, ext_port.clone()).await;
-                sleep(NAT_RENEW_INTERVAL).await;
+                tokio::select! {
+                    _ = cancel.changed() => break,
+                    _ = sleep(NAT_RENEW_INTERVAL) => {}
+                }
             }
         });
     }
@@ -6006,9 +6104,16 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             // (bom cidadão — evita rate-limit/ban). O endpoint fica retido no
             // serviço por horas, então a descoberta direta continua funcionando;
             // o 1º tick é imediato (anuncia no boot) e o relay cobre o resto.
+            let mut cancel = engine_clone.cancel_tx.subscribe();
             let mut tick = interval(Duration::from_secs(30));
             loop {
-                tick.tick().await;
+                if cancelled(&cancel) {
+                    break;
+                }
+                tokio::select! {
+                    _ = cancel.changed() => break,
+                    _ = tick.tick() => {}
+                }
                 // PRIVACIDADE: announce/lookup só nos modos "normal"/"encrypted".
                 // Em "proxy"/"full" (Tor/SOCKS5) o IP NUNCA vai a serviço de
                 // terceiros — reqwest não passa pelo SOCKS5 do engine, então
@@ -6299,8 +6404,16 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     {
         let engine = engine.clone();
         tokio::spawn(async move {
+            let mut cancel = engine.cancel_tx.subscribe();
             loop {
-                match listener.accept().await {
+                if cancelled(&cancel) {
+                    break;
+                }
+                let conn = tokio::select! {
+                    _ = cancel.changed() => break,
+                    c = listener.accept() => c,
+                };
+                match conn {
                     Ok((stream, _)) => {
                         let engine = engine.clone();
                         tokio::spawn(async move {
@@ -6729,7 +6842,11 @@ async fn connect_and_maintain(
     expected_fp: Option<String>,
 ) {
     let mut backoff = Duration::from_secs(1);
+    let cancel = engine.cancel_tx.subscribe();
     loop {
+        if cancelled(&cancel) {
+            return;
+        }
         if let Some(fp) = &expected_fp {
             set_link_state(&engine, fp, PeerLinkState::Connecting);
         }
@@ -7046,10 +7163,14 @@ fn relay_dial_stream(engine: &Arc<NetworkEngine>, peer_fp: &str) -> Option<Relay
 /// — 1 Hello perdido não mata a tentativa. Backoff com jitter 0-1s para dois
 /// lados não rediscarem em lockstep (evita Hello cruzado sistemático).
 async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
+    let cancel = engine.cancel_tx.subscribe();
     // Backoff inicial curto (1s) e teto baixo (10s): no 4G a sessão cai com
     // frequência e o usuário sente cada segundo. Jitter evita redial em lockstep.
     let mut backoff = Duration::from_secs(1);
     loop {
+        if cancelled(&cancel) {
+            return;
+        }
         let online = engine
             .links
             .lock()
@@ -7154,7 +7275,7 @@ fn spawn_relay_responder_force(engine: Arc<NetworkEngine>, from: String, first_f
     {
         let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(old) = links.remove(&from) {
-            old.drop_notify.notify_waiters();
+            old.drop_notify.notify_one(); // permit: a queda nunca se perde
         }
     }
     engine.emit_state();
@@ -7328,7 +7449,11 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             });
         }
     }
+    let cancel = engine.cancel_tx.subscribe();
     loop {
+        if cancelled(&cancel) {
+            break;
+        }
         if !first {
             // Intervalo adaptativo (latência mínima sem abusar da infra):
             // pernas com push (MQTT, inclusive via túnel SOCKS5) mantêm o
@@ -7552,7 +7677,7 @@ async fn register_and_run(
             .filter(|old| old.get_state() == PeerLinkState::Online)
     };
     if let Some(old) = replaced {
-        old.drop_notify.notify_waiters(); // encerra a sessão antiga (substituída pela preferida)
+        old.drop_notify.notify_one(); // encerra a sessão antiga (substituída pela preferida)
     }
     info!(peer_fp, %peer_nick, via_relay, "peer ONLINE");
     // Sessão online: a corrente se recompôs — zera falhas do fallback automático.
@@ -7742,8 +7867,13 @@ async fn register_and_run(
                 }
             }
             _ = tokio::time::sleep_until(ping_at) => {
-                // nada recebido desde o último evento → degrau de ociosidade
-                idle_step = (idle_step + 1).min(steps.len() - 1);
+                // Em chamada ativa o heartbeat fica no intervalo base: sessão
+                // meia-aberta morre em ~25s, não em até 5min no degrau máximo.
+                if engine.store.peer_in_active_call(peer_fp) {
+                    idle_step = 0;
+                } else {
+                    idle_step = (idle_step + 1).min(steps.len() - 1);
+                }
                 ping_at = tokio::time::Instant::now() + steps[idle_step];
                 if frame_tx.send((0, SecureFrame::Ping { ts: crate::identity::now_ms() })).is_err() {
                     break Err(ForgeError::PeerNotConnected(peer_fp.into()));
@@ -7869,7 +7999,22 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
         // Backoff curto e teto baixo (2s→3s→…→8s + jitter): o furo tem
         // janela de tempo; esperar demais deixa a sessão presa no relay.
         let mut backoff = Duration::from_secs(2);
+        let cancel = engine.cancel_tx.subscribe();
         loop {
+            if cancelled(&cancel) {
+                break;
+            }
+            // Um loop mais novo assumiu este peer (re-registro relay→relay)?
+            // O velho sai — sem isto os loops empilhavam a cada substituição.
+            let cur_gen = *engine
+                .punch_upgrades
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&peer_fp)
+                .unwrap_or(&generation);
+            if cur_gen != generation {
+                break;
+            }
             // Parou? direta venceu (não é mais via_relay) ou sessão caiu.
             let (online, via_relay) = {
                 let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -8496,6 +8641,23 @@ fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct
     engine.tunnel_housekeep(peer_fp);
 }
 
+/// SDP no fio pode vir cru (camada nativa/Rust) ou `{"type":..,"sdp":..}`
+/// (navegador). O webrtc-rs só entende o cru — desembrulha quando precisa.
+#[cfg(target_os = "linux")]
+fn unwrap_wire_sdp(sdp: &str) -> String {
+    let t = sdp.trim_start();
+    if t.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            if let Some(s) = v.get("sdp").and_then(|x| x.as_str()) {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    sdp.to_string()
+}
+
 async fn handle_frame(
     engine: &Arc<NetworkEngine>,
     peer_fp: &str,
@@ -8544,6 +8706,17 @@ async fn handle_frame(
             })
             .unwrap_or(false);
         if !is_friend && !shares_group && !shares_comm {
+            // Silêncio aqui deixava o chamador em "Chamando…" até o watchdog
+            // de 45s. Um CallReject honesto encerra na hora do lado de lá.
+            if let SecureFrame::CallInvite { call_id, .. } = &frame {
+                let _ = engine.queue_or_send_call_frame(
+                    peer_fp,
+                    SecureFrame::CallReject {
+                        call_id: call_id.clone(),
+                        reason: "não é amigo".into(),
+                    },
+                );
+            }
             return Err(ForgeError::Protocol(
                 "sinalização de chamada de quem não é amigo".into(),
             ));
@@ -9264,12 +9437,14 @@ async fn handle_frame(
         SecureFrame::CallEnd { call_id } => {
             engine.store.leave_call(&call_id, peer_fp)?;
             #[cfg(target_os = "linux")]
-            // Saiu da chamada: derruba as sessões nativas daquele par. A
-            // chamada em si continua existindo se OUTRO peer estiver nela, e
-            // quem decide é o `CallEnd` do host.
+            // Só a sessão NATIVA daquele par cai — as demais da chamada
+            // (grupo/mesh) continuam de pé. `voice_hangup` derrubava todas.
             if engine.voice_is_native(&call_id, peer_fp) {
-                engine.voice_hangup(&call_id);
+                engine.voice_hangup_peer(&call_id, peer_fp);
+                engine.voice_forget_peer(&call_id, peer_fp);
             }
+            #[cfg(target_os = "linux")]
+            engine.forget_held_call(&call_id);
             let _ = engine.events.send(EngineEvent::CallEnded {
                 call_id,
                 from_fp: peer_fp.into(),
@@ -9287,8 +9462,14 @@ async fn handle_frame(
             // Sem registro, o `if` nem existe e o comportamento é o de sempre,
             // byte a byte. É esta assimetria que preserva Windows/Android/macOS.
             #[cfg(target_os = "linux")]
-            if engine.voice_absorb_offer(&call_id, peer_fp, &sdp).await? {
-                return Ok(());
+            {
+                if !engine.voice_is_native(&call_id, peer_fp) && engine.native_voice_available() {
+                    engine.hold_call_offer(&call_id, peer_fp, &sdp);
+                    return Ok(());
+                }
+                if engine.voice_absorb_offer(&call_id, peer_fp, &sdp).await? {
+                    return Ok(());
+                }
             }
             let _ = engine.events.send(EngineEvent::CallOfferEv {
                 call_id,
@@ -9313,11 +9494,19 @@ async fn handle_frame(
             mid,
         } => {
             #[cfg(target_os = "linux")]
-            if engine
-                .voice_absorb_ice(&call_id, peer_fp, &candidate, &mid)
-                .await
             {
-                return Ok(());
+                if !engine.voice_is_native(&call_id, peer_fp)
+                    && engine.native_voice_available()
+                    && engine.hold_call_ice(&call_id, peer_fp, &candidate, &mid)
+                {
+                    return Ok(());
+                }
+                if engine
+                    .voice_absorb_ice(&call_id, peer_fp, &candidate, &mid)
+                    .await
+                {
+                    return Ok(());
+                }
             }
             let _ = engine.events.send(EngineEvent::CallIceEv {
                 call_id,
@@ -10389,6 +10578,36 @@ async fn handle_frame(
     Ok(())
 }
 
+/// Portas já ligadas por engines DESTE processo. SO_REUSEPORT deixa o kernel
+/// distribuir conexões entrantes entre listeners da mesma porta — entre
+/// processos é o que se quer (restart do app pega a 51413 na hora), mas DENTRO
+/// do processo dois listeners na mesma porta era flake garantido (nos testes,
+/// o dial de A para "C" caía às vezes no listener do B — handshake certo na
+/// porta errada). Um engine por porta, por processo.
+static PROCESS_PORTS: std::sync::OnceLock<StdMutex<std::collections::HashSet<u16>>> =
+    std::sync::OnceLock::new();
+
+fn process_ports() -> &'static StdMutex<std::collections::HashSet<u16>> {
+    PROCESS_PORTS.get_or_init(|| StdMutex::new(std::collections::HashSet::new()))
+}
+
+/// True quando o engine foi desligado (loop deve parar).
+fn cancelled(cancel: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *cancel.borrow()
+}
+
+impl NetworkEngine {
+    /// Recebedor do sinal de cancelamento (loops fora deste módulo).
+    pub(crate) fn cancel_subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
+    /// True quando o engine foi desligado.
+    pub(crate) fn is_cancelled(&self, cancel: &tokio::sync::watch::Receiver<bool>) -> bool {
+        *cancel.borrow()
+    }
+}
+
 /// Erro curto e legível para a UI/diagnóstico (sem paths enormes).
 fn short_diag_err(s: &str) -> String {
     let mut t = s.trim().replace('\n', " ");
@@ -10877,8 +11096,10 @@ mod tests {
         rx.try_recv().ok().map(|e| format!("{e:?}"))
     }
 
-    /// SEM sessão nativa: `CallOffer` vira `EngineEvent::CallOfferEv` e o JS
-    /// cria a `RTCPeerConnection`. Este é o caminho de Windows/Android/macOS.
+    /// Offer sem registro: com mídia nativa VIVA ela é RETIDA (o JS do
+    /// WebKitGTK não tem RTCPeerConnection — o caminho de evento era onde ela
+    /// morria); o aceite absorve via `resume_held_call`. Sem mídia nativa
+    /// (Windows/Android/macOS) o evento sai como sempre.
     #[test]
     #[cfg(target_os = "linux")]
     fn call_offer_sem_sessao_nativa_vai_para_o_js() {
@@ -10897,11 +11118,27 @@ mod tests {
             !e.voice_is_native(call_id, PEER),
             "par não registrado não pode virar sessão nativa"
         );
-        let ev = proximo_evento(&mut rx).expect("deve haver evento para o JS");
-        assert!(
-            ev.contains("CallOfferEv"),
-            "sem sessão nativa o evento tem que ser CallOfferEv, veio: {ev}"
-        );
+        if e.native_voice_available() {
+            // Nova semântica (Linux com mídia): retida, sem evento.
+            assert!(
+                proximo_evento(&mut rx).is_none(),
+                "offer pré-aceite retida não pode vazar para o JS"
+            );
+            assert!(e.voice_register(call_id, PEER));
+            block_on(e.resume_held_call(call_id, PEER));
+            assert!(
+                proximo_evento(&mut rx).is_none(),
+                "offer absorvida pela nativa não gera evento"
+            );
+            e.voice_hangup(call_id);
+        } else {
+            // Caminho do navegador (Windows/Android/macOS): evento como sempre.
+            let ev = proximo_evento(&mut rx).expect("deve haver evento para o JS");
+            assert!(
+                ev.contains("CallOfferEv"),
+                "sem sessão nativa o evento tem que ser CallOfferEv, veio: {ev}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -10929,7 +11166,7 @@ mod tests {
         let (e, _d) = engine_com_amigo("CoexistNative");
         // Sem mídia nativa não há o que absorver — e aí o caminho é o de
         // cima, que é justamente o que este arquivo quer proteger.
-        let Some(v) = e.voice.clone() else {
+        let Some(v) = e.voice_media() else {
             return;
         };
         let mut rx = e.subscribe();
@@ -10963,7 +11200,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn offer_invalido_na_regressa_para_o_navegador() {
         let (e, _d) = engine_com_amigo("CoexistFallback");
-        if e.voice.is_none() {
+        if e.voice_media().is_none() {
             return;
         }
         let mut rx = e.subscribe();
@@ -11019,7 +11256,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn sem_midia_nativa_nada_e_registrado() {
         let (e, _d) = mk_engine("SemMidia");
-        if e.voice.is_some() {
+        if e.voice_media().is_some() {
             // Ambiente com áudio: o registro é aceito, como deve ser.
             assert!(e.voice_register("c", "p"));
         } else {

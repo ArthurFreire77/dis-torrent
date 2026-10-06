@@ -799,7 +799,22 @@ export default function ThemeShell({ designId }: {designId:string}){
         window.setTimeout(() => setNotice(null), 6000)
       } catch { /* toast nunca quebra */ }
     }
-    return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce }
+    // O watchdog do manager (60s) ou um call_ended remoto encerram o ring
+    // também no shell — antes o sfx e o overlay tocavam para sempre quando
+    // quem ligou sumia sem desligar.
+    const unIncomingGone = callManager.onIncomingGone
+    callManager.onIncomingGone = (callId: string) => {
+      setIncomingCall((cur) => (cur && cur.call_id === callId ? null : cur))
+      try { sfxRingStop() } catch { /* ignore */ }
+    }
+    return () => {
+      callManager.unbind()
+      try { stopBots?.() } catch { /* ignore */ }
+      try { unCount() } catch { /* ignore */ }
+      callManager.onCallNotice = unNotice
+      callManager.onIceFailed = unIce
+      callManager.onIncomingGone = unIncomingGone
+    }
   }, [])
   // identidade real no CallManager (sem isso chamadas falham "sem identidade")
   useEffect(() => {
@@ -833,6 +848,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   }
   useEffect(() => {
     if (!activeCall) return
+    setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000))
     const t = setInterval(() => setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000)), 1000)
     return () => clearInterval(t)
   }, [activeCall?.callId])
@@ -927,7 +943,12 @@ export default function ThemeShell({ designId }: {designId:string}){
       }
       sfxRingStart()
     }
-    if (ev.type === 'call_ended') { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
+    if (ev.type === 'call_ended') {
+      // Só reage ao fim da chamada CORRETA: um call_ended de outra chamada
+      // (mesh/grupo/frame atrasado) fechava o overlay com a mídia viva.
+      const mine = activeCall?.callId === ev.call_id || incomingCall?.call_id === ev.call_id
+      if (mine) { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
+    }
     if (ev.type === 'voice_joined' || ev.type === 'voice_left' || ev.type === 'voice_state_changed') {
       if (voiceChannel && ev.community_id === voiceChannel.communityId && ev.channel_id === voiceChannel.channelId) {
         services.voiceStates(voiceChannel.communityId, voiceChannel.channelId).then(setVoiceStates).catch(()=>{})
@@ -1352,23 +1373,33 @@ export default function ThemeShell({ designId }: {designId:string}){
     // Rota única: WebRTC direto (host/STUN/TURN) ou erro honesto dizendo o
     // que falta neste aparelho.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
+    if (activeCall) { setError('já existe uma chamada em andamento'); return }
     try { await callManager.start(kind, selConv, fps) } catch (e: any) { setError(String(e?.message ?? e)) }
   }
   async function handleIncomingAccept() {
     if (!incomingCall) return
-    sfxRingStop()
     // Sem WebRTC: mostra o que falta em vez de aceitar uma chamada muda.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
+    // O ring SÓ para quando o aceite de fato sucedeu — antes o catch deixava
+    // o overlay parado no limbo, sem ring e sem chamada.
     try {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
-      try {
-        await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
-      } catch (e: any) {
-        setError(String(e?.message ?? e))
-      }
+      await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
+      sfxRingStop()
       setIncomingCall(null)
       sfxCallConnect()
-    } catch (e: any) { setError(String(e?.message ?? e)) }
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+      sfxRingStop()
+      setIncomingCall(null)
+    }
+  }
+
+  function handleIncomingReject() {
+    if (!incomingCall) return
+    sfxRingStop()
+    callManager.rejectIncoming(incomingCall.call_id, incomingCall.from_fp)
+    setIncomingCall(null)
   }
   async function createGroupNow() {
     if (groupPick.size === 0) return
@@ -2784,7 +2815,7 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
             {qualityError && <div style={{ fontSize: 11, color: '#ff9c9c', marginTop: 8 }}>{qualityError}</div>}
             <div style={{ display: 'flex', gap: 12, marginTop: 18 }}>
-              <button onClick={() => { services.callReject(incomingCall.call_id, incomingCall.from_fp, 'ocupado').catch(()=>{}); setIncomingCall(null) }} style={{ flex: 1, background: t.red, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>Recusar</button>
+              <button onClick={handleIncomingReject} style={{ flex: 1, background: t.red, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>Recusar</button>
               <button onClick={handleIncomingAccept} style={{ flex: 1, background: t.green, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>Aceitar</button>
             </div>
           </div>
@@ -2850,9 +2881,11 @@ export default function ThemeShell({ designId }: {designId:string}){
               <div key={p.fp} style={{ background: `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`, borderRadius: 12, overflow: 'hidden', position: 'relative', minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `2px solid ${p.muted ? t.red + '55' : 'transparent'}`, boxShadow: '0 2px 10px rgba(0,0,0,.35)' }}>
                 {p.stream ? (
                   <>
-                    <video autoPlay playsInline muted={p.fp===identity?.fingerprint} ref={(el:any)=>attachStream(el, p.stream)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    {/* remoto: vídeo SEMPRE mudo — o som sai do <audio> abaixo.
+                        Antes os dois tocavam: voz duplicada (eco/comb-filter). */}
+                    <video autoPlay playsInline muted ref={(el:any)=>attachStream(el, p.stream)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     {p.fp!==identity?.fingerprint && (
-                      <audio autoPlay playsInline hidden ref={(el:any)=>attachStream(el, p.stream)} />
+                      <audio autoPlay playsInline hidden muted={!!activeCall.deafened} ref={(el:any)=>attachStream(el, p.stream)} />
                     )}
                   </>
                 ) : (
@@ -2863,6 +2896,9 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <div style={{ fontWeight: 700, color: t.heading, marginTop: 12, fontSize: 15 }}>{p.nickname || p.fp.slice(0,8)}</div>
                     <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{p.fp===identity?.fingerprint ? 'você' : 'aguardando o vídeo…'}</div>
                   </div>
+                )}
+                {p.disconnected && (
+                  <span style={{ position: 'absolute', top: 8, right: 8, background: '#faa61a', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>RECONECTANDO…</span>
                 )}
                 {/* badge tela compartilhada: local COMPARTILHANDO, remoto com vídeo ASSISTINDO */}
                 {(() => { try { const s = (p as any)?.stream as MediaStream | undefined; const hasV = !!s && typeof (s as any).getVideoTracks === 'function' && (s as any).getVideoTracks().length > 0; if (hasV && p.fp!==identity?.fingerprint) return <span style={{ position: 'absolute', top: 8, left: 8, background: '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>TELA/CÂMERA</span>; return null } catch { return null } })()}

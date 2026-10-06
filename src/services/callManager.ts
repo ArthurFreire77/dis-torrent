@@ -30,6 +30,11 @@ import {
 
 export type CallKind = 'voice' | 'video' | 'screen'
 
+// ── Formato no fio: ver callWire.ts (navegador JSON ↔ nativo cru) ────────────
+import { parseWireSdp, parseWireCandidate } from './callWire'
+export { parseWireSdp, parseWireCandidate } from './callWire'
+export type { WireSdp } from './callWire'
+
 /** Ring de chamada entrante. `nickname` é o que a UI mostra (nome > fp). */
 export interface IncomingCall {
   call_id: string
@@ -1028,9 +1033,9 @@ let nativeVoiceAvailable: boolean | null = null
  *  "sem rota" mesmo com a chamada conectada). */
 let nativeRoute: string | null = null
 
-/** Consulta única e cacheada: a resposta não muda durante a sessão do app. */
-export async function detectNativeVoice(): Promise<boolean> {
-  if (nativeVoiceAvailable !== null) return nativeVoiceAvailable
+/** Consulta cacheada; `force` re-pergunta (dispositivo/engine podem subir depois). */
+export async function detectNativeVoice(force?: boolean): Promise<boolean> {
+  if (!force && nativeVoiceAvailable !== null) return nativeVoiceAvailable
   try {
     nativeVoiceAvailable = await services.voiceMediaAvailable()
   } catch {
@@ -1233,6 +1238,9 @@ export class CallManager {
    * relay…") e, se persistir/falhar, ICE_FAILED_MSG. Nulo por padrão.
    */
   public onIceFailed: ((info: IceFailureInfo) => void) | null = null
+  /** O ring de chamada entrante sumiu (watchdog/end/rejeição) — o shell limpa
+   *  o overlay e para o sfx, que vivem em estado React separado. */
+  public onIncomingGone: ((callId: string) => void) | null = null
   private iceFailOff: (() => void) | null = null
   // ── relay fallback (áudio via sinalização) ──
   private relayManual = false
@@ -1284,9 +1292,36 @@ export class CallManager {
           }
         } catch { /* nunca derruba o bus */ }
       }
-      // NÃO adiciona participante em 'call_incoming': só aparece na chamada
-      // quem REALMENTE entra (offer/answer/ICE). Antes o ring já listava o peer
-      // antes de aceitar/conectar.
+      if (ev.type === 'call_incoming' && typeof ev.call_id === 'string') {
+        // O ring agora tem estado no manager: o watchdog de incoming (60s)
+        // arma de verdade e o overlay nunca mais toca para sempre quando quem
+        // ligou some sem enviar call_ended. Antes o ring vivia só no React
+        // do shell, sem timeout nenhum.
+        if (!this.state || !isCallPhaseActive(this.state.phase)) {
+          const me = this.getIdentity()
+          if (me) {
+            this.myFp = me.fingerprint
+            this.state = {
+              callId: String(ev.call_id),
+              kind: (ev.kind === 'video' ? 'video' : 'voice') as CallKind,
+              convId: '',
+              phase: 'incoming',
+              muted: false,
+              deafened: false,
+              cameraOn: false,
+              sharing: false,
+              participants: [{ fp: me.fingerprint, nickname: me.nickname }],
+              startAt: Date.now(),
+              quality: this.quality,
+              ...(nativeVoiceAvailable === true ? { nativeMedia: true } : {}),
+            } as unknown as CallState
+            this.startIncomingWatchdog()
+            this.onUpdate({ ...this.state })
+          }
+        }
+      }
+      // Participante só entra de verdade com offer/answer/ICE — o ring lista
+      // apenas o autor (ver acima).
       if (ev.type === 'call_accepted') {
         // o outro lado atendeu → sinalização fluindo, mídia negociando
         if (this.state && this.state.callId === ev.call_id) this.applyPhase('accept')
@@ -1319,10 +1354,12 @@ export class CallManager {
       if (ev.type === 'call_ended') {
         const st = this.state
         if (st && st.callId === ev.call_id) {
-          // chamada perdida: desligaram enquanto tocava aqui
           const wasIncoming = st.phase === 'incoming'
           this.applyPhase('remote-ended')
-          if (wasIncoming) this.onCallNotice?.('chamada perdida')
+          if (wasIncoming) {
+            this.onCallNotice?.('chamada perdida')
+            this.onIncomingGone?.(st.callId)
+          }
           this.leave()
         }
       }
@@ -1463,10 +1500,25 @@ export class CallManager {
           this.setFailureCause('chamada perdida: quem ligou sumiu sem enviar call_ended (rede caiu)')
           this.applyPhase('reconnect-timeout') // incoming → missed
           this.onCallNotice?.('chamada perdida')
+          this.onIncomingGone?.(callId)
           void this.leave()
         } catch { /* watchdog nunca derruba */ }
       }, CallManager.INCOMING_TIMEOUT_MS)
     } catch { /* ignore */ }
+  }
+
+  /** Recusa o ring atual (botão do overlay): avisa o chamador e limpa o estado
+   *  de incoming do manager — o shell não precisa saber dos detalres. */
+  rejectIncoming(callId: string, fromFp: string, reason = 'ocupado') {
+    const st = this.state
+    if (st && st.callId === callId && st.phase === 'incoming') {
+      this.stopIncomingWatchdog()
+      this.state = null
+      this.lastPhase = 'rejected'
+      this.onIncomingGone?.(callId)
+      this.onUpdate(null as any)
+    }
+    services.callReject(callId, fromFp, reason).catch(() => {})
   }
   private stopIncomingWatchdog() {
     try { if (this.incomingTimer) clearTimeout(this.incomingTimer) } catch { /* ignore */ }
@@ -1513,6 +1565,7 @@ export class CallManager {
       const st = this.state
       if (!st || st.phase !== 'connecting') return
       if (this.relayActive) return // relay já é a rota viva
+      if ((st as any)?.nativeMedia) return // nativo: o monitor da mídia Rust vigia
       let anyAlive = false
       for (const pc of this.pcs.values()) {
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
@@ -1691,6 +1744,14 @@ export class CallManager {
   }
 
   async start(kind: CallKind, convId: string, targetFps: string[]): Promise<CallState> {
+    // Chamada em andamento? Não pisa: o segundo start vazava PCs/mic/watchdogs
+    // da primeira e fabricava dois invites (comportamento clássico de duplo-clique).
+    if (this.state && isCallPhaseActive(this.state.phase)) {
+      throw new Error('já existe uma chamada em andamento — encerre a atual antes')
+    }
+    // Re-confere a voz nativa AGORA: o engine pode ter re-armado a mídia depois
+    // do boot (áudio subiu tarde) — o cache do boot dizia 'não' para sempre.
+    await detectNativeVoice(true)
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
     const me = this.getIdentity()
     if (!me) throw new Error('sem identidade')
@@ -1703,21 +1764,21 @@ export class CallManager {
     try { this.lastStats.clear() } catch { /* ignore */ }
     try { this.lastNativeStats = null } catch { /* ignore */ }
     this.prevLost.clear()
-    // mídia local (mesmo em voice pedimos áudio para detectar falando)
-    // sem mic/permissão → null; o PC sem tracks ainda completa a sinalização
-    const qOrVideo: MediaTrackConstraints | boolean = kind === 'video' ? { ...CAMERA_CONSTRAINTS } : false
-    const constraints: MediaStreamConstraints = kind === 'video' ? { audio: true, video: qOrVideo } : { audio: true, video: false }
-    this.localStream = await getLocalMedia(constraints)
-
-    const callId = await services.callInvite(targetFps[0] ?? convId, kind).catch(() => `call-${Math.random().toString(36).slice(2, 8)}`)
+    // Sem fallback de callId aleatório: um id inventado criava uma chamada
+    // fantasma que ninguém na rede conhecia — morria só no watchdog de 45s
+    // com mensagem genérica, escondendo o erro real (ex.: motor sem boot).
+    // E o invite vai ANTES da mídia local: o outro lado ouve o ring na hora,
+    // não depois do prompt de permissão do nosso lado.
+    const callId = await services.callInvite(targetFps[0] ?? convId, kind)
     for (const fp of targetFps.slice(1)) {
       if (fp === me.fingerprint) continue
       try { await services.callAddParticipant(fp, callId, fp, kind) } catch { /* ring best-effort */ }
     }
+
     // CHAMADA NATIVA (voz em Rust): o core cuida de offer/answer/ICE e da
-    // mídia. Se eu tentasse seguir por aqui, `new RTCPeerConnection` explodiria
-    // com ReferenceError no WebKitGTK (RTCPeerConnection não existe lá), e
-    // `getUserMedia` abriria um segundo microfone competindo com o do core.
+    // mídia. Nada de getUserMedia aqui — o check antigo vinha DEPOIS do
+    // getLocalMedia e a WebView abria um microfone competindo com o do core,
+    // com tracks que nunca eram paradas (mic preso até reiniciar o app).
     if (nativeVoiceAvailable === true) {
       this.localStream = null
       this.screenStream = null
@@ -1742,6 +1803,12 @@ export class CallManager {
       this.onUpdate({ ...this.state })
       return this.state
     }
+
+    // Caminho navegador: mídia local agora (sem mic/permissão → null; o PC
+    // sem tracks ainda completa a sinalização).
+    const qOrVideo: MediaTrackConstraints | boolean = kind === 'video' ? { ...CAMERA_CONSTRAINTS } : false
+    const constraints: MediaStreamConstraints = kind === 'video' ? { audio: true, video: qOrVideo } : { audio: true, video: false }
+    this.localStream = await getLocalMedia(constraints)
 
     this.resetRelayForNewCall()
     this.state = {
@@ -1904,8 +1971,53 @@ export class CallManager {
     const me = this.getIdentity()
     if (!me) throw new Error('sem identidade')
     this.myFp = me.fingerprint
+    // Atender outra chamada com uma ativa? Recusa honesta em vez de pisar.
+    if (this.state && this.state.callId !== callId && isCallPhaseActive(this.state.phase)) {
+      throw new Error('já existe uma chamada em andamento — encerre a atual antes de atender outra')
+    }
+    await detectNativeVoice(true)
+    // NATIVA: a mídia é do core — nada de getUserMedia/RTCPeerConnection aqui
+    // (a offer retida foi absorvida pelo engine no call_accept).
+    if (nativeVoiceAvailable === true) {
+      this.lastFailureCause = null
+      if (this.state && this.state.callId === callId) {
+        if (this.state.phase === 'incoming') this.applyPhase('accept')
+        this.stopConnectWatchdog() // navegador não vigia mídia nativa
+        if (!this.state.convId && convId) this.state.convId = convId
+        if (!this.state.participants.find(p => p.fp === fromFp)) {
+          this.state.participants.push({ fp: fromFp, nickname: nickname ?? fromFp.slice(0, 6) })
+        }
+        ;(this.state as any).nativeMedia = true
+        this.localStream = null
+        this.startNativeVoiceMonitor(callId)
+        this.onUpdate({ ...this.state })
+        return this.state
+      }
+      this.state = {
+        callId,
+        kind,
+        convId,
+        phase: 'connecting',
+        muted: false,
+        deafened: false,
+        cameraOn: false,
+        sharing: false,
+        participants: [
+          { fp: me.fingerprint, nickname: me.nickname },
+          ...(fromFp === me.fingerprint ? [] : [{ fp: fromFp, nickname: nickname ?? fromFp.slice(0, 6) }]),
+        ],
+        startAt: Date.now(),
+        quality: this.quality,
+        nativeMedia: true,
+      } as unknown as CallState
+      this.stopConnectWatchdog()
+      this.startNativeVoiceMonitor(callId)
+      this.onUpdate({ ...this.state })
+      return this.state
+    }
     if (this.state && this.state.callId === callId) {
       if (this.state.phase === 'incoming') this.applyPhase('accept')
+      if (!this.state.convId && convId) this.state.convId = convId
       if (!this.state.participants.find(p => p.fp === fromFp)) {
         this.state.participants.push({ fp: fromFp, nickname: nickname ?? fromFp.slice(0, 6) })
         this.syncRelayToState()
@@ -2685,6 +2797,11 @@ export class CallManager {
       seen.add(s)
       try { s.getAudioTracks().forEach(t => { t.enabled = !muted }) } catch { /* ignore */ }
     }
+    // Chamada NATIVA: os tracks do DOM não existem — o mute é no core (Rust).
+    // Sem isto o botão de mudo mentia: o outro lado continuava ouvindo tudo.
+    if ((this.state as any)?.nativeMedia) {
+      services.voiceSetMuted(this.state.callId, muted).catch(() => {})
+    }
     this.onUpdate({ ...this.state })
   }
 
@@ -2701,7 +2818,11 @@ export class CallManager {
         s.getAudioTracks().forEach(t => { t.enabled = !this.state!.muted })
       }
     } catch { /* ignore */ }
-    // todos os remote audios muted no DOM
+    // Chamada NATIVA: ensurdecer cala o playout no core (Rust).
+    if ((this.state as any)?.nativeMedia) {
+      services.voiceSetDeafened(this.state.callId, this.state.deafened).catch(() => {})
+      if (this.state.deafened) services.voiceSetMuted(this.state.callId, true).catch(() => {})
+    }
     this.onUpdate({ ...this.state })
   }
 
@@ -3597,19 +3718,19 @@ export class CallManager {
 
   private async handleOffer(fromFp: string, callId: string, sdpStr: string) {
     if (!fromFp || fromFp === this.myFp) return
+    const offer = parseWireSdp(sdpStr, 'offer')
+    if (!offer) return
     if (!this.state || this.state.callId !== callId) {
       const me = this.getIdentity()
       if (!me) return
       if (!this.myFp) this.myFp = me.fingerprint
-      if (typeof sdpStr === 'string' && sdpStr.indexOf('"offer"') >= 0) {
+      // NATIVA: a offer pré-aceite foi retida no ENGINE (voice_gate) — aqui
+      // não há o que guardar. Só o caminho navegador bufferiza.
+      if (nativeVoiceAvailable !== true) {
         this.pendingOffers.set(fromFp, { callId, sdp: sdpStr })
       }
       return
     }
-    if (typeof sdpStr !== 'string') return
-    let offer: RTCSessionDescriptionInit
-    try { offer = JSON.parse(sdpStr) } catch { return }
-    if (!offer || offer.type !== 'offer') return
     this.markJoined(fromFp) // peer mandou offer = está entrando na chamada
 
     let pc = this.pcs.get(fromFp)
@@ -3623,7 +3744,14 @@ export class CallManager {
     }
     if (!pc) {
       if (!supportsCalls()) { console.debug('[call] oferta ignorada: WebRTC indisponível neste aparelho'); return }
-      pc = newPeerConnection()
+      // RTCPeerConnection pode não existir (WebKitGTK): sem try/catch a
+      // exceção subia no bus de eventos e matava os handlers seguintes.
+      try {
+        pc = newPeerConnection()
+      } catch (e) {
+        console.warn(`[call] RTCPeerConnection indisponível para offer de ${fromFp.slice(0, 8)}: ${(e as Error)?.message ?? e}`)
+        return
+      }
       this.pcs.set(fromFp, pc)
       this.wirePC(pc, fromFp, callId)
       // anexa mic/câmera ANTES de aplicar a offer (answer já sai com as tracks)
@@ -3666,13 +3794,13 @@ export class CallManager {
     if (!fromFp || fromFp === this.myFp) return
     const pc = this.pcs.get(fromFp)
     if (!pc) return
+    const ans = parseWireSdp(sdpStr, 'answer')
+    if (!ans) return
     this.markJoined(fromFp) // respondeu = entrou na chamada
     try {
-      const ans = JSON.parse(sdpStr)
-      if (!ans || ans.type !== 'answer') return
       // answer só vale se ainda temos offer local pendente (anti-GLARE/rollback).
       if (pc.signalingState !== 'have-local-offer') return
-      await pc.setRemoteDescription(ans)
+      await pc.setRemoteDescription(ans as RTCSessionDescriptionInit)
       // descrição remota pronta → candidatos ICE que chegaram cedo podem entrar
       await this.flushPendingIce(fromFp, pc)
     } catch (e) {
@@ -3703,8 +3831,8 @@ export class CallManager {
       }
     } catch { /* nunca derruba o bus */ }
     const pc = this.pcs.get(fromFp)
-    let cand: RTCIceCandidateInit
-    try { cand = JSON.parse(candidateStr) } catch { return }
+    const cand = parseWireCandidate(candidateStr)
+    if (!cand) return
     // Sem PC ou sem remoteDescription: GUARDA (não descarta). O flush acontece
     // quando a offer/answer for aplicada — trickle ICE sobre relay chega antes.
     if (!pc || !pc.remoteDescription) {
@@ -3786,4 +3914,8 @@ let cachedCallIdentity: { fingerprint: string; nickname: string } | null = null
 /** Shells chamam ao carregar/trocar/limpar identidade — sem isso chamadas falham com "sem identidade". */
 export function setCallIdentity(id: { fingerprint: string; nickname: string } | null) {
   cachedCallIdentity = id
+  // Identidade nova = engine novo: a disponibilidade de voz nativa pode ter
+  // mudado (cofre trancado → desbloqueado). Re-pergunta em vez de confiar no
+  // cache do boot.
+  void detectNativeVoice(true)
 }
