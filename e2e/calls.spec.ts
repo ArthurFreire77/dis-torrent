@@ -72,26 +72,7 @@ test('chamada de voz abre overlay sem crash (ou mensagem honesta sem WebRTC)', a
   );
 
   if (!hasRTC || !hasMedia) {
-    // Sem WebRTC: relay-only mantém botões ATIVOS (via relay); só 'none' desabilita.
-    const support = await a.evaluate(() => {
-      try {
-        const hasGum = typeof navigator !== 'undefined' && !!(navigator as unknown as { mediaDevices?: { getUserMedia?: unknown } }).mediaDevices?.getUserMedia;
-        const hasMR = typeof MediaRecorder !== 'undefined' && !!MediaRecorder;
-        const w = window as unknown as { webkitAudioContext?: unknown };
-        const hasAC = (typeof AudioContext !== 'undefined' && !!AudioContext) || !!w.webkitAudioContext;
-        if (hasMR && hasAC && hasGum) return 'relay-only';
-        if (hasAC) return 'relay-only';
-        return 'none';
-      } catch { return 'none'; }
-    });
-    if (support === 'relay-only') {
-      const voiceRelay = a.getByTitle(/via relay/).first();
-      await expect(voiceRelay).toBeVisible({ timeout: 10000 });
-      await expect(voiceRelay).toBeEnabled();
-      assertNoWebRTCrash([...errsA, ...errsB]);
-      await ctx.close();
-      return;
-    }
+    // Sem WebRTC NÃO existe relay: botões desabilitados com diagnóstico honesto.
     const honest = a.getByTitle(/indisponíveis/).first();
     await expect(honest).toBeVisible({ timeout: 10000 });
     await expect(honest).toBeDisabled();
@@ -106,8 +87,8 @@ test('chamada de voz abre overlay sem crash (ou mensagem honesta sem WebRTC)', a
   await expect(voiceBtn).toBeEnabled();
   await voiceBtn.click();
 
-  // Overlay ativo: "N participantes • mesh — todos semeiam"
-  await expect(a.getByText(/participantes • mesh/)).toBeVisible({ timeout: 15000 });
+  // Overlay ativo: contagem de participantes no cabeçalho da chamada
+  await expect(a.getByText(/1 participante/)).toBeVisible({ timeout: 15000 });
 
   // B recebe o convite AO VIVO (modal "está ligando…")
   await expect(b.getByText(/está ligando/)).toBeVisible({ timeout: 15000 });
@@ -122,7 +103,7 @@ test('chamada de voz abre overlay sem crash (ou mensagem honesta sem WebRTC)', a
   await ctx.close();
 });
 
-test('sem WebRTC: relay-only liga via relay; none mostra diagnóstico detalhado (sem crash)', async ({ browser }) => {
+test('sem WebRTC: clique mostra diagnóstico detalhado honesto (sem crash)', async ({ browser }) => {
   const ctx = await browser.newContext();
   // Mock: remove WebRTC ANTES de qualquer script da pagina rodar.
   await ctx.addInitScript(() => {
@@ -149,59 +130,24 @@ test('sem WebRTC: relay-only liga via relay; none mostra diagnóstico detalhado 
   const rtcType = await a.evaluate(() => typeof RTCPeerConnection);
   expect(rtcType).toBe('undefined');
 
-  // Nível real na página mockada (espelha getCallsSupport): relay precisa de
-  // MediaRecorder + AudioContext + getUserMedia; sem isso é 'none'.
-  const support = await a.evaluate(() => {
-    try {
-      const hasGum = typeof navigator !== 'undefined' && !!(navigator as unknown as { mediaDevices?: { getUserMedia?: unknown } }).mediaDevices?.getUserMedia;
-      const hasMR = typeof MediaRecorder !== 'undefined' && !!MediaRecorder;
-      const w = window as unknown as { webkitAudioContext?: unknown };
-      const hasAC = (typeof AudioContext !== 'undefined' && !!AudioContext) || !!w.webkitAudioContext;
-      if (hasMR && hasAC && hasGum) return 'relay-only';
-      if (hasAC) return 'relay-only';
-      return 'none';
-    } catch { return 'none'; }
-  });
-
   const HONEST = 'chamadas de voz/vídeo indisponíveis neste aparelho';
 
-  if (support === 'relay-only') {
-    // Botões ATIVOS via relay (não mais "indisponíveis"): voz vira áudio via relay.
-    const voiceRelay = a.getByTitle(/via relay/).first();
-    await expect(voiceRelay).toBeVisible({ timeout: 10000 });
-    await expect(voiceRelay).toBeEnabled();
-    await voiceRelay.click();
-
-    // Overlay com badge "via relay (latência alta)" em A.
-    await expect(a.getByText(/via relay/i).first()).toBeVisible({ timeout: 15000 });
-    // B recebe o convite AO VIVO e aceita via acceptInbound (que liga o relay).
-    await expect(b.getByText(/está ligando/)).toBeVisible({ timeout: 15000 });
-    await b.getByRole('button', { name: 'Aceitar' }).first().click();
-    await expect(b.getByText(/via relay/i).first()).toBeVisible({ timeout: 15000 });
-    await expect(b.getByText(/está ligando/)).toBeHidden({ timeout: 15000 });
-    assertNoWebRTCrash([...errsA, ...errsB]);
-    await ctx.close();
-    return;
-  }
-
-  // 'none': botões desabilitados com diagnóstico detalhado em pt-BR.
+  // 'none' é o ÚNICO nível sem WebRTC (relay foi removido de propósito):
+  // o botão fica com o título honesto e o clique mostra o diagnóstico.
   const voiceHonest = a.getByTitle(/indisponíveis/).first();
   await expect(voiceHonest).toBeVisible({ timeout: 10000 });
-  await expect(voiceHonest).toBeDisabled();
   // Tooltip detalhado diz O QUE falta + ação (atualize o WebView).
   const titleAttr = await voiceHonest.getAttribute('title').catch(() => '');
   expect(String(titleAttr ?? '')).toContain(HONEST);
   expect(String(titleAttr ?? '').toLowerCase()).toContain('atualize o webview');
 
-  // Clicar (force) nao pode gerar "Can't find variable" — mostra erro honesto ou nada
+  // Clicar nao pode gerar "Can't find variable" — mostra o erro honesto na tela
   await voiceHonest.click({ force: true }).catch(() => {});
   await a.waitForTimeout(500);
   assertNoWebRTCrash([...errsA, ...errsB]);
-  // Se algum erro visivel apareceu, tem que ser o honesto em pt-BR
+  // o diagnóstico honesto aparece visível para o usuário (banner de erro)
   const bodyText = await a.locator('body').innerText().catch(() => '');
-  if (bodyText.includes('indisponíveis')) {
-    expect(bodyText).toContain(HONEST);
-  }
+  expect(bodyText).toContain(HONEST);
 
   await ctx.close();
 });

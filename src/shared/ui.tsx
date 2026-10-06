@@ -548,10 +548,11 @@ export function Modal({
   subtitle,
   children,
   footer,
-  width = WIDTHS.md,
-  zIndex = 90,
-  labelId,
-}: {
+   width = WIDTHS.md,
+   zIndex = 90,
+   labelId,
+   dialogLabel,
+ }: {
   open: boolean
   onClose: () => void
   title: string
@@ -560,7 +561,14 @@ export function Modal({
   footer?: ReactNode
   width?: number
   zIndex?: number
+  /** ID do <h2> do título (p/ aria-labelledby quando o título é dinâmico). */
   labelId?: string
+  /**
+   * Nome acessível ESTÁVEL do dialog. Use quando o título visual muda
+   * (ex.: wizard por passos): leitores de tela e testes precisam de um
+   * nome que não muda a cada passo.
+   */
+  dialogLabel?: string
 }) {
   if (!open) return null
   return (
@@ -580,8 +588,8 @@ export function Modal({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={labelId ? undefined : title}
-        aria-labelledby={labelId}
+        aria-label={dialogLabel ?? (labelId ? undefined : title)}
+        aria-labelledby={dialogLabel ? undefined : labelId}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === 'Escape') {

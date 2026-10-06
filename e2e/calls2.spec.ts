@@ -129,9 +129,9 @@ test('voz A->B com WebRTC real (fake device): B aceita e overlay aparece nos doi
   await expect(voiceBtn).toBeEnabled();
   await voiceBtn.click();
 
-  // Overlay ativo em A: desktop mostra "N participantes • mesh — todos semeiam",
+  // Overlay ativo em A: desktop mostra a contagem de participantes,
   // mobile mostra "Em chamada". Aceita qualquer um dos dois.
-  await expect(a.getByText(/participantes • mesh|Em chamada/)).toBeVisible({ timeout: 15000 });
+  await expect(a.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
 
   // B vê o modal entrante AO VIVO ("está ligando…").
   await expect(b.getByText(/está ligando/)).toBeVisible({ timeout: 15000 });
@@ -141,9 +141,9 @@ test('voz A->B com WebRTC real (fake device): B aceita e overlay aparece nos doi
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
 
   // Overlay aparece em B após aceitar (mesma regra desktop/mobile).
-  await expect(b.getByText(/participantes • mesh|Em chamada/)).toBeVisible({ timeout: 15000 });
+  await expect(b.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
   // Overlay continua em A.
-  await expect(a.getByText(/participantes • mesh|Em chamada/)).toBeVisible({ timeout: 15000 });
+  await expect(a.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
   // Modal entrante sumiu em B.
   await expect(b.getByText(/está ligando/)).toBeHidden({ timeout: 15000 });
 

@@ -1846,10 +1846,16 @@ export class CallManager {
 
   async joinVoice(communityId: string, channelId: string) {
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
+    // Re-confere a voz nativa AGORA (o engine re-arma a mídia se o áudio
+    // subiu depois do boot) — o mesmo reset do start().
+    await detectNativeVoice(true)
+    // Anuncia a entrada PRIMEIRO: quem já está no canal precisa saber de nós
+    // ANTES das nossas offers chegarem (gate do auto-register nativo + o
+    // roster da UI). O engine também conecta a mídia nativa aqui (Linux).
     await services.voiceJoin(communityId, channelId)
-    // também cria call de voz local (apenas áudio) para o canal — todos semeiam o áudio entre si
     const me = this.getIdentity()
     if (!me) return
+    this.myFp = me.fingerprint
     const callId = `voice-${communityId}-${channelId}`
     this.quality = getStoredQuality()
     this.qualityNotice = null
@@ -1858,8 +1864,39 @@ export class CallManager {
     try { this.lastStats.clear() } catch { /* ignore */ }
     try { this.lastNativeStats = null } catch { /* ignore */ }
     this.prevLost.clear()
-    this.localStream = await getLocalMedia({ audio: true })
     this.resetRelayForNewCall()
+
+    // CANAL NATIVO (Linux): o core registrou as sessões e ofereceu a todos os
+    // presentes no voice_join — aqui só monitoramos a mídia dele.
+    if (nativeVoiceAvailable === true) {
+      this.localStream = null
+      this.screenStream = null
+      this.state = {
+        callId,
+        kind: 'voice',
+        convId: channelId,
+        phase: 'connecting',
+        startedAt: Date.now(),
+        startAt: Date.now(),
+        quality: this.quality,
+        muted: false,
+        deafened: false,
+        cameraOn: false,
+        screenOn: false,
+        sharing: false,
+        participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }],
+        nativeMedia: true,
+      } as unknown as CallState
+      this.startNativeVoiceMonitor(callId)
+      this.onUpdate({ ...this.state })
+      return this.state
+    }
+
+    // Caminho navegador: mic local (null honesto sem permissão — a
+    // sinalização segue) e MESH com quem já está no canal. Antes o estado
+    // local vivia sozinho: os watchdogs matavam a "chamada" em ~50s com
+    // "reconexão falhou" porque NUNCA havia mídia entre os participantes.
+    this.localStream = await getLocalMedia({ audio: true })
     this.state = {
       callId,
       kind: 'voice',
@@ -1877,12 +1914,29 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
+    // EU (joiner) ofereço a todos que já estão no canal. Quem entra DEPOIS
+    // oferece de novo a nós (handler voice_joined abaixo) — o anti-glare
+    // polite/impolite de sempre resolve as duas offers no mesmo par.
+    try {
+      const states = await services.voiceStates(communityId, channelId)
+      for (const [fp] of states) {
+        if (!fp || fp === me.fingerprint) continue
+        if (!this.state.participants.some((p: any) => p.fp === fp)) {
+          this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
+        }
+      }
+      for (const [fp] of states) {
+        if (!fp || fp === me.fingerprint) continue
+        try { await this.createPC(fp, callId, true) } catch { /* par best-effort */ }
+      }
+    } catch { /* lista best-effort: voice_joined still wires latecomers */ }
     // Entrada direta em `connecting` (sem passar por applyPhase): arma o
     // watchdog aqui — senão "Conectando…" infinito se o ICE nunca fechar.
     this.startConnectWatchdog()
     this.ensureRelayTransport()
     this.startQualityMonitor()
     this.onUpdate({ ...this.state })
+    return this.state
   }
 
   // ── joinVoiceRelayOnly REMOVIDO ──────────────────────────────────────────

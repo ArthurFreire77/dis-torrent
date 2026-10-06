@@ -2121,8 +2121,14 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </button>
               ))}
               <button onClick={() => setFriendsTab('adicionar')} className={'tab-btn add' + (friendsTab === 'adicionar' ? ' active' : '')}>Adicionar amigo</button>
-              <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center' }}>
+              <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
                 {netPill(status)}
+                {/* Downloads acessível SEM conversa aberta — o swarm é global,
+                    o painel não pode depender de um canal selecionado. */}
+                <button onClick={() => setShowDownloads(true)} title="Downloads" aria-label="Downloads" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex', position: 'relative' }}>
+                  <Icon d={Icons.download} size={18} />
+                  {dlCount > 0 && <span style={{ position: 'absolute', top: 2, right: 2, minWidth: 15, height: 15, borderRadius: 99, background: t.red, color: '#fff', fontSize: 9, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount > 9 ? '9+' : dlCount}</span>}
+                </button>
               </span>
             </div>
           )}
@@ -2281,6 +2287,25 @@ export default function ThemeShell({ designId }: {designId:string}){
                 renderFile={(m, grouped) => {
                   const fmeta = parseFileBody(m.body)
                   if (!fmeta) return null
+                  // O card lê o fileSwarm (sincronizado com o downloadManager,
+                  // que cuida da fila real): o progresso mostrado aqui é o mesmo
+                  // do painel. Sem isso o desktop não tinha COMO baixar arquivo
+                  // recebido — só mídia pequena vinha por auto-fetch.
+                  const sf = fileSwarm.files.get(fmeta.file_id) ?? null
+                  const done = !!sf && sf.chunks > 0 && sf.have.size >= sf.chunks
+                  const pct = sf && sf.chunks > 0 ? Math.round((100 * sf.have.size) / sf.chunks) : 0
+                  const baixar = async () => {
+                    if (!sf) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
+                    setError(null)
+                    if (done) {
+                      try { await fileSwarm.download(sf) } catch (e: any) { setError(String(e?.message ?? e)) }
+                      return
+                    }
+                    try {
+                      downloadManager.enqueue({ file_id: fmeta.file_id, name: fmeta.name, size: fmeta.size, chunks: fmeta.chunks, hash: fmeta.hash })
+                      setShowDownloads(true)
+                    } catch (e: any) { setError(String(e?.message ?? e)) }
+                  }
                   return (
                   <div style={{ marginTop: 6, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', maxWidth: 400 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -2290,7 +2315,19 @@ export default function ThemeShell({ designId }: {designId:string}){
                         <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{formatFileSize(fmeta.size)} · {fmeta.chunks} {fmeta.chunks === 1 ? 'chunk' : 'chunks'}</div>
                       </div>
                     </div>
-                    <button onClick={() => setShowDownloads(true)} style={{ marginTop: 8, background: t.accent, color: '#fff', border: 'none', padding: '7px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 800 }}>Abrir downloads</button>
+                    {sf && !done && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                        <div style={{ flex: 1, height: 6, background: t.main, borderRadius: 99, overflow: 'hidden' }}>
+                          <div style={{ width: `${pct}%`, height: '100%', background: t.accent, transition: 'width .3s' }} />
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: muted, fontFamily: 'JetBrains Mono, monospace' }}>{pct}%</span>
+                      </div>
+                    )}
+                    {!sf && <div style={{ fontSize: 11, color: muted, marginTop: 6 }}>aguardando anúncio do swarm…</div>}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                      <button onClick={() => void baixar()} disabled={!sf} style={{ background: t.accent, color: '#fff', border: 'none', padding: '7px 12px', borderRadius: 8, cursor: sf ? 'pointer' : 'not-allowed', fontSize: 12, fontWeight: 800, opacity: sf ? 1 : 0.55, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon d={Icons.download} size={14} /> {done ? 'Baixar' : sf ? `Baixar (${pct}%)` : 'Baixar'}</button>
+                      <button onClick={() => setShowDownloads(true)} style={{ background: 'transparent', color: muted, border: `1px solid ${borderColor}`, padding: '7px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>Painel de downloads</button>
+                    </div>
                   </div>
                   )
                 }}

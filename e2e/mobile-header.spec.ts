@@ -9,6 +9,9 @@ import { test, expect, type Page } from '@playwright/test';
 //
 // Este teste trava o comportamento: as duas ações continuam alcançáveis, mas
 // só pelo menu ⋯.
+//
+// O cabeçalho testado é o da TELA DE CONVERSA — conta nova não tem conversa,
+// então criamos um servidor (fluxo simplificado do mobile) e abrimos o canal.
 
 async function boot(page: Page) {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -19,10 +22,24 @@ async function boot(page: Page) {
   await expect(page).toHaveURL(/\/m/, { timeout: 15000 });
 }
 
+/** Cria um servidor pelo fluxo simplificado e abre o canal → tela de conversa. */
+async function openConversation(page: Page) {
+  await page.getByRole('button', { name: 'Servidores' }).click();
+  await page.getByRole('button', { name: 'Criar servidor' }).click();
+  await page.getByPlaceholder('Ex.: Grupo do jogo').fill('Servidor Cabecalho');
+  await page.getByRole('button', { name: 'Criar', exact: true }).click();
+  // o canal "geral" aparece na lista de canais do servidor
+  const canal = page.locator('.chan-row', { hasText: 'geral' }).first();
+  await expect(canal).toBeVisible({ timeout: 15000 });
+  await canal.click();
+  // tela de conversa: composer visível
+  await expect(page.getByLabel('Mensagem')).toBeVisible({ timeout: 10000 });
+}
+
 test.describe('cabeçalho do mobile sem poluição', () => {
   test('barra superior não tem mais busca nem download', async ({ page }) => {
     await boot(page);
-    await page.locator('.m-conversation, [data-testid="conv"]').first().click().catch(() => {});
+    await openConversation(page);
 
     // o ícone de busca saiu da barra…
     await expect(page.getByLabel('Buscar nesta conversa')).toHaveCount(0);
@@ -32,21 +49,23 @@ test.describe('cabeçalho do mobile sem poluição', () => {
 
   test('menu ⋯ expõe buscar e downloads', async ({ page }) => {
     await boot(page);
-    await page.locator('.m-conversation, [data-testid="conv"]').first().click().catch(() => {});
+    await openConversation(page);
 
     await page.getByLabel('Mais opções').click();
 
     await expect(page.getByText('Buscar mensagens')).toBeVisible({ timeout: 5000 });
     await expect(page.getByText(/Downloads/)).toBeVisible();
 
-    // buscar abre a sheet, pelo mesmo caminho de antes
+    // buscar abre a sheet com campo de busca real
     await page.getByText('Buscar mensagens').click();
-    await expect(page.getByPlaceholder(/uscar|Buscar/i).first()).toBeVisible({ timeout: 5000 });
+    const sheet = page.getByRole('dialog', { name: 'Buscar mensagens' });
+    await expect(sheet).toBeVisible({ timeout: 5000 });
+    await expect(sheet.getByRole('textbox', { name: 'Buscar mensagens' })).toBeVisible();
   });
 
   test('barra superior não transborda em tela estreita (360px)', async ({ page }) => {
     await boot(page);
-    await page.locator('.m-conversation, [data-testid="conv"]').first().click().catch(() => {});
+    await openConversation(page);
     await page.setViewportSize({ width: 360, height: 740 });
     await page.waitForTimeout(300);
 

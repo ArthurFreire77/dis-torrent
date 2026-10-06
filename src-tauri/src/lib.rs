@@ -2659,24 +2659,30 @@ fn screen_share_answer(
 }
 
 #[tauri::command]
-fn voice_join(
+async fn voice_join(
     community_id: String,
     channel_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    engine(&state)?
-        .voice_join(&community_id, &channel_id)
+    // `voice_join` negocia mídia nativa do canal (offer por par presente) e
+    // pode levar segundos: fora da main thread, senão a UI trava ao entrar.
+    let e = engine(&state)?;
+    tauri::async_runtime::spawn_blocking(move || e.voice_join(&community_id, &channel_id))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(err)
 }
 
 #[tauri::command]
-fn voice_leave(
+async fn voice_leave(
     community_id: String,
     channel_id: String,
-    state: State<AppState>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    engine(&state)?
-        .voice_leave(&community_id, &channel_id)
+    let e = engine(&state)?;
+    tauri::async_runtime::spawn_blocking(move || e.voice_leave(&community_id, &channel_id))
+        .await
+        .map_err(|e| e.to_string())?
         .map_err(err)
 }
 

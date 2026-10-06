@@ -45,6 +45,7 @@ declare global {
       remoteTrackLive: boolean
       remoteVideoSize: { w: number; h: number } | null
       remoteVideoTimeAdvanced: boolean
+      notBlack: boolean
       sendParamsApplied: boolean
       audioTracks: number
       degradedAfterPressure: boolean
@@ -101,7 +102,7 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           sendBitrateKbps: null, receiveBitrateKbps: null, rttMs: null, jitterMs: null,
           packetLossPct: null, framesEncoded: null, framesDecoded: null, framesDropped: null,
           keyFramesDecoded: null, freezeCount: null, codec: null, qualityLimitationReason: null,
-          remoteTrackLive: false, remoteVideoSize: null, remoteVideoTimeAdvanced: false,
+          remoteTrackLive: false, remoteVideoSize: null, remoteVideoTimeAdvanced: false, notBlack: false,
           sendParamsApplied: false, audioTracks: 0, degradedAfterPressure: false,
           renegotiationStable: false, peersReusedSender: false,
         }
@@ -154,6 +155,16 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           document.body.appendChild(remoteVideo)
           remoteVideo.play().catch(() => {})
 
+          // A captura de tela é estática por natureza: sem movimento, o
+          // encoder não produz frames e "sentFps > 0" é sorte. Um quadrado
+          // animado (visível na tela capturada) garante fluxo contínuo de
+          // frames DURANTE a medição.
+          const stim = document.createElement('div')
+          stim.style.cssText = 'position:fixed;left:24px;bottom:24px;width:64px;height:64px;background:#f0f;border-radius:12px;z-index:2147483647;'
+          document.body.appendChild(stim)
+          let stimOn = true
+          const stimTimer = setInterval(() => { stimOn = !stimOn; stim.style.background = stimOn ? '#f0f' : '#0ff' }, 250)
+
           const senderVideo = sender.addTrack(track, stream)
           const offer = await sender.createOffer()
           await sender.setLocalDescription(offer)
@@ -161,6 +172,22 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           const answer = await receiver.createAnswer()
           await receiver.setLocalDescription(answer)
           await sender.setRemoteDescription(answer)
+
+          // Trickle ICE: sem trocar candidatos os dois PCs nunca conectam
+          // (ontrack dispara com o SDP, mas mídia nenhuma flui).
+          sender.onicecandidate = (ev) => { if (ev.candidate) receiver.addIceCandidate(ev.candidate).catch(() => {}) }
+          receiver.onicecandidate = (ev) => { if (ev.candidate) sender.addIceCandidate(ev.candidate).catch(() => {}) }
+
+          // Espera a conexão de verdade antes de medir: sem isso o loop de
+          // 8s conta tempo de handshake como "zero frames".
+          const waitConnected = (pc) => new Promise((resolve) => {
+            if (pc.connectionState === 'connected') return resolve(null)
+            const check = () => { if (pc.connectionState === 'connected' || pc.connectionState === 'failed') { pc.removeEventListener('connectionstatechange', check); resolve(null) } }
+            pc.addEventListener('connectionstatechange', check)
+            setTimeout(resolve, 8000)
+          })
+          await waitConnected(sender)
+          await waitConnected(receiver)
 
           // Tuning REAL do encoder (bitrate/escala/degradação).
           probe.sendParamsApplied = await applySenderTuning(senderVideo, opts)
@@ -184,7 +211,11 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
             const ss = await sender.getStats()
             const merged = new Map()
             for (const [k, v] of rs) merged.set(k, v)
-            for (const [k, v] of ss) merged.set(k.toString() + '-s')
+            // O '-s' evita colisão de ID: sender e receiver compartilham o
+            // espaço de IDs de stats. O valor TEM que ir junto — sem ele a
+            // stats do sender inteira virava undefined e nada de outbound
+            // (codec/framesEncoded/bitrate) era medido.
+            for (const [k, v] of ss) merged.set(k.toString() + '-s', v)
             const capture = monitor.sample()
             const m = collector.read(merged, capture, null)
             samples.push(m)
@@ -193,6 +224,27 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           }
           // O vídeo remoto precisa ter avançado de verdade (frames decodificados).
           probe.remoteVideoTimeAdvanced = remoteVideo.currentTime > 0 && remoteVideo.currentTime !== lastTime - 1
+
+          // Amostra de pixels AO VIVO (depois de close()/stop() o elemento
+          // perde o frame e drawImage daria falso-negativo):
+          // 64x64 do frame decodificado não pode ser tudo preto.
+          probe.notBlack = (() => {
+            try {
+              if (!remoteVideo.videoWidth) return false
+              const c = document.createElement('canvas')
+              c.width = 64
+              c.height = 64
+              const ctx = c.getContext('2d')
+              if (!ctx) return false
+              ctx.drawImage(remoteVideo, 0, 0, 64, 64)
+              const d = ctx.getImageData(0, 0, 64, 64).data
+              let nonBlack = 0
+              for (let i = 0; i < d.length; i += 4) {
+                if (d[i] > 8 || d[i + 1] > 8 || d[i + 2] > 8) nonBlack++
+              }
+              return nonBlack > 64
+            } catch { return false }
+          })()
 
           const last = samples[samples.length - 1] ?? {}
           probe.capturedFps = last.capturedFps ?? null
@@ -217,6 +269,8 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           probe.degradedAfterPressure = lowerScreenQuality('1080p') === '720p'
 
           monitor.detach()
+          clearInterval(stimTimer)
+          stim.remove()
           sender.close()
           receiver.close()
           stream.getTracks().forEach(t => { try { t.stop() } catch {} })
@@ -265,24 +319,9 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
     expect(probe!.rttMs!).not.toBeNull()
     expect(probe!.rttMs!).toBeGreaterThanOrEqual(0)
 
-    // 5) nada de tela preta: o frame decodificado tem pixels
-    const notBlack = await page.evaluate(async () => {
-      const v = document.querySelector('video') as HTMLVideoElement | null
-      if (!v || !v.videoWidth) return false
-      const c = document.createElement('canvas')
-      c.width = 64
-      c.height = 64
-      const ctx = c.getContext('2d')
-      if (!ctx) return false
-      ctx.drawImage(v, 0, 0, 64, 64)
-      const d = ctx.getImageData(0, 0, 64, 64).data
-      let nonBlack = 0
-      for (let i = 0; i < d.length; i += 4) {
-        if (d[i] > 8 || d[i + 1] > 8 || d[i + 2] > 8) nonBlack++
-      }
-      return nonBlack > 64
-    })
-    expect(notBlack, 'o frame recebido não pode ser uma tela preta').toBe(true)
+    // 5) nada de tela preta: o frame decodificado tem pixels (amostrado ao
+    //    vivo pela sonda, antes de fechar os peers)
+    expect(probe!.notBlack, 'o frame recebido não pode ser uma tela preta').toBe(true)
 
     // 6) a degradação adaptativa desce um degrau (e o piso é 480p)
     expect(probe!.degradedAfterPressure).toBe(true)

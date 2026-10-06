@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { createServerViaWizard } from './helpers/server'
 
 // Regressão dos bugs achados auditando a camada social v3 contra o app real.
 // Cada teste abaixo falhava antes do fix e trava a correção.
@@ -12,18 +13,7 @@ async function createAccount(page: Page, name: string) {
 }
 
 async function createServer(page: Page, name: string): Promise<void> {
-  await page.getByTitle('Adicionar um servidor').click()
-  await page.getByText('Criar meu próprio', { exact: false }).click()
-  const wizard = page.getByRole('dialog', { name: 'Criar servidor' })
-  await expect(wizard).toBeVisible({ timeout: 10000 })
-  await wizard.getByPlaceholder('ex.: cantinho dos amigos').fill(name)
-  await wizard.getByRole('button', { name: 'Continuar' }).click()
-  await wizard.getByRole('button', { name: 'Continuar' }).click()
-  await wizard.getByRole('button', { name: 'Continuar' }).click()
-  await wizard.getByRole('button', { name: 'Criar servidor' }).click()
-  await expect(wizard.getByText('Servidor criado', { exact: false })).toBeVisible({ timeout: 15000 })
-  await wizard.getByRole('button', { name: 'Concluir' }).click()
-  await expect(wizard).toBeHidden({ timeout: 10000 })
+  await createServerViaWizard(page, name)
   await page.locator(`.rail-btn[title="${name}"]`).click()
   await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 })
 }

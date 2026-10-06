@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { createServerViaWizard } from './helpers/server';
 
 // Paridade Discord — camada social.
 //
@@ -18,21 +19,8 @@ async function createAccount(page: Page, name: string) {
 }
 
 async function createServer(page: Page, name: string): Promise<void> {
-  await page.getByTitle('Adicionar um servidor').click();
-  await page.getByText('Criar meu próprio', { exact: false }).click();
-  const wizard = page.getByRole('dialog', { name: 'Criar servidor' });
-  await expect(wizard).toBeVisible({ timeout: 10000 });
-  await wizard.getByPlaceholder('ex.: cantinho dos amigos').fill(name);
-  await wizard.getByRole('button', { name: 'Continuar' }).click();
-  await wizard.getByRole('button', { name: 'Continuar' }).click();
-  await wizard.getByRole('button', { name: 'Continuar' }).click();
-  await wizard.getByPlaceholder('ex.: sem flood, sem spam, respeite todo mundo').fill('regras');
-  await wizard.getByRole('button', { name: 'Criar servidor' }).click();
-  // O wizard fechou numa tela de sucesso com o link (não mais "Convidar").
-  await expect(wizard.getByText('Servidor criado', { exact: false })).toBeVisible({ timeout: 15000 });
-  await wizard.getByRole('button', { name: 'Concluir' }).click();
-  await expect(wizard).toBeHidden({ timeout: 10000 });
-  // "Concluir" fecha o wizard mas NÃO abre o servidor: é preciso clicar no
+  await createServerViaWizard(page, name);
+  // O helper fecha o wizard mas NÃO abre o servidor: é preciso clicar no
   // ícone da rail, senão a sidebar continua em "Amigos" e não há composer.
   await page.locator(`.rail-btn[title="${name}"]`).click();
   await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 });

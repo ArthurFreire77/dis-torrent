@@ -1002,6 +1002,7 @@ export default function CreateServerWizard({
         subtitle={subtitulo}
         width={WIDTHS.wizard}
         labelId="csw-title"
+        dialogLabel="Criar servidor"
         footer={footer}
       >
         {/* Indicador de passos: 4 segmentos. Clicar só volta para passo já

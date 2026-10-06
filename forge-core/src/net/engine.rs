@@ -704,6 +704,11 @@ pub struct NetworkEngine {
     /// Ofers/ICE retidos até o aceite (ver `net/voice_gate.rs`).
     #[cfg(target_os = "linux")]
     pub(super) held_calls: StdMutex<HashMap<String, HeldCall>>,
+    /// Canais de voz em que ESTE nó está agora: `voice-{community}-{channel}`
+    /// → (community_id, channel_id). É o registro que autoriza offers de
+    /// canal a virarem sessões nativas: quem NÃO está no canal nunca absorve.
+    #[cfg(target_os = "linux")]
+    pub(super) voice_channel_calls: StdMutex<HashMap<String, (String, String)>>,
 }
 
 enum EngineCmd {
@@ -944,6 +949,8 @@ impl NetworkEngine {
             voice_calls: StdMutex::new(HashMap::new()),
             #[cfg(target_os = "linux")]
             held_calls: StdMutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            voice_channel_calls: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -1021,6 +1028,8 @@ impl NetworkEngine {
             voice_calls: StdMutex::new(HashMap::new()),
             #[cfg(target_os = "linux")]
             held_calls: StdMutex::new(HashMap::new()),
+            #[cfg(target_os = "linux")]
+            voice_channel_calls: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -5125,6 +5134,32 @@ impl NetworkEngine {
             .remove(call_id);
     }
 
+    /// Offer de CANAL DE VOZ chegou de `peer_fp` e ainda não há sessão nativa
+    /// registrada. Registra se — e somente se — este nó está no canal
+    /// (`voice_channel_calls`, preenchido no `voice_join`) e o par é membro
+    /// da comunidade (o MESMO gate dos frames VoiceJoin/Leave/State).
+    /// `true` = registrado, o absorb do handle_frame conduz o offer/answer.
+    #[cfg(target_os = "linux")]
+    pub(super) fn auto_register_voice_channel(
+        self: &Arc<Self>,
+        call_id: &str,
+        peer_fp: &str,
+    ) -> bool {
+        let Some((community_id, _channel_id)) = self
+            .voice_channel_calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(call_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if self.store.member_role(&community_id, peer_fp).is_none() {
+            return false;
+        }
+        self.voice_register(call_id, peer_fp)
+    }
+
     /// Envia o SDP/candidatos que a mídia nativa produziu, pelos MESMOS
     /// `SecureFrame::Call*` que o navegador usa — nenhum frame novo no
     /// protocolo, nenhum branch no peer distante.
@@ -5492,7 +5527,7 @@ impl NetworkEngine {
     }
 
     // ---------- voz (canal) ----------
-    pub fn voice_join(&self, community_id: &str, channel_id: &str) -> Result<()> {
+    pub fn voice_join(self: &Arc<Self>, community_id: &str, channel_id: &str) -> Result<()> {
         self.store.set_voice_state(
             community_id,
             channel_id,
@@ -5500,6 +5535,18 @@ impl NetworkEngine {
             false,
             false,
         )?;
+        let call_id = format!("voice-{}-{}", community_id, channel_id);
+        // Registro ANTES do broadcast: se um offer de canal chegar junto com
+        // o VoiceJoin de outro par, o auto-register do handle_frame já nos
+        // considera "no canal".
+        #[cfg(target_os = "linux")]
+        self.voice_channel_calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                call_id.clone(),
+                (community_id.to_string(), channel_id.to_string()),
+            );
         // broadcast para membros da comunidade
         for (fp, _, _) in self.store.list_members(community_id)? {
             if fp == self.identity.fingerprint {
@@ -5522,12 +5569,54 @@ impl NetworkEngine {
             channel_id: channel_id.into(),
             fp: self.identity.fingerprint.clone(),
         });
+        // MESH NATIVO (Linux): o core conecta a mídia com quem já está no
+        // canal — o mesmo `voice_register` + `voice_begin_offer` das DMs,
+        // um por par presente. Sem WebRTC de página no WebKitGTK, este é o
+        // ÚNICO caminho de mídia para canais de voz no Linux.
+        #[cfg(target_os = "linux")]
+        if self.native_voice_available() {
+            for (fp, _, _) in self.store.list_voice_states(community_id, channel_id)? {
+                if fp == self.identity.fingerprint {
+                    continue;
+                }
+                if !self.voice_register(&call_id, &fp) {
+                    continue;
+                }
+                if let Ok(Some(sdp)) = self.voice_begin_offer(&call_id, &fp) {
+                    let _ = self.call_signal(
+                        &fp,
+                        SecureFrame::CallOffer {
+                            call_id: call_id.clone(),
+                            sdp,
+                        },
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
-    pub fn voice_leave(&self, community_id: &str, channel_id: &str) -> Result<()> {
+    pub fn voice_leave(self: &Arc<Self>, community_id: &str, channel_id: &str) -> Result<()> {
         self.store
             .leave_voice(community_id, channel_id, &self.identity.fingerprint)?;
+        let call_id = format!("voice-{}-{}", community_id, channel_id);
+        #[cfg(target_os = "linux")]
+        {
+            self.voice_channel_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&call_id);
+            // Derruba as sessões nativas DESTE canal (PCs, mic, tasks).
+            if self
+                .voice_calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&call_id)
+            {
+                self.voice_hangup(&call_id);
+                self.voice_forget_call(&call_id);
+            }
+        }
         for (fp, _, _) in self.store.list_members(community_id)? {
             if fp == self.identity.fingerprint {
                 continue;
@@ -9463,6 +9552,15 @@ async fn handle_frame(
             // byte a byte. É esta assimetria que preserva Windows/Android/macOS.
             #[cfg(target_os = "linux")]
             {
+                // CANAL DE VOZ: quem é membro da comunidade e oferta um canal
+                // em que ESTE nó está = sessão nativa legítima. Canais não têm
+                // invite/aceite (você entra), então o registro do RECEPTOR nasce
+                // aqui — o joiner registrou o lado dele no voice_join.
+                // `voice_channel_calls` garante que só absorve quem está no
+                // canal: oferta estranha nunca ganha sessão nativa.
+                if !engine.voice_is_native(&call_id, peer_fp) && engine.native_voice_available() {
+                    engine.auto_register_voice_channel(&call_id, peer_fp);
+                }
                 if !engine.voice_is_native(&call_id, peer_fp) && engine.native_voice_available() {
                     engine.hold_call_offer(&call_id, peer_fp, &sdp);
                     return Ok(());
@@ -9560,6 +9658,17 @@ async fn handle_frame(
             engine
                 .store
                 .leave_voice(&community_id, &channel_id, peer_fp)?;
+            #[cfg(target_os = "linux")]
+            {
+                // Sessão nativa DO CANAL deste par cai (as demais do mesh
+                // continuam) — sem isso o PC dele ficava aberto e o mic do
+                // core continuava enviando RTP para quem saiu.
+                let call_id = format!("voice-{}-{}", community_id, channel_id);
+                if engine.voice_is_native(&call_id, peer_fp) {
+                    engine.voice_hangup_peer(&call_id, peer_fp);
+                    engine.voice_forget_peer(&call_id, peer_fp);
+                }
+            }
             let _ = engine.events.send(EngineEvent::VoiceLeft {
                 community_id,
                 channel_id,

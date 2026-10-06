@@ -1,5 +1,43 @@
 # CHANGELOG
 
+## 1.1.0-pre-alpha.1 — Canais de voz com mídia real; suite e2e verde
+
+### Canais de voz (a maior lacuna funcional fecha)
+- **Mídia real entre participantes** — antes o `joinVoice` criava só estado
+  local: roster e mute/deafen funcionavam, mas NENHUMA mídia fluía e os
+  watchdogs matavam a "chamada" em ~50s com "reconexão falhou".
+- **Linux (nativo)**: o engine conecta sozinho — `voice_join` registra uma
+  sessão nativa e envia offer para cada par já presente no canal (o mesmo
+  `voice_register` + `voice_begin_offer` das DMs, um por par). No receptor, o
+  offer de canal ganha sessão nativa via `auto_register_voice_channel`, com o
+  MESMO gate de confiança dos frames `Voice*` (estar no canal + ser membro da
+  comunidade). `VoiceLeave` derruba só a sessão do par que saiu.
+- **Windows/Android/navegador (mesh JS)**: o `joinVoice` cria um
+  `RTCPeerConnection` por participante presente e oferta a todos; quem entra
+  depois oferta de novo — o anti-glare polite/impolite de sempre resolve.
+- Comandos Tauri `voice_join`/`voice_leave` agora async + `spawn_blocking`
+  (o mesh nativo negocia SDP e não pode congelar a main thread).
+
+### Correções de regressão (e2e: 29 falhas → 47/47 verdes)
+- **Download de arquivo no desktop voltou**: o card do chat só tinha "Abrir
+  downloads" e o `downloadManager.enqueue` não tinha NENHUM chamador fora do
+  mobile — não dava para baixar arquivo recebido no desktop. O card agora tem
+  botão "Baixar" com progresso ao vivo (lê o mesmo swarm do painel).
+- **Botão Downloads no cabeçalho da página Amigos**: o painel não depende de
+  conversa aberta.
+- **Wizard de servidor com nome acessível estável** (`dialogLabel` no Modal):
+  o título do dialog muda a cada passo e quebrou a cadeia de ~20 testes;
+  leitores de tela e testes precisam de um nome que não muda.
+- **Testes alinhados ao app real**: bots (modal "Criar bot", token mascarado
+  com confirmação destrutiva), calls (o modo relay-only foi removido do app
+  de propósito — testes agora travam o contrato 'none' honesto), wizard,
+  mobile-header (alcança a tela de conversa criando servidor).
+- **Sonda de screen share consertada**: nunca trocava candidatos ICE (mídia
+  não fluía), descartava os valores das stats do sender no merge e checava
+  pixels DEPOIS de fechar os peers. Agora: trickle ICE + espera de conexão +
+  estímulo animado + amostragem ao vivo — passa com métricas reais
+  (VP8, frames encodados/decodificados > 0, RTT medido, sem freeze).
+
 ## 1.0.0-pre-alpha.1 — Primeira alpha pública
 
 Republicação do projeto com histórico limpo e documentação revisada.
