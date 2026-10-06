@@ -27,7 +27,11 @@ sha2 = "0.10"
 tracing = "0.1"
 igd = "0.12"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], default-features = false }
-rumqttc = "0.25.1"
+# MQTT do relay: default-features = false DERRUBA a feature "use-rustls"
+# (rustls + rustls-webpki 0.102, vulnerável — GHSA do webpki) da árvore: o
+# relay fala TCP puro (nenhum Transport::tls() no código). Sem isso o
+# Dependabot conta alertas de um caminho inalcançável.
+rumqttc = { version = "0.25.1", default-features = false }
 mdns-sd = "0.21.1"
 mainline = "2"
 unicode-normalization = "0.1"
@@ -73,8 +77,8 @@ aec-rs = "1.0.0"
 # GStreamer ja e' dependencia do sistema no Linux (gst-plugins-good/base) e
 # traz vp8/h264/x264 prontos. `gstreamer-app` da o appsrc/appsink, que e' o
 # que liga o pipeline ao RTP do webrtc-rs.
-gstreamer = "0.22"
-gstreamer-app = "0.22"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
 # Captura de tela. Wayland SEM xdg-desktop-portal nao funciona (e' limitacao do
 # compositor, nao nossa) — o watchdog de 15s reporta isso em vez de fingir que
 # esta enviando.

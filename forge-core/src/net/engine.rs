@@ -19,12 +19,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "linux")]
+use super::voice_gate::HeldCall;
 use crate::identity::{Identity, Keypair};
 use crate::net::discovery::{DiscoveredPeer, Discovery};
 #[cfg(target_os = "linux")]
 use crate::net::media_voice::{OutboundSignal, VoiceMedia, VoiceStats};
-#[cfg(target_os = "linux")]
-use super::voice_gate::HeldCall;
 use crate::net::relay::{
     relay_post_loop, relay_topic, MultiRelay, PeerRelayBackend, Reassembler, RelayBackend,
     RelayStream,
@@ -5074,10 +5074,7 @@ impl NetworkEngine {
     /// Clone barato (Arc) da mídia nativa viva, ou `None`.
     #[cfg(target_os = "linux")]
     pub(super) fn voice_media(&self) -> Option<Arc<VoiceMedia>> {
-        self.voice
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.voice.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// A camada nativa PODE assumir chamadas agora?
@@ -5236,7 +5233,12 @@ impl NetworkEngine {
     /// `RTCPeerConnection`). `false` = o offer não é nosso: o arm emite o
     /// `EngineEvent` de sempre.
     #[cfg(target_os = "linux")]
-    pub(super) async fn voice_absorb_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> Result<bool> {
+    pub(super) async fn voice_absorb_offer(
+        &self,
+        call_id: &str,
+        peer_fp: &str,
+        sdp: &str,
+    ) -> Result<bool> {
         if !self.voice_is_native(call_id, peer_fp) {
             return Ok(false);
         }
@@ -5289,7 +5291,13 @@ impl NetworkEngine {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) async fn voice_absorb_ice(&self, call_id: &str, peer_fp: &str, cand: &str, mid: &str) -> bool {
+    pub(super) async fn voice_absorb_ice(
+        &self,
+        call_id: &str,
+        peer_fp: &str,
+        cand: &str,
+        mid: &str,
+    ) -> bool {
         if !self.voice_is_native(call_id, peer_fp) {
             return false;
         }

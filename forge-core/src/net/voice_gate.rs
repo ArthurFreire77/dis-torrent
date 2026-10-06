@@ -55,14 +55,12 @@ impl NetworkEngine {
                 map.remove(&oldest);
             }
         }
-        let h = map
-            .entry(call_id.to_string())
-            .or_insert_with(|| HeldCall {
-                peer_fp: peer_fp.to_string(),
-                sdp: String::new(),
-                ice: Vec::new(),
-                held_at: now_ms(),
-            });
+        let h = map.entry(call_id.to_string()).or_insert_with(|| HeldCall {
+            peer_fp: peer_fp.to_string(),
+            sdp: String::new(),
+            ice: Vec::new(),
+            held_at: now_ms(),
+        });
         h.peer_fp = peer_fp.to_string();
         h.sdp = sdp.to_string();
         h.held_at = now_ms();

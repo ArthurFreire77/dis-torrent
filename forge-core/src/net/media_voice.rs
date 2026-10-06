@@ -1141,9 +1141,7 @@ impl H {
             }
             let pc = sh.pc.lock().unwrap().clone();
             let Some(pc) = pc else { return };
-            let opts = rtc::peer_connection::configuration::RTCOfferOptions {
-                ice_restart: true,
-            };
+            let opts = rtc::peer_connection::configuration::RTCOfferOptions { ice_restart: true };
             match pc.create_offer(Some(opts)).await {
                 Ok(offer) => {
                     if let Err(e) = pc.set_local_description(offer).await {
@@ -1157,7 +1155,10 @@ impl H {
                             return;
                         }
                     };
-                    sh.out.lock().unwrap().push_back(OutboundSignal::Offer { sdp });
+                    sh.out
+                        .lock()
+                        .unwrap()
+                        .push_back(OutboundSignal::Offer { sdp });
                     sh.set_state("connecting");
                     eprintln!("[voice] ICE restart: nova offer na fila (rede trocou?)");
                 }
