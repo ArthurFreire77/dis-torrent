@@ -2007,9 +2007,26 @@ fn new_encoder() -> Result<opus::Encoder, String> {
 
 fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-        if !wait_connected(&sess.sh, Duration::from_secs(30)).await {
-            eprintln!("[voice] envio nao iniciou: nunca conectou");
-            return;
+        // Espera conectar SEM TETO: este loop e' a UNICA fonte de audio do mic.
+        // Antes havia `wait_connected(30s)` que DESISTIA em silencio — com TURN
+        // lento/CGNAT (ou ICE restart que recupera a rota depois) a chamada
+        // conectava TARDE e este lado virava "so' recebe" ate' o fim, sem
+        // erro nenhum. Quem decide que "nunca conectou" e' a UI (watchdogs do
+        // callManager); aqui a missao e' viver enquanto a sessao viver.
+        let mut silent_ticks: u32 = 0;
+        loop {
+            if sess.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            if sess.sh.connected_flag.load(Ordering::SeqCst) {
+                break;
+            }
+            silent_ticks = silent_ticks.saturating_add(1);
+            if silent_ticks == 150 {
+                // ~30s sem rota: um log honesto (NAO desiste).
+                eprintln!("[voice] envio aguardando ICE conectar (>30s; TURN/CGNAT demoram)");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         // pt/ssrc so' sao negociados depois do answer.
@@ -2422,9 +2439,22 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         return;
     };
     let is_screen = want_source == "screen";
-    if !wait_connected(&sh, Duration::from_secs(30)).await {
-        video_fail(&sh, "vídeo não iniciou: a chamada não conectou".into());
-        return;
+    // Sem teto: o video so' pode comecar depois da rota; se a rota demora
+    // (TURN/CGNAT) ou cai e volta, o envio segue vivo — o watchdog de envio
+    // (15s sem pacote) cuida do caso "conectou e morreu".
+    let mut vticks: u32 = 0;
+    loop {
+        if sess.closed.load(Ordering::SeqCst) || sh.video_state.lock().unwrap().as_str() != "starting" {
+            return;
+        }
+        if sh.connected_flag.load(Ordering::SeqCst) {
+            break;
+        }
+        vticks = vticks.saturating_add(1);
+        if vticks == 150 {
+            tracing::debug!("[video] aguardando ICE conectar (>30s)");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     // Re-avalia: o usuario pode ter desligado a camera enquanto o ICE subia.
     if sh.video_state.lock().unwrap().as_str() != "starting" {

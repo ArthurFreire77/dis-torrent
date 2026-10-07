@@ -1,5 +1,68 @@
 # CHANGELOG
 
+## [não lançado] — Ciclo de chamada consertado + vídeo nativo ligado na UI
+
+### O bug "só consegue chamar uma vez" (causa-raiz, 3 partes)
+- **`callEnd` era no-op no driver navegador** (browser.ts): as outras abas
+  nunca ficavam sabendo que a chamada acabou — o overlay do outro lado ficava
+  preso em "Conectado" para sempre e bloqueava qualquer ligação seguinte com
+  "já existe uma chamada em andamento". Agora `callAccept`/`callReject`/
+  `callEnd` emitem os MESMOS eventos que o engine nativo emite
+  (`call_accepted`/`call_rejected`/`call_ended`).
+- **A offer negociava antes do aceite**: quem ligava enviava a offer ~2s
+  depois do invite, e o `handleOffer` do recebedor criava PC e respondia
+  IMEDIATAMENTE — a mídia conectava (e o áudio de quem ligava chegava) com o
+  telefone ainda tocando. O lado nativo já retém (voice_gate.rs); o espelho
+  do navegador agora também: `acceptedCalls` registra o aceite e a offer
+  fica retida até o clique em "Aceitar". O `promoteOnSignal` deixou de
+  promover o ring (`incoming`) para `connecting`.
+- **Self-echo da sinalização no modo navegador**: o BroadcastChannel devolve
+  TUDO para a própria aba que emitiu — a offer ecoada promovia a fase de quem
+  ligava (badge mentia "Conectando…" no lugar de "Chamando…") e o
+  `call_incoming` ecoado tocava o telefone de QUEM LIGOU (overlay de ring
+  sobreposto interceptando os cliques). Sinalização própria e self-ring agora
+  são filtrados (no callManager e nos dois shells).
+- **e2e novo** (`call-rejoin.spec.ts`): chamar → conectar → sair → chamar de
+  novo, nas duas direções — o ciclo que quebrava, agora travado por teste.
+
+### Vídeo nativo (Linux) — a ponte que faltava
+- O core JÁ codificava câmera (v4l2) e tela (xcap) via GStreamer na mesma
+  PeerConnection webrtc-rs da voz — mas NADA disso era exposto à UI: os
+  botões chamavam getUserMedia/getDisplayMedia (inexistentes no WebKitGTK)
+  e a capacidade inteira ficava morta. Novos comandos Tauri
+  `voice_video_start`/`voice_video_stop`/`voice_video_frame` + services JS +
+  caminho nativo no `callManager` (câmera/tela por par, estados honestos do
+  core em `voice_media_stats`).
+- **Vídeo RECEBIDO no Linux**: o decoder GStreamer já produz o frame mais
+  recente em JPEG; agora a UI faz polling (`voice_video_frame` com
+  `since_seq` para não reenviar) e desenha o tile do participante com
+  `<img>` (desktop + mobile).
+
+### Áudio nativo (Linux): o envio não morre mais aos 30s
+- `spawn_send_loop` tinha `wait_connected(30s)` que DESISTIA em silêncio:
+  com TURN lento/CGNAT (ou ICE restart que recupera a rota depois) a rota
+  fechava após os 30s e este lado virava "só recebe" até o fim da chamada,
+  sem erro nenhum. Agora o loop espera enquanto a sessão viver (log honesto
+  aos 30s; quem decide "nunca conectou" são os watchdogs da UI). O mesmo
+  teto saiu do envio de vídeo nativo.
+
+### Permissões de mídia do WebView (tela no Windows)
+- `on_permission_request` global no Tauri: sem handler, o WebView2 NEGA o
+  pedido de captura de tela do `getDisplayMedia` por padrão (o picker nem
+  abre) e o WebKitGTK nega tudo (Default = Deny). Agora mic/câmera/tela são
+  Allow — o `getDisplayMedia` do Windows abre o seletor nativo de
+  tela/janela/app (o caminho JS de tela que já existia passa a funcionar).
+
+### Câmera que não abre em celular
+- `frameRate.min` era 24: câmera frontal fraca de Android não entrega 24fps
+  e o getUserMedia falhava com OverconstrainedError (câmera que NEM ABRIA).
+  Piso agora é 15 (ideal continua 60).
+
+### Paridade Discord
+- Popup do próprio perfil ganha **"Editar perfil"** → editor completo
+  (avatar/banner/About me/status/accent) — antes só era alcançável clicando
+  no avatar de uma mensagem sua.
+
 ## 1.1.0-pre-alpha.1 — Canais de voz com mídia real; suite e2e verde
 
 ### Canais de voz (a maior lacuna funcional fecha)

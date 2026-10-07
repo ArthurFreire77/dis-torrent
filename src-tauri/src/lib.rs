@@ -2579,6 +2579,76 @@ fn voice_set_deafened(call_id: String, deafened: bool, state: State<AppState>) -
     Ok(())
 }
 
+// ---------------- vídeo nativo (câmera/tela) — Linux ----------------
+//
+// O caminho NATIVO de vídeo (encoder/decoder GStreamer em
+// `forge-core/src/net/media_video.rs`) já existe no core; o que faltava era
+// a PONTE até a UI. Sem estes comandos, os botões de câmera/tela no Linux
+// chamavam getUserMedia/getDisplayMedia (que o WebKitGTK não expõe para
+// RTCPeerConnection) e a capacidade inteira ficava morta.
+
+/// Liga o envio de vídeo nativo ("camera"|"screen") para um par da chamada.
+/// Devolve "starting" — o estado sobe em `voice_media_stats` (video_state).
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_video_start(
+    call_id: String,
+    peer_fp: String,
+    source: String,
+    monitor_id: Option<u32>,
+    state: State<AppState>,
+) -> Result<String, String> {
+    let e = engine(&state)?;
+    let Some(v) = e.voice() else {
+        return Err("mídia nativa indisponível (voz nativa desligada?)".into());
+    };
+    v.video_start(&call_id, &peer_fp, &source, monitor_id)
+}
+
+/// Desliga o envio de vídeo nativo para um par (o recebimento continua).
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_video_stop(call_id: String, peer_fp: String, state: State<AppState>) -> Result<(), String> {
+    let e = engine(&state)?;
+    if let Some(v) = e.voice() {
+        v.video_stop(&call_id, &peer_fp);
+    }
+    Ok(())
+}
+
+/// Último frame JPEG do vídeo REMOTO decodificado pelo core (polling da UI).
+/// `since_seq` evita re-enviar o mesmo frame (a UI guarda o último seq).
+/// `null` = ainda não há frame/decode desta sessão.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_video_frame(
+    call_id: String,
+    peer_fp: String,
+    since_seq: Option<u64>,
+    state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    let e = engine(&state)?;
+    let Some(v) = e.voice() else {
+        return Ok(serde_json::Value::Null);
+    };
+    match v.video_frame(&call_id, &peer_fp) {
+        Some(f) => {
+            if let Some(since) = since_seq {
+                if f.seq <= since {
+                    // Mesmo frame de antes: só meta, sem o JPEG pesado de novo.
+                    return Ok(serde_json::json!({ "seq": f.seq, "w": f.w, "h": f.h }));
+                }
+            }
+            let b64 = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(&f.jpeg)
+            };
+            Ok(serde_json::json!({ "jpeg": b64, "w": f.w, "h": f.h, "seq": f.seq }))
+        }
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
 // Fora do Linux a camada nativa NÃO EXISTE (webrtc-rs/cpal/libopus nem entram
 // no build — ver forge-core/Cargo.toml). Estes stubs respondem exatamente o que
 // o Linux responderia com a camada desligada, então a UI não tem nenhum caminho
@@ -2611,6 +2681,38 @@ fn voice_hangup(_call_id: String, _state: State<AppState>) -> Result<(), String>
 #[tauri::command]
 fn voice_set_deafened(_call_id: String, _deafened: bool, _state: State<AppState>) -> Result<(), String> {
     Ok(())
+}
+
+// Vídeo nativo: fora do Linux a página TEM RTCPeerConnection e o caminho é o
+// getUserMedia/getDisplayMedia do WebView — os stubs respondem o que o Linux
+// responderia com a camada desligada, sem ensinar caminho novo à UI.
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_video_start(
+    _call_id: String,
+    _peer_fp: String,
+    _source: String,
+    _monitor_id: Option<u32>,
+    _state: State<AppState>,
+) -> Result<String, String> {
+    Err("vídeo nativo indisponível nesta plataforma".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_video_stop(_call_id: String, _peer_fp: String, _state: State<AppState>) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_video_frame(
+    _call_id: String,
+    _peer_fp: String,
+    _since_seq: Option<u64>,
+    _state: State<AppState>,
+) -> Result<serde_json::Value, String> {
+    Ok(serde_json::Value::Null)
 }
 
 /// Indicador "digitando…" — o frame Typing existia no protocolo e o engine
@@ -3068,8 +3170,15 @@ fn unique_download_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
 }
 
 #[tauri::command]
-fn get_app_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+fn get_app_version(app: tauri::AppHandle) -> String {
+    // A versão do APP é a do tauri.conf.json (mesma do package.json, e a
+    // mesma que nomeia os instaladores). CARGO_PKG_VERSION é a do CRATE Rust
+    // (2.2.0 — histórico FORGE), não do produto: a tela Sobre mostrava
+    // "versão 2.2.0" num app 1.1.0-pre-alpha.1.
+    app.config()
+        .version
+        .clone()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
 // ---------------- cofre portátil .stormvault (conta inteira, sem servidor) ----------------
@@ -3561,6 +3670,29 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(downloads_plugin())
+        // PERMISSÕES DE MÍDIA DO WEBVIEW — a correção do "não consegue enviar
+        // tela/câmera/mic" no Windows (WebView2) e o pré-requisito do
+        // getDisplayMedia no WebKitGTK.
+        //
+        // Windows/WebView2: sem um handler em `PermissionRequested`, o WebView2
+        // nega por padrão o pedido de captura de tela do `getDisplayMedia` — o
+        // picker nativo NEM abre (o clique no botão morria em NotAllowedError
+        // silencioso). Com `Allow`, o WebView2 mostra o seletor de
+        // tela/janela/app do Windows e a captura vira uma MediaStreamTrack
+        // normal para o WebRTC da página. IMPORTANTE: o wry (0.57) não mapeia o
+        // `COREWEBVIEW2_PERMISSION_KIND_SCREEN_CAPTURE` — ele chega aqui como
+        // `Other`, por isso Other também é Allow. O conteúdo do webview é
+        // EXCLUSIVAMENTE o frontend próprio (protocolo custom), nunca web
+        // arbitrária, então permitir os kinds restantes não abre superfície.
+        //
+        // Linux/WebKitGTK: sem handler o `permission-request` fica sem
+        // `request.allow()` → negado (o Default do WebKitGTK é DENY, ver doc do
+        // wry `PermissionResponse::Default`). Com Allow, `getDisplayMedia`
+        // pede DisplayCapture de verdade.
+        //
+        // Android: o handler do wry cobre mic/câmera (RESOURCE_AUDIO/VIDEO_
+        // CAPTURE) e o fluxo de permissão de runtime do Android segue normal.
+        .on_permission_request(|_webview, _kind| tauri::webview::PermissionResponse::Allow)
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             identity_get,
@@ -3642,6 +3774,9 @@ fn main() {
             voice_set_muted,
             voice_hangup,
             voice_set_deafened,
+            voice_video_start,
+            voice_video_stop,
+            voice_video_frame,
             send_typing,
             screen_share_offer,
             screen_share_answer,

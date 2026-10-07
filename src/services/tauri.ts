@@ -312,6 +312,15 @@ export const tauriServices: ForgeServices = {
   voiceSetMuted: (callId, muted) => invoke<void>('voice_set_muted', { callId, muted }),
   voiceSetDeafened: (callId, deafened) => invoke<void>('voice_set_deafened', { callId, deafened }),
   voiceHangup: (callId) => invoke<void>('voice_hangup', { callId }),
+  // Vídeo nativo (Linux): o core codifica câmera/tela (GStreamer) na MESMA
+  // PeerConnection webrtc-rs da voz e decodifica o vídeo remoto em JPEG
+  // para a UI — o WebKitGTK não expõe RTCPeerConnection, então é este o
+  // único caminho de vídeo no desktop Linux.
+  voiceVideoStart: (callId, peerFp, source, monitorId) =>
+    invoke<string>('voice_video_start', { callId, peerFp, source, monitorId: monitorId ?? null }),
+  voiceVideoStop: (callId, peerFp) => invoke<void>('voice_video_stop', { callId, peerFp }),
+  voiceVideoFrame: (callId, peerFp, sinceSeq) =>
+    invoke<import('./models').NativeVideoFrame | null>('voice_video_frame', { callId, peerFp, sinceSeq: sinceSeq ?? null }),
   // ================= CAMADA SOCIAL v3 =================
   react: (convId, msgId, emoji) => invoke<boolean>('social_react', { convId, msgId, emoji }),
   reactions: (msgId) => invoke<ReactionSummary[]>('social_reactions', { msgId }),

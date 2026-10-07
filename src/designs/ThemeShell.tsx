@@ -925,10 +925,14 @@ export default function ThemeShell({ designId }: {designId:string}){
       refreshCommunities()
     }
     if (ev.type === 'call_incoming') {
+      const fp = ev.from_fp
+      // SELF-RING (modo navegador): o eco do próprio invite não pode tocar o
+      // telefone de quem ligou — o ring sobreposto interceptava os botões da
+      // chamada ativa (ver filtro irmão no callManager bind).
+      if (fp && identity?.fingerprint && fp === identity.fingerprint) return
       // NOME, nunca fingerprint: o ring precisa ser reconhecível ("Ana está
       // ligando"), senão o usuário não sabe quem é. Ordem: peer conhecido →
       // amigo aceito → DM/conversa → nick do envelope do frame (v6+) → fp.
-      const fp = ev.from_fp
       const known = peers.find((p) => p.fp === fp)?.nickname
         || friendsAccepted.find((f) => f.fp === fp)?.nickname
         || peerNickCacheRef.current[fp]
@@ -2925,6 +2929,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                       <audio autoPlay playsInline hidden muted={!!activeCall.deafened} ref={(el:any)=>attachStream(el, p.stream)} />
                     )}
                   </>
+                ) : (p as any).videoUrl ? (
+                  /* VÍDEO NATIVO (Linux): o core decodifica o RTP em Rust e a UI
+                     faz polling do último frame JPEG — não existe MediaStream do
+                     WebView aqui, então o tile é um <img> honesto. */
+                  <img src={(p as any).videoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
                 ) : (
                   /* Avatar maior + subtitulo que era o MESMO nome repetido
                      (duas expressões identicas) — agora diz o que a pessoa é. */
@@ -2938,7 +2947,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <span style={{ position: 'absolute', top: 8, right: 8, background: '#faa61a', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>RECONECTANDO…</span>
                 )}
                 {/* badge tela compartilhada: local COMPARTILHANDO, remoto com vídeo ASSISTINDO */}
-                {(() => { try { const s = (p as any)?.stream as MediaStream | undefined; const hasV = !!s && typeof (s as any).getVideoTracks === 'function' && (s as any).getVideoTracks().length > 0; if (hasV && p.fp!==identity?.fingerprint) return <span style={{ position: 'absolute', top: 8, left: 8, background: '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>TELA/CÂMERA</span>; return null } catch { return null } })()}
+                {(() => { try { const s = (p as any)?.stream as MediaStream | undefined; const hasV = (!!s && typeof (s as any).getVideoTracks === 'function' && (s as any).getVideoTracks().length > 0) || !!(p as any).videoUrl; if (hasV && p.fp!==identity?.fingerprint) return <span style={{ position: 'absolute', top: 8, left: 8, background: '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>TELA/CÂMERA</span>; return null } catch { return null } })()}
                 {activeCall.sharing && p.fp===identity?.fingerprint && <span style={{ position: 'absolute', top: 8, left: 8, background: t.green, color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>COMPARTILHANDO</span>}
                 <div style={{ position: 'absolute', bottom: 8, left: 8, right: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 12, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.nickname || p.fp.slice(0,8)} {p.muted ? <Icon d={Icons.micOff} size={12} /> : <Icon d={Icons.mic} size={12} />}</span>
@@ -3126,6 +3135,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                   }} style={{ flex: 1, background: inputBg, color: text, border: `1px solid ${borderColor}`, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Importar identidade</button>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
+                  {/* IGUAL DISCORD: o popup do próprio perfil leva ao editor
+                      COMPLETO (avatar/banner/about/status) — antes o editor só
+                      era alcançável clicando no avatar de uma mensagem sua. */}
+                  <button onClick={() => { setShowProfile(false); setProfileFp(identity?.fingerprint ?? '') }} style={{ flex: 1, background: t.accent, color: '#fff', border: 'none', padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Editar perfil</button>
                   <button onClick={() => { setShowProfile(false); setShowSettings(true) }} style={{ flex: 1, background: inputBg, color: text, border: `1px solid ${borderColor}`, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Configurações</button>
                   <button onClick={() => { setPhase('lock'); setIdentity(null as any); setSelConv(null); setSelPeerFp(null); setShowProfile(false) }} style={{ flex: 1, background: '#f23f4322', color: '#f23f43', border: `1px solid #f23f4355`, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>
                     Sair da conta

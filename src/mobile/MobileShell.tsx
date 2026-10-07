@@ -842,8 +842,11 @@ export default function MobileShell() {
     if (ev.type === 'community_removed') { refreshCommunities(); refreshConvos(); if (selCommunity === ev.community_id) { setSelCommunity(null); setSelConv(null); setSelPeerFp(null) } }
     if (ev.type === 'group_synced') { refreshConvos(); refreshCommunities() }
     if (ev.type === 'call_incoming') {
-      // Nome, nunca fingerprint: "Ana está ligando" é reconhecível, um fp não.
       const fp = ev.from_fp
+      // SELF-RING (modo navegador): eco do próprio invite não toca o telefone
+      // de quem ligou (ver filtro irmão no callManager bind).
+      if (fp && identity?.fingerprint && fp === identity.fingerprint) return
+      // Nome, nunca fingerprint: "Ana está ligando" é reconhecível, um fp não.
       const known = peers.find((p) => p.fp === fp)?.nickname
         || peerNickCacheRef.current[fp]
         || (ev as unknown as { nickname?: string }).nickname
@@ -1835,15 +1838,18 @@ export default function MobileShell() {
               )}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} disabled={!supportsScreenShare() && !(activeCall as any)?.sharing} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: supportsScreenShare() || (activeCall as any)?.sharing ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>
-            {/* Receptor view-only: tela compartilhada chega como track de vídeo — exibe igual desktop */}
+            {/* Receptor view-only: tela compartilhada chega como track de vídeo — exibe igual desktop.
+                VÍDEO NATIVO (Linux): o core decodifica em Rust; a UI desenha o frame JPEG por <img>. */}
             {(() => {
-              const withVideo = ((activeCall.participants ?? []) as any[]).filter((pp: any) => { try { return !!(pp.stream as MediaStream)?.getVideoTracks?.()?.length } catch { return false } })
+              const withVideo = ((activeCall.participants ?? []) as any[]).filter((pp: any) => { try { return !!(pp.stream as MediaStream)?.getVideoTracks?.()?.length || !!(pp as any).videoUrl } catch { return false } })
               if (withVideo.length === 0) return null
               return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {withVideo.map((pp: any) => (
                     <div key={pp.fp} style={{ position: 'relative', background: '#000', borderRadius: 10, overflow: 'hidden', minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <video autoPlay playsInline muted={pp.fp===identity?.fingerprint} ref={(el: any) => attachStream(el, pp.stream)} style={{ width: '100%', maxHeight: 320, objectFit: 'contain', background: '#000' }} />
+                      {(pp as any).videoUrl && !pp.stream
+                        ? <img src={(pp as any).videoUrl} alt="" style={{ width: '100%', maxHeight: 320, objectFit: 'contain', background: '#000' }} />
+                        : <video autoPlay playsInline muted={pp.fp===identity?.fingerprint} ref={(el: any) => attachStream(el, pp.stream)} style={{ width: '100%', maxHeight: 320, objectFit: 'contain', background: '#000' }} />}
                       <span style={{ position: 'absolute', top: 8, left: 8, background: (activeCall as any)?.sharing && pp.fp===identity?.fingerprint ? t.green : '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>
                         {(activeCall as any)?.sharing && pp.fp===identity?.fingerprint ? 'COMPARTILHANDO' : 'TELA/CÂMERA'}
                       </span>

@@ -649,6 +649,11 @@ export interface ForgeServices {
   voiceSetMuted(callId: string, muted: boolean): Promise<void>
   voiceSetDeafened(callId: string, deafened: boolean): Promise<void>
   voiceHangup(callId: string): Promise<void>
+  // Vídeo NATIVO (Linux): liga/desliga o envio de câmera/tela pelo core
+  // (GStreamer + webrtc-rs) e faz polling do frame remoto decodificado.
+  voiceVideoStart(callId: string, peerFp: string, source: 'camera' | 'screen', monitorId?: number | null): Promise<string>
+  voiceVideoStop(callId: string, peerFp: string): Promise<void>
+  voiceVideoFrame(callId: string, peerFp: string, sinceSeq?: number | null): Promise<NativeVideoFrame | null>
 
   // ================= CAMADA SOCIAL v3 (paridade Discord) =================
   react(convId: string, msgId: string, emoji: string): Promise<boolean>
@@ -825,6 +830,28 @@ export interface VoiceMediaStats {
   plc_frames: number
   decode_errors: number
   rtt_ms: number | null
+  /** Último erro de abertura do microfone (cpal) — Some com packets_out 0
+   *  = este lado não envia áudio. */
+  mic_error?: string | null
+  /** Vídeo nativo: "off" | "starting" | "live" | "failed". */
+  video_state?: string | null
+  video_codec?: string | null
+  video_source?: string | null
+  video_error?: string | null
+  frames_in?: number | null
+  frames_out?: number | null
+}
+
+/**
+ * Frame de vídeo REMOTO decodificado pela camada nativa (Linux). `jpeg` é
+ * base64 (payload de imagem); resposta "meta-only" (sem jpeg) quando a UI
+ * pede com since_seq e o frame não mudou.
+ */
+export interface NativeVideoFrame {
+  jpeg?: string
+  w: number
+  h: number
+  seq: number
 }
 
 export interface NameCheckView {

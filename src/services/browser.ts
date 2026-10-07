@@ -37,6 +37,10 @@ import type {
 import { validateNameLocal, randomNameLocal } from '../core/security/names'
 import { createIdentity, type UserIdentity } from '../core/identity/identity'
 import { LocalDriver } from '../core/storage/localDriver'
+// Versão real do package.json — o modo navegador antes hardcodava '0.2.0-web'
+// e a tela Sobre mentia sobre a build. Rollup tree-shakeia o JSON: só `version`
+// entra no bundle.
+import { version as APP_VERSION } from '../../package.json'
 import { SessionDriver } from '../core/storage/sessionDriver'
 import { IdentityStore } from '../core/storage/identityStore'
 import * as LX from './localExtras'
@@ -470,7 +474,7 @@ function blankMeta(msgId: string, convId: string): MsgMetaView {
 export const browserServices: ForgeServices = {
   kind: 'browser',
 
-  version: async () => '0.2.0-web',
+  version: async () => `${APP_VERSION}-web`,
 
   identityGet: () => Promise.resolve(store.load()),
 
@@ -1083,9 +1087,24 @@ export const browserServices: ForgeServices = {
     } catch { /* silent */ }
     return Promise.resolve(callId)
   },
-  callAccept: () => Promise.resolve(),
-  callReject: () => Promise.resolve(),
-  callEnd: () => Promise.resolve(),
+  // Aceite/recusa/fim ERAM no-ops: as outras abas nunca ficavam sabendo que
+  // a chamada acabou, e o overlay do outro lado ficava preso em "Conectado"
+  // para sempre — bloqueando qualquer ligação seguinte ("já existe uma
+  // chamada em andamento"). Agora os mesmos eventos que o engine nativo
+  // emite (ver tauri.ts: call_accepted/call_rejected/call_ended) viajam
+  // pelo BroadcastChannel da demo multi-aba.
+  callAccept: (callId, _fromFp) => {
+    try { emit({ type: 'call_accepted', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
+    return Promise.resolve()
+  },
+  callReject: (callId, _fromFp, reason) => {
+    try { emit({ type: 'call_rejected', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', reason } as any) } catch { /* silent */ }
+    return Promise.resolve()
+  },
+  callEnd: (callId) => {
+    try { emit({ type: 'call_ended', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
+    return Promise.resolve()
+  },
   callOffer: (targetFp, callId, sdp) => {
     try {
       emit({ type: 'call_offer', from_fp: store.load()?.fingerprint ?? 'local', call_id: callId, sdp } as any)
@@ -1357,6 +1376,12 @@ export const browserServices: ForgeServices = {
   voiceSetMuted: () => Promise.resolve(),
   voiceSetDeafened: () => Promise.resolve(),
   voiceHangup: () => Promise.resolve(),
+  // Vídeo nativo idem: no browser a página tem RTCPeerConnection e o
+  // getUserMedia/getDisplayMedia fazem o papel. Os stubs devolvem o mesmo
+  // que o nativo devolveria sem a camada (erro honesto / null).
+  voiceVideoStart: () => Promise.reject(new Error('vídeo nativo indisponível no navegador')),
+  voiceVideoStop: () => Promise.resolve(),
+  voiceVideoFrame: () => Promise.resolve(null),
 
   // ================= CAMADA SOCIAL v3 =================
   react: async (convId, msgId, emoji) => {

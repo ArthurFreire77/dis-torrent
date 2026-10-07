@@ -50,13 +50,14 @@ export const TURN_URL_KEY = 'forge:turn_url'
 export const QUALITY_ORDER: CallQuality[] = ['480p', '720p', '1080p', '4K']
 
 export const QUALITY_CONSTRAINTS: Record<CallQuality, MediaTrackConstraints> = {
-  // Piso 480p em todas: nunca abaixo de 640x480. Teto de FPS 120 — o browser
-  // negocia o que o dispositivo/câmera/rede suportam (ideal alto, max 120);
-  // estabilidade vem do monitor adaptativo (pollStats rebaixa se houver perda).
-  '480p': { width: { min: 640, ideal: 640, max: 1280 }, height: { min: 480, ideal: 480, max: 720 }, frameRate: { min: 24, ideal: 60, max: 120 } },
-  '720p': { width: { min: 640, ideal: 1280, max: 1920 }, height: { min: 480, ideal: 720, max: 1080 }, frameRate: { min: 24, ideal: 60, max: 120 } },
-  '1080p': { width: { min: 640, ideal: 1920, max: 1920 }, height: { min: 480, ideal: 1080, max: 1080 }, frameRate: { min: 24, ideal: 60, max: 120 } },
-  '4K': { width: { min: 640, ideal: 3840, max: 3840 }, height: { min: 480, ideal: 2160, max: 2160 }, frameRate: { min: 24, ideal: 60, max: 120 } },
+  // Piso 480p em todas: nunca abaixo de 640x480. FPS mínimo 15 (era 24): o
+  // `min` de 24 dava OverconstrainedError em câmera frontal fraca de celular
+  // — a câmera NEM ABRIA. 15 é o piso de videochamada; o ideal segue pedindo
+  // 60 e o monitor adaptativo rebaixa se a rede reclamar.
+  '480p': { width: { min: 640, ideal: 640, max: 1280 }, height: { min: 480, ideal: 480, max: 720 }, frameRate: { min: 15, ideal: 60, max: 120 } },
+  '720p': { width: { min: 640, ideal: 1280, max: 1920 }, height: { min: 480, ideal: 720, max: 1080 }, frameRate: { min: 15, ideal: 60, max: 120 } },
+  '1080p': { width: { min: 640, ideal: 1920, max: 1920 }, height: { min: 480, ideal: 1080, max: 1080 }, frameRate: { min: 15, ideal: 60, max: 120 } },
+  '4K': { width: { min: 640, ideal: 3840, max: 3840 }, height: { min: 480, ideal: 2160, max: 2160 }, frameRate: { min: 15, ideal: 60, max: 120 } },
 }
 
 /**
@@ -70,7 +71,9 @@ export const QUALITY_CONSTRAINTS: Record<CallQuality, MediaTrackConstraints> = {
 export const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
   width: { min: 640, ideal: 1280, max: 1920 },
   height: { min: 480, ideal: 720, max: 1080 },
-  frameRate: { min: 24, ideal: 60, max: 120 },
+  // min 15 (era 24): câmera frontal fraca de celular não entrega 24 fps e o
+  // getUserMedia falhava com OverconstrainedError — câmera que não abre.
+  frameRate: { min: 15, ideal: 60, max: 120 },
 }
 
 /**
@@ -453,8 +456,12 @@ export function supportsScreenShare(): boolean {
   try {
     if (typeof navigator === 'undefined') return false
     const md: any = (navigator as any).mediaDevices
-    if (!md?.getDisplayMedia) return false
-    return true
+    if (md?.getDisplayMedia) return true
+    // Caminho NATIVO (Linux/WebKitGTK): a captura e a codificação acontecem
+    // no core (xcap + GStreamer + webrtc-rs) — getDisplayMedia nem precisa
+    // existir na página. Sem isto o botão de tela ficava morto no desktop
+    // Linux mesmo com o pipeline inteiro já pronto no Rust.
+    return nativeVoiceAvailable === true
   } catch { return false }
 }
 
@@ -1145,6 +1152,12 @@ export class CallManager {
    *  `resendLocalIce`). */
   private localIce = new Map<string, RTCIceCandidate[]>()
   private pendingOffers = new Map<string, { callId: string; sdp: string }>()
+  /** Chamadas que ESTE lado já aceitou/originou/entrou. A offer de quem liga
+   *  chega quase sempre ANTES do clique em "Aceitar"; sem este registro, a
+   *  fase (promovida a 'connecting' pelo promoteOnSignal) já não era mais
+   *  'incoming' quando o handleOffer rodava, e a chamada CONECTAVA com o ring
+   *  ainda na tela — mídia fluindo sem ninguém atender (bug do e2e). */
+  private acceptedCalls = new Set<string>()
   /** Último SDP de offer aceito por peer (dedup de reenvio / anti-GLARE). */
   private lastRemoteOffer = new Map<string, string>()
   /** Nº de ICE restarts já pedidos por peer (limite evita loop infinito). */
@@ -1267,6 +1280,18 @@ export class CallManager {
     this.engineOff = services.subscribe((ev: any) => {
       // eventos de sinalização sem fp válido são ignorados (nunca crasham o bus)
       const fpOk = typeof ev?.from_fp === 'string' && ev.from_fp.length > 0
+      // SELF-ECHO de sinalização (modo navegador): o BroadcastChannel devolve
+      // TUDO que esta aba emitiu. handleOffer/Answer/Ice já ignoram from_fp
+      // próprio, mas o promoteOnSignal rodava ANTES deles e a própria offer
+      // ecoada promovia 'outgoing' → 'connecting' sem ninguém ter atendido —
+      // o badge mentia "Conectando…" no lugar de "Chamando…" (reproduzido no
+      // e2e; o engine nativo NÃO ecoa a sinalização do remetente).
+      if (fpOk && (ev.type === 'call_offer' || ev.type === 'call_answer' || ev.type === 'call_ice')) {
+        try {
+          const meNow = this.getIdentity()
+          if (meNow && ev.from_fp === meNow.fingerprint) return
+        } catch { /* segue sem identidade */ }
+      }
       if (ev.type === 'call_offer' && fpOk) {
         // Offer fluindo = sinalização viva: tira de outgoing/incoming mesmo se
         // o frame `call_accepted` se perdeu (causa raiz do "Chamando…" infinito
@@ -1293,6 +1318,15 @@ export class CallManager {
         } catch { /* nunca derruba o bus */ }
       }
       if (ev.type === 'call_incoming' && typeof ev.call_id === 'string') {
+        // SELF-RING: no modo navegador o `callInvite` ecoa o `call_incoming`
+        // de volta para a própria aba que ligou (BroadcastChannel não filtra
+        // remetente). Sem este filtro, quem LIGA via tocar o próprio
+        // telefone — o ring "está ligando…" aparece sobre o overlay da
+        // chamada e intercepta os cliques da UI (bug reproduzido no e2e).
+        try {
+          const meNow = this.getIdentity()
+          if (meNow && ev.from_fp === meNow.fingerprint) return
+        } catch { /* segue sem identidade */ }
         // O ring agora tem estado no manager: o watchdog de incoming (60s)
         // arma de verdade e o overlay nunca mais toca para sempre quando quem
         // ligou some sem enviar call_ended. Antes o ring vivia só no React
@@ -1530,7 +1564,11 @@ export class CallManager {
     try {
       const st = this.state
       if (!st || st.callId !== callId) return
-      if (st.phase === 'outgoing' || st.phase === 'incoming') this.applyPhase('signal')
+      // Só o CHAMADOR sai de 'outgoing' com sinalização fluindo. O CALLEE em
+      // ring ('incoming') permanece tocando até clicar em Aceitar — antes, a
+      // própria offer promovia o ring para 'connecting' e o badge mentia
+      // "Conectando…" com o telefone ainda tocando.
+      if (st.phase === 'outgoing') this.applyPhase('signal')
     } catch { /* fase nunca derruba o bus */ }
   }
 
@@ -1770,6 +1808,7 @@ export class CallManager {
     // E o invite vai ANTES da mídia local: o outro lado ouve o ring na hora,
     // não depois do prompt de permissão do nosso lado.
     const callId = await services.callInvite(targetFps[0] ?? convId, kind)
+    this.acceptedCalls.add(callId) // eu originue: offers/respostas fluem já
     for (const fp of targetFps.slice(1)) {
       if (fp === me.fingerprint) continue
       try { await services.callAddParticipant(fp, callId, fp, kind) } catch { /* ring best-effort */ }
@@ -1857,6 +1896,7 @@ export class CallManager {
     if (!me) return
     this.myFp = me.fingerprint
     const callId = `voice-${communityId}-${channelId}`
+    this.acceptedCalls.add(callId) // quem entra no canal aceitou por definição
     this.quality = getStoredQuality()
     this.qualityNotice = null
     this.badWindows = 0
@@ -2029,6 +2069,8 @@ export class CallManager {
     if (this.state && this.state.callId !== callId && isCallPhaseActive(this.state.phase)) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de atender outra')
     }
+    // ACEITOU: as offers retidas no ring agora podem negociar (ver handleOffer).
+    this.acceptedCalls.add(callId)
     await detectNativeVoice(true)
     // NATIVA: a mídia é do core — nada de getUserMedia/RTCPeerConnection aqui
     // (a offer retida foi absorvida pelo engine no call_accept).
@@ -2805,6 +2847,7 @@ export class CallManager {
       this.pendingIce.clear()
       this.localIce.clear()
       this.pendingOffers.clear()
+      this.acceptedCalls.clear()
       this.lastRemoteOffer.clear()
       this.iceReports.clear()
       this.iceRestarts.clear()
@@ -2880,6 +2923,101 @@ export class CallManager {
     this.onUpdate({ ...this.state })
   }
 
+  // ── VÍDEO NATIVO (Linux): câmera/tela codificadas no core Rust ──────────
+  //
+  // O WebKitGTK não expõe RTCPeerConnection — a chamada inteira viaja pela
+  // mídia nativa (webrtc-rs). O core já sabe codificar câmera (v4l2) e tela
+  // (xcap) em VP8/H264 e decodificar o que chega; o que faltava era a UI
+  // chamar. Sem isto os botões de câmera/tela no Linux tentavam
+  // getUserMedia/getDisplayMedia (inexistentes) e morriam.
+  //
+  // Sinal remoto: quem está do outro lado (Windows/Android, browser WebRTC)
+  // recebe o vídeo como track normal. Quem está no Linux RECEBE via polling
+  // `voiceVideoFrame` (JPEG do último frame decodificado) — ver
+  // `startNativeVideoMonitor`.
+
+  /** Liga/desliga vídeo nativo (câmera ou tela) para todos os pares da call. */
+  private async toggleNativeVideo(source: 'camera' | 'screen'): Promise<void> {
+    const st = this.state
+    if (!st) return
+    const on = source === 'camera' ? !st.cameraOn : !st.sharing
+    const targets = st.participants.filter(p => p.fp && p.fp !== this.myFp)
+    if (on) {
+      // Monitor: o id do xcap (u32, lado Rust) ainda não é escolhível pela UI
+      // (o picker da tela lista monitores do Tauri por string) — por ora o core
+      // captura o monitor PRIMÁRIO (o mesmo default do grab_screen_frame).
+      const monitorId: number | null = null
+      let ok = 0
+      let lastErr: string | null = null
+      for (const p of targets) {
+        try {
+          await services.voiceVideoStart(st.callId, p.fp, source, monitorId)
+          ok++
+        } catch (e) {
+          lastErr = String((e as Error)?.message ?? e)
+        }
+      }
+      if (ok === 0 && targets.length > 0) {
+        this.onCallNotice?.(lastErr ? `vídeo nativo falhou: ${lastErr}` : 'vídeo nativo falhou')
+        throw new Error(lastErr ? `não foi possível ligar o vídeo nativo: ${lastErr}` : 'não foi possível ligar o vídeo nativo')
+      }
+      if (source === 'camera') st.cameraOn = true
+      else {
+        st.sharing = true
+        this.broadcastScreenSignal(true)
+      }
+    } else {
+      for (const p of targets) {
+        try { await services.voiceVideoStop(st.callId, p.fp) } catch { /* par best-effort */ }
+      }
+      if (source === 'camera') st.cameraOn = false
+      else {
+        st.sharing = false
+        this.broadcastScreenSignal(false)
+      }
+    }
+    this.onUpdate({ ...st })
+  }
+
+  /** Monitor de FRAMES REMOTOS decodificados pelo core (Linux nativo).
+   *  A UI desenha p.videoUrl (data:image/jpeg) no tile do participante. */
+  private nativeVideoTimer: ReturnType<typeof setInterval> | null = null
+  private nativeVideoSeqs = new Map<string, number>()
+  private startNativeVideoMonitor(callId: string) {
+    this.stopNativeVideoMonitor()
+    try {
+      this.nativeVideoTimer = setInterval(() => {
+        const st = this.state
+        if (!st || st.callId !== callId) { this.stopNativeVideoMonitor(); return }
+        for (const p of st.participants) {
+          if (!p.fp || p.fp === this.myFp) continue
+          const since = this.nativeVideoSeqs.get(p.fp) ?? null
+          void services.voiceVideoFrame(callId, p.fp, since).then((f) => {
+            try {
+              const cur = this.state
+              if (!f || !cur || cur.callId !== callId) return
+              const part = cur.participants.find((x: any) => x.fp === p.fp)
+              if (!part) return
+              if (f.seq !== (this.nativeVideoSeqs.get(p.fp) ?? -1)) {
+                this.nativeVideoSeqs.set(p.fp, f.seq)
+                if (f.jpeg) {
+                  ;(part as any).videoUrl = `data:image/jpeg;base64,${f.jpeg}`
+                  ;(part as any).videoSeq = f.seq
+                  this.onUpdate({ ...cur })
+                }
+              }
+            } catch { /* frame nunca derruba o bus */ }
+          }).catch(() => { /* poll best-effort */ })
+        }
+      }, 150)
+    } catch { this.nativeVideoTimer = null }
+  }
+  private stopNativeVideoMonitor() {
+    try { if (this.nativeVideoTimer) clearInterval(this.nativeVideoTimer) } catch { /* ignore */ }
+    this.nativeVideoTimer = null
+    this.nativeVideoSeqs.clear()
+  }
+
   /**
    * Acha o sender de vídeo do PC mesmo quando ele está com track nulo
    * (câmera desligada via `replaceTrack(null)`). Sem isso, religar a câmera
@@ -2896,6 +3034,13 @@ export class CallManager {
 
   async toggleCamera() {
     if (!this.state) return
+    // Chamada NATIVA (Linux): o core captura a câmera (v4l2) e codifica em
+    // GStreamer na MESMA PeerConnection webrtc-rs da voz — a página não tem
+    // RTCPeerConnection/getUserMedia aqui.
+    if ((this.state as any)?.nativeMedia) {
+      await this.toggleNativeVideo('camera')
+      return
+    }
     if (this.state.cameraOn) {
       // Desliga: para de ENVIAR vídeo (replaceTrack(null) mantém o m-line) e
       // solta os tracks locais. O remoto para de receber em vez de congelar.
@@ -2976,6 +3121,15 @@ export class CallManager {
    */
   async startScreenShare(opts?: Partial<ScreenShareOptions>): Promise<void> {
     if (!this.state) return
+    // Caminho NATIVO (Linux/WebKitGTK): captura xcap + encoder GStreamer no
+    // core, na mesma PeerConnection webrtc-rs da voz. Antes este caminho
+    // caía no guard de `pcs.size === 0` com erro de "não codifica vídeo" —
+    // mentira: o core codifica; faltava a chamada.
+    if ((this.state as any)?.nativeMedia) {
+      if (opts?.source) this.screenOptions = normalizeOptions({ source: opts.source }, this.screenOptions)
+      await this.toggleNativeVideo('screen')
+      return
+    }
     this.screenEnv = detectScreenEnvironment()
     if (!supportsScreenShare()) {
       const reason = screenShareUnavailableReason()
@@ -2983,13 +3137,11 @@ export class CallManager {
       throw new ScreenShareError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG, false)
     }
     // Voz nativa em Rust (webrtc-rs) NÃO cria RTCPeerConnection: o `pcs` fica
-    // vazio e `seedScreenPeers` não teria para onde enviar. Sem esta guarda o
-    // app anunciava "COMPARTILHANDO" e não transmitia nada — tela preta com
-    //Status de sucesso. Aqui falhamos com o motivo real e retryable.
+    // vazio e `seedScreenPeers` não teria para onde enviar. (Chamadas nativas
+    // foram roteadas ACIMA para `toggleNativeVideo` — chegar aqui numa chamada
+    // nativa seria bug de roteamento, não estado do usuário.)
     if (this.pcs.size === 0) {
-      const why = nativeVoiceAvailable === true
-        ? 'esta chamada usa a voz nativa em Rust (sem WebRTC na página), que hoje não codifica vídeo — compartilhe a tela numa chamada com WebRTC'
-        : 'nenhum participante conectado ainda — espere a chamada estabilizar e tente de novo'
+      const why = 'nenhum participante conectado ainda — espere a chamada estabilizar e tente de novo'
       this.setScreenError('unavailable', why)
       throw new ScreenShareError('unavailable', why, true)
     }
@@ -3166,6 +3318,12 @@ export class CallManager {
   /** Para o compartilhamento e devolve a câmera (ou null) aos remotos. */
   async stopScreenShare(): Promise<void> {
     if (!this.state) return
+    // NATIVO: para o encoder no core (sem isto o xcap/GStreamer continuava
+    // capturando e codificando uma tela que ninguém assiste).
+    if ((this.state as any)?.nativeMedia) {
+      await this.toggleNativeVideo('screen') // sharing=true → desliga
+      return
+    }
     this.stopScreenStatsTimer()
     try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
     this.screenRecoveryTimer = null
@@ -3643,6 +3801,8 @@ export class CallManager {
   private startNativeVoiceMonitor(callId: string) {
     this.stopNativeVoiceMonitor()
     this.nativeVoiceSince = Date.now()
+    // Vídeo remoto (frames JPEG do core) na MESMA vida do monitor de voz.
+    this.startNativeVideoMonitor(callId)
     const t = setInterval(() => {
       const st = this.state
       if (!st || st.callId !== callId) { this.stopNativeVoiceMonitor(); return }
@@ -3651,6 +3811,28 @@ export class CallManager {
         if (!s || !this.state || this.state.callId !== callId) return
         try { this.lastNativeStats = s } catch { /* ignore */ }
         if (nativeRoute !== s.route) { nativeRoute = s.route; this.onUpdate({ ...this.state }) }
+        // VÍDEO NATIVO: estado honesto vindo do core (encoder/decoder).
+        // "live" com fonte = câmera/tela no ar; "failed" = aviso com o erro
+        // real (Wayland sem portal, câmera travada etc.) em vez de tile preto.
+        try {
+          const vs = (s as any).video_state as string | null | undefined
+          const vsrc = (s as any).video_source as string | null | undefined
+          const verr = (s as any).video_error as string | null | undefined
+          const cur = this.state
+          if (cur && vs) {
+            if (vs === 'live' || vs === 'starting') {
+              if (vsrc === 'camera' && !cur.cameraOn) { cur.cameraOn = true; this.onUpdate({ ...cur }) }
+              if (vsrc === 'screen' && !cur.sharing) { cur.sharing = true; this.onUpdate({ ...cur }) }
+            } else if (vs === 'failed') {
+              if (verr) { this.onCallNotice?.(verr); this.setFailureCause(verr) }
+              if (vsrc === 'camera') { cur.cameraOn = false; this.onUpdate({ ...cur }) }
+              if (vsrc === 'screen') { cur.sharing = false; this.onUpdate({ ...cur }) }
+            } else if (vs === 'off') {
+              if (vsrc === 'camera' && cur.cameraOn) { cur.cameraOn = false; this.onUpdate({ ...cur }) }
+              if (vsrc === 'screen' && cur.sharing) { cur.sharing = false; this.onUpdate({ ...cur }) }
+            }
+          }
+        } catch { /* estado de vídeo nunca derruba a chamada */ }
         if (s.state === 'connected') {
           this.nativeVoiceSince = 0
           this.applyPhase('media-connected')
@@ -3680,6 +3862,7 @@ export class CallManager {
 
   private stopNativeVoiceMonitor() {
     if (this.nativeVoiceTimer) { clearInterval(this.nativeVoiceTimer); this.nativeVoiceTimer = null }
+    this.stopNativeVideoMonitor()
   }
 
   /** ICE restart com BACKOFF: até MAX_ICE_RESTARTS por peer (1s/4s/9s entre
@@ -3782,6 +3965,21 @@ export class CallManager {
       // não há o que guardar. Só o caminho navegador bufferiza.
       if (nativeVoiceAvailable !== true) {
         this.pendingOffers.set(fromFp, { callId, sdp: sdpStr })
+      }
+      return
+    }
+    // RING EM ANDAMENTO: a offer chega ~2s depois do invite, quase sempre
+    // ANTES do usuário clicar em "Aceitar". Negociar aqui fazia a chamada
+    // CONECTAR (e o áudio de quem ligou chegar) com o ring ainda na tela —
+    // o overlay virava "Conectado" sem ninguém atender (bug reproduzido no
+    // e2e; o lado nativo já retém via voice_gate.rs, este é o espelho do
+    // navegador). Retém e o `acceptInbound` aplica no aceite. O critério é o
+    // REGISTRO de aceite (não a fase): o promoteOnSignal já moveu 'incoming'
+    // para 'connecting' antes deste handler rodar.
+    if (!this.acceptedCalls.has(callId)) {
+      if (nativeVoiceAvailable !== true) {
+        this.pendingOffers.set(fromFp, { callId, sdp: sdpStr })
+        console.debug(`[call] offer de ${fromFp.slice(0, 8)} retida até o aceite (ring em andamento)`)
       }
       return
     }
@@ -3931,6 +4129,7 @@ export class CallManager {
     this.pendingIce.clear()
     this.localIce.clear()
     this.pendingOffers.clear()
+    this.acceptedCalls.clear()
     this.lastRemoteOffer.clear()
     this.iceReports.clear()
     this.iceRestarts.clear()

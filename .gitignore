@@ -1,6 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Segredos — NUNCA versionar
 # ─────────────────────────────────────────────────────────────────────────────
+# AGENTS.md é LOCAL de propósito (guia de agents com caminhos/senha da
+# máquina) — o deploy e as regras versionadas vivem em CONTRIBUTING/EXECUTAR.
+AGENTS.md
 .env
 .env.*
 !.env.example
