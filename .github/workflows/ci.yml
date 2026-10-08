@@ -242,8 +242,9 @@ jobs:
       - run: npm ci
       # O MSI do Windows exige pre-release NUMERICO ("pre-alpha.1" e' rejeitado:
       #   optional pre-release identifier must be numeric-only and <= 65535).
-      # Deriva do package.json: "1.1.0-pre-alpha.1" -> "1.1.0-1". O numero
-      # final do pre-release vira o identificador numerico do MSI — assim o
+      # Deriva do package.json: "1.1.0-pre-alpha.1" -> "1.1.0-1" e
+      # "1.1.2-pre-alpha" -> "1.1.2-1". O numero final, quando existe,
+      # vira o identificador numerico do MSI — assim o
       # instalador SOBE de versao a cada pre-alpha (hardcode "1.0.0" fazia o
       # MSI 1.0.0 recusar upgrade sobre a 1.0.0 ja instalada).
       - name: Versao numerica para o MSI
@@ -251,9 +252,11 @@ jobs:
           node -e "
             const fs=require('fs');
             const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
-            const m=pkg.version.match(/^(\d+\.\d+\.\d+)(?:-[^\d.]*\.?(\d+))?$/);
-            if(!m){console.error('versao nao parseavel: '+pkg.version);process.exit(1)}
-            const v=m[1]+'-'+(m[2]||'1');
+            const parts=pkg.version.split('-');
+            const base=parts.shift();
+            if(!/^\d+\.\d+\.\d+$/.test(base)){console.error('versao nao parseavel: '+pkg.version);process.exit(1)}
+            const suffix=parts.join('-').match(/(?:^|\.)(\d+)$/);
+            const v=base+'-'+(suffix?.[1]||'1');
             for (const f of ['package.json','src-tauri/tauri.conf.json']) {
               const d=JSON.parse(fs.readFileSync(f,'utf8'));
               d.version=v;
