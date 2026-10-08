@@ -1,7 +1,7 @@
 {
   "name": "distorent",
   "private": true,
-  "version": "1.1.0-pre-alpha.2",
+  "version": "1.1.2-pre-alpha",
   "type": "module",
   "scripts": {
     "dev": "vite",

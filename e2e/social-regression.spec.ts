@@ -140,7 +140,7 @@ test('fixar, editar e apagar mensagem pelo menu de contexto', async ({ page }) =
   await expect(linha.getByTitle('fixada')).toBeVisible({ timeout: 8000 })
 
   await linha.click({ button: 'right' })
-  await page.getByText('✏️ Editar').click()
+  await page.getByRole('button', { name: 'Editar', exact: true }).click()
   const campo = linha.locator('textarea')
   await campo.fill('texto editado')
   await linha.getByRole('button', { name: 'salvar' }).click()
@@ -148,7 +148,7 @@ test('fixar, editar e apagar mensagem pelo menu de contexto', async ({ page }) =
   await expect(page.locator('[data-mid]').first().locator('text=(editado)')).toBeVisible()
 
   await page.locator('[data-mid]').first().click({ button: 'right' })
-  await page.getByText('🗑 Apagar').click()
+  await page.getByRole('button', { name: 'Apagar', exact: true }).click()
   await expect(page.getByText('1 mensagem apagada')).toBeVisible({ timeout: 8000 })
 })
 
@@ -167,7 +167,7 @@ test('painel de pins lista a mensagem fixada', async ({ page }) => {
 
   await page.locator('[data-mid]').first().click({ button: 'right' })
   await page.getByText('Fixar / desafixar').click()
-  await expect(page.locator('[data-mid]').first().locator('text=📌')).toBeVisible({ timeout: 8000 })
+  await expect(page.locator('[data-mid]').first().getByTitle('fixada')).toBeVisible({ timeout: 8000 })
 
   await page.getByTitle(/Mensagens fixadas/).click()
   await expect(page.getByText(/Mensagens fixadas \(1\)/)).toBeVisible({ timeout: 8000 })

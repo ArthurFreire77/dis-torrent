@@ -1,6 +1,8 @@
 # CHANGELOG
 
-## [1.1.0-pre-alpha.2] — 2026-10-08
+## [1.1.2-pre-alpha] — 2026-10-08
+
+### Perfil, preferências e interface
 - **Perfil P2P completo**: banner 160px, avatar 88px com anel, selos ed25519/presença/servidor, abas Sobre/Servidor/P2P, edição inline com preview ao vivo, troca de capa/avatar por toque, anotação privada por usuário, cópia de fingerprint
 - **Aparência**: tema escuro/claro funcional, fonte 85–125% com prévia, densidade confortável/compacta persistida por conversa
 - **Notificações**: padrão global + silenciar servidor/canal (todas/menções/nada), tudo local via localStorage
@@ -16,7 +18,7 @@
 - **Limpeza**: ~15 estados/props mortas removidos, imports limpos, emojis de UI → SVG
 - **Lint zerado** (era 24), typecheck limpo, 106 testes, build 4s
 
-## [não lançado] — Ciclo de chamada consertado + vídeo nativo ligado na UI
+### Chamadas e vídeo
 
 ### O bug "só consegue chamar uma vez" (causa-raiz, 3 partes)
 - **`callEnd` era no-op no driver navegador** (browser.ts): as outras abas
@@ -53,6 +55,15 @@
   recente em JPEG; agora a UI faz polling (`voice_video_frame` com
   `since_seq` para não reenviar) e desenha o tile do participante com
   `<img>` (desktop + mobile).
+- **Transporte de vídeo corrigido**: o encoder entrega quadros comprimidos ao
+  WebRTC para packetização RTP; o caminho anterior podia encapsular RTP duas
+  vezes. O decoder mantém pacotes RTP até remontar o frame, evitando descartar
+  fragmentos necessários.
+- **Captura e estado de mídia**: pipelines GStreamer encerram ao liberar a
+  sessão, monitores são armazenados em cache durante captura, e métricas de
+  vídeo separam pacotes RTP recebidos de frames decodificados. Em chamadas de
+  grupo, os contadores agregam todos os peers; a UI só marca vídeo como ativo
+  após o primeiro frame enviado.
 
 ### Áudio nativo (Linux): o envio não morre mais aos 30s
 - `spawn_send_loop` tinha `wait_connected(30s)` que DESISTIA em silêncio:
@@ -78,6 +89,10 @@
 - Popup do próprio perfil ganha **"Editar perfil"** → editor completo
   (avatar/banner/About me/status/accent) — antes só era alcançável clicando
   no avatar de uma mensagem sua.
+
+### Validação
+- E2E completo: 49 passaram e 2 foram ignorados. A auditoria de mídia registra
+  os testes de hardware disponíveis e os limites de validação por plataforma.
 
 ## 1.1.0-pre-alpha.1 — Canais de voz com mídia real; suite e2e verde
 

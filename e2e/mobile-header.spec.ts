@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { createServerViaWizard } from './helpers/server';
 
 // A barra superior do mobile tinha busca e download como botões próprios.
 // Com a chamada de voz/vídeo e membros, o cabeçalho ficou com cinco alvos de
@@ -10,25 +11,29 @@ import { test, expect, type Page } from '@playwright/test';
 // Este teste trava o comportamento: as duas ações continuam alcançáveis, mas
 // só pelo menu ⋯.
 //
-// O cabeçalho testado é o da TELA DE CONVERSA — conta nova não tem conversa,
-// então criamos um servidor (fluxo simplificado do mobile) e abrimos o canal.
+// O cabeçalho testado é o da TELA DE CONVERSA. Como o mobile é invite-only,
+// preparamos um servidor no desktop e abrimos o canal na mesma conta mobile.
 
 async function boot(page: Page) {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/m');
+  // Servidores só podem ser criados no app de PC. Prepara a comunidade pelo
+  // fluxo real do desktop e depois abre a mesma conta na interface mobile.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/d/forge');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill('Movel');
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  await expect(page).toHaveURL(/\/m/, { timeout: 15000 });
+  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 });
+  await createServerViaWizard(page, 'Servidor Cabecalho');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/m');
+  await expect(page.getByRole('button', { name: 'Servidores' })).toBeVisible({ timeout: 15000 });
 }
 
-/** Cria um servidor pelo fluxo simplificado e abre o canal → tela de conversa. */
+/** Abre o servidor existente e seu canal → tela de conversa mobile. */
 async function openConversation(page: Page) {
   await page.getByRole('button', { name: 'Servidores' }).click();
-  await page.getByRole('button', { name: 'Criar servidor' }).click();
-  await page.getByPlaceholder('Ex.: Grupo do jogo').fill('Servidor Cabecalho');
-  await page.getByRole('button', { name: 'Criar', exact: true }).click();
-  // o canal "geral" aparece na lista de canais do servidor
+  await page.getByRole('button', { name: /Servidor Cabecalho/ }).click();
+  // o canal "geral" aparece na lista de canais do servidor selecionado
   const canal = page.locator('.chan-row', { hasText: 'geral' }).first();
   await expect(canal).toBeVisible({ timeout: 15000 });
   await canal.click();
