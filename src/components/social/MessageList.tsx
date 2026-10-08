@@ -27,6 +27,7 @@ import {
   UnreadDivider,
   fmtClock,
 } from './Social'
+import { Icon, Icons } from '../../shared/icons'
 
 
 const QUICK = ['👍', '❤️', '🔥', '😂', '🎉', '👀']
@@ -51,6 +52,8 @@ export interface MessageListProps {
   /** enquetes do canal (nativo; vazio no browser até criar) */
   pollChannel?: { communityId: string; channelId: string }
   pollHighlight?: string
+  compact?: boolean
+  fontScale?: number
 }
 
 export interface MessageListHandle {
@@ -64,7 +67,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const {
     messages, convId, myFp, nameOf, profiles, presence, emptyBlock,
     onReply, onProfile, onForward, onThread, onToast, renderFile, pollChannel, onResend,
+    compact, fontScale,
   } = props
+  const fs = fontScale && fontScale > 0 ? fontScale : 1
 
   const [metas, setMetas] = useState<Record<string, MsgMetaView>>({})
   const [bodies, setBodies] = useState<Record<string, string>>({})
@@ -215,10 +220,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  function jumpTo(id: string) {
-    const el = scrollRef.current?.querySelector(`[data-mid="${id}"]`)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
   useEffect(() => { if (unreadBefore) setUnreadBefore(null) }, [messages.length])
 
   if (messages.length === 0) return <>{emptyBlock}</>
@@ -257,23 +258,39 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               data-mid={m.id}
               onContextMenu={e => { e.preventDefault(); setMenu({ id: m.id, x: e.clientX, y: e.clientY }) }}
               className="msg-row"
-              style={{ display: 'flex', gap: 12, padding: grouped ? '1px 8px' : '8px', borderRadius: 8, marginTop: grouped ? -6 : 0, position: 'relative' }}
+              style={{ display: 'flex', gap: compact ? 8 : 12, padding: compact ? '2px 8px' : grouped ? '1px 8px' : '8px', borderRadius: 8, marginTop: grouped && !compact ? -6 : 0, position: 'relative' }}
             >
-              {grouped ? <span style={{ width: 40, flexShrink: 0 }} /> : (
+              {compact ? (
+                <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono', flexShrink: 0, paddingTop: 2 }}>{fmtClock(m.ts)}</span>
+              ) : grouped ? <span style={{ width: 40, flexShrink: 0 }} /> : (
                 <span style={{ position: 'relative', flexShrink: 0, cursor: 'pointer' }} onClick={() => onProfile(authorFp)}>
                   <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} />
                   {pres && <PresenceDot status={pres} size={12} ring={T_MAIN} />}
                 </span>
               )}
               <div style={{ flex: 1, minWidth: 0 }}>
-                {!grouped && (
+                {compact ? (
+                  <div style={{ fontSize: 14 * fs, color: T_TEXT, lineHeight: 1.4 }}>
+                    <span style={{ fontWeight: 700, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
+                      onClick={() => onProfile(authorFp)}>{authorName}</span>
+                    {!isFile && (
+                      <>
+                        <span style={{ color: T_MUTED }}>  </span>
+                        <span style={{ overflowWrap: 'anywhere' }}><RichText body={body} onMention={onProfile} /></span>
+                      </>
+                    )}
+                    {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }}> (editado)</span> : null}
+                    {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED, verticalAlign: 'middle' }}><Icon d={Icons.pin} size={11} /></span> : null}
+                    {mine && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={m.status} /></span>}
+                  </div>
+                ) : !grouped && (
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 700, fontSize: 14, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
+                    <span style={{ fontWeight: 700, fontSize: 14 * fs, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
                       onClick={() => onProfile(authorFp)}>{authorName}</span>
                     <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono' }}>{authorFp.slice(0, 12)}</span>
                     <span style={{ fontSize: 11, color: T_MUTED }}>{fmtClock(m.ts)}</span>
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }} title={new Date(meta.edited_at).toLocaleString('pt-BR')}>(editado)</span> : null}
-                    {meta?.pinned ? <span title="fixada" style={{ fontSize: 10 }}>📌</span> : null}
+                    {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED }}><Icon d={Icons.pin} size={11} /></span> : null}
                     {meta?.forwarded_from ? <span style={{ fontSize: 10, color: T_MUTED }}>↪ encaminhada de {meta.forwarded_from}</span> : null}
                     {mine && m.status !== 'ok' && <StatusGlyph status={m.status} />}
                   </div>
@@ -294,16 +311,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 {editing?.id === m.id ? (
                   <div style={{ marginTop: 4 }}>
                     <textarea autoFocus value={editing.body} onChange={e => setEditing({ id: m.id, body: e.target.value })}
-                      style={{ width: '100%', minHeight: 60, background: T_INPUT, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 10, color: T_TEXT, fontSize: 14, outline: 'none', resize: 'vertical', fontFamily: 'inherit' }} />
+                      style={{ width: '100%', minHeight: 60, background: T_INPUT, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 10, color: T_TEXT, fontSize: 14 * fs, outline: 'none', resize: 'vertical', fontFamily: 'inherit' }} />
                     <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                       <button onClick={() => setEditing(null)} style={BTN_GHOST}>cancelar</button>
                       <button onClick={() => doEdit(m.id)} disabled={!editing.body.trim()} style={{ ...BTN_PRIMARY, opacity: editing.body.trim() ? 1 : 0.5 }}>salvar</button>
                       <span style={{ fontSize: 10, color: T_MUTED, alignSelf: 'center' }}>Enter salva · Esc cancela</span>
                     </div>
                   </div>
-                ) : isFile && renderFile ? renderFile(m, grouped) : (
+                ) : isFile && renderFile ? renderFile(m, grouped) : compact ? null : (
                   <>
-                    <div style={{ fontSize: 14, color: T_TEXT, marginTop: grouped ? 0 : 2 }}>
+                    <div style={{ fontSize: 14 * fs, color: T_TEXT, marginTop: grouped ? 0 : 2 }}>
                       <RichText body={body} onMention={onProfile} />
                     </div>
                     {wantsUnfurl && <LinkUnfurl body={body} />}
@@ -343,7 +360,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   <button key={e} title={`Reagir ${e}`} onClick={e2 => { e2.stopPropagation(); toggleReact(m.id, e) }}
                     style={TOOL_BTN}>{e}</button>
                 ))}
-                <button title="Mais reações" onClick={e2 => { e2.stopPropagation(); setPicker(picker === m.id ? null : m.id) }} style={TOOL_BTN}>😊</button>
+                <button title="Mais reações" aria-label="Mais reações" onClick={e2 => { e2.stopPropagation(); setPicker(picker === m.id ? null : m.id) }} style={{ ...TOOL_BTN, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.smile} size={15} /></button>
                 <button title="Responder" onClick={e2 => { e2.stopPropagation(); onReply(m) }} style={{ ...TOOL_BTN, width: 'auto', padding: '0 8px', fontSize: 11, fontWeight: 800 }}>Responder</button>
                 <button title="Mais" onClick={e2 => { e2.stopPropagation(); setMenu({ id: m.id, x: e2.clientX, y: e2.clientY }) }} style={TOOL_BTN}>⋯</button>
                 {picker === m.id && (
@@ -360,16 +377,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 zIndex: 210, background: T_MAIN, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 4,
                 boxShadow: '0 12px 34px rgba(0,0,0,.5)', minWidth: 190,
               }}>
-              <MenuItem label="📌 Fixar / desafixar" onClick={() => { doPin(m.id); setMenu(null) }} />
-              <MenuItem label="↪ Encaminhar" onClick={() => { onForward(m); setMenu(null) }} />
-              <MenuItem label="🧵 Criar thread" onClick={() => { onThread(m); setMenu(null) }} />
-              {(mine || meta) && <MenuItem label="✏️ Editar" onClick={() => { setEditing({ id: m.id, body }); setMenu(null) }} />}
+              <MenuItem label="Fixar / desafixar" icon={Icons.pin} onClick={() => { doPin(m.id); setMenu(null) }} />
+              <MenuItem label="Encaminhar" icon={Icons.externalLink} onClick={() => { onForward(m); setMenu(null) }} />
+              <MenuItem label="Criar thread" icon={Icons.hash} onClick={() => { onThread(m); setMenu(null) }} />
+              {(mine || meta) && <MenuItem label="Editar" icon={Icons.edit} onClick={() => { setEditing({ id: m.id, body }); setMenu(null) }} />}
               {/* Reenviar: só faz sentido quando o envio realmente falhou. O
                   glyph já aparece na linha (StatusGlyph), aqui damos o botão. */}
               {mine && m.status === 'failed' && onResend && (
-                <MenuItem label="🔁 Reenviar" onClick={() => { onResend(m); setMenu(null) }} />
+                <MenuItem label="Reenviar" icon={Icons.refresh} onClick={() => { onResend(m); setMenu(null) }} />
               )}
-              <MenuItem label="🔕 Marcar como não lida" onClick={() => {
+              <MenuItem label="Marcar como não lida" icon={Icons.eye} onClick={() => {
                 // Cursor de leitura falso logo abaixo desta msg = tudo acima
                 // volta a contar como não lida (mesma semântica do Discord).
                 services.readSet(convId, Math.max(0, m.ts - 1)).catch(() => {})
@@ -377,13 +394,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 onToast('marcada como não lida')
                 setMenu(null)
               }} />
-              <MenuItem label="🔎 Copiar texto" onClick={() => { navigator.clipboard?.writeText(body); onToast('copiado'); setMenu(null) }} />
-              <MenuItem label="🔖 Salvar marcador" onClick={async () => {
+              <MenuItem label="Copiar texto" icon={Icons.copy} onClick={() => { navigator.clipboard?.writeText(body); onToast('copiado'); setMenu(null) }} />
+              <MenuItem label="Salvar marcador" icon={Icons.save} onClick={async () => {
                 try { await services.bookmarkSet(convId, body.slice(0, 24) || 'mensagem', m.id); onToast('marcador salvo') } catch (e: any) { onToast(String(e?.message ?? e)) }
                 setMenu(null)
               }} />
               {!mine && (
-                <MenuItem label="⚠️ Denunciar" danger onClick={async () => {
+                <MenuItem label="Denunciar" icon={Icons.warn} danger onClick={async () => {
                   try {
                     await services.reportUser(authorFp, undefined, `Mensagem: ${body.slice(0, 80)}`)
                     onToast('denunciada')
@@ -391,7 +408,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   setMenu(null)
                 }} />
               )}
-              <MenuItem label="🗑 Apagar" danger onClick={() => { doDelete(m.id); setMenu(null) }} />
+              <MenuItem label="Apagar" icon={Icons.trash} danger onClick={() => { doDelete(m.id); setMenu(null) }} />
             </div>
             )}
           </React.Fragment>
@@ -422,14 +439,14 @@ function JumpToBottom({ visible, onClick }: { visible: boolean; onClick: () => v
   )
 }
 
-function MenuItem({ label, onClick, danger }: { label: string; onClick: () => void; danger?: boolean }) {
+function MenuItem({ label, icon, onClick, danger }: { label: string; icon?: string; onClick: () => void; danger?: boolean }) {
   return (
     <button onClick={onClick} style={{
-      display: 'block', width: '100%', textAlign: 'left', background: 'transparent', border: 'none',
+      display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: 'transparent', border: 'none',
       color: danger ? '#ff9c9c' : T_TEXT, padding: '7px 10px', borderRadius: 6, cursor: 'pointer',
       fontSize: 12.5, fontWeight: 600,
     }} onMouseEnter={e => (e.currentTarget.style.background = T_INPUT)} onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-      {label}
+      {icon ? <span style={{ display: 'flex', color: danger ? '#ff9c9c' : T_MUTED }}><Icon d={icon} size={14} /></span> : null}{label}
     </button>
   )
 }

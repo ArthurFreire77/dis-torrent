@@ -6,15 +6,15 @@
 //! POR QUE GSTREAMER E NAO "so um encoder": a chamada nativa precisa de três
 //! coisas que o `webrtc-rs` não dá pronto —
 //!   1. codificar a câmera (v4l2src) ou a tela (appsrc alimentado pelo xcap) em
-//!      VP8/H264 e puxar pacotes RTP de saída;
+//!      VP8/H264 e entregar quadros codificados ao `TrackLocalStaticSample`;
 //!   2. decodificar o RTP que chega e entregar frames para a UI;
 //!   3. fazer isso SEM travar o worker tokio de áudio/RTP.
-//! GStreamer entrega os três de uma vez, e já está no sistema.
+//! GStreamer cuida de captura/conversão/codec. O `TrackLocalStaticSample`
+//! empacota os quadros codificados em RTP e SRTP; não se deve inserir um RTP
+//! payloader do GStreamer antes dele (isso encapsularia RTP dentro de RTP).
 //!
-//! REGRA QUE NÃO SE QUEBRA: o payload type dos caps do `appsrc` tem que ser o
-//! PT **real** negociado no SDP. Com `payload=96` fixo, qualquer H264 negociado
-//! em 102/98 fazia o `rtp*depay` rejeitar todo pacote — "o vídeo nunca chega",
-//! sem erro visível. Ver [`rtp_caps`] e [`VideoDecoder::new_with_pt`].
+//! REGRA QUE NÃO SE QUEBRA: o payload type do decoder tem que ser o PT **real**
+//! negociado no SDP. Ver [`rtp_caps`] e [`VideoDecoder::new_with_pt`].
 
 use std::time::Duration;
 
@@ -25,15 +25,17 @@ use gstreamer_app::AppSrc;
 
 // ---------------------------------------------------------------- parametros
 
-/// RTP_MTU seguro: 1200 B deixa folga para o encapsulamento IPv6 + UDP + SRTP.
-const RTP_MTU: usize = 1200;
-/// Dimensoes de envio (16:9, tamanho de videochamada — 4K nao roda em CPU de
+/// Dimensoes de envio (tamanho de videochamada — 4K nao roda em CPU de
 /// notebook e o encoder viralmente leria acima de 2x o frame rate).
 const CAPTURE_W: u32 = 640;
 const CAPTURE_H: u32 = 480;
 /// Teto de frames em voo no encoder: acima disso, prefere perder quadro a
 /// acumular latência.
 const ENCODER_QUEUE: u32 = 2;
+/// RTP precisa chegar inteiro ao depayloader: se qualquer fragmento de um
+/// frame for descartado, todo o frame se perde. A fila é limitada para não
+/// deixar a latência crescer sem limite se o decoder ficar preso.
+const RTP_QUEUE: u32 = 512;
 /// Teto de frames no sink de decode: a UI só quer o MAIS RECENTE.
 const SINK_QUEUE: u32 = 2;
 
@@ -130,70 +132,70 @@ pub struct VideoEncoder {
     camera: bool,
 }
 
-/// Monta o encoder da CÂMERA. `payload_type` tem que ser o negociado.
+/// Monta o encoder da CÂMERA. O RTP é produzido por `TrackLocalStaticSample`.
 ///
 /// Não bloqueia por muito tempo: `v4l2src ! ... ! play` volta assim que o
 /// primeiro frame entra, mas em máquina sem câmera o `play` pode demorar — daí
 /// o caller(envolver em timeout) e o watchdog de envio.
-pub fn new_camera(codec: VideoCodec, payload_type: u8, fps: u32) -> Result<VideoEncoder, String> {
+pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     gst_init()?;
-    let enc = match codec {
-        VideoCodec::Vp8 => "vp8enc deadline=1".to_string(),
-        VideoCodec::H264 => {
-            if has_element("x264enc") {
-                "x264enc tune=zerolatency speed-preset=veryfast bitrate=800 key-int-max=60"
-                    .to_string()
-            } else if has_element("avenc_mpeg4") {
-                // Fallback: sem x264 o avenc_mpeg4 faz H264 (perfil main).
-                "avenc_mpeg4".to_string()
-            } else {
-                return Err("nenhum encoder H264 disponível (x264enc/avenc_mpeg4)".into());
-            }
-        }
-    };
+    let enc = video_encoder(codec, 800)?;
+    let caps = encoded_caps(codec);
     let desc = format!(
         "v4l2src device=/dev/video0 ! videoconvert ! videoscale ! \
          video/x-raw,format=I420,width={CAPTURE_W},height={CAPTURE_H},framerate={fps}/1 ! \
-         queue leaky=downstream max-size-buffers={ENCODER_QUEUE} ! {enc} ! rtpvp8pay mtu={RTP_MTU} ! \
-         rtppayloader pt={payload_type} ! appsink name=vedsink emit-signals=false sync=false async=false \
+         queue leaky=downstream max-size-buffers={ENCODER_QUEUE} ! {enc} ! {caps} ! \
+         appsink name=vedsink emit-signals=false sync=false async=false \
          max-buffers=4 drop=true"
     );
-    build_encoder(&desc, true, payload_type)
+    build_encoder(&desc, true)
 }
 
 /// Monta o encoder de TELA. Não captura nada sozinho: quem alimenta é
 /// [`VideoEncoder::push_screen_frame`] (via xcap).
-pub fn new_screen(codec: VideoCodec, payload_type: u8, fps: u32) -> Result<VideoEncoder, String> {
+pub fn new_screen(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     gst_init()?;
-    let enc = match codec {
-        VideoCodec::Vp8 => "vp8enc deadline=1".to_string(),
-        VideoCodec::H264 => {
-            if has_element("x264enc") {
-                "x264enc tune=zerolatency speed-preset=veryfast bitrate=1500 key-int-max=60"
-                    .to_string()
-            } else if has_element("avenc_mpeg4") {
-                "avenc_mpeg4".to_string()
-            } else {
-                return Err("nenhum encoder H264 disponível (x264enc/avenc_mpeg4)".into());
-            }
-        }
-    };
-    let depayless = match codec {
-        VideoCodec::Vp8 => "rtpvp8pay",
-        VideoCodec::H264 => "rtph264pay",
-    };
+    let enc = video_encoder(codec, 1500)?;
+    let caps = encoded_caps(codec);
     let desc = format!(
         "appsrc name=vesrc is-live=true format=time do-timestamp=true block=false \
-         max-buffers={ENCODER_QUEUE} caps=video/x-raw,format=RGB,width={CAPTURE_W},height={CAPTURE_H} ! \
+         max-buffers={ENCODER_QUEUE} caps=video/x-raw,format=RGB,width={CAPTURE_W},height={CAPTURE_H},framerate={fps}/1 ! \
          queue leaky=downstream max-size-buffers={ENCODER_QUEUE} ! videoconvert ! videoscale ! \
-         video/x-raw,format=I420,framerate={fps}/1 ! {enc} ! {depayless} mtu={RTP_MTU} ! \
-         rtppayloader pt={payload_type} ! appsink name=vedsink emit-signals=false sync=false async=false \
+         video/x-raw,format=I420,framerate={fps}/1 ! {enc} ! {caps} ! \
+         appsink name=vedsink emit-signals=false sync=false async=false \
          max-buffers=4 drop=true"
     );
-    build_encoder(&desc, false, payload_type)
+    build_encoder(&desc, false)
 }
 
-fn build_encoder(desc: &str, camera: bool, payload_type: u8) -> Result<VideoEncoder, String> {
+/// Escolhe um encoder que realmente produz o codec negociado. `avenc_mpeg4`
+/// é MPEG-4 Part 2, não H.264.
+fn video_encoder(codec: VideoCodec, bitrate_kbps: u32) -> Result<String, String> {
+    match codec {
+        VideoCodec::Vp8 => Ok("vp8enc deadline=1".to_string()),
+        VideoCodec::H264 if has_element("x264enc") => Ok(format!(
+            "x264enc tune=zerolatency speed-preset=veryfast bitrate={bitrate_kbps} key-int-max=60"
+        )),
+        VideoCodec::H264 if has_element("openh264enc") => Ok(format!(
+            "openh264enc complexity=low bitrate={} gop-size=60",
+            bitrate_kbps.saturating_mul(1000)
+        )),
+        VideoCodec::H264 if has_element("avenc_h264") => Ok("avenc_h264".to_string()),
+        VideoCodec::H264 => {
+            Err("nenhum encoder H.264 disponível (x264enc, openh264enc ou avenc_h264)".into())
+        }
+    }
+}
+
+/// Formato comprimido que o encoder entrega ao packetizer WebRTC.
+fn encoded_caps(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::Vp8 => "video/x-vp8",
+        VideoCodec::H264 => "video/x-h264,stream-format=byte-stream,alignment=au",
+    }
+}
+
+fn build_encoder(desc: &str, camera: bool) -> Result<VideoEncoder, String> {
     let pipeline = gstreamer::parse::launch(desc)
         .map_err(|e| format!("pipeline de encode não montou: {e}"))?
         .downcast::<gstreamer::Pipeline>()
@@ -213,7 +215,6 @@ fn build_encoder(desc: &str, camera: bool, payload_type: u8) -> Result<VideoEnco
     pipeline
         .set_state(gstreamer::State::Playing)
         .map_err(|e| format!("encoder não entrou em Playing: {e}"))?;
-    let _ = payload_type; // o PT já está nos caps do desc (rtppayloader pt=)
     Ok(VideoEncoder {
         pipeline,
         sink,
@@ -251,8 +252,8 @@ impl VideoEncoder {
         }
     }
 
-    /// Puxa pacotes RTP prontos (não bloqueia mais que `timeout`).
-    pub fn poll_rtp(&mut self, timeout: Duration) -> Option<Vec<u8>> {
+    /// Puxa um quadro comprimido pronto para `TrackLocalStaticSample`.
+    pub fn poll_encoded_frame(&mut self, timeout: Duration) -> Option<Vec<u8>> {
         let sample = self.sink.try_pull_sample(gst::ClockTime::from_nseconds(
             timeout.as_nanos().min(u64::MAX as u128) as u64,
         ))?;
@@ -296,6 +297,12 @@ impl VideoEncoder {
     }
 }
 
+impl Drop for VideoEncoder {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 // ---------------------------------------------------------------- decoder
 
 /// Pipeline de decode: RTP -> frames RGB para a UI.
@@ -336,8 +343,8 @@ impl VideoDecoder {
         };
         let desc = format!(
             "appsrc name=vdsrc is-live=true format=time do-timestamp=true block=false \
-             max-buffers={ENCODER_QUEUE} caps={caps} ! \
-             queue leaky=downstream max-size-buffers={ENCODER_QUEUE} ! \
+             max-buffers={RTP_QUEUE} caps={caps} ! \
+             queue leaky=no max-size-buffers={RTP_QUEUE} max-size-bytes=0 max-size-time=0 ! \
              {depay} ! {dec} ! videoconvert ! videoscale ! \
              video/x-raw,format=RGB ! appsink name=vdsink emit-signals=false sync=false \
              async=false max-buffers={SINK_QUEUE} drop=true"
@@ -364,14 +371,17 @@ impl VideoDecoder {
         })
     }
 
-    /// Enfia um pacote RTP cru (com header) no decode. Erro aqui é ENGOLED de
-    /// propósito: um pacote ruim não pode derrubar a sessão inteira.
-    pub fn push_rtp(&mut self, bytes: &[u8]) {
+    /// Enfia um pacote RTP cru (com header) no decode e preserva falhas do appsrc.
+    pub fn push_rtp(&mut self, bytes: &[u8]) -> Result<(), String> {
         if bytes.is_empty() {
-            return;
+            return Ok(());
         }
         let buf = gstreamer::Buffer::from_mut_slice(bytes.to_vec());
-        let _ = self.appsrc.push_buffer(buf);
+        match self.appsrc.push_buffer(buf) {
+            Ok(gst::FlowSuccess::Ok) => Ok(()),
+            Ok(other) => Err(format!("appsrc do decoder recusou RTP ({other:?})")),
+            Err(e) => Err(format!("appsrc do decoder recusou RTP: {e}")),
+        }
     }
 
     /// Frame RGB mais recente, sem bloquear.
@@ -414,38 +424,55 @@ impl VideoDecoder {
     pub fn stop(&mut self) {
         let _ = self.pipeline.set_state(gstreamer::State::Null);
     }
+
+    /// Erro de fluxo publicado pelo decoder, se houver.
+    pub fn take_error(&mut self) -> Option<String> {
+        let bus = self.pipeline.bus()?;
+        let mut iter =
+            bus.iter_timed_filtered(Some(gst::ClockTime::ZERO), &[gst::MessageType::Error]);
+        let msg = iter.next()?;
+        let detail = msg
+            .structure()
+            .and_then(|st| st.get::<String>("debug").ok())
+            .unwrap_or_else(|| "(sem detalhe)".to_string());
+        let domain = msg
+            .structure()
+            .and_then(|st| st.get::<&str>("domain").ok())
+            .unwrap_or("gstreamer");
+        Some(format!("decoder de vídeo [{domain}]: {detail}"))
+    }
+}
+
+impl Drop for VideoDecoder {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 // ---------------------------------------------------------------- captura de tela
 
-/// Lista de monitores (com cache de processo).
-///
-/// `xcap::Monitor::all()` enumera TODOS os outputs. Chamando isso a CADA tick
-/// (~10x/s por peer) dentro do `spawn_blocking`, com 3 peers na call eramos 30
-/// enumeracoes/s disputando a pool bloqueante com a pilha de audio/RTP — e era
-/// parte do que fazia o audio "engasgar" quando o video ligava. Enumera uma vez
-/// e reusa; a lista so muda com hotplug.
-fn monitors() -> Option<&'static Vec<xcap::Monitor>> {
-    static MONS: std::sync::OnceLock<std::sync::Mutex<Vec<xcap::Monitor>>> =
-        std::sync::OnceLock::new();
-    let cache = MONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+/// Lista de monitores em cache, atualizada a cada dois segundos para perceber
+/// hotplug sem enumerar outputs a cada quadro. Retorna uma cópia curta para o
+/// chamador não manter o lock durante a captura.
+fn monitors() -> Option<Vec<xcap::Monitor>> {
+    type Cache = Option<(std::time::Instant, Vec<xcap::Monitor>)>;
+    static MONS: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let cache = MONS.get_or_init(|| std::sync::Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    let needs = guard.is_empty();
-    if needs {
+    let stale = guard.as_ref().map_or(true, |(updated, _)| {
+        updated.elapsed() >= Duration::from_secs(2)
+    });
+    if stale {
         match xcap::Monitor::all() {
-            Ok(list) if !list.is_empty() => *guard = list,
-            Ok(_) => return None,
-            // Enumeracao falhou: nao zera o cache (um transient nao deve apagar
-            // a lista boa) e sinaliza falha neste tick.
-            Err(e) => {
-                tracing::warn!("[video] xcap nao enumerou monitores: {e}");
-                return None;
-            }
+            Ok(list) => *guard = Some((std::time::Instant::now(), list)),
+            // Uma falha transitória não descarta a última lista conhecida.
+            Err(e) => tracing::warn!("[video] xcap não enumerou monitores: {e}"),
         }
     }
-    // Vence o borrow do guard: devolvemos a lista viva via Box::leak (so' um
-    // punteiro, a lista em si nunca cresce depois disso).
-    Some(Box::leak(Box::new(guard.clone())))
+    guard
+        .as_ref()
+        .map(|(_, monitors)| monitors.clone())
+        .filter(|monitors| !monitors.is_empty())
 }
 
 /// Captura um frame RGB da tela. `None` = este tick falhou (Wayland sem portal,
@@ -473,9 +500,17 @@ pub fn grab_screen_frame(monitor: Option<u32>) -> Option<(Vec<u8>, u32, u32)> {
     let shot = match want.capture_image() {
         Ok(s) => s,
         Err(e) => {
-            // Wayland sem xdg-desktop-portal cai aqui sempre. Registramos uma
-            // vez (nao a cada tick) para nao inundar o log.
-            tracing::warn!("[video] captura de tela falhou: {e}");
+            // Wayland sem xdg-desktop-portal cai aqui sempre. A captura pode
+            // ser tentada por frame e por peer, então limita o log a 1 aviso/10s.
+            static LAST_CAPTURE_WARNING: std::sync::OnceLock<
+                std::sync::Mutex<Option<std::time::Instant>>,
+            > = std::sync::OnceLock::new();
+            let last = LAST_CAPTURE_WARNING.get_or_init(|| std::sync::Mutex::new(None));
+            let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+            if last.map_or(true, |t| t.elapsed() >= Duration::from_secs(10)) {
+                tracing::warn!("[video] captura de tela falhou: {e}");
+                *last = Some(std::time::Instant::now());
+            }
             return None;
         }
     };
@@ -524,4 +559,18 @@ pub fn jpeg_encode(rgb: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     )
     .map_err(|e| format!("JPEG falhou: {e}"))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encoded_caps, VideoCodec};
+
+    #[test]
+    fn encoder_exposes_compressed_frames_for_the_webrtc_packetizer() {
+        assert_eq!(encoded_caps(VideoCodec::Vp8), "video/x-vp8");
+        assert_eq!(
+            encoded_caps(VideoCodec::H264),
+            "video/x-h264,stream-format=byte-stream,alignment=au"
+        );
+    }
 }

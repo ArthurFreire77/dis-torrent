@@ -79,7 +79,7 @@ export function EmojiPicker({
     try { localStorage.setItem('forge:emoji:recent', JSON.stringify(next)) } catch { /* quota */ }
   }
 
-  const shown = results ? [{ id: 'busca', label: 'Resultados', icon: '🔍', emojis: results }] : groups
+  const shown = results ? [{ id: 'busca', label: 'Resultados', icon: '', emojis: results }] : groups
   const activeTab = results ? 'busca' : tab
 
   return (
@@ -117,9 +117,10 @@ export function EmojiPicker({
             aria-label={g.label}
             style={{
               background: activeTab === g.id ? DARK.hover : 'transparent', border: 'none', cursor: 'pointer',
-              fontSize: 15, padding: '4px 6px', borderRadius: 6, flexShrink: 0,
+              color: activeTab === g.id ? DARK.heading : DARK.muted, padding: '5px 7px', borderRadius: 6, flexShrink: 0,
+              display: 'flex', alignItems: 'center',
             }}
-          >{g.icon}</button>
+          >{g.id === 'busca' ? <Icon d={Icons.search} size={15} /> : <span style={{ fontSize: 15, lineHeight: 1 }}>{g.icon}</span>}</button>
         ))}
       </div>
 

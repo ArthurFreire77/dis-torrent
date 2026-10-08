@@ -454,6 +454,10 @@ async fn e2e_two_users_via_proxy_full_journey() {
     .await;
 
     // ---------- 12) reinício do app de Bruna: identidade estável ----------
+    // Solta listeners, conexões e tarefas do engine anterior antes de abrir a
+    // mesma identidade de novo. `Drop` do Arc não encerra o engine enquanto
+    // suas tarefas ainda o mantêm vivo.
+    bruna.shutdown();
     drop(bruna);
     sleep(Duration::from_millis(300)).await;
     // MESMA chave + MESMO banco = mesma identidade, fingerprint NUNCA muda

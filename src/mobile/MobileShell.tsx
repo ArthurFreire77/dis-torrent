@@ -22,8 +22,12 @@ import { activeToken } from '../shared/markdown'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { useSocialWindow, useMessageActions, usePresence, PRESENCE_COLOR, PRESENCE_LABEL, useReadState } from '../app/useSocial'
 import { BookmarksPanel } from '../components/social/Social'
+import { shouldNotify, usePrefs } from '../shared/prefs'
+import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
+import { NotificationSettings } from '../components/prefs/NotificationSettings'
+import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
-import type { Conversation, Identity, MessageStatus, NetworkState, CommunityView, PrivacyMode, StoredMessage } from '../services/models'
+import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 
 // DisTorrent mobile — top design mobile-first (não clone do PC antigo)
@@ -72,22 +76,6 @@ const stateLabel: Record<NetworkState, string> = {
 }
 
 type Tab = 'home' | 'servers' | 'chats' | 'friends' | 'profile'
-
-function statusGlyph(s: MessageStatus) {
-  if (s === 'delivered') return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={t.green} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12l5 5L17 7"/><path d="M9 12l5 5L24 7" transform="translate(-3,0) scale(0.9)"/></svg>
-  if (s === 'sent') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.muted} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12l5 5L20 7"/></svg>
-  if (s === 'sending') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.muted} strokeWidth="2.4" strokeLinecap="round"><circle cx="12" cy="12" r="9" strokeDasharray="40 16"/></svg>
-  if (s === 'pending') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.yellow} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-  if (s === 'failed') return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.red} strokeWidth="2.4" strokeLinecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5 M12 16h.01"/></svg>
-  return null
-}
-function statusText(s: MessageStatus): string {
-  if (s === 'pending') return 'pendente'
-  if (s === 'sending') return 'enviando'
-  if (s === 'sent') return 'enviado'
-  if (s === 'delivered') return 'entregue'
-  return ''
-}
 
 function avatarColor(fp: string): string {
   const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
@@ -182,11 +170,9 @@ const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove }: {
 // e o lookup no swarm acontecem 1x por mensagem no useMemo pai (antes: a cada
 // tecla digitada no composer e a cada chunk recebido).
 /** Card de arquivo (swarm): usado pela linha de mensagem e pelo preview. */
-export function FileCard({ m, mine, authorName, authorFp, fmeta, pct, done, announced, previewUrl, onDownload, onRetry }: {
+export function FileCard({ m, mine, fmeta, pct, done, announced, previewUrl, onDownload, onRetry }: {
   m: StoredMessage
   mine: boolean
-  authorName: string
-  authorFp: string
   fmeta: FileMsgMeta
   pct: number
   done: boolean
@@ -225,56 +211,6 @@ export function FileCard({ m, mine, authorName, authorFp, fmeta, pct, done, anno
   )
 }
 
-const MessageItem = memo(function MessageItem({ m, mine, authorName, authorFp, fmeta, pct, done, announced, previewUrl, onDownload, onRetry }: {
-  m: StoredMessage
-  mine: boolean
-  authorName: string
-  authorFp: string
-  fmeta: FileMsgMeta | null
-  pct: number
-  done: boolean
-  announced: boolean
-  previewUrl?: string
-  onDownload: (fileId: string) => void
-  onRetry: (m: StoredMessage) => void
-}) {
-  if (fmeta) {
-    return (
-      <div style={{ display: 'flex', gap: 12, padding: '6px 4px' }}>
-        <Avatar name={authorName} fp={authorFp} size={36} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 700, fontSize: 14, color: t.heading }}>{authorName}</span>
-            <span style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{authorFp.slice(0, 12)}</span>
-            <span style={{ fontSize: 11, color: t.muted }}>{fmtTime(m.ts)}</span>
-          </div>
-          <FileCard m={m} mine={mine} authorName={authorName} authorFp={authorFp} fmeta={fmeta} pct={pct} done={done} announced={announced} previewUrl={previewUrl} onDownload={onDownload} onRetry={onRetry} />
-        </div>
-      </div>
-    )
-  }
-  return (
-    <div style={{ display: 'flex', gap: 12, padding: '6px 4px' }}>
-      <Avatar name={authorName} fp={authorFp} size={36} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-          <span style={{ fontWeight: 700, fontSize: 14, color: t.heading }}>{authorName}</span>
-          <span style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{authorFp.slice(0, 12)}</span>
-          <span style={{ fontSize: 11, color: t.muted }}>{fmtTime(m.ts)}</span>
-          {mine && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }} title={m.status}>
-              {statusGlyph(m.status)}
-              <span style={{ fontSize: 10, color: t.muted, textTransform: 'uppercase' }}>{statusText(m.status)}</span>
-            </span>
-          )}
-        </div>
-        <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, color: t.text, marginTop: 2, overflowWrap: 'anywhere' }}>{m.body}</div>
-        {mine && m.status === 'failed' && (<button onClick={() => onRetry(m)} style={{ marginTop: 6, background: 'transparent', border: `1px solid ${t.red}`, color: '#ff9c9c', padding: '6px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>Tentar novamente</button>)}
-      </div>
-    </div>
-  )
-})
-
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
@@ -296,12 +232,26 @@ function EmptyBlock({ msg, sub }: { msg: string; sub?: any }) {
 // ---------- telas de conta (estilo desktop) ----------
 
 function AuthCard({ children }: { children: any }) {
+  const perks = [
+    { icon: Icons.lock, title: 'Cifrado', desc: 'fim-a-fim' },
+    { icon: Icons.users, title: 'Sem servidor', desc: 'P2P direto' },
+    { icon: Icons.key, title: 'Sua chave', desc: 'sem conta' },
+  ]
   return (
-    <div style={{ height: '100dvh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: 'Inter' }}>
-      <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 28, width: '100%', maxWidth: 380, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
-        <div style={{ textAlign: 'center', marginBottom: 16 }}>
+    <div style={{ minHeight: '100dvh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: 'Inter' }}>
+      <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 24, width: '100%', maxWidth: 380, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
+        <div style={{ textAlign: 'center', marginBottom: 12 }}>
           <span style={{ fontSize: 24, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
-          <div style={{ fontSize: 11, color: t.muted, marginTop: 4 }}>comunicação P2P — sem servidor, sem cadastro online</div>
+          <div style={{ fontSize: 12, color: t.muted, marginTop: 4 }}>chat, voz e arquivos P2P — sem cadastro</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          {perks.map(p => (
+            <div key={p.title} style={{ flex: 1, background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '8px 4px', textAlign: 'center' }}>
+              <span style={{ color: t.accent, display: 'inline-flex' }}><Icon d={p.icon} size={16} /></span>
+              <div style={{ fontSize: 11, fontWeight: 800, color: t.heading, marginTop: 4 }}>{p.title}</div>
+              <div style={{ fontSize: 10, color: t.muted }}>{p.desc}</div>
+            </div>
+          ))}
         </div>
         {children}
       </div>
@@ -477,6 +427,7 @@ const mobileCss = `
 // ---------- app principal ----------
 
 export default function MobileShell() {
+  const prefs = usePrefs()
   const [phase, setPhase] = useState<'loading' | 'create' | 'lock' | 'app'>('loading')
   const { identity, setIdentity } = useIdentityBase()
   const { status, peers } = useNetwork(4000)
@@ -486,6 +437,18 @@ export default function MobileShell() {
   const { conversations, refresh: refreshConvos } = useConversations(phase === 'app')
   const { messages, append, patchStatus, replaceOptimistic, failOptimistic } = useMessages(selConv)
   const [input, setInput] = useState('')
+  const draftKey = (c: string) => `forge:draft:${c}`
+  useEffect(() => {
+    if (!selConv) return
+    try { setInput(localStorage.getItem(draftKey(selConv)) ?? '') } catch { setInput('') }
+  }, [selConv])
+  useEffect(() => {
+    if (!selConv) return
+    try {
+      if (input) localStorage.setItem(draftKey(selConv), input)
+      else localStorage.removeItem(draftKey(selConv))
+    } catch { /* quota cheia: rascunho fica só na sessão */ }
+  }, [input, selConv])
   const [communities, setCommunities] = useState<CommunityView[]>([])
   const [selCommunity, setSelCommunity] = useState<string | null>(null)
   const [showDrawer, setShowDrawer] = useState(false)
@@ -520,11 +483,7 @@ export default function MobileShell() {
   const [showSearch, setShowSearch] = useState(false)
   const [showPins, setShowPins] = useState(false)
   const [showBookmarks, setShowBookmarks] = useState(false)
-  // Criar servidor no mobile (paridade com o wizard do desktop).
-  const [showNewServer, setShowNewServer] = useState(false)
-  const [newServerName, setNewServerName] = useState('')
-  const [newServerChannel, setNewServerChannel] = useState('geral')
-  const [newServerBusy, setNewServerBusy] = useState(false)
+  // Mobile é invite-only: criar servidor só no desktop.
   const [showThread, setShowThread] = useState(false)
   const [threadMsgs, setThreadMsgs] = useState<StoredMessage[]>([])
   const [threadInput, setThreadInput] = useState('')
@@ -817,7 +776,14 @@ export default function MobileShell() {
   }, [messages, identity])
   useEngineEvents(ev => {
     // mensagem em QUALQUER conversa atualiza a lista (DM nova aparecia só após restart)
-    if (ev.type === 'message_new') { if (ev.conv_id === selConv) append(ev); refreshConvos(); sfxMessage() }
+    if (ev.type === 'message_new') {
+      const mentioned = !!identity && typeof (ev as unknown as { body?: unknown }).body === 'string'
+        && (ev as unknown as { body: string }).body.includes(identity.fingerprint)
+      const notify = shouldNotify(ev.conv_id, undefined, mentioned)
+      if (ev.conv_id === selConv) append(ev)
+      refreshConvos()
+      if (notify) sfxMessage()
+    }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
     // "digitando…" — o desktop já mostrava; no mobile faltava (lacuna auditada).
     if (ev.type === 'typing') {
@@ -1367,7 +1333,7 @@ export default function MobileShell() {
     const renderFile = fmeta
       ? (msg: StoredMessage) => (
           <FileCard
-            m={msg} authorName={authorName} authorFp={authorFp} mine={mine}
+            m={msg} mine={mine}
             fmeta={fmeta} pct={pct} done={done} announced={announced}
             previewUrl={previews[fmeta.file_id]} onDownload={downloadFile} onRetry={resendMessage}
           />
@@ -1399,6 +1365,7 @@ export default function MobileShell() {
         isBot={!!m.bot_id}
         botName={m.bot_id ? (bots.find((b) => b.id === m.bot_id)?.name ?? undefined) : undefined}
         renderFile={renderFile}
+        fontSize={15 * prefs.fontScale}
         onJumpToReply={(id) => {
           const el = document.getElementById(`mmsg-${id}`)
           if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); setFlash(id) }
@@ -1739,15 +1706,11 @@ export default function MobileShell() {
             <div onClick={() => setTopMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 150, background: 'rgba(0,0,0,.4)' }}>
               <div onClick={(e) => e.stopPropagation()} style={{ position: 'absolute', top: 52, right: 8, background: t.panel, border: `1px solid ${t.border}`, borderRadius: 10, padding: 6, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 190, boxShadow: '0 8px 24px rgba(0,0,0,.5)' }}>
                 {[
-                  { id: 'search', label: '🔍  Buscar mensagens' },
-                  { id: 'pins', label: `📌  Fixadas (${pinnedMsgs.length})` },
-                  // O contador vem no rótulo: o badge vivia num botão da barra
-                  // que foi removido, e umatransferência de arquivo em curso
-                  // sem nenhum sinal visível é a forma rápida de achar que a
-                  // rede travou.
-                  { id: 'downloads', label: dlCount > 0 ? `⬇️  Downloads (${dlCount})` : '⬇️  Downloads' },
-                  ...(isChannel ? [{ id: 'members', label: '👥  Membros do canal' }] : []),
-                  { id: 'status', label: '💬  Meu status' },
+                  { id: 'search', label: 'Buscar mensagens', icon: Icons.search },
+                  { id: 'pins', label: `Fixadas (${pinnedMsgs.length})`, icon: Icons.pin },
+                  { id: 'downloads', label: dlCount > 0 ? `Downloads (${dlCount})` : 'Downloads', icon: Icons.download },
+                  ...(isChannel ? [{ id: 'members', label: 'Membros do canal', icon: Icons.users }] : []),
+                  { id: 'status', label: 'Meu status', icon: Icons.smile },
                 ].map((it) => (
                   <button
                     key={it.id}
@@ -1759,8 +1722,8 @@ export default function MobileShell() {
                       else if (it.id === 'members') setShowMembers(true)
                       else if (it.id === 'status') setProfilePeer({ fp: myFp, name: identity?.nickname ?? 'você' })
                     }}
-                    style={{ background: 'transparent', border: 'none', color: t.text, textAlign: 'left', padding: '9px 10px', borderRadius: 6, fontSize: 13, cursor: 'pointer' }}
-                  >{it.label}</button>
+                    style={{ display: 'flex', alignItems: 'center', gap: 9, background: 'transparent', border: 'none', color: t.text, textAlign: 'left', padding: '9px 10px', borderRadius: 6, fontSize: 13, cursor: 'pointer' }}
+                  ><span style={{ color: t.muted, display: 'flex' }}><Icon d={it.icon} size={15} /></span>{it.label}</button>
                 ))}
               </div>
             </div>
@@ -1895,7 +1858,7 @@ export default function MobileShell() {
             onClick={() => setShowPins(true)}
             style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: t.input, border: 'none', borderBottom: `1px solid ${t.border}`, padding: '6px 12px', cursor: 'pointer', flexShrink: 0 }}
           >
-            <span style={{ color: t.muted, display: 'flex', flexShrink: 0 }}>📌</span>
+            <span style={{ color: t.muted, display: 'flex', flexShrink: 0 }}><Icon d={Icons.pin} size={13} /></span>
             <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: t.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               <b style={{ color: t.text }}>{pinnedMsgs[0].author}</b>: {pinnedMsgs[0].body}
               {pinnedMsgs.length > 1 && <span style={{ marginLeft: 6 }}>+{pinnedMsgs.length - 1}</span>}
@@ -2128,16 +2091,18 @@ export default function MobileShell() {
 
         {tab === 'servers' && <>
           <div className="m-sec">SERVIDORES — {filteredComms.length}</div>
-          {/* Paridade com o desktop: no PC existe "criar servidor" (wizard com
-              nome/canais/cargos/regras). No mobile faltava entirely — só dava
-              para entrar por convite. */}
+          {/* Mobile é invite-only. */}
           <button
-            onClick={() => { setNewServerName(''); setNewServerChannel('geral'); setShowNewServer(true) }}
+            onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}
+            aria-label="Entrar em servidor com convite"
             style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: t.input, border: `1px solid ${t.border}`, color: t.text, borderRadius: 8, padding: '9px 12px', marginBottom: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
           >
             <span style={{ width: 22, height: 22, borderRadius: '50%', background: t.accent, color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>+</span>
-            Criar servidor
+            Entrar com convite
           </button>
+          <div style={{ fontSize: 11, color: t.muted, marginBottom: 8, lineHeight: 1.5 }}>
+            No celular você entra por convite. Para criar um servidor, use o app no PC.
+          </div>
           {filteredComms.length === 0
             ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button></span>} />
             : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
@@ -2314,6 +2279,22 @@ export default function MobileShell() {
               <div style={{ fontSize: 11, color: t.muted, marginTop: 8, lineHeight: 1.5 }}>Formato <span className="m-fp">turn:host:porta</span> • salvo em <span className="m-fp">forge:turn_url</span>.</div>
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>MICROFONE</div>
+              <VoiceDeviceSettings T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} />
+            </div>
+            <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>NOTIFICAÇÕES</div>
+              <NotificationSettings
+                servers={communities.map(c => ({ id: c.id, name: c.name }))}
+                channelsOf={(sid) => (communities.find(c => c.id === sid)?.channels ?? []).map(([id, name]) => ({ id, name }))}
+                T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted}
+              />
+            </div>
+            <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>APARÊNCIA</div>
+              <AppearanceSettings T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} hideTheme />
+            </div>
+            <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>COFRE &amp; BACKUP</div>
               <StormVaultPanel />
             </div>
@@ -2426,48 +2407,7 @@ export default function MobileShell() {
       )}
 
       {/* modal de convite público — token pré-preenchido via ?invite=TOKEN */}
-      {/* Criar servidor — paridade com o wizard do desktop (nome + canais). */}
-      {showNewServer && (
-        <div className="m-overlay" onClick={() => !newServerBusy && setShowNewServer(false)}>
-          <div className="m-modal" onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <h3 style={{ fontWeight: 800, color: t.heading, margin: 0, flex: 1, fontSize: 18 }}>Criar servidor</h3>
-              <button aria-label="Fechar" onClick={() => setShowNewServer(false)} style={{ background: 'transparent', border: 'none', color: t.muted, cursor: 'pointer', fontSize: 16 }}>x</button>
-            </div>
-            <div style={{ fontSize: 12, color: t.muted, lineHeight: 1.5 }}>O servidor é seu e dos seus amigos. Comece com um canal de texto.</div>
-            <div style={{ marginTop: 14 }}>
-              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: t.muted, marginBottom: 5 }}>NOME DO SERVIDOR</div>
-              <input className="m-input" value={newServerName} onChange={e => setNewServerName(e.target.value)} placeholder="Ex.: Grupo do jogo" maxLength={48} />
-            </div>
-            <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: t.muted, marginBottom: 5 }}>PRIMEIRO CANAL</div>
-              <input className="m-input" value={newServerChannel} onChange={e => setNewServerChannel(e.target.value)} placeholder="geral" maxLength={32} />
-              <div style={{ fontSize: 10, color: t.muted, marginTop: 4 }}>Use vírgulas para vários: geral, random, memes</div>
-            </div>
-            {error && <div className="m-err" style={{ marginTop: 10 }}>{error}</div>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-              <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => setShowNewServer(false)}>Cancelar</button>
-              <button
-                className="m-btn" style={{ flex: 1, opacity: !newServerName.trim() || newServerBusy ? 0.5 : 1 }}
-                disabled={!newServerName.trim() || newServerBusy}
-                onClick={async () => {
-                  const name = newServerName.trim()
-                  const chans = newServerChannel.split(',').map(c => c.trim().replace(/^#/, '')).filter(Boolean)
-                  if (!name || !chans.length) return
-                  setNewServerBusy(true); setError(null)
-                  try {
-                    const id = await services.createCommunity(name, chans)
-                    setShowNewServer(false); setNewServerName(''); setNewServerChannel('geral')
-                    await refreshCommunities()
-                    setSelCommunity(id)
-                    setTab('servers')
-                  } catch (e: any) { setError(String(e?.message ?? e)) } finally { setNewServerBusy(false) }
-                }}
-              >{newServerBusy ? 'criando…' : 'Criar'}</button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* SEM modal de criação no mobile: invite-only por decisão de UX. */}
 
       {showInvite && (
         <div className="m-overlay" onClick={() => setShowInvite(false)}>

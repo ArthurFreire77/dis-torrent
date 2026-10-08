@@ -89,17 +89,19 @@ export interface MobileMessageProps {
   botName?: string
   highlighted?: boolean
   renderFile?: (m: StoredMessage) => React.ReactNode
+  fontSize?: number
 }
 
-type SheetAction = { id: string; label: string; icon?: string; danger?: boolean }
+  type SheetAction = { id: string; label: string; icon?: string; svg?: string; danger?: boolean }
 
 const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   const {
     m, mine, authorName, authorFp, authorAvatar, authorAccent, body, meta, reactions, grouped, ctx,
     replyTo, onJumpToReply, onReact, onEdit, onDelete, onPin, onReply, onCopy,
     onReport, onForward, onOpenThread, onOpenProfile, isBot, botName, highlighted,
-    renderFile, resolveName,
+    renderFile, resolveName, fontSize,
   } = props
+  const fs = fontSize && fontSize > 0 ? fontSize : 15
 
   const [whoEmoji, setWhoEmoji] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -137,15 +139,15 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   }
 
   const actions: SheetAction[] = [
-    ...QUICK_REACTIONS.slice(0, 4).map((e) => ({ id: `react:${e}`, label: e, icon: e })),
-    { id: 'react-more', label: 'Mais reações', icon: '➕' },
-    { id: 'reply', label: 'Responder', icon: '↩️' },
-    ...(mine ? [{ id: 'edit', label: 'Editar', icon: '✏️' }] : []),
-    { id: 'copy', label: 'Copiar texto', icon: '📋' },
-    { id: 'pin', label: meta?.pinned ? 'Desafixar' : 'Fixar mensagem', icon: '📌' },
-    { id: 'forward', label: 'Encaminhar', icon: '↪️' },
-    ...(mine ? [] : [{ id: 'report', label: 'Denunciar', icon: '⚠️', danger: true }]),
-    { id: 'delete', label: 'Apagar', icon: '🗑️', danger: true },
+    ...QUICK_REACTIONS.slice(0, 4).map((e) => ({ id: `react:${e}`, label: e })),
+    { id: 'react-more', label: 'Mais reações', svg: Icons.smile },
+    { id: 'reply', label: 'Responder', svg: Icons.send },
+    ...(mine ? [{ id: 'edit', label: 'Editar', svg: Icons.edit }] : []),
+    { id: 'copy', label: 'Copiar texto', svg: Icons.copy },
+    { id: 'pin', label: meta?.pinned ? 'Desafixar' : 'Fixar mensagem', svg: Icons.pin },
+    { id: 'forward', label: 'Encaminhar', svg: Icons.externalLink },
+    ...(mine ? [] : [{ id: 'report', label: 'Denunciar', svg: Icons.warn, danger: true }]),
+    { id: 'delete', label: 'Apagar', svg: Icons.trash, danger: true },
   ]
 
   const runAction = (id: string) => {
@@ -184,7 +186,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
               onClick={() => onOpenProfile?.(authorFp)}
               style={{ background: 'transparent', border: 'none', padding: 0, cursor: onOpenProfile ? 'pointer' : 'default' }}
             >
-              <span style={{ fontWeight: 700, fontSize: 14, color: isBot ? T.accent : (authorAccent || T.heading) }}>{botName ?? authorName}</span>
+              <span style={{ fontWeight: 700, fontSize: Math.round(fs * 0.93), color: isBot ? T.accent : (authorAccent || T.heading) }}>{botName ?? authorName}</span>
             </button>
             {isBot && <span style={{ fontSize: 9, background: T.accent, color: '#fff', padding: '1px 4px', borderRadius: 4, fontWeight: 800 }}>BOT</span>}
             <span style={{ fontSize: 10, color: T.muted, fontFamily: MONO }}>{authorFp.slice(0, 8)}</span>
@@ -244,7 +246,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
           renderFile!(m)
         ) : (
           <div onDoubleClick={() => { if (mine) onReply() }}>
-            <RichText body={body} ctx={ctx} color={T.text} fontSize={15} />
+            <RichText body={body} ctx={ctx} color={T.text} fontSize={fs} />
             {edited && <span style={{ fontSize: 10, color: T.muted, marginLeft: 4 }} title={new Date(meta!.edited_at).toLocaleString()}>(editado)</span>}
           </div>
         )}
@@ -370,7 +372,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
                     color: a.danger ? '#ff9c9c' : T.text, border: `1px solid ${T.border}`,
                     borderRadius: 8, padding: '9px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
                   }}
-                ><span>{a.icon}</span>{a.label}</button>
+                >{a.svg ? <span style={{ display: 'flex', color: a.danger ? '#ff9c9c' : T.muted }}><Icon d={a.svg} size={14} /></span> : (a.icon ? <span>{a.icon}</span> : null)}{a.label}</button>
               ))}
             </div>
             <button onClick={() => setSheet(false)} style={{ width: '100%', marginTop: 8, background: 'transparent', color: T.muted, border: 'none', padding: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>cancelar</button>

@@ -2354,7 +2354,6 @@ export class CallManager {
     const MR: any = typeof MediaRecorder !== 'undefined' ? MediaRecorder : null
     if (!MR) throw new Error('MediaRecorder indisponível')
     // Prefere os tracks de áudio já capturados (sem pedir mic 2x); senão pede mic dedicado.
-    // eslint-disable-next-line no-useless-assignment
     let stream: MediaStream | null = null
     try {
       const audioTracks = this.localStream?.getAudioTracks().filter(t => t.readyState === 'live') ?? []
@@ -2785,24 +2784,25 @@ export class CallManager {
         try {
           const s = await services.voiceMediaStats(st.callId).catch(() => null)
           if (s) { try { this.lastNativeStats = s } catch { /* ignore */ } }
-          const io = s ? `out=${s.packets_out ?? 0} in=${s.packets_in ?? 0} plc=${s.plc_frames ?? 0} err=${s.decode_errors ?? 0}` : null
+          const audioIo = s ? `audio out=${s.packets_out ?? 0} in=${s.packets_in ?? 0} plc=${s.plc_frames ?? 0}` : null
+          const videoIo = s ? `vídeo RTP in=${s.video_packets_in ?? 0} frames in=${s.frames_in ?? 0} out=${s.frames_out ?? 0}` : null
           out.push({
             fp: 'nativa (Rust)',
             connectionState: s ? s.state : 'desconhecida',
             iceConnectionState: s ? s.state : 'desconhecida',
             signalingState: 'estável (core)',
             localType: null, remoteType: null,
-            selectedPair: s ? `rota ${s.route} • ${io}` : null,
+            selectedPair: s ? `rota ${s.route} • ${audioIo} • ${videoIo}` : null,
             rttMs: s?.rtt_ms ?? null,
             audioBitrateKbps: null, videoBitrateKbps: null,
             resolution: null, fps: null,
-            framesReceived: s ? Number(s.packets_in ?? 0) : null,
-            framesLost: s ? Number(s.plc_frames ?? 0) : null,
+            framesReceived: s?.frames_in ?? null,
+            framesLost: null,
             packetsLost: s ? Number(s.plc_frames ?? 0) : null,
             packetLossPct: null,
-            codec: 'Opus (nativo)',
+            codec: s?.video_codec ? `Opus + ${s.video_codec}` : 'Opus (nativo)',
             jitterMs: s ? s.jitter_depth_ms : null,
-            camera: 'n/d (nativa)',
+            camera: s?.video_source === 'camera' && s.video_state === 'live' ? 'capturando' : 'n/d (nativa)',
             microphone: s ? ((s.packets_out ?? 0) > 0 ? 'enviando' : 'sem saída ainda') : 'n/d (nativa)',
           })
         } catch { /* ignore */ }
@@ -2961,11 +2961,9 @@ export class CallManager {
         this.onCallNotice?.(lastErr ? `vídeo nativo falhou: ${lastErr}` : 'vídeo nativo falhou')
         throw new Error(lastErr ? `não foi possível ligar o vídeo nativo: ${lastErr}` : 'não foi possível ligar o vídeo nativo')
       }
-      if (source === 'camera') st.cameraOn = true
-      else {
-        st.sharing = true
-        this.broadcastScreenSignal(true)
-      }
+      // O comando aceito só confirma que o pipeline começou. A UI e o sinal
+      // remoto esperam o monitor observar o primeiro frame enviado (video_state
+      // = live), para não anunciar uma câmera/tela preta como ativa.
     } else {
       for (const p of targets) {
         try { await services.voiceVideoStop(st.callId, p.fp) } catch { /* par best-effort */ }
@@ -3820,16 +3818,31 @@ export class CallManager {
           const verr = (s as any).video_error as string | null | undefined
           const cur = this.state
           if (cur && vs) {
-            if (vs === 'live' || vs === 'starting') {
+            if (vs === 'live') {
               if (vsrc === 'camera' && !cur.cameraOn) { cur.cameraOn = true; this.onUpdate({ ...cur }) }
-              if (vsrc === 'screen' && !cur.sharing) { cur.sharing = true; this.onUpdate({ ...cur }) }
+              if (vsrc === 'screen' && !cur.sharing) {
+                cur.sharing = true
+                this.broadcastScreenSignal(true)
+                this.onUpdate({ ...cur })
+              }
+            } else if (vs === 'starting') {
+              // Mantém os controles desligados até o core escrever o primeiro
+              // frame codificado no sender; pipeline aberto não prova mídia.
             } else if (vs === 'failed') {
               if (verr) { this.onCallNotice?.(verr); this.setFailureCause(verr) }
               if (vsrc === 'camera') { cur.cameraOn = false; this.onUpdate({ ...cur }) }
-              if (vsrc === 'screen') { cur.sharing = false; this.onUpdate({ ...cur }) }
+              if (vsrc === 'screen' && cur.sharing) {
+                cur.sharing = false
+                this.broadcastScreenSignal(false)
+                this.onUpdate({ ...cur })
+              }
             } else if (vs === 'off') {
               if (vsrc === 'camera' && cur.cameraOn) { cur.cameraOn = false; this.onUpdate({ ...cur }) }
-              if (vsrc === 'screen' && cur.sharing) { cur.sharing = false; this.onUpdate({ ...cur }) }
+              if (vsrc === 'screen' && cur.sharing) {
+                cur.sharing = false
+                this.broadcastScreenSignal(false)
+                this.onUpdate({ ...cur })
+              }
             }
           }
         } catch { /* estado de vídeo nunca derruba a chamada */ }

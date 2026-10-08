@@ -33,11 +33,9 @@ import type {
   ThreadView,
   BanView,
   PollView,
-  PollTally,
   EventView,
   EmojiView,
   ReadCursor,
-  SearchQuery,
   SearchHit,
 } from './models'
 

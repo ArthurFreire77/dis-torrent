@@ -5,6 +5,24 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { services } from '../../services'
 import { Markdown } from '../../shared/markdown'
+import { compressAvatar, compressBanner } from '../../shared/avatar'
+import { Ic, type IconName } from '../../shared/icons'
+import { getNote, setNote } from '../../shared/prefs'
+
+const STATUS_ICONS: { id: string; icon: IconName; label: string }[] = [
+  { id: 'game', icon: 'grid', label: 'Jogando' },
+  { id: 'code', icon: 'terminal', label: 'Codando' },
+  { id: 'music', icon: 'headphones', label: 'Ouvindo música' },
+  { id: 'study', icon: 'file', label: 'Estudando' },
+  { id: 'live', icon: 'video', label: 'Em chamada' },
+  { id: 'chat', icon: 'smile', label: 'Conversando' },
+  { id: 'work', icon: 'monitor', label: 'Trabalhando' },
+  { id: 'hype', icon: 'sparkle', label: 'Hype' },
+]
+
+function statusIconName(id: string): IconName | null {
+  return STATUS_ICONS.find(s => s.id === id)?.icon ?? null
+}
 import type {
   BanView,
   ChannelMeta,
@@ -114,10 +132,22 @@ export function RichText({
       return next
     })
   }, [])
-  // Este é o MESMO parser do mobile (shared/markdown) — havia uma segunda
-  // implementação só aqui, que renderizava o conteúdo de um bloco ``` duas
-  // vezes (o forEach do scanner não sabia que o for interno já consumiu as
-  // linhas). Um parser só, mesmo comportamento nos dois shells.
+  const q = (highlight ?? '').trim()
+  if (q && !/[*_~`>|]/.test(body)) {
+    const lower = body.toLowerCase()
+    const needle = q.toLowerCase()
+    const parts: React.ReactNode[] = []
+    let i = 0
+    let k = 0
+    for (;;) {
+      const at = lower.indexOf(needle, i)
+      if (at < 0) { parts.push(body.slice(i)); break }
+      if (at > i) parts.push(body.slice(i, at))
+      parts.push(<mark key={k++}>{body.slice(at, at + q.length)}</mark>)
+      i = at + q.length
+    }
+    return <span style={{ fontSize: 14, lineHeight: 1.375, color: T.text, wordBreak: 'break-word' }}>{parts}</span>
+  }
   return (
     <Markdown
       body={body}
@@ -279,8 +309,8 @@ export function ReactionBar({ reactions, onToggle, onHoverList, resolveName }: {
       {reactions.map((r) => (
         <div key={r.emoji} style={{ position: 'relative' }}>
           <button
-            onClick={() => { setWho(w => w?.emoji === r.emoji ? null : { emoji: r.emoji, r }); onHoverList?.(r) }}
-            onMouseEnter={() => onHoverList?.(r)}
+            onClick={() => onToggle(r.emoji)}
+            onMouseEnter={() => { setWho({ emoji: r.emoji, r }); onHoverList?.(r) }}
             title={`${r.count} · ${r.reactors.join(', ')}`}
             aria-label={`${r.emoji}, ${r.count} reações. Ver quem reagiu`}
             style={{
@@ -393,6 +423,30 @@ export const inputStyle: React.CSSProperties = {
   padding: '9px 11px', color: T.text, fontSize: 13, outline: 'none', fontFamily: 'inherit',
 }
 
+const secHead: React.CSSProperties = { fontSize: 10, fontWeight: 800, letterSpacing: 1, color: T.muted, margin: '12px 0 4px' }
+
+export function ProfileNote({ fp }: { fp: string }) {
+  const [val, setVal] = useState(() => getNote(fp))
+  const [saved, setSaved] = useState(false)
+  return (
+    <div>
+      <div style={secHead}>ANOTAÇÃO · SÓ VOCÊ VÊ</div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input
+          value={val}
+          onChange={e => { setVal(e.target.value); setSaved(false) }}
+          onBlur={() => { setNote(fp, val); if (val.trim()) setSaved(true) }}
+          maxLength={500}
+          placeholder="Ex.: conheci no grupo de Rust"
+          aria-label="Anotação privada sobre este usuário"
+          style={inputStyle}
+        />
+      </div>
+      {saved && <div style={{ fontSize: 11, color: T.green, marginTop: 4 }}>Salva neste aparelho.</div>}
+    </div>
+  )
+}
+
 export const btnPrimary: React.CSSProperties = {
   background: T.accent, color: '#fff', border: 'none', padding: '9px 18px',
   borderRadius: 6, cursor: 'pointer', fontWeight: 800, fontSize: 13,
@@ -414,7 +468,6 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   myFp: string
   onClose: () => void
   onMessage?: (fp: string) => void
-  /** Se informado, habilita o apelido por servidor (Discord #165). */
   communityId?: string
   communityName?: string
   onRenamed?: () => void
@@ -422,7 +475,8 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   const [profile, setProfile] = useState<ProfileView | null>(null)
   const [presence, setPresence] = useState<PresenceView | null>(null)
   const isMe = fp === myFp
-  const [editing, setEditing] = useState(isMe)
+  const [editing, setEditing] = useState(false)
+  const [tab, setTab] = useState<'sobre' | 'servidor' | 'p2p'>('sobre')
   const [displayName, setDisplayName] = useState('')
   const [about, setAbout] = useState('')
   const [accent, setAccent] = useState('#5865f2')
@@ -430,26 +484,21 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   const [banner, setBanner] = useState('')
   const [status, setStatus] = useState<PresenceStatus>('online')
   const [custom, setCustom] = useState('')
-  // Emoji do status personalizado (igual Discord): o core já difunde
-  // `custom_emoji` via presença P2P, mas a UI salvava '' e não exibia.
   const [customEmoji, setCustomEmoji] = useState('')
   const [memberSince, setMemberSince] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  // apelido por servidor: como EU apareço naquele servidor, separado do
-  // display_name global. O motor valida a permissão antes de gravar.
+  const [copied, setCopied] = useState(false)
   const canNick = !!communityId && isMe
   const [nick, setNick] = useState(nickname)
   const [nickBusy, setNickBusy] = useState(false)
 
-  // carrega o apelido REAL daquele servidor (o `nickname` recebido é o do
-  // objeto da comunidade, que pode ser de outro servidor em DM).
   useEffect(() => {
     if (!communityId) return
     let alive = true
     services.nicknameGet(communityId, fp)
       .then(n => { if (alive && n) setNick(n) })
-      .catch(() => { /* sem apelido próprio: mantém o herdado */ })
+      .catch(() => {})
     return () => { alive = false }
   }, [communityId, fp])
 
@@ -468,8 +517,6 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
         setCustomEmoji((pr as { custom_emoji?: string }).custom_emoji ?? '')
       })
       .catch(() => { if (alive) setProfile({ fp, display_name: nickname, about: '', avatar_b64: '', banner_b64: '', accent: '', updated_at: 0 }) })
-    // Membro desde: data de criação da identidade local (só faz sentido para
-    // mim — o perfil de terceiros não carrega essa data e não vou inventar).
     if (isMe) {
       services.identityGet()
         .then(id => { if (alive && id && typeof id.created_at === 'number' && id.created_at > 0) setMemberSince(id.created_at) })
@@ -478,13 +525,8 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
     return () => { alive = false }
   }, [fp, nickname])
 
-  const readImage = (f: File, max: number): Promise<string> => new Promise((res, rej) => {
-    if (f.size > max) { rej(new Error('imagem grande demais')); return }
-    const r = new FileReader()
-    r.onload = () => { const s = String(r.result); res(s.slice(s.indexOf(',') + 1)) }
-    r.onerror = () => rej(new Error('falha ao ler imagem'))
-    r.readAsDataURL(f)
-  })
+  const readAvatar = (f: File): Promise<string> => compressAvatar(f)
+  const readBanner = (f: File): Promise<string> => compressBanner(f)
 
   async function save() {
     setBusy(true); setErr(null)
@@ -492,15 +534,17 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
       const p = await services.profileSet({ display_name: displayName, about, avatar_b64: avatar, banner_b64: banner, accent })
       setProfile(p)
       await services.presenceSet(status, custom, customEmoji)
-      // Reflete na hora: sem isto o cabeçalho mantinha a presença carregada
-      // ao abrir (ex.: "Offline" após salvar como Online).
       setPresence({ fp, status, custom, custom_emoji: customEmoji, updated_at: Date.now() })
       setEditing(false)
     } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy(false) }
   }
 
-  // Pré-visualização ao vivo (igual Discord): editando, o cabeçalho mostra o
-  // rascunho em vez do salvo.
+  async function copyFp() {
+    try { await navigator.clipboard?.writeText(fp) } catch { /* clipboard indisponível */ }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1400)
+  }
+
   const previewing = editing && isMe
   const name = previewing ? (displayName || nickname || fp) : (profile?.display_name || nickname || fp)
   const shownStatus = previewing ? status : (presence?.status ?? 'offline')
@@ -509,123 +553,149 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   const shownAbout = previewing ? about : (profile?.about ?? '')
   const shownAccent = previewing ? accent : (profile?.accent || T.accent)
   const shownAvatar = previewing ? (avatar || profile?.avatar_b64) : profile?.avatar_b64
+  const bannerUrl = (previewing ? banner : (profile?.banner_b64 ?? banner))
+    ? `url(data:image/jpeg;base64,${previewing ? banner : profile?.banner_b64})`
+    : `linear-gradient(135deg, ${shownAccent} 0%, #1e1f22 130%)`
+  const tabs = [{ id: 'sobre', label: 'Sobre' }, ...(communityId ? [{ id: 'servidor', label: 'Servidor' }] : []), { id: 'p2p', label: 'P2P' }] as const
+  const activeTab = tab === 'servidor' && !communityId ? 'sobre' : tab
   return (
-    <Modal title={isMe ? 'Meu perfil' : 'Perfil'} onClose={onClose} width={560}>
-      {banner && (
-        <div style={{ margin: '-20px -20px 0', height: 130, backgroundImage: `url(data:image/png;base64,${banner})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
-      )}
-      <div style={{ display: 'flex', gap: 14, alignItems: 'flex-end', marginTop: banner ? -34 : 0, marginBottom: 16, position: 'relative' }}>
-        <div style={{ position: 'relative' }}>
-          <Avatar name={name} fp={fp} size={80} avatarB64={shownAvatar} ring={shownAccent} />
-          {presence && (
-            <span style={{ position: 'absolute', bottom: 2, right: 2 }}>
-              <PresenceDot status={shownStatus} size={20} ring={T.main} />
-            </span>
-          )}
-        </div>
-        <div style={{ flex: 1, paddingBottom: 6 }}>
-          <div style={{ fontSize: 20, fontWeight: 900, color: T.heading }}>{name}</div>
-          <div style={{ fontSize: 11, color: T.muted, fontFamily: 'JetBrains Mono' }}>{fp}</div>
-          <div style={{ fontSize: 12, color: PRESENCE_COLOR[shownStatus], marginTop: 4 }}>
-            {PRESENCE_LABEL[shownStatus]}{shownCustom ? ` — ${shownEmoji ? `${shownEmoji} ` : ''}${shownCustom}` : (shownEmoji ? ` — ${shownEmoji}` : '')}
-          </div>
-          {memberSince && (
-            <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>
-              Membro desde {new Date(memberSince).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })}
-            </div>
-          )}
-        </div>
-        {!isMe && onMessage && (
-          <button onClick={() => { onMessage(fp); onClose() }} style={{ ...btnPrimary, marginBottom: 6 }}>Mensagem</button>
+    <Modal title={isMe ? 'Meu perfil' : 'Perfil'} onClose={onClose} width={460}>
+      <div style={{ margin: '-20px -20px 0', height: 160, backgroundImage: bannerUrl, backgroundSize: 'cover', backgroundPosition: 'center', position: 'relative' }}>
+        <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(180deg, transparent 40%, rgba(0,0,0,.45))' }} />
+        {editing && isMe && (
+          <label style={{ position: 'absolute', top: 10, right: 10, background: 'rgba(0,0,0,.65)', color: '#fff', fontSize: 12, fontWeight: 700, padding: '7px 12px', borderRadius: 8, cursor: 'pointer' }}>
+            Trocar capa
+            <input type="file" accept="image/*" aria-label="Escolher banner" hidden onChange={async e => { const f = e.target.files?.[0]; if (!f) return; try { setErr(null); setBanner(await readBanner(f)) } catch (err: any) { setErr(String(err?.message ?? err)) } }} />
+          </label>
         )}
       </div>
-
-      {shownAbout && <div style={{ fontSize: 13, color: T.text, whiteSpace: 'pre-wrap', marginBottom: 16, background: T.input, borderRadius: 8, padding: '10px 12px' }}>{shownAbout}</div>}
-
-      {editing && isMe ? (
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginTop: -44, marginBottom: 4, position: 'relative' }}>
+        <div style={{ position: 'relative' }}>
+          <label style={{ display: 'block', cursor: editing && isMe ? 'pointer' : 'default' }} title={editing && isMe ? 'Trocar avatar' : undefined}>
+            <span style={{ display: 'block', borderRadius: '50%', border: '6px solid #313338', lineHeight: 0, boxShadow: `0 0 0 2px ${shownAccent}` }}>
+              <Avatar name={name} fp={fp} size={88} avatarB64={shownAvatar} />
+            </span>
+            {editing && isMe && (
+              <input type="file" accept="image/*" aria-label="Escolher avatar" hidden onChange={async e => { const f = e.target.files?.[0]; if (!f) return; try { setErr(null); setAvatar(await readAvatar(f)) } catch (err: any) { setErr(String(err?.message ?? err)) } }} />
+            )}
+          </label>
+          <span style={{ position: 'absolute', bottom: 8, right: 8 }}>
+            <PresenceDot status={shownStatus} size={22} ring="#313338" />
+          </span>
+        </div>
+        <div style={{ flex: 1, minWidth: 0, paddingBottom: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: shownAccent, flexShrink: 0 }} />
+            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: T.muted }}>PERFIL</span>
+          </div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: T.heading, lineHeight: 1.15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+          <div style={{ fontSize: 12, color: T.muted }}>@{fp.slice(0, 8)} · {PRESENCE_LABEL[shownStatus]}</div>
+        </div>
+        {editing && isMe && (
+          <input type="color" value={accent} aria-label="Cor de destaque" title="Cor de destaque" onChange={e => setAccent(e.target.value)} style={{ width: 38, height: 30, background: T.input, border: `1px solid ${T.border}`, borderRadius: 8, cursor: 'pointer', flexShrink: 0 }} />
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 800, background: 'rgba(35,165,89,.15)', color: '#57f287', border: '1px solid rgba(35,165,89,.4)', padding: '3px 8px', borderRadius: 99 }}><Ic name="check" size={12} stroke={2.4} />ed25519 verificada</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 800, background: T.input, color: PRESENCE_COLOR[shownStatus], border: `1px solid ${T.border}`, padding: '3px 8px', borderRadius: 99 }}>
+          {statusIconName(shownEmoji) ? <Ic name={statusIconName(shownEmoji)!} size={12} stroke={2} /> : null}{shownCustom || PRESENCE_LABEL[shownStatus]}</span>
+        {communityName && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 800, background: T.input, color: T.muted, border: `1px solid ${T.border}`, padding: '3px 8px', borderRadius: 99 }}><Ic name="hash" size={12} />{communityName}</span>}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        {!isMe && onMessage && (
+          <button onClick={() => { onMessage(fp); onClose() }} style={{ ...btnPrimary, flex: 1 }}>Mensagem</button>
+        )}
+        <button onClick={copyFp} style={{ ...btnGhost, flex: 1 }}>{copied ? 'Copiado!' : 'Copiar ID'}</button>
+        {isMe && !editing && (
+          <button onClick={() => setEditing(true)} style={{ ...btnPrimary, flex: 1 }}>Editar perfil</button>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 4, background: T.input, borderRadius: 8, padding: 4, marginBottom: 12 }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id as typeof tab)}
+            style={{ flex: 1, background: activeTab === t.id ? T.accent : 'transparent', color: activeTab === t.id ? '#fff' : T.muted, border: 'none', borderRadius: 6, padding: '7px 0', fontSize: 12, fontWeight: 800, cursor: 'pointer' }}>{t.label}</button>
+        ))}
+      </div>
+      {activeTab === 'sobre' && !editing && (
+        <div style={{ background: T.input, borderRadius: 10, padding: '12px 14px' }}>
+          <div style={secHead}>SOBRE MIM</div>
+          <div style={{ fontSize: 13, color: shownAbout ? T.text : T.muted, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>{shownAbout || 'Nada por aqui ainda.'}</div>
+          <div style={secHead}>MEMBRO DESDE</div>
+          <div style={{ fontSize: 13, color: T.text }}>{memberSince ? new Date(memberSince).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' }) : (isMe ? '—' : 'visível só no próprio aparelho')}</div>
+          <div style={secHead}>COR DO PERFIL</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 22, height: 22, borderRadius: 6, background: shownAccent, border: `1px solid ${T.border}` }} />
+            <span style={{ fontSize: 12, color: T.muted, fontFamily: 'JetBrains Mono' }}>{shownAccent}</span>
+          </div>
+          {!isMe && !editing && <ProfileNote fp={fp} />}
+        </div>
+      )}
+      {activeTab === 'servidor' && communityId && !editing && (
+        <div style={{ background: T.input, borderRadius: 10, padding: '12px 14px' }}>
+          <div style={secHead}>NESTE SERVIDOR{communityName ? ` — ${communityName}` : ''}</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input value={nick} onChange={e => setNick(e.target.value)} disabled={!canNick} maxLength={32}
+              placeholder={canNick ? 'Seu apelido aqui…' : 'sem permissão'} style={{ ...inputStyle, flex: 1, opacity: canNick ? 1 : 0.5 }} />
+            <button
+              onClick={async () => {
+                if (!canNick || !nick.trim()) return
+                setNickBusy(true); setErr(null)
+                try { await services.nicknameSet(communityId, fp, nick.trim()); onRenamed?.() }
+                catch (e: any) { setErr(String(e?.message ?? e)) } finally { setNickBusy(false) }
+              }}
+              disabled={!canNick || nickBusy} style={{ ...btnPrimary, opacity: canNick && !nickBusy ? 1 : 0.5 }}>{nickBusy ? '…' : 'Salvar'}</button>
+          </div>
+          <div style={{ fontSize: 11, color: T.muted, marginTop: 8, lineHeight: 1.5 }}>Apelido vale só aqui. Seu perfil global continua igual.</div>
+        </div>
+      )}
+      {activeTab === 'p2p' && !editing && (
+        <div style={{ background: T.input, borderRadius: 10, padding: '12px 14px' }}>
+          <div style={secHead}>IDENTIDADE P2P</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ flex: 1, fontSize: 11, color: T.text, fontFamily: 'JetBrains Mono', wordBreak: 'break-all', lineHeight: 1.6 }}>{fp}</span>
+            <button onClick={copyFp} style={{ ...btnGhost, padding: '6px 10px', fontSize: 11, flexShrink: 0 }}>{copied ? 'OK!' : 'Copiar'}</button>
+          </div>
+          <div style={secHead}>CONEXÃO</div>
+          <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.6 }}>
+            Rota negociada sozinha entre aparelhos (direta ou via relay quando há NAT restritivo). Conteúdo sempre cifrado fim-a-fim — relay enxerga no máximo metadados de transporte.
+          </div>
+          <div style={secHead}>SINCRONIZAÇÃO</div>
+          <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.6 }}>
+            Avatar e capa viajam comprimidos pelo swarm e ficam em cache nos peers. Sem servidor guardando nada.
+          </div>
+        </div>
+      )}
+      {editing && isMe && (
         <>
           <Field label="Nome de exibição">
-            <input value={displayName} onChange={e => setDisplayName(e.target.value)} style={inputStyle} maxLength={48} />
+            <input value={displayName} onChange={e => setDisplayName(e.target.value)} style={inputStyle} maxLength={48} placeholder="Como quer aparecer" />
           </Field>
-          <Field label="Sobre mim" hint="Máx 400 caracteres">
-            <textarea value={about} onChange={e => setAbout(e.target.value)} style={{ ...inputStyle, minHeight: 70, resize: 'vertical' }} maxLength={400} />
+          <Field label="Sobre mim" hint={`${about.length}/400`}>
+            <textarea value={about} onChange={e => setAbout(e.target.value)} style={{ ...inputStyle, minHeight: 64, resize: 'vertical' }} maxLength={400} placeholder="Conte um pouco sobre você" />
           </Field>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <Field label="Avatar">
-              <input type="file" accept="image/*" onChange={async e => { try { setAvatar(await readImage(e.target.files![0], 400_000)) } catch (err: any) { setErr(String(err.message)) } }}
-                style={{ fontSize: 11, color: T.muted, width: '100%' }} />
-            </Field>
-            <Field label="Banner">
-              <input type="file" accept="image/*" onChange={async e => { try { setBanner(await readImage(e.target.files![0], 900_000)) } catch (err: any) { setErr(String(err.message)) } }}
-                style={{ fontSize: 11, color: T.muted, width: '100%' }} />
-            </Field>
-          </div>
-          <Field label="Cor de destaque">
-            <input type="color" value={accent} onChange={e => setAccent(e.target.value)} style={{ width: 54, height: 30, background: T.input, border: `1px solid ${T.border}`, borderRadius: 6 }} />
-          </Field>
-          <Field label="Status">
+          <Field label="Presença">
             <StatusPicker value={status} onChange={setStatus} />
           </Field>
-          <Field label="Status personalizado" hint="O que você está fazendo? (até 128 caracteres)">
-            <input value={custom} onChange={e => setCustom(e.target.value)} style={inputStyle} maxLength={128} placeholder="ex.: estudando Rust 🦀" />
+          <Field label="Status personalizado" hint={`${custom.length}/128`}>
+            <input value={custom} onChange={e => setCustom(e.target.value)} style={inputStyle} maxLength={128} placeholder="O que está fazendo agora?" />
           </Field>
-          <Field label="Emoji do status" hint="Aparece antes do texto, igual no Discord">
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-              {['🎮', '💻', '🎧', '📚', '☕', '🏖️', '💤', '🔥', '🦀', '🚀'].map(e => (
-                <button key={e} type="button" onClick={() => setCustomEmoji(customEmoji === e ? '' : e)}
-                  title={e} aria-label={`Emoji ${e}`}
-                  style={{ fontSize: 20, background: customEmoji === e ? `${T.accent}33` : 'transparent', border: `1px solid ${customEmoji === e ? T.accent : T.border}`, borderRadius: 8, padding: '4px 6px', cursor: 'pointer' }}>{e}</button>
+          <Field label="Ícone do status">
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {STATUS_ICONS.map(s => (
+                <button key={s.id} type="button" onClick={() => setCustomEmoji(customEmoji === s.id ? '' : s.id)} title={s.label} aria-label={s.label} aria-pressed={customEmoji === s.id}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 38, height: 38, background: customEmoji === s.id ? `${T.accent}33` : 'transparent', border: `1px solid ${customEmoji === s.id ? T.accent : T.border}`, borderRadius: 8, color: customEmoji === s.id ? '#fff' : T.muted, cursor: 'pointer' }}><Ic name={s.icon} size={18} /></button>
               ))}
-              {customEmoji && (
-                <button type="button" onClick={() => setCustomEmoji('')} style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}>Limpar</button>
-              )}
+              {customEmoji && !statusIconName(customEmoji) && <span style={{ fontSize: 11, color: T.muted }}>Ícone antigo: {customEmoji}</span>}
+              {customEmoji && <button type="button" onClick={() => setCustomEmoji('')} style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}>Limpar</button>}
             </div>
           </Field>
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 12, lineHeight: 1.5 }}>Dica: toque na capa ou no avatar lá em cima para trocar a imagem. Tudo é comprimido no aparelho antes de ir ao P2P.</div>
           {err && <div style={{ color: '#ff9c9c', fontSize: 12, marginBottom: 10 }}>{err}</div>}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button onClick={() => setEditing(false)} style={btnGhost}>Cancelar</button>
-            <button onClick={save} disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? 'Salvando…' : 'Salvar perfil'}</button>
+            <button onClick={save} disabled={busy} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? 'Salvando…' : 'Salvar'}</button>
           </div>
         </>
-      ) : (
-        <div style={{ fontSize: 12, color: T.muted, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <span>Identidade ed25519</span><span>·</span><span>Cifrada fim-a-fim</span><span>·</span><span>Sem servidor</span>
-          {isMe && <button onClick={() => setEditing(true)} style={{ ...btnGhost, marginLeft: 'auto', padding: '6px 12px' }}>Editar perfil</button>}
-        </div>
-      )}
-
-      {/* Apelido por servidor — só faz sentido dentro de um servidor, e é
-          separado do display_name: é o nome que o DONO daquele servidor vê. */}
-      {communityId && (
-        <div style={{ borderTop: `1px solid ${T.border}`, marginTop: 16, paddingTop: 14 }}>
-          <Field
-            label={`Apelido neste servidor${communityName ? ` — ${communityName}` : ''}`}
-            hint="Como você aparece aqui. Não altera seu perfil global."
-          >
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                value={nick}
-                onChange={e => setNick(e.target.value)}
-                disabled={!canNick}
-                maxLength={32}
-                placeholder={canNick ? 'apelido…' : 'sem permissão para renomear'}
-                style={{ ...inputStyle, flex: 1, opacity: canNick ? 1 : 0.5 }}
-              />
-              <button
-                onClick={async () => {
-                  if (!canNick || !nick.trim()) return
-                  setNickBusy(true); setErr(null)
-                  try {
-                    await services.nicknameSet(communityId, fp, nick.trim())
-                    onRenamed?.()
-                  } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setNickBusy(false) }
-                }}
-                disabled={!canNick || nickBusy}
-                style={{ ...btnPrimary, opacity: canNick && !nickBusy ? 1 : 0.5 }}
-              >{nickBusy ? '…' : 'Salvar'}</button>
-            </div>
-          </Field>
-        </div>
       )}
     </Modal>
   )
@@ -661,7 +731,7 @@ export function SearchPanel({ convId, convLabel, profiles, onClose, onJump }: {
       display: 'flex', flexDirection: 'column', maxHeight: 380, boxShadow: '0 8px 24px rgba(0,0,0,.35)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 10, borderBottom: `1px solid ${T.border}` }}>
-        <span style={{ fontSize: 13, color: T.muted }}>🔍</span>
+        <span style={{ display: 'flex', color: T.muted }}><Ic name="search" size={14} /></span>
         <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder={`Buscar em ${convLabel}… (digite from:uuid, has:link)`}
           style={{ flex: 1, background: T.input, border: `1px solid ${T.border}`, borderRadius: 6, padding: '7px 10px', color: T.text, fontSize: 13, outline: 'none' }} />
         <select value={has} onChange={e => setHas(e.target.value)} style={{ background: T.input, color: T.muted, border: `1px solid ${T.border}`, borderRadius: 6, padding: '6px 8px', fontSize: 11 }}>
@@ -708,7 +778,7 @@ export function PinsPanel({ convId, messages, onClose, onJump }: {
   if (pins.length === 0) {
     return (
       <div style={{ background: T.rail, border: `1px solid ${T.border}`, borderRadius: 10, margin: '0 16px 10px', padding: 14 }}>
-        <div style={{ fontSize: 12, color: T.muted }}>📌 Nenhuma mensagem fixada ainda — passe o mouse e use 📌 no menu da mensagem.</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: T.muted }}><Ic name="pin" size={14} />Nenhuma mensagem fixada ainda — use Fixar no menu da mensagem.</div>
         <button onClick={onClose} style={{ ...btnGhost, marginTop: 8, padding: '5px 10px' }}>Fechar</button>
       </div>
     )
@@ -716,7 +786,7 @@ export function PinsPanel({ convId, messages, onClose, onJump }: {
   return (
     <div style={{ background: T.rail, border: `1px solid ${T.border}`, borderRadius: 10, margin: '0 16px 10px', overflow: 'hidden' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', borderBottom: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 12, fontWeight: 900, color: T.heading }}>📌 Mensagens fixadas ({pins.length})</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, fontWeight: 900, color: T.heading }}><Ic name="pin" size={14} />Mensagens fixadas ({pins.length})</div>
         <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: T.muted, cursor: 'pointer', fontSize: 18 }}>×</button>
       </div>
       <div style={{ maxHeight: 260, overflowY: 'auto' }}>
@@ -772,12 +842,11 @@ export function PollCard({ poll, tally, onVote, communityId, channelId }: {
 
 // ============================== THREADS ==============================
 
-export function ThreadList({ communityId, parentChannel, channels, onOpen, onCreate }: {
+export function ThreadList({ communityId, parentChannel, channels, onOpen }: {
   communityId: string
   parentChannel: string
   channels: ChannelMeta[]
   onOpen: (t: ThreadView) => void
-  onCreate: (name: string) => void
 }) {
   const [threads, setThreads] = useState<ThreadView[]>([])
   const [name, setName] = useState('')
@@ -791,7 +860,7 @@ export function ThreadList({ communityId, parentChannel, channels, onOpen, onCre
     return (
       <div style={{ padding: '4px 8px' }}>
         <button onClick={() => setOpen(true)} className="chan-row" style={{ width: '100%', background: 'transparent', border: 'none', cursor: 'pointer', color: T.muted, fontSize: 12, fontWeight: 700 }}>
-          <span style={{ opacity: 0.7 }}>📝</span> Criar post no fórum
+          <span style={{ opacity: 0.7, display: 'flex' }}><Ic name="edit" size={12} /></span> Criar post no fórum
         </button>
       </div>
     )
@@ -805,7 +874,7 @@ export function ThreadList({ communityId, parentChannel, channels, onOpen, onCre
         </button>
       ))}
       <button onClick={() => setOpen(o => !o)} className="chan-row" style={{ width: '100%', background: 'transparent', border: 'none', cursor: 'pointer', color: T.muted }}>
-        <span style={{ opacity: 0.7 }}>＋</span> Nova thread
+        <span style={{ opacity: 0.7, display: 'flex' }}><Ic name="plus" size={12} /></span> Nova thread
       </button>
       {open && (
         <div style={{ display: 'flex', gap: 4, padding: '4px 8px' }}>
@@ -1150,6 +1219,7 @@ export function useShortcuts(handlers: Record<string, (e: KeyboardEvent) => void
       // (Ctrl+I e Ctrl+Shift+D). Não colidem com nada acima.
       if (key && !e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); ref.current.inbox?.(e); return }
       if (key && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); ref.current.bookmarks?.(e); return }
+      if (e.key === 'Escape') { ref.current.escape?.(e); return }
       if (!typing && e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); (e.key === 'ArrowDown' ? ref.current.next : ref.current.prev)?.(e) }
     }
     window.addEventListener('keydown', onKey)
@@ -1171,9 +1241,23 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
   const [q, setQ] = useState('')
   const [idx, setIdx] = useState(0)
   const list = useMemo(() => {
-    const n = q.trim().toLowerCase()
-    const filtered = n ? commands.filter(c => c.label.toLowerCase().includes(n) || c.group.toLowerCase().includes(n)) : commands
-    return filtered.slice(0, 40)
+    const raw = q.trim().toLowerCase()
+    if (!raw) return commands.slice(0, 40)
+    let group: string | null = null
+    let n = raw
+    if (raw[0] === '#') { group = 'canal'; n = raw.slice(1).trim() }
+    else if (raw[0] === '@') { group = 'conversa'; n = raw.slice(1).trim() }
+    else if (raw[0] === '*') { group = 'servidor'; n = raw.slice(1).trim() }
+    const pool = group ? commands.filter(c => c.group === group) : commands
+    if (!n) return pool.slice(0, 40)
+    const starts: Command[] = []
+    const rest: Command[] = []
+    for (const c of pool) {
+      const label = c.label.toLowerCase()
+      if (label.startsWith(n) || label.includes('#' + n) || label.includes('@' + n)) starts.push(c)
+      else if (label.includes(n) || c.group.toLowerCase().includes(n)) rest.push(c)
+    }
+    return [...starts, ...rest].slice(0, 40)
   }, [q, commands])
 
   useEffect(() => { setIdx(0) }, [q])
@@ -1182,7 +1266,7 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 300, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: '12vh' }}>
       <div onClick={e => e.stopPropagation()} style={{ background: T.rail, border: `1px solid ${T.border}`, borderRadius: 10, width: '100%', maxWidth: 560, overflow: 'hidden', boxShadow: '0 24px 70px rgba(0,0,0,.6)' }}>
         <div style={{ padding: 14, borderBottom: `1px solid ${T.border}`, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ color: T.muted, fontSize: 15 }}>⌘</span>
+          <span style={{ color: T.muted, display: 'flex' }}><Ic name="search" size={15} /></span>
           <input autoFocus value={q} onChange={e => setQ(e.target.value)}
             onKeyDown={e => {
               if (e.key === 'ArrowDown') { e.preventDefault(); setIdx(i => Math.min(i + 1, list.length - 1)) }
@@ -1190,7 +1274,7 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
               if (e.key === 'Enter') { e.preventDefault(); list[idx]?.run(); onClose() }
               if (e.key === 'Escape') onClose()
             }}
-            placeholder="Digite um comando ou pesquise…" style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: T.heading, fontSize: 15 }} />
+            placeholder="Digite um comando ou pesquise… (# canal · @ conversa · * servidor)" style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: T.heading, fontSize: 15 }} />
           <span style={{ fontSize: 10, color: T.muted }}>ESC</span>
         </div>
         <div style={{ maxHeight: 380, overflowY: 'auto' }}>

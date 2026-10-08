@@ -838,6 +838,8 @@ export interface VoiceMediaStats {
   video_codec?: string | null
   video_source?: string | null
   video_error?: string | null
+  /** Pacotes RTP de vídeo recebidos, antes do decode. */
+  video_packets_in?: number | null
   frames_in?: number | null
   frames_out?: number | null
 }

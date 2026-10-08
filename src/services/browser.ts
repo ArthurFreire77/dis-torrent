@@ -27,11 +27,9 @@ import type {
   ThreadView,
   BanView,
   PollView,
-  PollTally,
   EventView,
   EmojiView,
   ReadCursor,
-  SearchQuery,
   SearchHit,
 } from './models'
 import { validateNameLocal, randomNameLocal } from '../core/security/names'
@@ -943,8 +941,6 @@ export const browserServices: ForgeServices = {
       const text = await res.text()
       return { status: res.status, body: text.slice(0, 256 * 1024) }
     } catch (e: any) {
-      // lib ES2020 não tem Error cause — detalhe original preservado na mensagem
-      // eslint-disable-next-line preserve-caught-error
       throw new Error(`HTTP falhou: ${String(e?.message ?? e)}`)
     } finally {
       clearTimeout(timer)

@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## [1.1.0-pre-alpha.2] — 2026-10-08
+- **Perfil P2P completo**: banner 160px, avatar 88px com anel, selos ed25519/presença/servidor, abas Sobre/Servidor/P2P, edição inline com preview ao vivo, troca de capa/avatar por toque, anotação privada por usuário, cópia de fingerprint
+- **Aparência**: tema escuro/claro funcional, fonte 85–125% com prévia, densidade confortável/compacta persistida por conversa
+- **Notificações**: padrão global + silenciar servidor/canal (todas/menções/nada), tudo local via localStorage
+- **Áudio**: lista microfones, toggles eco/ruído/ganho aplicados no AUDIO_CONSTRAINTS, teste de mic com medidor ao vivo
+- **Rascunhos por conversa**: desktop + mobile — trocar canal/DM não perde texto
+- **Ctrl+K quick-switcher**: prefixos `#` canal, `@` conversa, `*` servidor, prioriza início
+- **Esc global**: fecha busca/fixadas/paleta/inbox/salvos
+- **Reação alterna no clique** (bug real corrigido), hover mostra quem reagiu
+- **Compartilhamento de tela**: dropdown único com "Tela inteira", "Janela/Aba", "Configurações avançadas"; botão "Parar" quando compartilhando
+- **Pastas de servidor**: criar/mover/renomear/apagar via botão direito na rail
+- **Mute no menu do canal** (desktop) e mobile
+- **Boas-vindas/AuthCard**: proposta P2P em 3 cards SVG, splash no index.html + noscript + OG
+- **Limpeza**: ~15 estados/props mortas removidos, imports limpos, emojis de UI → SVG
+- **Lint zerado** (era 24), typecheck limpo, 106 testes, build 4s
+
 ## [não lançado] — Ciclo de chamada consertado + vídeo nativo ligado na UI
 
 ### O bug "só consegue chamar uma vez" (causa-raiz, 3 partes)

@@ -499,10 +499,38 @@ async fn rede_social_reacoes_entre_dois_nos() {
     let fp_a = a.identity().fingerprint.clone();
     let fp_b = b.identity().fingerprint.clone();
     a.friend_request(&fp_b).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if b.friends(Some("pending_in"))
+                .iter()
+                .any(|peer| peer.fp == fp_a)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("pedido de amizade não chegou ao peer B");
     b.friend_respond(&fp_a, true).unwrap();
-    b.friend_request(&fp_a).unwrap();
-    a.friend_respond(&fp_b, true).unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let a_accepted = a
+                .friends(Some("accepted"))
+                .iter()
+                .any(|peer| peer.fp == fp_b);
+            let b_accepted = b
+                .friends(Some("accepted"))
+                .iter()
+                .any(|peer| peer.fp == fp_a);
+            if a_accepted && b_accepted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("aceite de amizade não sincronizou nos dois peers");
 
     let conv = Store::dm_conversation_id(&fp_a, &fp_b);
     a.store.ensure_dm_conversation(&fp_a, &fp_b, "Bob").unwrap();

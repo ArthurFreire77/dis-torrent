@@ -947,6 +947,8 @@ pub struct VoiceStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_packets_in: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_out: Option<u64>,
@@ -1008,6 +1010,7 @@ struct Shared {
     video_codec: Mutex<Option<String>>,
     video_error: Mutex<Option<String>>,
     video_source: Mutex<Option<String>>,
+    video_packets_in: AtomicU64,
     frames_in: AtomicU64,
     frames_out: AtomicU64,
     video_seq: AtomicU64,
@@ -1047,6 +1050,7 @@ impl Shared {
             video_codec: Mutex::new(None),
             video_error: Mutex::new(None),
             video_source: Mutex::new(None),
+            video_packets_in: AtomicU64::new(0),
             frames_in: AtomicU64::new(0),
             frames_out: AtomicU64::new(0),
             video_seq: AtomicU64::new(0),
@@ -1075,6 +1079,7 @@ impl Shared {
             video_codec: self.video_codec.lock().unwrap().clone(),
             video_source: self.video_source.lock().unwrap().clone(),
             video_error: self.video_error.lock().unwrap().clone(),
+            video_packets_in: Some(self.video_packets_in.load(Ordering::Relaxed)),
             frames_in: Some(self.frames_in.load(Ordering::Relaxed)),
             frames_out: Some(self.frames_out.load(Ordering::Relaxed)),
         }
@@ -1098,6 +1103,9 @@ struct Session {
     muted: AtomicBool,
     closed: AtomicBool,
     tx: TxState,
+    /// Trilha de video (sendrecv) criada no build: o SDP inicial ja' traz
+    /// m=video e ligar a captura nao renegocia NADA — so' escreve samples.
+    vtx: TxState,
     tasks: Mutex<Vec<tokio::task::AbortHandle>>,
     probe: &'static LatencyProbe,
 }
@@ -1577,19 +1585,17 @@ impl VoiceMedia {
             .map(|s| s.sh.stats())
     }
 
-    /// Estado agregado da call (soma de todos os peers).
+    /// Estado agregado da call. Contadores somam todos os peers; para o estado
+    /// de vídeo, um peer com mídia fluindo tem precedência sobre estados
+    /// `starting`/`failed`/`off` dos demais. Isso evita depender da ordem do
+    /// HashMap ao decidir se a chamada está transmitindo.
     pub fn stats_agg(&self, call_id: &str) -> Option<VoiceStats> {
-        let all = self.inner.of_call(call_id);
-        let first = all.first()?;
-        let mut out = first.sh.stats();
-        for s in all.iter().skip(1) {
-            let s = s.sh.stats();
-            out.packets_in += s.packets_in;
-            out.packets_out += s.packets_out;
-            out.plc_frames += s.plc_frames;
-            out.decode_errors += s.decode_errors;
-        }
-        Some(out)
+        aggregate_stats(
+            self.inner
+                .of_call(call_id)
+                .into_iter()
+                .map(|session| session.sh.stats()),
+        )
     }
 
     pub fn stats_peer(&self, call_id: &str, peer_fp: &str) -> Option<VoiceStats> {
@@ -1713,6 +1719,105 @@ impl VoiceMedia {
     }
 }
 
+fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceStats> {
+    let all = stats.into_iter().collect::<Vec<_>>();
+    let mut out = all.first()?.clone();
+
+    for peer in all.iter().skip(1) {
+        out.packets_in = out.packets_in.saturating_add(peer.packets_in);
+        out.packets_out = out.packets_out.saturating_add(peer.packets_out);
+        out.plc_frames = out.plc_frames.saturating_add(peer.plc_frames);
+        out.decode_errors = out.decode_errors.saturating_add(peer.decode_errors);
+    }
+
+    let best_video = all
+        .iter()
+        .max_by_key(|peer| match peer.video_state.as_deref() {
+            Some("live") => 4,
+            Some("starting") => 3,
+            Some("failed") => 2,
+            Some("off") => 1,
+            _ => 0,
+        });
+    if let Some(peer) = best_video {
+        out.video_state = peer.video_state.clone();
+        out.video_source = peer.video_source.clone();
+        out.video_codec = peer.video_codec.clone();
+    }
+    out.video_error = all
+        .iter()
+        .find(|peer| peer.video_state.as_deref() == Some("failed"))
+        .and_then(|peer| peer.video_error.clone());
+    out.video_packets_in = sum_optional_stat(&all, |peer| peer.video_packets_in);
+    out.frames_in = sum_optional_stat(&all, |peer| peer.frames_in);
+    out.frames_out = sum_optional_stat(&all, |peer| peer.frames_out);
+    Some(out)
+}
+
+fn sum_optional_stat(
+    all: &[VoiceStats],
+    field: impl Fn(&VoiceStats) -> Option<u64>,
+) -> Option<u64> {
+    let mut found = false;
+    let mut sum = 0u64;
+    for peer in all {
+        if let Some(value) = field(peer) {
+            found = true;
+            sum = sum.saturating_add(value);
+        }
+    }
+    found.then_some(sum)
+}
+
+#[cfg(test)]
+mod stats_aggregation_tests {
+    use super::{aggregate_stats, VoiceStats};
+
+    fn peer(state: &str, source: Option<&str>, frames_out: u64) -> VoiceStats {
+        VoiceStats {
+            state: "connected".into(),
+            route: "LAN".into(),
+            jitter_depth_ms: 50,
+            packets_in: 2,
+            packets_out: 3,
+            plc_frames: 0,
+            decode_errors: 0,
+            rtt_ms: Some(10),
+            mic_error: None,
+            video_state: Some(state.into()),
+            video_codec: source.map(|_| "video/VP8".into()),
+            video_source: source.map(str::to_owned),
+            video_error: None,
+            video_packets_in: Some(4),
+            frames_in: Some(5),
+            frames_out: Some(frames_out),
+        }
+    }
+
+    #[test]
+    fn aggregate_prefers_live_video_and_sums_peer_counters() {
+        let stats = aggregate_stats([peer("off", None, 0), peer("live", Some("screen"), 7)])
+            .expect("duas sessões devem produzir stats");
+
+        assert_eq!(stats.video_state.as_deref(), Some("live"));
+        assert_eq!(stats.video_source.as_deref(), Some("screen"));
+        assert_eq!(stats.frames_out, Some(7));
+        assert_eq!(stats.video_packets_in, Some(8));
+        assert_eq!(stats.frames_in, Some(10));
+        assert_eq!(stats.packets_in, 4);
+        assert_eq!(stats.packets_out, 6);
+    }
+
+    #[test]
+    fn aggregate_reports_failed_video_when_no_peer_is_live_or_starting() {
+        let stats = aggregate_stats([peer("off", None, 0), peer("failed", Some("camera"), 0)])
+            .expect("duas sessões devem produzir stats");
+
+        assert_eq!(stats.video_state.as_deref(), Some("failed"));
+        assert_eq!(stats.video_source.as_deref(), Some("camera"));
+    }
+}
+
 /// Ultimo frame remoto decodificado (a UI faz polling; nao emitimos evento).
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct VideoFrame {
@@ -1826,6 +1931,13 @@ fn ssrc_for(call_id: &str, peer_fp: &str) -> u32 {
     h | 0x8000_0000
 }
 
+/// SSRC do VIDEO: distinto do de audio na MESMA PC. Antes os dois usavam
+/// `ssrc_for` puro — dois SSRCs identicos em tracks distintas confundem o
+/// demux de RTP do outro lado (o audio do par "sumia" ao ligar a camera).
+fn ssrc_for_video(call_id: &str, peer_fp: &str) -> u32 {
+    ssrc_for(&format!("{call_id}|video"), peer_fp)
+}
+
 async fn build_session(
     inner: &Arc<Inner>,
     call_id: &str,
@@ -1930,6 +2042,45 @@ async fn build_session(
         .await
         .map_err(err)?;
 
+    // Trilha de VIDEO criada desde o início (sendrecv, sem samples escritos
+    // enquanto o vídeo estiver desligado). Antes ela era criada no meio da
+    // chamada (add_video_transceiver) SEM renegociação nenhuma: o par nunca
+    // via a m-line nova e o RTP ia a lugar nenhum — a tela/câmera nativa no
+    // Linux nunca chegava. Com a m-line na offer/answer inicial, "ligar a
+    // câmera" e' só começar a escrever samples (mesma lógica do áudio).
+    // O navegador do outro lado também anuncia audio+video desde o início
+    // (ensureMlines no callManager), então audio+video aqui casa o SDP.
+    let vcodec = RTCRtpCodec {
+        mime_type: "video/VP8".to_owned(),
+        clock_rate: 90_000,
+        channels: 0,
+        sdp_fmtp_line: String::new(),
+        rtcp_feedback: vec![],
+    };
+    let vtl = TrackLocalStaticSample::new(
+        Instant::now(),
+        MediaStreamTrack::new(
+            format!("{peer_fp}-video"),
+            "video".to_string(),
+            "video0".to_string(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc_for_video(call_id, peer_fp)),
+                    ..Default::default()
+                },
+                codec: vcodec,
+                ..Default::default()
+            }],
+        ),
+    )
+    .map_err(err)?;
+    let vtl: Arc<TrackLocalStaticSample> = Arc::new(vtl);
+    let vsender = pc
+        .add_track(Arc::clone(&vtl) as Arc<dyn TrackLocal>)
+        .await
+        .map_err(err)?;
+
     let sess = Arc::new(Session {
         call_id: call_id.to_owned(),
         peer_fp: peer_fp.to_owned(),
@@ -1942,6 +2093,10 @@ async fn build_session(
         muted: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         tx: TxState { track: tl, sender },
+        vtx: TxState {
+            track: vtl,
+            sender: vsender,
+        },
         tasks: Mutex::new(Vec::new()),
         probe: probe(),
     });
@@ -2358,79 +2513,9 @@ const VIDEO_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// sem pacote = captura travada de verdade.
 const VIDEO_STALL: Duration = Duration::from_secs(15);
 
-/// Cria a track de video, registra o sender e devolve o codec/PT que a
-/// PeerConnection REALMENTE escolheu.
-///
-/// Separate do laco porque o PT so' existe depois do answer: `add_track` roda
-/// aqui e so' com a renegociacao feita que o sender diz qual codec e qual PT.
-/// Montar o encoder antes seria chute — e chute de PT e' exatamente o que fazia
-/// o video "funcionar contra o nosso build e sumir contra o Android".
-async fn add_video_transceiver(sess: &Arc<Session>) -> Result<(String, u8), String> {
-    let sh = sess.sh.clone();
-    let vtl = TrackLocalStaticSample::new(
-        Instant::now(),
-        MediaStreamTrack::new(
-            format!("{}-video", sess.peer_fp),
-            "video".to_string(),
-            "video0".to_string(),
-            RtpCodecKind::Video,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc_for(&sess.call_id, &sess.peer_fp)),
-                    ..Default::default()
-                },
-                // VP8 primeiro: e' o codec que TODOS os navegadores aceitam e o
-                // unico que o pipeline do GStreamer garante aqui. O PT real e'
-                // reescrito pela renegociacao; este e' so' a proposta.
-                codec: RTCRtpCodec {
-                    mime_type: "video/VP8".to_owned(),
-                    clock_rate: 90_000,
-                    channels: 0,
-                    sdp_fmtp_line: String::new(),
-                    rtcp_feedback: vec![],
-                },
-                ..Default::default()
-            }],
-        ),
-    )
-    .map_err(|e| format!("track de video recusada: {e}"))?;
-    let vtl: Arc<TrackLocalStaticSample> = Arc::new(vtl);
-    let sender = sess
-        .pc
-        .add_track(Arc::clone(&vtl) as Arc<dyn TrackLocal>)
-        .await
-        .map_err(|e| format!("peer recusou a track de video: {e}"))?;
-
-    let params = sender
-        .get_parameters()
-        .await
-        .map_err(|e| format!("vídeo: sender sem parâmetros: {e}"))?;
-    let c = params
-        .rtp_parameters
-        .codecs
-        .iter()
-        .find(|c| c.rtp_codec.mime_type.starts_with("video"))
-        .ok_or_else(|| {
-            format!(
-                "vídeo não foi negociado no SDP (o sender ficou só com: {})",
-                params
-                    .rtp_parameters
-                    .codecs
-                    .iter()
-                    .map(|c| c.rtp_codec.mime_type.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-    let mime = c.rtp_codec.mime_type.clone();
-    let pt = c.payload_type;
-    *sh.video_track.lock().unwrap() = Some(vtl);
-    Ok((mime, pt))
-}
-
 /// Envia video pela MESMA PeerConnection da voz.
 ///
-/// Espera conectar -> cria track e descobre codec/PT -> monta encoder ->
+/// Espera conectar -> lê codec/PT do sender já negociado -> monta encoder ->
 /// laco que puxa pacotes RTP e escreve na track, com watchdog de 15 s.
 async fn video_send_task(sess: Arc<Session>, want_source: String) {
     let sh = sess.sh.clone();
@@ -2444,7 +2529,9 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     // (15s sem pacote) cuida do caso "conectou e morreu".
     let mut vticks: u32 = 0;
     loop {
-        if sess.closed.load(Ordering::SeqCst) || sh.video_state.lock().unwrap().as_str() != "starting" {
+        if sess.closed.load(Ordering::SeqCst)
+            || sh.video_state.lock().unwrap().as_str() != "starting"
+        {
             return;
         }
         if sh.connected_flag.load(Ordering::SeqCst) {
@@ -2461,13 +2548,32 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         return;
     }
 
-    let (mime, pt) = match add_video_transceiver(&sess).await {
-        Ok(v) => v,
+    // O transceiver de vídeo veio do `build_session`: nada de add_track/re-
+    // negociação no meio da chamada — só lemos o codec/PT que o par aceitou.
+    let params = match sess.vtx.sender.get_parameters().await {
+        Ok(p) => p,
+        Err(e) => {
+            video_fail(&sh, format!("vídeo: sender sem parâmetros: {e}"));
+            return;
+        }
+    };
+    let c = params
+        .rtp_parameters
+        .codecs
+        .iter()
+        .find(|c| c.rtp_codec.mime_type.starts_with("video"))
+        .ok_or_else(|| "vídeo não foi negociado no SDP".to_string());
+    let c = match c {
+        Ok(c) => c,
         Err(e) => {
             video_fail(&sh, e);
             return;
         }
     };
+    let mime = c.rtp_codec.mime_type.clone();
+    let pt = c.payload_type;
+    let vtl = sess.vtx.track.clone();
+    *sh.video_track.lock().unwrap() = Some(vtl.clone());
     let codec = crate::net::media_video::VideoCodec::from_mime(&mime);
     let want = codec.mime();
     *sh.video_codec.lock().unwrap() = Some(want.to_string());
@@ -2475,18 +2581,13 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     sh.frames_out.store(0, Ordering::Relaxed);
     tracing::debug!("[video] enviando ({want}, {want_source}) pt={pt}");
 
-    let Some(vtl) = sh.video_track.lock().unwrap().clone() else {
-        video_fail(&sh, "vídeo: track local não foi criada".into());
-        return;
-    };
-
     // Encoder: construcao bloqueante (v4l2src/xscreen abrem device), fora do
     // laco quente e fora do worker de audio.
     let built = tokio::task::spawn_blocking(move || {
         if is_screen {
-            crate::net::media_video::new_screen(codec, pt, VIDEO_FPS)
+            crate::net::media_video::new_screen(codec, VIDEO_FPS)
         } else {
-            crate::net::media_video::new_camera(codec, pt, VIDEO_FPS)
+            crate::net::media_video::new_camera(codec, VIDEO_FPS)
         }
     })
     .await;
@@ -2502,7 +2603,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         }
     };
 
-    *sh.video_state.lock().unwrap() = "live".to_string();
     let mut last_progress = Instant::now();
     let mut grab_miss: u32 = 0;
 
@@ -2510,44 +2610,45 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         if sess.closed.load(Ordering::SeqCst) {
             break;
         }
-        if sh.video_state.lock().unwrap().as_str() != "live" {
+        if !matches!(sh.video_state.lock().unwrap().as_str(), "starting" | "live") {
             break;
         }
         // `take()`: o encoder e' MOVIDO para dentro da `spawn_blocking` (ele
-        // precisa estar la para o poll_rtp). O `Option` existe para o `break`
+        // precisa estar la para puxar um frame codificado). O `Option` existe para o `break`
         // do meio do laco nao deixar um valor ja movido.
         let Some(mut enc2) = enc.take() else { break };
-        // Iteracao bloqueante: tick de tela + pacotes RTP prontos. A cadencia
-        // do loop (~poll 60 ms + captura) dita ~10 fps de tela sozinha.
+        // Captura/encode não roda no worker tokio de mídia. Drena os buffers
+        // disponíveis e mantém só o quadro mais recente para não criar atraso.
         let pumped = tokio::task::spawn_blocking(
-            move || -> (Vec<Vec<u8>>, Option<String>, bool, crate::net::media_video::VideoEncoder) {
+            move || -> (Option<Vec<u8>>, Option<String>, bool, crate::net::media_video::VideoEncoder) {
             let mut grab_ok = !is_screen;
+            let mut capture_error = None;
             if is_screen {
                 match crate::net::media_video::grab_screen_frame(want_monitor) {
                     Some((rgb, w, h)) => {
-                        let _ = enc2.push_screen_frame(&rgb, w, h);
-                        grab_ok = true;
+                        if let Err(e) = enc2.push_screen_frame(&rgb, w, h) {
+                            capture_error = Some(e);
+                            grab_ok = false;
+                        } else {
+                            grab_ok = true;
+                        }
                     }
                     None => grab_ok = false,
                 }
             }
-            let mut pkts = Vec::new();
-            // Primeiro com espera curta (cadencia), resto sem esperar.
-            if let Some(p) = enc2.poll_rtp(Duration::from_millis(60)) {
-                pkts.push(p);
-                while pkts.len() < 64 {
-                    match enc2.poll_rtp(Duration::ZERO) {
-                        Some(p) => pkts.push(p),
-                        None => break,
-                    }
+            let mut latest = enc2.poll_encoded_frame(Duration::ZERO);
+            for _ in 0..16 {
+                match enc2.poll_encoded_frame(Duration::ZERO) {
+                    Some(frame) => latest = Some(frame),
+                    None => break,
                 }
             }
-            let err = enc2.take_error();
-            (pkts, err, grab_ok, enc2)
+            let err = capture_error.or_else(|| enc2.take_error());
+            (latest, err, grab_ok, enc2)
             },
         )
         .await;
-        let (pkts, enc_err, grab_ok, encoder) = match pumped {
+        let (frame, enc_err, grab_ok, encoder) = match pumped {
             Ok(v) => v,
             Err(_) => break,
         };
@@ -2570,23 +2671,27 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             video_fail(&sh, "vídeo: a track local ficou sem ssrc".into());
             break;
         };
-        let now_ts = rtp_ts_video();
-        let sent = pkts.len();
-        for p in pkts {
+        let sent = usize::from(frame.is_some());
+        if let Some(frame) = frame {
             let sample = Sample {
-                data: Bytes::from(p),
-                // `Sample::duration` = duracao REAL de wall clock; e' dela que
-                // o packetizer deriva o timestamp RTP de video (90 kHz).
+                // O TrackLocalStaticSample packetiza os bytes codificados em
+                // RTP com MTU/timestamps WebRTC; aqui não entram pacotes RTP.
+                data: Bytes::from(frame),
                 duration: VIDEO_FRAME_INTERVAL,
                 timestamp: Instant::now(),
-                packet_timestamp: now_ts,
+                packet_timestamp: rtp_ts_video(),
                 prev_dropped_packets: 0,
                 prev_padding_packets: 0,
             };
-            if vtl.write_sample(ssrc, pt, &sample, &[]).await.is_err() {
+            if let Err(e) = vtl.write_sample(ssrc, pt, &sample, &[]).await {
+                video_fail(&sh, format!("vídeo: falha ao escrever amostra RTP: {e}"));
                 break;
             }
             sh.frames_out.fetch_add(1, Ordering::Relaxed);
+            let mut state = sh.video_state.lock().unwrap();
+            if state.as_str() == "starting" {
+                *state = "live".to_string();
+            }
         }
         if sent > 0 {
             last_progress = Instant::now();
@@ -2618,8 +2723,9 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         e.stop();
     }
     let _ = vtl.stop();
-    if sh.video_state.lock().unwrap().as_str() == "live" {
-        *sh.video_state.lock().unwrap() = "off".to_string();
+    let mut state = sh.video_state.lock().unwrap();
+    if matches!(state.as_str(), "starting" | "live") {
+        *state = "off".to_string();
     }
     tracing::debug!("[video] envio encerrado");
 }
@@ -2641,6 +2747,7 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                 continue;
             };
             n += 1;
+            sh.video_packets_in.fetch_add(1, Ordering::Relaxed);
             if n <= 3 || n % 200 == 0 {
                 tracing::debug!(
                     "[video] recv pacote #{n} ssrc={} seq={} pt={} payload={}",
@@ -2682,9 +2789,12 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                         tracing::debug!("[video] recebendo ({mime})");
                         dec = Some(d);
                     }
-                    _ => {
-                        *sh.video_error.lock().unwrap() =
-                            Some(format!("decode {mime} indisponivel"));
+                    Ok(Err(e)) => {
+                        video_fail(&sh, format!("decodificador {mime} não abriu: {e}"));
+                        break;
+                    }
+                    Err(e) => {
+                        video_fail(&sh, format!("tarefa do decodificador {mime} falhou: {e}"));
                         break;
                     }
                 }
@@ -2692,7 +2802,14 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
             if let Some(d) = dec.as_mut() {
                 use rtc::shared::marshal::Marshal;
                 if let Ok(bytes) = pkt.marshal() {
-                    d.push_rtp(&bytes);
+                    if let Err(e) = d.push_rtp(&bytes) {
+                        video_fail(&sh, format!("entrada RTP de vídeo falhou: {e}"));
+                        return;
+                    }
+                }
+                if let Some(e) = d.take_error() {
+                    video_fail(&sh, e);
+                    return;
                 }
                 // Drena frames sem bloquear: fica so o mais recente. O JPEG de
                 // CADA frame decoded sai por um `spawn_blocking` DEDICADO —

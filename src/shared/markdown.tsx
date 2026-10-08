@@ -74,8 +74,6 @@ export interface MentionHit {
   noteIndex: number
 }
 
-const BLOCKQUOTE = '>'
-
 /** Uma linha classificada pelo scanner de blocos. */
 type Block =
   | { t: 'code'; lang: string; lines: string[] }

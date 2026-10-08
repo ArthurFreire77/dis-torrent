@@ -6,7 +6,7 @@ import { EmojiPicker } from '../shared/EmojiPicker'
 import MessageList, { type MessageListHandle } from '../components/social/MessageList'
 import { BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel, PinsPanel, ProfileModal, SearchPanel, ThreadList, ThreadViewModal, useShortcuts, type Command, type InboxTab } from '../components/social/Social'
 import { services } from '../services'
-import type { Identity, MessageStatus, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage } from '../services/models'
+import type { Identity, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 import {
   useConversations,
@@ -29,10 +29,14 @@ import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
 import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
-import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, isVideoName, mediaAutoFetchCap } from '../services/fileSwarm'
+import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize } from '../services/fileSwarm'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import { throttleTrailing } from '../shared/perf'
 import { attachStream } from '../shared/mediaAttach'
+import { addFolder, folderOf, isMutedServer, moveServerToFolder, removeFolder, renameFolder, shouldNotify, toggleMuteChannel, toggleMuteServer, usePrefs } from '../shared/prefs'
+import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
+import { NotificationSettings } from '../components/prefs/NotificationSettings'
+import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 
 // DisTorrent — visual Discord original. Dados 100% reais do motor (forge-core).
 // Fluxo: criar conta (nome + senha opcional) → desbloqueio por senha a cada abertura.
@@ -91,12 +95,26 @@ function PeerDot({ s }: { s: NetworkState }) {
 // ---------- telas de conta ----------
 
 function AuthCard({ children }: { children: any }) {
+  const perks = [
+    { icon: Icons.lock, title: 'Cifrado fim-a-fim', desc: 'só os aparelhos leem' },
+    { icon: Icons.users, title: 'Sem servidor', desc: 'direto entre peers' },
+    { icon: Icons.key, title: 'Sua chave', desc: 'sem conta online' },
+  ]
   return (
-    <div style={{ height: '100vh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'Inter' }}>
-      <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 28, width: 420, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
-        <div style={{ textAlign: 'center', marginBottom: 16 }}>
-          <span style={{ fontSize: 24, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
-          <div style={{ fontSize: 11, color: t.muted, marginTop: 4 }}>comunicação P2P — sem servidor, sem cadastro online</div>
+    <div style={{ minHeight: '100vh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: 'Inter' }}>
+      <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 28, width: 440, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
+        <div style={{ textAlign: 'center', marginBottom: 14 }}>
+          <span style={{ fontSize: 26, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
+          <div style={{ fontSize: 12, color: t.muted, marginTop: 4 }}>chat, voz e arquivos P2P — sem servidor, sem cadastro</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+          {perks.map(p => (
+            <div key={p.title} style={{ flex: 1, background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '9px 6px', textAlign: 'center' }}>
+              <span style={{ color: t.accent, display: 'inline-flex' }}><Icon d={p.icon} size={17} /></span>
+              <div style={{ fontSize: 11, fontWeight: 800, color: t.heading, marginTop: 5 }}>{p.title}</div>
+              <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>{p.desc}</div>
+            </div>
+          ))}
         </div>
         {children}
       </div>
@@ -407,7 +425,8 @@ const SECTION_IDA: Record<string, 'visao-geral' | 'canais' | 'cargos' | 'membros
 
 export default function ThemeShell({ designId }: {designId:string}){
   void designId
-  const [theme] = useState<'dark'|'light'>('dark')
+  const prefs = usePrefs()
+  const theme = prefs.theme
   const light = theme==='light'
   const bg = light ? t.lbg : t.main
   const sidebarBg = light ? t.lsidebar : t.sidebar
@@ -482,10 +501,19 @@ export default function ThemeShell({ designId }: {designId:string}){
     return () => window.clearTimeout(t)
   }, [jumpTarget, messages])
   const [input, setInput] = useState('')
+  const draftKey = (c: string) => `forge:draft:${c}`
+  useEffect(() => {
+    if (!selConv) return
+    try { setInput(localStorage.getItem(draftKey(selConv)) ?? '') } catch { setInput('') }
+  }, [selConv])
+  useEffect(() => {
+    if (!selConv) return
+    try {
+      if (input) localStorage.setItem(draftKey(selConv), input)
+      else localStorage.removeItem(draftKey(selConv))
+    } catch { /* quota cheia: rascunho fica só na sessão */ }
+  }, [input, selConv])
   const [showSettings, setShowSettings] = useState(false)
-  /** Espelho da fonte de captura escolhida na barra da chamada, para o botão
-   *  reagir ao clique (o CallManager não emite evento para isso). */
-  const [screenSourceHint, setScreenSourceHint] = useState<'monitor' | 'window'>('monitor')
   /** Seletor completo de compartilhamento (fonte/áudio/qualidade/FPS). */
   const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
@@ -570,7 +598,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showModeration, setShowModeration] = useState(false)
   const [showEvents, setShowEvents] = useState(false)
   const [showChannelCfg, setShowChannelCfg] = useState(false)
-  const [threadsByChannel, setThreadsByChannel] = useState<Record<string, any[]>>({})
   const [forwardTarget, setForwardTarget] = useState('')
   const [newPollQ, setNewPollQ] = useState('')
   const [newPollOpts, setNewPollOpts] = useState('')
@@ -632,6 +659,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [roles, setRoles] = useState<RoleView[]>([])
   const [bots, setBots] = useState<BotView[]>([])
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; id: string } | null>(null)
+  const [railMenu, setRailMenu] = useState<{ x: number; y: number; serverId: string } | null>(null)
+  const [railFolderName, setRailFolderName] = useState('')
   const [collapsedCats, setCollapsedCats] = useState<Set<string>>(new Set())
   const [showServerSettings, setShowServerSettings] = useState(false)
   const [serverTab, setServerTab] = useState<'geral'|'canais'|'cargos'|'bots'|'membros'>('geral')
@@ -661,9 +690,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   /** Painel de diagnóstico da chamada (tempo real) dentro do overlay. */
   const [showCallDiag, setShowCallDiag] = useState(false)
   const [, setFileList] = useState<any[]>([])
-  const handlePreviewTick = useCallback(() => {
-    try { setFileList([...fileSwarm.files.values()]) } catch { /* ignore */ }
-  }, [])
   const swarmNotifyRef = useRef<() => void>(() => {})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -878,15 +904,17 @@ export default function ThemeShell({ designId }: {designId:string}){
     // mensagem em QUALQUER conversa atualiza a lista (antes só a aberta entrava e
     // a lista de conversas nunca atualizava — DM nova só aparecia após restart)
     if (ev.type === 'message_new') {
+      const cid = (ev as unknown as { community_id?: string }).community_id
+        ?? communities.find(c => c.channels.some(([id]) => id === ev.conv_id))?.id
+      const mentioned = !!identity && typeof (ev as unknown as { body?: unknown }).body === 'string'
+        && (ev as unknown as { body: string }).body.includes(identity.fingerprint)
+      const notify = shouldNotify(ev.conv_id, cid, mentioned)
       if (ev.conv_id === selConv) append(ev)
-      else {
-        // marca servidor como não-lido (badge real, igual Discord)
-        const cid = (ev as unknown as { community_id?: string }).community_id
-          ?? communities.find(c => c.channels.some(([id]) => id === ev.conv_id))?.id
-        if (cid) setUnreadServers(prev => new Set(prev).add(cid))
+      else if (cid && notify) {
+        setUnreadServers(prev => new Set(prev).add(cid))
       }
       refreshConvos()
-      sfxMessage()
+      if (notify) sfxMessage()
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
     if (ev.type === 'typing') {
@@ -1532,9 +1560,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     return services.subscribe((ev: any) => {
       if (ev.type === 'profile_changed') setSocialProfiles(p => ({ ...p, [ev.fp]: ev.profile }))
       else if (ev.type === 'presence_changed') setSocialPresence(p => ({ ...p, [ev.fp]: ev.status }))
-      else if (ev.type === 'muted') setNotice(`🔇 ${ev.reason}`)
+      else if (ev.type === 'muted') setNotice(ev.reason)
       else if (ev.type === 'moderation_applied') setNotice(`Moderação: ${ev.kind} aplicado a ${String(ev.target_fp).slice(0, 8)}${ev.reason ? ` — ${ev.reason}` : ''}`)
-      else if (ev.type === 'thread_created') refreshThreads(ev.community_id, ev.thread.parent_channel)
     })
   }, [selCommunity])
 
@@ -1567,20 +1594,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     try {
       const t = await services.threadCreate(selCommunity, selConv, m.body.slice(0, 40) || 'thread')
       setOpenThread(t)
-      refreshThreads(selCommunity, selConv)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
-
-  const [threadsState, setThreadsState] = useState<Record<string, any[]>>({})
-  function refreshThreads(communityId: string, parent: string) {
-    services.threadList(communityId, parent)
-      .then(t => setThreadsState(s => ({ ...s, [`${communityId}:${parent}`]: t as any[] })))
-      .catch(() => {})
-  }
-
-  useEffect(() => {
-    if (selCommunity && selConv && view === 'servidores') refreshThreads(selCommunity, selConv)
-  }, [selCommunity, selConv, view])
 
   const commands: Command[] = useMemo(() => {
     const list: Command[] = []
@@ -1616,6 +1631,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     pins: () => setShowPins(s => !s),
     inbox: () => setShowInbox(s => !s),
     bookmarks: () => setShowBookmarks(s => !s),
+    escape: () => { setShowSearch(false); setShowPins(false); setShowCmdK(false); setShowInbox(false); setShowBookmarks(false) },
     mute: () => setIsMuted(v => { const n = !v; try { (callManager as any).setMuted?.(n) } catch { /* noop */ } return n }),
     next: () => { const i = conversations.findIndex(c => c.id === selConv); const nx = conversations[(i + 1) % Math.max(1, conversations.length)]; if (nx) { setSelConv(nx.id); setSelPeerFp(nx.peer_fp || null) } },
     prev: () => { const i = conversations.findIndex(c => c.id === selConv); const pv = conversations[(i - 1 + conversations.length) % Math.max(1, conversations.length)]; if (pv) { setSelConv(pv.id); setSelPeerFp(pv.peer_fp || null) } },
@@ -1730,24 +1746,45 @@ export default function ThemeShell({ designId }: {designId:string}){
             </button>
           </div>
           <div style={{ width: 32, height: 2, background: '#35363c', borderRadius: 99, margin: '4px 0' }} />
-          {communities.map(c => {
-            const active = view === 'servidores' && selCommunity === c.id
-            const unread = unreadServers.has(c.id)
+          {(() => {
+            const railBtn = (c: CommunityView) => {
+              const active = view === 'servidores' && selCommunity === c.id
+              const mutedSrv = isMutedServer(c.id)
+              const unread = !mutedSrv && unreadServers.has(c.id)
+              return (
+                <div key={c.id} className="rail-item">
+                  <span className={'rail-pill' + (active ? ' on' : unread ? ' dot' : '')} />
+                  <button
+                    onClick={() => openServer(c.id, c.channels[0]?.[0] ?? null)}
+                    onContextMenu={e => { e.preventDefault(); setRailMenu({ x: e.clientX, y: e.clientY, serverId: c.id }) }}
+                    title={c.name + (mutedSrv ? ' (silenciado)' : '')}
+                    className={'rail-btn' + (active ? ' active' : '')}
+                    style={{ background: avatarColor(c.id), opacity: !active && mutedSrv ? 0.55 : 1 }}
+                  >
+                    {(c.name || '?').charAt(0).toUpperCase()}
+                  </button>
+                  {!active && !mutedSrv && (unreadMap[c.id] || 0) > 0 && <span className="rail-badge">{unreadMap[c.id]}</span>}
+                </div>
+              )
+            }
+            const grouped = new Set(prefs.serverFolders.flatMap(f => f.servers))
+            const loose = communities.filter(c => !grouped.has(c.id))
             return (
-              <div key={c.id} className="rail-item">
-                <span className={'rail-pill' + (active ? ' on' : unread ? ' dot' : '')} />
-                <button
-                  onClick={() => openServer(c.id, c.channels[0]?.[0] ?? null)}
-                  title={c.name}
-                  className={'rail-btn' + (active ? ' active' : '')}
-                  style={{ background: avatarColor(c.id) }}
-                >
-                  {(c.name || '?').charAt(0).toUpperCase()}
-                </button>
-                {!active && (unreadMap[c.id] || 0) > 0 && <span className="rail-badge">{unreadMap[c.id]}</span>}
-              </div>
+              <>
+                {prefs.serverFolders.map(f => {
+                  const items = f.servers.flatMap(id => { const c = communities.find(x => x.id === id); return c ? [c] : [] })
+                  if (items.length === 0) return null
+                  return (
+                    <div key={f.id} style={{ background: 'rgba(0,0,0,.22)', borderRadius: 12, padding: '6px 0', margin: '2px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                      <span style={{ fontSize: 9, fontWeight: 800, color: muted, maxWidth: 52, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.name}>{f.name}</span>
+                      {items.map(railBtn)}
+                    </div>
+                  )
+                })}
+                {loose.map(railBtn)}
+              </>
             )
-          })}
+          })()}
           <button
             onClick={() => { setShowCreateServer(true); setServerFlow('choose') }}
             title="Adicionar um servidor"
@@ -1757,6 +1794,75 @@ export default function ThemeShell({ designId }: {designId:string}){
             <Icon d={Icons.plus} size={18} />
           </button>
         </div>
+        {railMenu && (() => {
+          const sid = railMenu.serverId
+          const srv = communities.find(c => c.id === sid)
+          const cur = folderOf(sid)
+          const mutedSrv = isMutedServer(sid)
+          const item: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: 'transparent', border: 'none', color: text, padding: '8px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12.5, fontWeight: 600 }
+          return (
+            <div onClick={() => { setRailMenu(null); setRailFolderName('') }} style={{ position: 'fixed', inset: 0, zIndex: 200 }} onContextMenu={e => { e.preventDefault(); setRailMenu(null) }}>
+              <div onClick={e => e.stopPropagation()} style={{ position: 'fixed', left: Math.min(railMenu.x, window.innerWidth - 250), top: Math.min(railMenu.y, window.innerHeight - 320), width: 230, background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 10, padding: 6, boxShadow: '0 12px 34px rgba(0,0,0,.5)' }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: muted, padding: '6px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{srv?.name ?? 'Servidor'}</div>
+                <button onClick={() => { toggleMuteServer(sid); setRailMenu(null) }} style={item}>
+                  <span style={{ display: 'flex', color: muted }}><Icon d={mutedSrv ? Icons.eye : Icons.eyeOff} size={14} /></span>
+                  {mutedSrv ? 'Ativar notificações' : 'Silenciar servidor'}
+                </button>
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: muted, padding: '8px 10px 4px' }}>PASTA</div>
+                {prefs.serverFolders.map(f => (
+                  <button
+                    key={f.id}
+                    onClick={() => { moveServerToFolder(sid, cur === f.id ? null : f.id); setRailMenu(null) }}
+                    style={{ ...item, color: cur === f.id ? t.accent : text }}
+                  >
+                    <span style={{ display: 'flex', color: muted }}><Icon d={Icons.menu} size={14} /></span>
+                    <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cur === f.id ? 'Tirar de ' : 'Mover para '}{f.name}</span>
+                  </button>
+                ))}
+                <div style={{ display: 'flex', gap: 6, padding: '4px 6px' }}>
+                  <input
+                    value={railFolderName}
+                    onChange={e => setRailFolderName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && railFolderName.trim()) { const id = addFolder(railFolderName.trim()); moveServerToFolder(sid, id); setRailFolderName(''); setRailMenu(null) } }}
+                    placeholder="Nova pasta…"
+                    aria-label="Nome da nova pasta"
+                    style={{ flex: 1, minWidth: 0, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 6, padding: '7px 9px', color: text, fontSize: 12, outline: 'none' }}
+                  />
+                  <button
+                    onClick={() => { if (!railFolderName.trim()) return; const id = addFolder(railFolderName.trim()); moveServerToFolder(sid, id); setRailFolderName(''); setRailMenu(null) }}
+                    style={{ background: t.accent, color: '#fff', border: 'none', borderRadius: 6, padding: '0 12px', fontWeight: 800, fontSize: 12, cursor: 'pointer' }}
+                  >Criar</button>
+                </div>
+                {(() => {
+                  const f = prefs.serverFolders.find(x => x.servers.includes(sid))
+                  if (!f) return null
+                  return (
+                    <>
+                      <div style={{ display: 'flex', gap: 6, padding: '4px 6px' }}>
+                        <input
+                          defaultValue={f.name}
+                          key={f.id + f.name}
+                          onKeyDown={e => { if (e.key === 'Enter') { const el = e.target as HTMLInputElement; if (el.value.trim()) renameFolder(f.id, el.value.trim()); setRailMenu(null) } }}
+                          placeholder="Renomear pasta…"
+                          aria-label="Renomear pasta"
+                          style={{ flex: 1, minWidth: 0, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 6, padding: '7px 9px', color: text, fontSize: 12, outline: 'none' }}
+                        />
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Apagar a pasta "${f.name}"? Os servidores voltam para a lista.`)) { removeFolder(f.id); setRailMenu(null) }
+                        }}
+                        style={{ ...item, color: '#ff9c9c' }}
+                      >
+                        <span style={{ display: 'flex' }}><Icon d={Icons.trash} size={14} /></span>Apagar pasta
+                      </button>
+                    </>
+                  )
+                })()}
+              </div>
+            </div>
+          )
+        })()}
 
         <div style={{ width: 260, background: sidebarBg, borderRight: `1px solid ${borderColor}`, display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
           {view === 'servidores' && selCommunity ? (() => {
@@ -1892,7 +1998,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                                     parentChannel={ch.id}
                                     channels={extraChannels}
                                     onOpen={(th) => setOpenThread(th)}
-                                    onCreate={() => setNotice('Clique direito numa mensagem → “Criar thread” para abrir uma discussao aqui.')}
                                   />
                                 )}
                               </div>
@@ -2287,8 +2392,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                 onThread={(m) => { void createThreadFrom(m) }}
                 onToast={setNotice}
                 onResend={(m) => { void resendMessage(m) }}
+                compact={prefs.compact}
+                fontScale={prefs.fontScale}
                 pollChannel={view === 'servidores' && selCommunity ? { communityId: selCommunity, channelId: selConv } : undefined}
-                renderFile={(m, grouped) => {
+                renderFile={(m, _grouped) => {
                   const fmeta = parseFileBody(m.body)
                   if (!fmeta) return null
                   // O card lê o fileSwarm (sincronizado com o downloadManager,
@@ -2731,6 +2838,10 @@ export default function ThemeShell({ designId }: {designId:string}){
             <button className="dd-item" onClick={() => { const id = channelMenu.id; setChannelMenu(null); const ch = mergeChannels(activeComm?.channels, extraChannels).find(c => c.id === id); if (ch) { setChannelMenu(null); setShowServerSettings(true); setServerTab('canais'); setPendingChannelEdit(ch.id) } }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.edit} size={14} /></span> Editar canal</button>
             <button className="dd-item" onClick={async () => { if (!selCommunity) return; const id = channelMenu.id; setChannelMenu(null); if (!confirm('Excluir este canal?')) return; try { await services.channelDelete(selCommunity, id); refreshExtras(selCommunity); if (selConv === id) { const fallback = activeComm?.channels.find(([cid]) => cid !== id)?.[0] ?? extraChannels.find(c => c.id !== id)?.id ?? null; setSelConv(fallback) } } catch (e: any) { setError(String(e?.message ?? e)) } }} style={{ color: t.red }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.trash} size={14} /></span> Excluir canal</button>
             <button className="dd-item" onClick={() => { const id = channelMenu.id; setChannelMenu(null); navigator.clipboard?.writeText?.(id).catch(() => {}) }}><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={Icons.copy} size={14} /></span> Copiar ID</button>
+            <button
+              className="dd-item"
+              onClick={() => { const id = channelMenu.id; setChannelMenu(null); toggleMuteChannel(id) }}
+            ><span style={{ display: 'inline-flex', marginRight: 2 }}><Icon d={prefs.mutedChannels.includes(channelMenu.id) ? Icons.eye : Icons.eyeOff} size={14} /></span> {prefs.mutedChannels.includes(channelMenu.id) ? 'Ativar notificações' : 'Silenciar canal'}</button>
           </div>
         </div>
       )}
@@ -2973,37 +3084,47 @@ export default function ThemeShell({ designId }: {designId:string}){
                 fonte e sem forma de PARAR a não ser pelo botão nativo do SO.
                 Agora: rótulo que muda ("Compartilhar"/"Parar"), escolha de
                 tela-inteira vs janela, e o alvo some quando para. */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <button
-                onClick={()=> { if (activeCall.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
-                disabled={!supportsScreenShare() && !activeCall.sharing}
-                data-testid="call-screen-share"
-                title={activeCall.sharing ? 'Parar de compartilhar a tela' : supportsScreenShare() ? 'Compartilhar a tela com a chamada (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? 'Este navegador não permite compartilhar tela')}
-                aria-label={activeCall.sharing ? 'Parar de compartilhar a tela' : 'Compartilhar tela'}
-                style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: activeCall.sharing ? t.red : '#3a3a3c', color: '#fff', opacity: supportsScreenShare() || activeCall.sharing ? 1 : 0.45, cursor: supportsScreenShare() || activeCall.sharing ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              ><Icon d={Icons.screen} size={18} /></button>
-              {activeCall.sharing && (
+            <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+              {activeCall.sharing ? (
                 <button
-                  onClick={()=> callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))}
+                  onClick={() => callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))}
                   data-testid="call-screen-stop"
                   title="Parar de compartilhar"
                   aria-label="Parar de compartilhar"
-                  style={{ height: 48, padding: '0 14px', borderRadius: 24, border: 'none', background: t.red, color: '#fff', cursor: 'pointer', fontWeight: 800, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
-                ><Icon d={Icons.screen} size={14} /> Parar</button>
+                  style={{ height: 48, width: 48, borderRadius: '50%', border: 'none', background: t.red, color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                ><Icon d={Icons.screen} size={18} /></button>
+              ) : (
+                <>
+                  <button
+                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
+                    disabled={!supportsScreenShare()}
+                    data-testid="call-screen-share"
+                    title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte)' : (screenShareUnavailableReason() ?? 'Este navegador não permite compartilhar tela')}
+                    aria-label="Compartilhar tela"
+                    style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: '#3a3a3c', color: '#fff', opacity: supportsScreenShare() ? 1 : 0.45, cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  ><Icon d={Icons.screen} size={18} /></button>
+                  <div
+                    style={{ position: 'absolute', bottom: 56, left: 0, background: '#232428', border: `1px solid ${borderColor}`, borderRadius: 8, padding: 6, boxShadow: '0 8px 24px rgba(0,0,0,.5)', zIndex: 200, display: 'flex', flexDirection: 'column', gap: 2 }}
+                    onClick={e => e.stopPropagation()}
+                  >
+<button
+                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } callManager.startScreenShare({ source: 'screen', audio: 'system' }).catch((e: any) => setError(String(e?.message ?? e))) }}
+                    disabled={!supportsScreenShare()}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200, padding: '8px 10px', background: 'transparent', border: 'none', color: '#fff', cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', fontSize: 12.5, fontWeight: 700, textAlign: 'left', borderRadius: 6 }}
+                  ><Icon d={Icons.screen} size={16} /> Tela inteira</button>
+                  <button
+                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } callManager.startScreenShare({ source: 'window', audio: 'system' }).catch((e: any) => setError(String(e?.message ?? e))) }}
+                    disabled={!supportsScreenShare()}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200, padding: '8px 10px', background: 'transparent', border: 'none', color: '#fff', cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', fontSize: 12.5, fontWeight: 700, textAlign: 'left', borderRadius: 6 }}
+                  ><Icon d={Icons.grid} size={16} /> Janela/Aba</button>
+                    <div style={{ height: 1, background: borderColor, margin: '2px 0' }} />
+                    <button
+                      onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200, padding: '8px 10px', background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 12.5, fontWeight: 700, textAlign: 'left', borderRadius: 6 }}
+                    ><Icon d={Icons.settings} size={16} /> Configurações avançadas…</button>
+                  </div>
+                </>
               )}
-            </div>
-            {/* Fonte da captura: tela inteira, janela ou monitor específico.
-                Escolher antes de capturar evita o principal atrito — compartilhar
-                "Tela inteira" e depois querer só uma janela obrigava a parar e
-                recomeçar. Abre o seletor completo (fonte/áudio/qualidade/FPS). */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#3a3a3c', borderRadius: 24, padding: 4, height: 48 }}>
-              <button
-                onClick={()=> { if (!supportsScreenShare() && !activeCall.sharing) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
-                data-testid="call-screen-source"
-                aria-label={`Fonte: ${screenSourceHint === 'monitor' ? 'tela inteira' : 'uma janela/aba'}. Clique para escolher fonte, áudio e qualidade.`}
-                title="Fonte, áudio, qualidade e FPS do compartilhamento de tela"
-                style={{ height: 40, padding: '0 12px', borderRadius: 20, border: 'none', background: 'transparent', color: '#fff', cursor: 'pointer', fontWeight: 700, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}
-              ><Icon d={screenSourceHint === 'monitor' ? Icons.screen : Icons.grid} size={14} /> {screenSourceHint === 'monitor' ? 'Tela' : 'Janela'}</button>
             </div>
             <button onClick={() => callManager.leave()} data-testid="call-leave" aria-label="Sair da chamada" title="Sair da chamada" style={{ width: 64, height: 48, borderRadius: 24, border: 'none', background: t.red, color: '#fff', cursor: 'pointer', fontWeight: 800, fontSize: 13 }}>Sair</button>
           </div>
@@ -3220,6 +3341,25 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
             {turnMsg && <div style={{ fontSize: 12, color: turnMsg.startsWith('formato') ? '#ff9c9c' : '#8cf5b8', marginBottom: 24 }}>{turnMsg}</div>}
             {!turnMsg && <div style={{ marginBottom: 24 }} />}
+
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>APARÊNCIA</div>
+            <div style={{ marginBottom: 8 }}>
+              <AppearanceSettings T={t} inputBg={inputBg} borderColor={borderColor} text={text} muted={muted} />
+            </div>
+
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>NOTIFICAÇÕES</div>
+            <div style={{ marginBottom: 8 }}>
+              <NotificationSettings
+                servers={communities.map(c => ({ id: c.id, name: c.name }))}
+                channelsOf={(sid) => (communities.find(c => c.id === sid)?.channels ?? []).map(([id, name]) => ({ id, name }))}
+                T={t} inputBg={inputBg} borderColor={borderColor} text={text} muted={muted}
+              />
+            </div>
+
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>VOZ E ÁUDIO</div>
+            <div style={{ marginBottom: 8 }}>
+              <VoiceDeviceSettings T={t} inputBg={inputBg} borderColor={borderColor} text={text} muted={muted} />
+            </div>
 
             {services.kind === 'native' && (
               <>

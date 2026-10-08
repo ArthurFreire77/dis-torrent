@@ -47,6 +47,7 @@ fn contrato_da_api() {
         video_codec: None,
         video_source: None,
         video_error: None,
+        video_packets_in: None,
         frames_in: None,
         frames_out: None,
     };

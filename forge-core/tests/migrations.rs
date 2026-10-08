@@ -74,8 +74,19 @@ fn banco_v6_sem_thread_id_e_consertado_na_abertura() {
         store.kv_set("probe", "1").ok();
         let conn = Connection::open(&db).unwrap();
         conn.execute_batch(
-            "CREATE TABLE messages_old AS SELECT
-                 id,conv_id,author_fp,body,ts,sig,direction,status,bot_id FROM messages;
+            "CREATE TABLE messages_old (
+                 id TEXT PRIMARY KEY,
+                 conv_id TEXT NOT NULL,
+                 author_fp TEXT NOT NULL,
+                 body TEXT NOT NULL,
+                 ts INTEGER NOT NULL,
+                 sig TEXT NOT NULL,
+                 direction TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 bot_id TEXT NOT NULL DEFAULT ''
+             );
+             INSERT INTO messages_old
+                 SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id FROM messages;
              DROP TABLE messages;
              ALTER TABLE messages_old RENAME TO messages;
              CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conv_id, ts);
@@ -98,7 +109,7 @@ fn banco_v6_sem_thread_id_e_consertado_na_abertura() {
         conn.query_row("SELECT value FROM kv WHERE key='schema_version'", [], |r| r
             .get::<_, String>(0))
             .unwrap(),
-        "7"
+        "8"
     );
 
     // 3) E o mais importante: uma leitura de mensagem tem que funcionar, que é
@@ -120,9 +131,9 @@ fn banco_v6_sem_thread_id_e_consertado_na_abertura() {
     assert_eq!(got.thread_id, "");
 }
 
-/// Reabrir um banco já em v7 é idempotente: não erra, não duplica coluna.
+/// Reabrir um banco no schema atual é idempotente: não erra nem duplica coluna.
 #[test]
-fn reabrir_v7_e_idempotente() {
+fn reabrir_schema_atual_e_idempotente() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("forge.db");
     {

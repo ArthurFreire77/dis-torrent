@@ -288,7 +288,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
     }, { timeout: 45000 })
 
     const probe = await page.evaluate(() => window.__forgeScreenProbe)
-    // eslint-disable-next-line no-console
     console.log('SCREEN PROBE', JSON.stringify(probe, null, 1))
 
     // Se a máquina não tem display nenhum (sandbox), isso é um pulo honesto:
