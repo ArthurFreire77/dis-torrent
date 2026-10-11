@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## [1.1.3-pre-alpha] — 2026-10-11
+
+### Tela cinza no .deb Linux — causa raiz e blindagem
+
+- **Causa raiz (não era o app)**: `~/.cache/fontconfig` compartilhado
+  reescrito pelo `fc-cache` 2.18 do Linuxbrew num formato que o fontconfig
+  2.15 do sistema não entende (cache das WOFF OpenDyslexic). O
+  `WebKitWebProcess` entrava em loop infinito a 100% de CPU antes do
+  primeiro paint — janela cinza, `about:blank` nunca comitava, zero output
+  no console. Chromium nunca foi afetado.
+- **Blindagem no código**: o app agora usa `FONTCONFIG_FILE` próprio
+  (`src-tauri/fontconfig/forge-fonts.conf`, mesmas fontes/regras do sistema
+  via `/etc/fonts/conf.d`) com `<cachedir>` só em
+  `~/.cache/forge-fontconfig`. Cache compartilhado envenenado nunca mais
+  trava o app — verificado com o arquivo venenoso presente.
+- **Diagnóstico no Linux**: console JS espelhado no stdout
+  (`enable_write_console_messages_to_stdout`) e `useHttpsScheme: false`.
+
 ## [Não lançado]
 
 ### Chamadas e vídeo — qualidade e estabilidade (medido, não estimado)
