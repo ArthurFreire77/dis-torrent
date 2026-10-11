@@ -3895,6 +3895,11 @@ fn main() {
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&dir).ok();
             tracing::info!(?dir, "FORGE iniciando");
+            // Cache fontconfig privado (imune ao ~/.cache/fontconfig
+            // envenenado — ver isolate_fontconfig_cache). Aqui com o data_dir
+            // autoritativo; o run() já fez best-effort antes de tudo.
+            #[cfg(target_os = "linux")]
+            isolate_fontconfig_cache_managed(&dir);
             // cache LRU de disco (avatares/thumbnails/spool de chunks) — teto
             // persistido em kv, padrão 256MB
             let cap_mb: u64 = Store::open(&dir.join("forge.db"))
@@ -3964,13 +3969,17 @@ fn enable_webrtc(app: &tauri::AppHandle) {
         // `PlatformWebview` é wrapper; no Linux o `inner()` devolve o
         // `webkit2gtk::WebView` (type alias direto, sem cast).
         let inner = wv.inner();
-        match inner.settings() {
-            Some(settings) => {
-                settings.set_enable_webrtc(true);
-                eprintln!("[forge] WebKitGTK: enable_webrtc = LIGADO");
-            }
-            None => eprintln!("[forge] WebKitGTK: settings() = None — WebRTC NÃO ligado"),
+    match inner.settings() {
+        Some(settings) => {
+            settings.set_enable_webrtc(true);
+            // Console do JS -> stdout/stderr do processo. Sem isto, qualquer
+            // erro de CSP, de carregamento de asset ou exceção na UI fica
+            // INVISÍVEL: o app só mostra uma janela cinza sem explicação.
+            settings.set_enable_write_console_messages_to_stdout(true);
+            eprintln!("[forge] WebKitGTK: enable_webrtc = LIGADO");
         }
+        None => eprintln!("[forge] WebKitGTK: settings() = None — WebRTC NÃO ligado"),
+    }
     });
 
 }
@@ -3993,5 +4002,62 @@ pub fn run() {
     // PRODUÇÃO: liga a DHT mainline BitTorrent (descoberta descentralizada).
     // Testes não setam → engines de teste ficam isolados da rede BitTorrent.
     std::env::set_var("FORGE_DHT", "1");
+    #[cfg(target_os = "linux")]
+    isolate_fontconfig_cache_best_effort();
     main();
+}
+
+/// Cache fontconfig PRIVADO do app (Linux desktop).
+///
+/// BUG que isto corrige ("tela cinza" no .deb): o WebKitGTK lê o
+/// `~/.cache/fontconfig` COMPARTILHADO. Se outro programa reescrever aquele
+/// cache num formato que o fontconfig do sistema não entende (aconteceu com
+/// o `fc-cache` 2.18 do Linuxbrew contra o 2.15 do sistema, no cache das
+/// WOFF OpenDyslexic), o `WebKitWebProcess` entra em loop infinito a 100%
+/// de CPU antes do primeiro paint — a janela abre cinza, sem splash, sem
+/// BootScreen e sem nem mensagem no console. Chromium não é afetado.
+///
+/// A correção: `FONTCONFIG_FILE` próprio (`forge-fonts.conf`, ao lado deste
+/// fonte), com os mesmos diretórios e regras do sistema (`/etc/fonts/conf.d`
+/// — que inclui o 50-user.conf com as personalizações do usuário), mas
+/// `<cachedir>` APENAS em `~/.cache/forge-fontconfig`. O cache envenenado
+/// nunca é lido nem escrito por nós, e brew/outros nunca tocam no nosso.
+/// Respeita `FONTCONFIG_FILE` pré-existente (quem setou sabe o que faz).
+/// Primeira execução: cache vazio = varredura ao vivo (lento uma vez),
+/// depois normal.
+#[cfg(target_os = "linux")]
+fn isolate_fontconfig_cache_best_effort() {
+    if std::env::var_os("FONTCONFIG_FILE").is_some() {
+        return;
+    }
+    let Some(data_dir) = dirs::data_dir().map(|d| d.join("com.forge.app")) else {
+        return;
+    };
+    isolate_fontconfig_cache(&data_dir);
+}
+
+/// Idem, com o data_dir autoritativo do Tauri (dentro do setup).
+#[cfg(target_os = "linux")]
+fn isolate_fontconfig_cache_managed(data_dir: &std::path::Path) {
+    if std::env::var_os("FONTCONFIG_FILE").is_some() {
+        return;
+    }
+    isolate_fontconfig_cache(data_dir);
+}
+
+#[cfg(target_os = "linux")]
+fn isolate_fontconfig_cache(data_dir: &std::path::Path) {
+    const CONF: &str = include_str!("../fontconfig/forge-fonts.conf");
+    let target = data_dir.join("forge-fonts.conf");
+    let fresh = std::fs::read_to_string(&target).map(|c| c == CONF).unwrap_or(false);
+    if !fresh {
+        if let Err(e) = std::fs::create_dir_all(data_dir)
+            .and_then(|_| std::fs::write(&target, CONF))
+        {
+            tracing::warn!("fontconfig privado indisponível ({e}) — seguindo com o compartilhado");
+            return;
+        }
+    }
+    std::env::set_var("FONTCONFIG_FILE", &target);
+    eprintln!("[forge] fontconfig: cache privado em {}", target.display());
 }
