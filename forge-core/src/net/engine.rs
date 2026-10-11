@@ -5587,21 +5587,46 @@ impl NetworkEngine {
                 if fp == self.identity.fingerprint {
                     continue;
                 }
-                if !self.voice_register(&call_id, &fp) {
-                    continue;
-                }
-                if let Ok(Some(sdp)) = self.voice_begin_offer(&call_id, &fp) {
-                    let _ = self.call_signal(
-                        &fp,
-                        SecureFrame::CallOffer {
-                            call_id: call_id.clone(),
-                            sdp,
-                        },
-                    );
-                }
+                self.voice_mesh_maybe_offer(community_id, channel_id, &fp);
             }
         }
         Ok(())
+    }
+
+    /// Abre a sessão nativa de mídia com `peer_fp` no canal, se EU sou o lado
+    /// que oferece. Idempotente e sem efeito quando não sou.
+    ///
+    /// A REGRA DO PAR (fingerprint maior oferece) é o que impede offer contra
+    /// offer quando dois nós entram no canal no mesmo instante. Chamada dos
+    /// três pontos em que um par do canal pode aparecer: no meu `voice_join`,
+    /// quando EU recebo o `VoiceJoin` dele e quando eu recebo o `VoiceState`
+    /// dele (o anúncio que o joiner usa para me enxergar).
+    #[cfg(target_os = "linux")]
+    fn voice_mesh_maybe_offer(
+        self: &Arc<Self>,
+        community_id: &str,
+        channel_id: &str,
+        peer_fp: &str,
+    ) {
+        if !self.native_voice_available() {
+            return;
+        }
+        // Lado menor: quem oferece é o outro. Só anuncio (ver o arm de VoiceJoin).
+        if self.identity.fingerprint.as_str() <= peer_fp {
+            return;
+        }
+        let call_id = format!("voice-{community_id}-{channel_id}");
+        // Já há sessão nativa com este par? Não renegocia (a renegociação
+        // gratuita a cada mute era o que fazia a chamada "cair e voltar").
+        if self.voice_is_native(&call_id, peer_fp) {
+            return;
+        }
+        if !self.auto_register_voice_channel(&call_id, peer_fp) {
+            return;
+        }
+        if let Ok(Some(sdp)) = self.voice_begin_offer(&call_id, peer_fp) {
+            let _ = self.call_signal(peer_fp, SecureFrame::CallOffer { call_id, sdp });
+        }
     }
 
     pub fn voice_leave(self: &Arc<Self>, community_id: &str, channel_id: &str) -> Result<()> {
@@ -9533,6 +9558,27 @@ async fn handle_frame(
         }
         SecureFrame::CallEnd { call_id } => {
             engine.store.leave_call(&call_id, peer_fp)?;
+            // SOZINHO na chamada? Então ela acabou para mim também.
+            //
+            // Antes só o par que desligou era removido: em 1:1 o convidado
+            // continuava em `call_participants` DEPOIS do fim, e o registro
+            // fantasma fazia a chamada seguinte nascer achando que ainda havia
+            // uma em andamento — sintoma exato de "tem que reiniciar o app
+            // para chamar alguém".
+            //
+            // Em grupo a remoção é só a do par: quem fica continua com os
+            // outros (remover a chamada inteira derrubaria B quando C falasse).
+            let sozinho = engine
+                .store
+                .call_participants(&call_id)
+                .unwrap_or_default()
+                .iter()
+                .filter(|f| **f != engine.identity.fingerprint)
+                .count()
+                == 0;
+            if sozinho {
+                engine.store.end_call(&call_id)?;
+            }
             #[cfg(target_os = "linux")]
             // Só a sessão NATIVA daquele par cai — as demais da chamada
             // (grupo/mesh) continuam de pé. `voice_hangup` derrubava todas.
@@ -9650,6 +9696,41 @@ async fn handle_frame(
             engine
                 .store
                 .set_voice_state(&community_id, &channel_id, peer_fp, false, false)?;
+            #[cfg(target_os = "linux")]
+            {
+                // Quem RECEBE o join abre a mídia quando é o lado de fingerprint
+                // MAIOR do par (regra em `voice_mesh_maybe_offer`).
+                //
+                // Antes este arm só gravava o estado: a mesh nativa nascia
+                // EXCLUSIVAMENTE de quem entrou ver os outros no `list_voice_states`
+                // local. Quando os dois nós entravam juntos — ou quando quem entrou
+                // ainda não conhecida o estado do outro — NENHUM lado oferecia e o
+                // canal ficava mudo até alguém reinstalar o app.
+                engine.voice_mesh_maybe_offer(&community_id, &channel_id, peer_fp);
+                // Eu sou o lado MENOR: quem oferece é o joiner, mas ele pode não
+                // me conhecer ainda (ele acabou de entrar). Anuncio meu estado
+                // para que o store dele me enxergue — o arm de VoiceState
+                // completa a mesh pelo lado que oferece.
+                if engine.native_voice_available()
+                    && engine.identity.fingerprint.as_str() < peer_fp
+                    && engine
+                        .voice_channel_calls
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains_key(&format!("voice-{community_id}-{channel_id}"))
+                {
+                    let _ = engine.cmd_tx.send(EngineCmd::SendToPeer(
+                        peer_fp.to_string(),
+                        SecureFrame::VoiceState {
+                            community_id: community_id.clone(),
+                            channel_id: channel_id.clone(),
+                            muted: false,
+                            deafened: false,
+                            speaking: false,
+                        },
+                    ));
+                }
+            }
             let _ = engine.events.send(EngineEvent::VoiceJoined {
                 community_id,
                 channel_id,
@@ -9696,6 +9777,12 @@ async fn handle_frame(
             engine
                 .store
                 .set_voice_state(&community_id, &channel_id, peer_fp, muted, deafened)?;
+            #[cfg(target_os = "linux")]
+            // Este frame é o anúncio que o lado menor manda ao receber um
+            // VoiceJoin: ele faz o store do joiner me enxergar, e aqui a mesh
+            // nativa se completa pelo lado que oferece. Idempotente — um par
+            // que já tem sessão não é renegociado.
+            engine.voice_mesh_maybe_offer(&community_id, &channel_id, peer_fp);
             let _ = engine.events.send(EngineEvent::VoiceStateChanged {
                 community_id,
                 channel_id,

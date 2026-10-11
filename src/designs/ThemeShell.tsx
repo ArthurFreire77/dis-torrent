@@ -1438,6 +1438,11 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     // O ring SÓ para quando o aceite de fato sucedeu — antes o catch deixava
     // o overlay parado no limbo, sem ring e sem chamada.
+    // Valida ANTES de avisar o peer: se o frame CallAccept sair e o
+    // `acceptInbound` recusar, o chamador conecta sozinho e quem atendeu fica
+    // sem chamada nenhuma (estado dos dois divergentes).
+    const bloqueio = callManager.canAccept(incomingCall.call_id)
+    if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
     try {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
       await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)

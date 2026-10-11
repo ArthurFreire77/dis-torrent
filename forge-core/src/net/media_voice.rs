@@ -263,6 +263,68 @@ pub mod audio {
         }
     }
 
+    /// Amplificador de pico com limitador, aplicado ao microfone.
+    ///
+    /// MEDIDO nesta máquina: o device default (webcam USB) está com o volume do
+    /// sistema em 31% e entrega pico de -33 dBFS. O caminho do NAVEGADOR tem
+    /// `autoGainControl` nas constraints; o caminho nativo não tinha NADA, e a
+    /// mesma voz chegava ao par como sussurro — o sintoma "não captura áudio"
+    /// mesmo com o microfone aberto e os frames fluindo.
+    ///
+    /// Só AMPLIFICA (nunca atenua): atenuar quem já fala alto seria piorar
+    /// quem está correto. O alvo é -6 dBFS e o ganho élimitado a 12x para não
+    /// transformar o ruído de fundo em uivo.
+    pub(super) struct MicGain {
+        pub(super) gain: f32,
+    }
+
+    impl MicGain {
+        pub(super) fn new() -> Self {
+            Self { gain: 1.0 }
+        }
+
+        /// Alvo de pico: -6 dBFS.
+        pub(super) const TARGET: f32 = 0.5;
+        /// Teto de amplificação.
+        pub(super) const MAX_GAIN: f32 = 12.0;
+        /// Piso de ruído (-48 dBFS): abaixo disto é silêncio, não voz baixa.
+        /// Sem este gate o AGC sobe o ganho entre as palavras e o par ouve chiado.
+        pub(super) const NOISE_FLOOR: f32 = 0.004;
+
+        pub(super) fn process(&mut self, mono: &mut [i16]) {
+            let peak = mono.iter().fold(0i16, |m, s| m.max(s.abs())) as f32 / i16::MAX as f32;
+            // Bloco de silêncio real: não mexe no ganho (e desce devagar para 1.0).
+            if peak < Self::NOISE_FLOOR {
+                self.gain += (1.0 - self.gain) * 0.05;
+                if self.gain <= 1.001 {
+                    self.gain = 1.0;
+                }
+                return;
+            }
+            let want = (Self::TARGET / peak).min(Self::MAX_GAIN);
+            // Ataque rápido (~3 blocos) para não cortar a sílaba inicial;
+            // liberação lenta (~1 s) para o ganho não "bombar" entre palavras.
+            let coef = if want > self.gain { 0.35 } else { 0.03 };
+            self.gain += (want - self.gain) * coef;
+            if self.gain <= 1.001 {
+                self.gain = 1.0;
+                return;
+            }
+            for s in mono.iter_mut() {
+                let v = *s as f32 * self.gain / i16::MAX as f32;
+                // Limitador suave: linear até 0.7 e comprimido acima, para o
+                // ganho nunca produzir estouro digital com clip reto.
+                let limited = if v.abs() <= 0.7 {
+                    v
+                } else {
+                    let over = v.signum() * (0.7 + (v.abs() - 0.7) / (1.0 + (v.abs() - 0.7) * 4.0));
+                    over.min(1.0).max(-1.0)
+                };
+                *s = (limited * i16::MAX as f32) as i16;
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- hub
 
     /// Partes compartilhadas com os callbacks do cpal (threads de device).
@@ -464,7 +526,7 @@ pub mod audio {
             id
         }
 
-        // -------------------------------------------------------------- microfone
+        // ---------------------------------------------------------------- microfone
 
         fn open_mic(&self) -> Result<(), String> {
             let host = cpal::default_host();
@@ -503,6 +565,7 @@ pub mod audio {
             let downmix = hw_channels > 1;
             let ch = hw_channels as usize;
             let mut resampler = Resampler::new(hw_rate, SAMPLE_RATE);
+            let mut agc = MicGain::new();
             let mut acc: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 4);
             // Ancora de tempo do frame em formacao. Encadeada por +FRAME a cada frame
             // emitido: o primeiro sample de cada frame e' datado pela callback que o
@@ -510,7 +573,7 @@ pub mod audio {
             let mut next_frame_wall: Option<Instant> = None;
 
             let stream = build_input_with_buffer_fallback(&device, cfg, move |data: &[f32]| {
-                let mono: Vec<i16> = if downmix {
+                let mut mono: Vec<i16> = if downmix {
                     data.chunks_exact(ch)
                         .map(|c| {
                             let avg: f32 = c.iter().sum::<f32>() / ch as f32;
@@ -522,6 +585,9 @@ pub mod audio {
                         .map(|s| ((*s).clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                         .collect()
                 };
+                // Ganho ANTES do resampler e antes de acumular: o par ouve o
+                // mesmo volume independente do volume do device no sistema.
+                agc.process(&mut mono);
                 if next_frame_wall.is_none() {
                     next_frame_wall = Some(Instant::now());
                 }
@@ -895,7 +961,9 @@ use webrtc::rtp_transceiver::RtpSender;
 const JITTER_DEPTH: Duration = Duration::from_millis(50);
 /// Pacotes retidos por stream (independente da profundidade).
 const JITTER_CAPACITY: usize = 64;
-const BITRATE_BPS: i32 = 32_000;
+/// Bitrate do Opus. 32 kbps era "voip medio" e a voz chegava abafada em
+/// fone — 48 kbps é fullband mono e não custa banda em P2P.
+const BITRATE_BPS: i32 = 48_000;
 const STUN_DEFAULT: &str = "stun:stun.l.google.com:19302";
 /// TURN público padrão (mesmo do caminho do navegador). Sem relay, CGNAT
 /// simétrico não fecha — daí a obrigatoriedade.
@@ -1671,14 +1739,41 @@ impl VoiceMedia {
             // "starting" e' gravado ANTES de qualquer `await`.
             let mut st = sess.sh.video_state.lock().unwrap();
             if st.as_str() == "live" || st.as_str() == "starting" {
-                let codec = sess
-                    .sh
-                    .video_codec
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .unwrap_or_else(|| "video/VP8".to_string());
-                return Ok(codec);
+                // TROCA DE FONTE: com video no ar e fonte pedida OUTRA (camera ->
+                // tela ou tela -> camera), recomecar e' a unica forma de trocar.
+                // Devolver o codec sem fazer nada era o bug: o botao de camera
+                // ficava MORTO (sem erro nenhum) quando a tela ja estava
+                // compartilhada — e vice-versa.
+                let atual = sess.sh.video_want.lock().unwrap().clone();
+                let mesma_fonte = atual.as_ref().map(|(f, _)| f == source).unwrap_or(false);
+                if mesma_fonte {
+                    let codec = sess
+                        .sh
+                        .video_codec
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| "video/VP8".to_string());
+                    return Ok(codec);
+                }
+                // Solta o lock e purga a tarefa anterior antes de reabrir: o
+                // `video_purge_source` precisa do lock de `video_state` tambem.
+                drop(st);
+                self.video_purge_source(&sess);
+                let mut st = sess.sh.video_state.lock().unwrap();
+                *sess.sh.video_want.lock().unwrap() = Some((source.to_string(), monitor_id));
+                *st = "starting".to_string();
+                *sess.sh.video_error.lock().unwrap() = None;
+                drop(st);
+                let for_task = sess.clone();
+                let for_abort = sess.clone();
+                let want = source.to_string();
+                self.inner.core.run(async move {
+                    let h = tokio::spawn(async move { video_send_task(for_task, want).await });
+                    for_abort.tasks.lock().unwrap().push(h.abort_handle());
+                    Ok::<(), String>(())
+                })??;
+                return Ok("starting".to_string());
             }
             *sess.sh.video_want.lock().unwrap() = Some((source.to_string(), monitor_id));
             *st = "starting".to_string();
@@ -1696,6 +1791,20 @@ impl VoiceMedia {
             Ok::<(), String>(())
         })??;
         Ok("starting".to_string())
+    }
+
+    /// Purga a tarefa/encoder da FONTE atual de video de uma sessao, para uma
+    /// troca de fonte (camera -> tela) poder reabrir o device. Sem isto a task
+    /// antiga continuava rodando e a nova nunca assumia.
+    fn video_purge_source(&self, sess: &Session) {
+        // Estado "off" faz o laco de `video_send_task` quebrar sozinho; as tasks
+        // registradas sao abortadas de uma vez pelo hangup/close, entao aqui
+        // basta marcar — a task nova nasce com o estado "starting" acima.
+        *sess.sh.video_state.lock().unwrap() = "off".to_string();
+        *sess.sh.video_want.lock().unwrap() = None;
+        // Da' uma folga para a task ver o estado antes de reabrir o device:
+        // `v4l2src`/`ximagesrc` dois ao mesmo tempo no mesmo processo briga.
+        std::thread::sleep(Duration::from_millis(120));
     }
 
     /// Desliga o envio de video (o recebimento continua; o tile some na UI).
@@ -1721,7 +1830,21 @@ impl VoiceMedia {
 
 fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceStats> {
     let all = stats.into_iter().collect::<Vec<_>>();
-    let mut out = all.first()?.clone();
+    // O estado agregado NAO pode ser o de um peer arbitrario: `HashMap` nao tem
+    // ordem estavel e o primeiro elemento sorteado mandava na chamada inteira.
+    // Medido/raciocinado: num mesh de 3, um par atras de NAT simetrico (failed)
+    // derrubava a chamada dos outros dois que estavam connected; e com um par
+    // connected e outro connecting, o `media-connected` nunca disparava porque
+    // dava sorte de cair no connecting. Prioridade: o PIOR caso decide.
+    let gravidade = |peer: &VoiceStats| match peer.state.as_str() {
+        "failed" => 4,
+        "connecting" => 3,
+        "reconnecting" => 3,
+        "connected" => 2,
+        "idle" => 1,
+        _ => 0,
+    };
+    let mut out = all.iter().max_by_key(|peer| gravidade(peer))?.clone();
 
     for peer in all.iter().skip(1) {
         out.packets_in = out.packets_in.saturating_add(peer.packets_in);
@@ -1730,6 +1853,7 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
         out.decode_errors = out.decode_errors.saturating_add(peer.decode_errors);
     }
 
+    // `route` vem do peer escolhido acima (a rota que decide o estado).
     let best_video = all
         .iter()
         .max_by_key(|peer| match peer.video_state.as_deref() {
@@ -2605,6 +2729,14 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
 
     let mut last_progress = Instant::now();
     let mut grab_miss: u32 = 0;
+    // SSRC buscado UMA vez. Dentro do laço, `ssrcs().await` por quadro somava
+    // ~20 ms de ida/volta async e o envio empacava em ~15 fps com o encoder
+    // entregando 29 — o gargalo era esta chamada, não a captura.
+    let ssrc = vtl.ssrcs().await.first().copied();
+    if ssrc.is_none() {
+        video_fail(&sh, "vídeo: a track local ficou sem ssrc".into());
+        return;
+    }
 
     loop {
         if sess.closed.load(Ordering::SeqCst) {
@@ -2616,14 +2748,19 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         // `take()`: o encoder e' MOVIDO para dentro da `spawn_blocking` (ele
         // precisa estar la para puxar um frame codificado). O `Option` existe para o `break`
         // do meio do laco nao deixar um valor ja movido.
+        let t_iter = Instant::now();
         let Some(mut enc2) = enc.take() else { break };
         // Captura/encode não roda no worker tokio de mídia. Drena os buffers
         // disponíveis e mantém só o quadro mais recente para não criar atraso.
         let pumped = tokio::task::spawn_blocking(
             move || -> (Option<Vec<u8>>, Option<String>, bool, crate::net::media_video::VideoEncoder) {
-            let mut grab_ok = !is_screen;
+            // `ximagesrc` captura sozinho: o encoder JA recebe quadro do
+            // pipeline e o laco so precisa puxar. Alimentar por cima seria
+            // empurrar o mesmo frame duas vezes.
+            let needs_feed = is_screen && !enc2.self_feeding();
+            let mut grab_ok = !needs_feed;
             let mut capture_error = None;
-            if is_screen {
+            if needs_feed {
                 match crate::net::media_video::grab_screen_frame(want_monitor) {
                     Some((rgb, w, h)) => {
                         if let Err(e) = enc2.push_screen_frame(&rgb, w, h) {
@@ -2665,12 +2802,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         } else {
             grab_miss = grab_miss.saturating_add(1);
         }
-        // `write_sample` pede ssrc + payload type: sao os do transceiver que
-        // acabamos de negociar, e NAO um chute.
-        let Some(ssrc) = vtl.ssrcs().await.first().copied() else {
-            video_fail(&sh, "vídeo: a track local ficou sem ssrc".into());
-            break;
-        };
         let sent = usize::from(frame.is_some());
         if let Some(frame) = frame {
             let sample = Sample {
@@ -2683,6 +2814,7 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
                 prev_dropped_packets: 0,
                 prev_padding_packets: 0,
             };
+            let Some(ssrc) = ssrc else { break };
             if let Err(e) = vtl.write_sample(ssrc, pt, &sample, &[]).await {
                 video_fail(&sh, format!("vídeo: falha ao escrever amostra RTP: {e}"));
                 break;
@@ -2714,7 +2846,15 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             video_fail(&sh, msg);
             break;
         }
-        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        // Passo adaptativo: o encoder e o relogio. Dormir SEMPRE o intervalo
+        // inteiro (33 ms) somava o custo do frame e travava em ~15 fps mesmo
+        // com o pipeline entregando 29. Aqui dorme-se somente o que falta.
+        let gasto = t_iter.elapsed();
+        if gasto < VIDEO_FRAME_INTERVAL {
+            tokio::time::sleep(VIDEO_FRAME_INTERVAL - gasto).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
     }
 
     // FECHA o device: sem `set_state(Null)` a proxima `new_camera` falha com
@@ -2923,4 +3063,128 @@ fn spawn_stats_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
         }
     })
     .abort_handle()
+}
+
+#[cfg(test)]
+mod mic_gain_tests {
+    use super::audio::MicGain;
+
+    /// Pico em i32: `i16::MIN.abs()` estoura em i16 e panicularia em debug.
+    fn peak(samples: &[i16]) -> i32 {
+        samples.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
+    }
+
+    /// Aplica o ganho a `n` callbacks NOVOS (é assim que o cpal chama: cada
+    /// bloco é áudio novo, com o mesmo pico de origem).
+    fn rodar(agc: &mut MicGain, n: usize, bloco: &[i16]) -> i32 {
+        let mut ultimo = 0;
+        for _ in 0..n {
+            let mut b = bloco.to_vec();
+            agc.process(&mut b);
+            ultimo = peak(&b);
+        }
+        ultimo
+    }
+
+    #[test]
+    fn amplifica_voz_baixa_ate_o_alvo() {
+        // O caso medido: device em 31% de volume, pico de -33 dBFS.
+        let mut agc = MicGain::new();
+        let bloco = vec![4000i16; 960]; // pico 0.122
+        let saida = rodar(&mut agc, 40, &bloco);
+        let alvo = saida as f32 / i16::MAX as f32;
+        assert!(
+            (alvo - MicGain::TARGET).abs() < 0.06,
+            "pico nao foi para o alvo: {alvo}"
+        );
+    }
+
+    #[test]
+    fn nao_amplifica_silencio() {
+        let mut agc = MicGain::new();
+        for v in [0i16, 3, 0, 2, 1] {
+            let mut b = vec![v; 960];
+            agc.process(&mut b);
+            assert_eq!(peak(&b), v.abs() as i32, "silencio foi amplificado");
+        }
+        assert_eq!(agc.gain, 1.0);
+    }
+
+    #[test]
+    fn nunca_estoura_acima_de_full_scale() {
+        let mut agc = MicGain::new();
+        // Sinal jah alto (sem i16::MIN, que estoura o abs): o ganho deve
+        // voltar para 1.0 e o limitador nao pode passar de full scale.
+        let bloco: Vec<i16> = (0..960)
+            .map(|i| if i % 2 == 0 { i16::MAX } else { 30000 })
+            .collect();
+        let saida = rodar(&mut agc, 60, &bloco);
+        assert!(saida <= i16::MAX as i32, "estouro digital");
+        assert_eq!(agc.gain, 1.0);
+    }
+
+    #[test]
+    fn limitador_nao_estoura_com_pico_minimo() {
+        // Pico baixo o bastante para o ganho bater no teto: o limitador suave
+        // tem que segurar em full scale sem clip reto.
+        let mut agc = MicGain::new();
+        let bloco: Vec<i16> = (0..960).map(|i| 300 + (i % 7) as i16 * 10).collect();
+        let saida = rodar(&mut agc, 100, &bloco);
+        assert!(saida <= i16::MAX as i32, "estouro digital");
+    }
+}
+
+#[cfg(test)]
+mod aggregate_priority_tests {
+    use super::{aggregate_stats, VoiceStats};
+
+    fn peer(state: &str) -> VoiceStats {
+        VoiceStats {
+            state: state.into(),
+            route: "LAN".into(),
+            jitter_depth_ms: 20,
+            packets_in: 1,
+            packets_out: 1,
+            plc_frames: 0,
+            decode_errors: 0,
+            rtt_ms: Some(5),
+            mic_error: None,
+            video_state: None,
+            video_codec: None,
+            video_source: None,
+            video_error: None,
+            video_packets_in: None,
+            frames_in: None,
+            frames_out: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_state_is_the_worst_case_not_an_arbitrary_peer() {
+        // Regressao: `all.first()` sorteado pela ordem doHashMap. Com tres
+        // pares assim, dava 50% de chance de reportar `connected` com um par
+        // `failed` — a chamada so morria quando o sorteio colaborava.
+        let s = aggregate_stats(vec![peer("connected"), peer("failed"), peer("connected")])
+            .expect("agregado");
+        assert_eq!(s.state, "failed", "um par failed decide o estado do mesh");
+    }
+
+    #[test]
+    fn aggregate_state_connected_only_when_every_peer_is() {
+        let s = aggregate_stats(vec![peer("connected"), peer("connected")]).expect("agregado");
+        assert_eq!(s.state, "connected");
+    }
+
+    #[test]
+    fn aggregate_state_connecting_pinned_even_after_a_connected_peer() {
+        // A ordem do Vec NAO pode mudar o resultado:connectinge' pior que
+        // connected e tem de vencer qualquer que seja a posicao.
+        for v in [
+            vec![peer("connected"), peer("connecting")],
+            vec![peer("connecting"), peer("connected")],
+        ] {
+            let s = aggregate_stats(v).expect("agregado");
+            assert_eq!(s.state, "connecting");
+        }
+    }
 }

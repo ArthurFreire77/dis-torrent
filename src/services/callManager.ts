@@ -668,6 +668,27 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
     try {
       return await md.getUserMedia(merged)
     } catch (e) {
+      // `OverconstrainedError` = as constraints que pedimos não existem no
+      // aparelho. Antes isto matava a câmera inteira ("não abre"). Agora
+      // DEGRADA em ordem: 720p/60 → 720p/15 → 480p/15 → 480p/30 → sem vídeo.
+      // Áudio nunca sai da jogada: chamada de voz sem microfone é pior que
+      // chamada de voz sem imagem.
+      if (merged.video && (e as Error)?.name === 'OverconstrainedError') {
+        const quedas: MediaTrackConstraints[] = [
+          { width: { min: 640, ideal: 1280 }, height: { min: 480, ideal: 720 }, frameRate: { min: 15, ideal: 30 } },
+          { width: { min: 640, ideal: 1280 }, height: { min: 480, ideal: 720 }, frameRate: { min: 15, ideal: 60, max: 60 } },
+          { width: { min: 320, ideal: 640 }, height: { min: 240, ideal: 480 }, frameRate: { min: 15, ideal: 30 } },
+        ]
+        for (const q of quedas) {
+          try {
+            return await md.getUserMedia({ ...merged, video: q })
+          } catch { /* tenta a próxima degradação */ }
+        }
+        try {
+          localMediaNotice?.('câmera não aceitou as resoluções pedidas — seguindo só com voz')
+          return await md.getUserMedia({ ...merged, video: false })
+        } catch { /* cai no erro honesto abaixo */ }
+      }
       const honest = describeMediaError(e)
       try { localMediaNotice?.(honest ?? `falha ao abrir microfone/câmera (${(e as Error)?.name ?? 'erro'})`) } catch { /* ignore */ }
       return null
@@ -1181,7 +1202,17 @@ export class CallManager {
   private relayFallbackTimer: ReturnType<typeof setTimeout> | null = null
   /** Timeout de 'connecting' sem mídia → reinicia ICE (ICE em silêncio no CGNAT). */
   private nativeVoiceTimer: ReturnType<typeof setInterval> | null = null
-  private nativeVoiceSince = 0
+  private nativeVoiceSince = -1
+  /**
+   * Chamadas que JÁ acabaram (callId vistos no `cleanup`). Sem isto, aceitar
+   * um toque que morreu enquanto o usuário decidia criava uma chamada fantasma
+   * de 20 s + 30 s — e no caminho nativo, eterna (o core não tinha sessão e o
+   * vigilante não disparava). Também barra o duplo-clique em "Aceitar", que
+   * reenviaria `CallAccept` para um `call_id` já encerrado.
+   */
+  private endedCalls = new Set<string>()
+  /** callIds com aceite em andamento (duplo clique). */
+  private accepting = new Set<string>()
   private connectTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly CONNECT_TIMEOUT_MS = 20_000
   /** Sem resposta do outro lado (ninguém atendeu / sinalização não andou). */
@@ -1277,6 +1308,11 @@ export class CallManager {
     // identidade já disponível (shells chamam setCallIdentity antes) — base do polite/impolite
     try { const me = this.getIdentity(); if (me && !this.myFp) this.myFp = me.fingerprint } catch { /* ignore */ }
     // escuta eventos do engine (oferta/resposta/ICE + relay via callIce/call_signal)
+    // Descarta o anterior ANTES: se `bind` rodar duas vezes sem `unbind` entre
+    // elas (remount do shell, StrictMode duplo), o listener velho vazava e cada
+    // evento de chamada passava a ser processado 2x — offers duplicadas, PCs
+    // duplos e estado brigando consigo mesmo.
+    try { this.engineOff?.() } catch { /* ignore */ }
     this.engineOff = services.subscribe((ev: any) => {
       // eventos de sinalização sem fp válido são ignorados (nunca crasham o bus)
       const fpOk = typeof ev?.from_fp === 'string' && ev.from_fp.length > 0
@@ -1592,12 +1628,18 @@ export class CallManager {
     this.stopConnectWatchdog()
     this.connectWatchdogGrants = 0
     try {
-      this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(), CallManager.CONNECT_TIMEOUT_MS)
+      // callId capturado no START: o corpo comparа antes de agir. Sem isto, um
+      // timer de uma chamada morta que sobrevivesse chamaria `leave()` na
+      // chamada nova (estado cruzado).
+      const callId = this.state?.callId
+      this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
     } catch { /* ignore */ }
   }
 
   /** Corpo do watchdog de conexão (extraído para poder reagendar a si mesmo). */
-  private onConnectWatchdogFire() {
+  private onConnectWatchdogFire(callId?: string) {
+    // Chamada TROCADA desde que o timer armou? O watchdog é da chamada velha.
+    if (callId && (!this.state || this.state.callId !== callId)) return
     this.connectTimer = null
     try {
       const st = this.state
@@ -1622,7 +1664,7 @@ export class CallManager {
       }
       if (stillGathering && this.connectWatchdogGrants < 2) {
         this.connectWatchdogGrants++
-        this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(), CallManager.CONNECT_TIMEOUT_MS)
+        this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
         return
       }
       try { this.onCallNotice?.('sem rota de mídia direta — reiniciando ICE') } catch { /* ignore */ }
@@ -1645,9 +1687,12 @@ export class CallManager {
   private startReconnectWatchdog() {
     this.stopReconnectWatchdog()
     try {
+      const callId = this.state?.callId
       this.reconnectTimer = setTimeout(() => {
         try {
           const st = this.state
+          // Watchdog da chamada velha? Não mexe na nova.
+          if (callId && (!st || st.callId !== callId)) return
           if (!st || !isCallPhaseActive(st.phase)) return
           let anyAlive = false
           for (const pc of this.pcs.values()) {
@@ -1885,6 +1930,13 @@ export class CallManager {
 
   async joinVoice(communityId: string, channelId: string) {
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
+    // Mesma guarda de `start()`/`acceptInbound()`: entrar num canal de voz com
+    // uma DM ativa sobrescrevia `this.state` e `this.localStream` sem fechar os
+    // PCs da DM nem chamar `callEnd` — o par remoto só saia pelo watchdog dele
+    // (45 s) e o microfone antigo ficava preso (substituído sem `stop()`).
+    if (this.state && isCallPhaseActive(this.state.phase) && !this.state.callId.startsWith('voice-')) {
+      throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar num canal de voz')
+    }
     // Re-confere a voz nativa AGORA (o engine re-arma a mídia se o áudio
     // subiu depois do boot) — o mesmo reset do start().
     await detectNativeVoice(true)
@@ -2065,7 +2117,26 @@ export class CallManager {
     const me = this.getIdentity()
     if (!me) throw new Error('sem identidade')
     this.myFp = me.fingerprint
-    // Atender outra chamada com uma ativa? Recusa honesta em vez de pisar.
+    // Validação REAL (não só a do shell): duplo clique, toque já encerrado e
+    // chamada ativa diferente. `accepting` trava os dois cliques simultâneos.
+    const porquê = this.canAccept(callId)
+    if (porquê) throw new Error(porquê)
+    this.accepting.add(callId)
+    try {
+      return await this.acceptInboundInner(callId, kind, convId, fromFp, nickname, me)
+    } finally {
+      this.accepting.delete(callId)
+    }
+  }
+
+  private async acceptInboundInner(
+    callId: string,
+    kind: CallKind,
+    convId: string,
+    fromFp: string,
+    nickname: string | undefined,
+    me: { fingerprint: string; nickname: string },
+  ): Promise<CallState> {
     if (this.state && this.state.callId !== callId && isCallPhaseActive(this.state.phase)) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de atender outra')
     }
@@ -2811,6 +2882,23 @@ export class CallManager {
     return out
   }
 
+  /**
+   * resolve "posso atender este toque?" ANTES de falar com o peer.
+   *
+   * Antes o shell chamava `services.callAccept` (o frame já ia pro fio) e só
+   * depois `acceptInbound`, que podia lançar ("já existe uma chamada em
+   * andamento"). Resultado: o chamador conectava sozinho e quem atendeu ficava
+   * sem chamada nenhuma. Agora a validação vem primeiro.
+   */
+  canAccept(callId: string): string | null {
+    if (this.accepting.has(callId)) return 'aceitando…'
+    if (this.endedCalls.has(callId)) return 'essa chamada já foi encerrada'
+    if (this.state && this.state.callId !== callId && isCallPhaseActive(this.state.phase)) {
+      return 'já existe uma chamada em andamento — encerre a atual antes de atender outra'
+    }
+    return null
+  }
+
   async leave() {
     if (!this.state) return
     const cid = this.state.callId
@@ -2819,11 +2907,35 @@ export class CallManager {
     this.clearIceRestartTimers()
     this.stopNativeVoiceMonitor()
     if (cid.startsWith('voice-')) {
-      // voz: apenas limpa estado local, servidor já notificou via voiceLeave
-      void cid // preserva sem var não usada
+      // CANAL DE VOZ: sem este `voiceLeave` o core NUNCA ficava sabendo — a
+      // sessão nativa (webrtc-rs + cpal + ximagesrc) continuava viva depois do
+      // "desligar", o áudio do canal seguia saindo e a próxima vez que se
+      // entrava no mesmo canal o mesh duplicava em cima da sessão morta.
+      //
+      // `convId` É o channel_id (ver joinVoice); a comunidade é o que sobra
+      // entre o prefixo e o sufixo — funciona mesmo que os ids tenham '-'.
+      const ch = this.state?.convId
+      const community = ch && cid.endsWith(`-${ch}`)
+        ? cid.slice('voice-'.length, cid.length - `-${ch}`.length)
+        : ''
+      if (community) void services.voiceLeave(community, ch as string).catch(() => {})
     } else {
       try { await services.callEnd(cid) } catch { /* silent */ }
     }
+    // Rede de segurança: a captura nativa (câmera/tela) é derrubada pelo
+    // `voice_leave`/`call_end` do core, mas se algum caminho chegou aqui sem
+    // um desses (estado já meio-mortido), o encoder ficava aberto e o
+    // `ximagesrc`/`v4l2src` só soltavam o device reiniciando o app.
+    try {
+      const st = this.state
+      if ((st as any)?.nativeMedia) {
+        for (const p of st?.participants ?? []) {
+          if (p.fp && p.fp !== this.myFp) {
+            try { void services.voiceVideoStop(cid, p.fp) } catch { /* best-effort */ }
+          }
+        }
+      }
+    } catch { /* nunca impede o encerramento */ }
     this.cleanup()
   }
 
@@ -3007,7 +3119,11 @@ export class CallManager {
             } catch { /* frame nunca derruba o bus */ }
           }).catch(() => { /* poll best-effort */ })
         }
-      }, 150)
+      // 40 ms (~25 fps) e não 150 ms: o encoder nativo entrega 29 fps e a UI
+      // era o gargalo VISUAL — o peer via o vídeo do Linux como slideshow.
+      // O comando devolve resposta meta-only quando não há quadro novo (o
+      // `since_seq` bate), então o custo de IPC é o de um poll, não o do JPEG.
+      }, 40)
     } catch { this.nativeVideoTimer = null }
   }
   private stopNativeVideoMonitor() {
@@ -3138,10 +3254,14 @@ export class CallManager {
     // vazio e `seedScreenPeers` não teria para onde enviar. (Chamadas nativas
     // foram roteadas ACIMA para `toggleNativeVideo` — chegar aqui numa chamada
     // nativa seria bug de roteamento, não estado do usuário.)
+    //
+    // NÃO é mais erro: a captura é preparada mesmo sem participantes e
+    // `attachLocalStreamToPC` (3622) semeia a tela em TODO PC que nascer
+    // depois. Bloquear aqui era o sintoma "no Windows/Android não captura
+    // tela": o usuário clicava em compartilhar enquanto a chamada ainda
+    // estabilizava e tomava erro — quando a tela só precisava esperar os PCs.
     if (this.pcs.size === 0) {
-      const why = 'nenhum participante conectado ainda — espere a chamada estabilizar e tente de novo'
-      this.setScreenError('unavailable', why)
-      throw new ScreenShareError('unavailable', why, true)
+      this.onCallNotice?.('preparando a tela — ela começa a ser enviada quando a chamada conectar')
     }
     this.screenOptions = normalizeOptions(opts, this.screenOptions)
 
@@ -3183,7 +3303,19 @@ export class CallManager {
     const md: any = (typeof navigator !== 'undefined' ? (navigator as any).mediaDevices : null)
     if (!md?.getDisplayMedia) throw new ScreenShareError('unsupported', SCREEN_UNAVAILABLE_MSG, false)
     const constraints = buildDisplayMediaConstraints(opts, this.screenEnv)
-    return await md.getDisplayMedia(constraints) as MediaStream
+    try {
+      return await md.getDisplayMedia(constraints) as MediaStream
+    } catch (e) {
+      // Pede 30 fps de piso; se o aparelho/GPU nao sustenta, o engine recusa
+      // com OverconstrainedError. Derrotar o `min` e melhor que nada: sem
+      // esse retry a tela simplesmente nao abria em aparelho mais modesto.
+      if ((e as Error)?.name !== 'OverconstrainedError') throw e
+      const semPiso = { ...constraints } as Record<string, unknown>
+      const video = semPiso.video as Record<string, unknown>
+      delete video.frameRate
+      video.frameRate = { ideal: 60 }
+      return await md.getDisplayMedia(semPiso) as MediaStream
+    }
   }
 
   /**
@@ -3798,15 +3930,37 @@ export class CallManager {
    */
   private startNativeVoiceMonitor(callId: string) {
     this.stopNativeVoiceMonitor()
-    this.nativeVoiceSince = Date.now()
+    // -1 = "ainda nao conectou". NUNCA 0: `0` faz `Date.now() - 0` dar ~1.7e12
+    // e qualquer `connecting` posterior a uma conexao boa virava timeout
+    // instantaneo — a chamada morria em <700 ms ao trocar de rede, em vez de
+    // deixar o ICE restart trabalhar.
+    this.nativeVoiceSince = -1
     // Vídeo remoto (frames JPEG do core) na MESMA vida do monitor de voz.
     this.startNativeVideoMonitor(callId)
     const t = setInterval(() => {
       const st = this.state
       if (!st || st.callId !== callId) { this.stopNativeVoiceMonitor(); return }
-      const waited = Date.now() - (this.nativeVoiceSince ?? (this.nativeVoiceSince = Date.now()))
+      // So espera timeout quando a chamada esta pendente de midia. Depois de
+      // conectada (`-1`), `waited` fica 0 e o vigilante so age em `failed`.
+      const waited = this.nativeVoiceSince > 0 ? Date.now() - this.nativeVoiceSince : 0
       void services.voiceMediaStats(callId).then((s) => {
-        if (!s || !this.state || this.state.callId !== callId) return
+        if (!this.state || this.state.callId !== callId) return
+        // CRITICO 2: o timeout TEM de valer sem sessao no core.
+        // `voiceMediaStats` devolve null quando nao ha sessao (offer perdida,
+        // absorb falhou, SDP recusado). Sair aqui engolia o vigilante de 45 s
+        // e o overlay ficava em "Conectando…" PARA SEMPRE no caminho nativo.
+        if (!s) {
+          if (waited > CallManager.NATIVE_VOICE_TIMEOUT_MS) {
+            this.nativeVoiceSince = -1
+            this.setFailureCause(
+              `sem rota de midia nativa em ${Math.round(CallManager.NATIVE_VOICE_TIMEOUT_MS / 1000)}s — a oferta nao virou sessao (SDP recusado ou offer perdida)`,
+            )
+            this.onCallNotice?.('sem rota de midia nativa — a chamada nao conseguiu negociar')
+            this.applyPhase('reconnect-timeout')
+            this.leave()
+          }
+          return
+        }
         try { this.lastNativeStats = s } catch { /* ignore */ }
         if (nativeRoute !== s.route) { nativeRoute = s.route; this.onUpdate({ ...this.state }) }
         // VÍDEO NATIVO: estado honesto vindo do core (encoder/decoder).
@@ -3847,14 +4001,14 @@ export class CallManager {
           }
         } catch { /* estado de vídeo nunca derruba a chamada */ }
         if (s.state === 'connected') {
-          this.nativeVoiceSince = 0
+          this.nativeVoiceSince = -1
           this.applyPhase('media-connected')
         } else if (s.state === 'failed' || waited > CallManager.NATIVE_VOICE_TIMEOUT_MS) {
           // O ICE que nunca fecha é o caso do CGNAT simétrico. Sem este
           // timeout a tela ficava em "Conectando…" indefinidamente — que é
           // exatamente o bug que a versão anterior resolveu no caminho do
           // WebRTC, e que voltou no caminho nativo.
-          this.nativeVoiceSince = 0
+          this.nativeVoiceSince = -1
           this.setFailureCause(
             s.state === 'failed'
               ? `rota de mídia nativa perdida (${s.route}; pacotes in=${s.packets_in} out=${s.packets_out} plc=${s.plc_frames})`
@@ -4122,6 +4276,20 @@ export class CallManager {
   }
 
   private cleanup() {
+    // Captura NATIVA (câmera/tela) antes de qualquer coisa: o `leave` já pede,
+    // mas `cleanup` também é alcançado por outros caminhos e um encoder
+    // `ximagesrc`/`v4l2src` aberto segura o device até reiniciar o app — e a
+    // chamada SEGUINTE herra "device busy" sem explicação.
+    try {
+      const st = this.state
+      if ((st as any)?.nativeMedia) {
+        for (const p of st?.participants ?? []) {
+          if (p.fp && p.fp !== this.myFp) {
+            try { if (st) void services.voiceVideoStop(st.callId, p.fp) } catch { /* best-effort */ }
+          }
+        }
+      }
+    } catch { /* nunca impede o encerramento */ }
     this.stopQualityMonitor()
     this.stopReconnectWatchdog()
     this.stopConnectWatchdog()
@@ -4152,7 +4320,19 @@ export class CallManager {
     this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
     this.resetScreenRuntime()
     this.localStream = null
+    // Guarda o callId encerrado para `canAccept` barar aceite tardio. Com teto:
+    // uma sessão longa não deveria acumular milhares de ids.
+    if (this.state) {
+      this.endedCalls.add(this.state.callId)
+      if (this.endedCalls.size > 64) {
+        const maisAntigo = this.endedCalls.values().next().value
+        if (maisAntigo) this.endedCalls.delete(maisAntigo)
+      }
+    }
     this.state = null
+    // `nativeRoute` e' global de MODULO: sem zerar, uma chamada nativa seguida
+    // de uma pelo navegador mostrava a rota da chamada anterior para sempre.
+    nativeRoute = null
     this.onUpdate(null as any)
   }
 }

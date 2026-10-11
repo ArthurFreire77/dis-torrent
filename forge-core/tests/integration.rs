@@ -320,3 +320,160 @@ async fn wrong_expected_fingerprint_is_rejected() {
     // e o peer autenticado (C) também não foi registrado como online para B's fp
     assert!(!a.online_peer_fps().contains(&b.identity().fingerprint));
 }
+
+/// Ciclo COMPLETO de chamada, repetido: chamar → o outro recebe → aceitar →
+/// encerrar → chamar de novo. É a regressão do "tem que reiniciar o app para
+/// chamar alguém": cada rodada precisa deixar o core limpo (sem participante
+/// pendurado, sem sessão de mídia viva) para a próxima servir.
+///
+/// Roda sem depender de dispositivo de mídia: o que se prova aqui é o CICLO DE
+/// VIDA (convite/aceite/fim e o estado que sobra), não o áudio.
+#[tokio::test(flavor = "multi_thread")]
+async fn call_cycle_repeats_cleanly_round_after_round() {
+    let (a, _kp_a, _da) = spawn_engine("NodeA", false);
+    let (b, _kp_b, _db) = spawn_engine("NodeB", false);
+
+    let mut ev_a = a.subscribe();
+    let mut ev_b = b.subscribe();
+
+    let addr_b: std::net::SocketAddr = format!("127.0.0.1:{}", b.listen_port()).parse().unwrap();
+    a.add_manual_peer(addr_b, Some(b.identity().fingerprint.clone()));
+
+    wait_event(
+        &mut ev_a,
+        |e| matches!(e, EngineEvent::PeerOnline { .. }),
+        Duration::from_secs(10),
+    )
+    .await;
+    wait_event(
+        &mut ev_b,
+        |e| matches!(e, EngineEvent::PeerOnline { .. }),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    befriend(&a, &b, &mut ev_a, &mut ev_b).await;
+
+    let fp_a = a.identity().fingerprint.clone();
+    let fp_b = b.identity().fingerprint.clone();
+
+    for rodada in 0..3 {
+        // 1) A chama B. (No Linux o invite abre a mídia nativa; sem device o
+        // caminho segue no navegador — os dois contam como ciclo válido.)
+        let want = a.call_invite(&fp_b, "dm").expect("invite");
+
+        // 2) B recebe o toque.
+        let incoming = wait_event(
+            &mut ev_b,
+            |e| matches!(e, EngineEvent::CallIncoming { call_id: cid, .. } if cid == &want),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(matches!(incoming, EngineEvent::CallIncoming { .. }));
+
+        // 3) B aceita.
+        b.call_accept(&want, &fp_a).expect("accept");
+
+        let aceite = wait_event(
+            &mut ev_a,
+            |e| matches!(e, EngineEvent::CallAcceptedEv { call_id: cid, .. } if cid == &want),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(matches!(aceite, EngineEvent::CallAcceptedEv { .. }));
+
+        // 4) A encerra. Os DOIS lados precisam ouvir o fim.
+        a.call_end(&want).expect("end");
+        wait_event(
+            &mut ev_a,
+            |e| matches!(e, EngineEvent::CallEnded { call_id: cid, .. } if cid == &want),
+            Duration::from_secs(10),
+        )
+        .await;
+        wait_event(
+            &mut ev_b,
+            |e| matches!(e, EngineEvent::CallEnded { call_id: cid, .. } if cid == &want),
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // 5) O ESTADO TEM DE SAIR LIMPO. Se sobrar participante, a rodada
+        // seguinte herra "já existe uma chamada em andamento" no frontend.
+        assert!(
+            a.store
+                .call_participants(&want)
+                .unwrap_or_default()
+                .is_empty(),
+            "rodada {rodada}: A ficou com participante na chamada encerrada"
+        );
+        assert!(
+            b.store
+                .call_participants(&want)
+                .unwrap_or_default()
+                .is_empty(),
+            "rodada {rodada}: B ficou com participante na chamada encerrada"
+        );
+    }
+}
+
+/// Recusar também tem de limpar dos dois lados — antes a oferta recusada
+/// ficava retida no `held_calls` e era "aceita" por engano mais tarde.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejected_call_leaves_nothing_held_behind() {
+    let (a, _kp_a, _da) = spawn_engine("NodeA", false);
+    let (b, _kp_b, _db) = spawn_engine("NodeB", false);
+
+    let mut ev_a = a.subscribe();
+    let mut ev_b = b.subscribe();
+
+    let addr_b: std::net::SocketAddr = format!("127.0.0.1:{}", b.listen_port()).parse().unwrap();
+    a.add_manual_peer(addr_b, Some(b.identity().fingerprint.clone()));
+
+    wait_event(
+        &mut ev_a,
+        |e| matches!(e, EngineEvent::PeerOnline { .. }),
+        Duration::from_secs(10),
+    )
+    .await;
+    wait_event(
+        &mut ev_b,
+        |e| matches!(e, EngineEvent::PeerOnline { .. }),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    befriend(&a, &b, &mut ev_a, &mut ev_b).await;
+
+    let fp_a = a.identity().fingerprint.clone();
+    let fp_b = b.identity().fingerprint.clone();
+
+    let want = a.call_invite(&fp_b, "dm").expect("invite");
+    wait_event(
+        &mut ev_b,
+        |e| matches!(e, EngineEvent::CallIncoming { call_id: cid, .. } if cid == &want),
+        Duration::from_secs(10),
+    )
+    .await;
+    b.call_reject(&want, &fp_a, "ocupado").expect("reject");
+
+    wait_event(
+        &mut ev_a,
+        |e| matches!(e, EngineEvent::CallRejected { call_id: cid, .. } if cid == &want),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    // Chamada nova imediatamente depois: se a recusa tivesse deixado estado
+    // retido, o segundo convite não chegaria como toque novo.
+    let want2 = a
+        .call_invite(&fp_b, "dm")
+        .expect("segundo invite após recusa");
+    let toque = wait_event(
+        &mut ev_b,
+        |e| matches!(e, EngineEvent::CallIncoming { call_id: cid, .. } if cid == &want2),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(matches!(toque, EngineEvent::CallIncoming { .. }));
+    assert_ne!(want, want2, "cada rodada precisa de call_id novo");
+}

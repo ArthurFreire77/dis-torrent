@@ -245,7 +245,11 @@ export function buildDisplayMediaConstraints(
   const wantsSystemAudio = opts.audio === 'system' || opts.audio === 'system+mic'
   const displaySurface = opts.source === 'window' ? 'window' : 'monitor'
   const constraints: Record<string, unknown> = {
-    video: { displaySurface },
+    // `min: 30`: pede o piso de videochamada de verdade. Sem isto o WebView
+    // entregava 15-24 fps por escolha própria. Se o aparelho não sustentar 30,
+    // `acquireScreenStream` derruba o `min` e tenta de novo (ver callManager) —
+    // tela a 20 fps continua melhor que tela preta.
+    video: { displaySurface, frameRate: { min: 30, ideal: 60 } },
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
     selfBrowserSurface: 'exclude',

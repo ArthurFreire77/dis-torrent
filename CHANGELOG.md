@@ -1,5 +1,140 @@
 # CHANGELOG
 
+## [Não lançado]
+
+### Chamadas e vídeo — qualidade e estabilidade (medido, não estimado)
+
+Instrumento novo: `cargo run --example media_probe` (forge-core/examples) abre
+os dispositivos REAIS e imprime o que aconteceu — microfone (cpal), câmera
+(v4l2src), tela (xcap) e os encoders. Todos os números abaixo são dele.
+
+- **Tela nativa (Linux) 0.5 fps → 29.2 fps a 1280x720**: a captura usava o
+  `xcap`, que faz `XGetImage` sem MIT-SHM e converte 2M pixels em Rust, e
+  depois reduzia com `image::resize(Triangle)` (1 fps MEDIDO, só o resize).
+  Agora o X11 usa `ximagesrc` dentro do pipeline GStreamer — captura, converte
+  e escala em C. O caminho appsrc/xcap continua como fallback (Wayland sem
+  portal) e recebe RGBA na resolução do monitor: quem reduz é o `videoscale`.
+- **Câmera nativa: 640x480 → 1280x720** no mesmo fps (19–20 fps). O teto é o
+  dispositivo: `v4l2src` puro entrega 19 fps nesta webcam (anuncia 30, mas o
+  driver/firmware não sustenta — limbos de exposição/ USB). Antes o pipeline
+  exigia `framerate=30/1` exato e morria com `not-negotiated` em qualquer
+  webcam que não fizesse exatamente 30.
+- **Câmera robusta**: `new_camera` varre `/dev/video*` (video0 era hardcoded),
+  tenta 720p→480p e 30→20→15→10 fps, MJPG com `jpegdec` quando o raw não
+  negoceia, e só aceita um pipeline que **entregue um quadro** (montar em
+  Playing não provava nada — morria no preroll).
+- **Áudio: AGC com noise gate no microfone**. MEDIDO: o device padrão está com
+  o volume do sistema em 31% e entrega pico de -33 dBFS — o par ouvia
+  sussurro. O caminho do navegador tem `autoGainControl`; o nativo não tinha
+  nada. Alvo -6 dBFS, teto 12x, abaixo de -48 dBFS é silêncio (sem gate o AGC
+  transformava ruído de fundo em uivo). 4 testes de regressão.
+- **Opus 32 → 48 kbps** (voip médio → fullband mono).
+- **VP8 capaz**: `cpu-used=-8 threads=4 lag-in-frames=0 error-resilient=
+  default+partitions keyframe-max-dist=60` — `partitions` deixa o quadro ser
+  decodificado em pedaços, que é o que salva a imagem quando pacote RTP se
+  perde em P2P. Bitrate 800/1500 → 2500 (câmera) e 3500 kbps (tela).
+- **Loop de envio de vídeo: ~15 fps fixos → 30 fps**. Dois gargalos: o SSRC era
+  buscado com `await` a cada quadro (~20 ms de ida/volta) e o passo era um
+  `sleep` de 33 ms inteiro, somando o custo do frame. Agora o SSRC é lido uma
+  vez e o sono é adaptativo — dorme só o que falta do intervalo.
+- **Preview remoto na UI: 150 ms → 40 ms** (6.6 → 25 fps). O encoder entrega 29
+  e a UI era o gargalo visual: o vídeo do Linux chegava como slideshow.
+- **Mesh de canal de voz não formava (race)**: a mídia nativa só nascia se quem
+  entrava no canal visse os outros no `list_voice_states` local. Quem estava no
+  canal recebendo o `VoiceJoin` só gravava estado e **não abria mídia** — nos
+  dois entravam juntos, NENHUM lado oferecia e o canal ficava mudo até
+  reiniciar o app. Regra do par (fingerprint maior oferece) nos três pontos:
+  `voice_join`, `VoiceJoin` recebido e `VoiceState`.
+- **Tela (navegador)**: `getDisplayMedia` pedia sem framerate — o WebView
+  escolhia 15-24 fps. Agora `frameRate: { min: 30, ideal: 60 }`, com retry que
+  derrota o `min` se o aparelho não sustentar (OverconstrainedError).
+- **Câmera (navegador)**: `OverconstrainedError` agora DEGRADA
+  (720p/60 → 720p/15 → 480p/15 → 480p/30 → só voz) em vez de matar a câmera.
+- **Compartilhar tela sem participante conectado**: o guard `pcs.size === 0`
+  lançava erro. Removido — a captura é preparada e semeada quando os PCs
+  nascem (`attachLocalStreamToPC` já faz isso).
+
+
+### Ciclo de chamada (chamar → aceitar → sair → chamar de novo)
+
+Dois bugs REAIS encontrados por teste novo
+(`call_cycle_repeats_cleanly_round_after_round`, `rejected_call_leaves_nothing_
+held_behind` em forge-core/tests/integration.rs — 2 engines, chamada de verdade):
+
+- **Quem recebia o fim continuava dentro da chamada**: `handle_frame(CallEnd)`
+  fazia `leave_call(call_id, peer_fp)` — removia só PAR que desligou. Em 1:1 o
+  convidado ficava em `call_participants` DEPOIS do fim, e o registro fantasma
+  fazia a chamada seguinte nascer achando que ainda havia uma em andamento.
+  **Esse é o "tem que reiniciar o app para chamar alguém".** Agora: remove o par
+  e, se não sobrou mais ninguém além de mim, `end_call` (em grupo quem fica
+  continua com os outros — remover a chamada inteira derrubaria B quando C
+  falasse).
+- **Sair de CANAL DE VOZ não encerrava a mídia**: `leave()` só limpava estado
+  local quando o callId começava com `voice-` — nunca chamava `voiceLeave`. A
+  sessão nativa (webrtc-rs + cpal + ximagesrc) continuava viva: o áudio do canal
+  seguia saindo depois de "desligar" e entrar de novo no mesmo canal montava o
+  mesh por cima da sessão morta. Agora deriva comunidade/canal (via `convId`,
+  que é o channel_id) e chama `voiceLeave`.
+- **Rede de segurança do encoder**: `cleanup()` e `leave()` agora pedem
+  `voice_video_stop` para cada par quando a chamada era nativa — se algum
+  caminho chegou ali sem `voice_leave`/`call_end`, o `ximagesrc`/`v4l2src`
+  segurava o device e a chamada SEGUINTE herra "device busy" sem explicação.
+- **`bind()` vazava listener**: sobrescrever `engineOff` sem descartar o
+  anterior significava que um segundo `bind` (remount do shell) dobrava o
+  processamento de cada evento de chamada — offers duplicadas, PCs duplos.
+
+
+### Varredura completa do fluxo (auditoria → 2 críticos + 4 graves corrigidos)
+
+- 🔴 **`nativeVoiceSince = 0` derrubava a chamada nativa a qualquer
+  `connecting`**: o sentinela era `0`, então `Date.now() - 0` dava ~1,7 × 10¹² e
+  o watchdog de 45 s estourava INSTANTANEAMENTE. Depois da primeira conexão
+  boa, qualquer `connecting` posterior — ICE restart, troca de Wi-Fi para 4G
+  (`media_voice.rs:1238`/`1257` escrevem esse estado) — chamava `leave()` em
+  menos de 700 ms em vez de deixar o restart trabalhar. Agora o sentinela é
+  `-1` e `waited` só conta quando a chamada está realmente pendente de mídia.
+- 🔴 **O watchdog nativo não existia quando o core não tinha sessão**:
+  `voiceMediaStats` devolve `null` sem sessão (offer perdida, SDP recusado) e o
+  `if (!s) return` engolia o teste de 45 s — overlay "Conectando…" **para
+  sempre** no caminho nativo. Agora o timeout vale igual sem sessão, com
+  mensagem própria ("a oferta não virou sessão").
+- 🟠 **Trocar câmera ↔ tela no nativo era no-op silencioso**: `video_start`
+  devolvia o codec sem olhar a fonte pedida. Com a tela no ar, clicar em
+  "ligar câmera" não fazia nada — e nenhum erro aparecia; o botão de câmera
+  ficava morto. Agora fonte diferente ⇒ purga a task atual e reabre.
+- 🟠 **O accept era avisado ao peer ANTES de validar local**: o shell chamava
+  `services.callAccept` (o frame já ia pro fio) e só depois `acceptInbound`,
+  que podia lançar. Resultado: o chamador conectava sozinho e quem atendeu
+  ficava sem chamada. Novo `callManager.canAccept(callId)` consultado antes
+  nos dois shells.
+- 🟠 **Aceitar duas vezes — ou aceitar um toque já encerrado — criava chamada
+  fantasma**: sem guard de duplo clique, o segundo accept caía em
+  `state === null`, criava zumbi de 20 s + 30 s (e **eterno** no nativo, pelo
+  crítico 2). Registro de `endedCalls` + `accepting` barra os dois casos.
+- 🟠 **`aggregate_stats` usava o estado de um par arbitrário do `HashMap`**: num
+  mesh de 3, um par atrás de NAT simétrico (`failed`) derrubava a chamada dos
+  outros dois que estavam `connected`; e com um par `connected` e outro
+  `connecting`, o `media-connected` nunca disparava (dava sorte). Agora o
+  **pior** caso decide o estado agregado — 3 testes novos.
+- 🟡 **Entrar em canal de voz com DM ativa fazia órfãos**: `joinVoice` não
+  tinha a guarda que `start()`/`acceptInbound()` têm — sobrescrevia estado e
+  `localStream` sem fechar os PCs da DM, sem `callEnd` e sem parar os tracks
+  (microfone preso). Guarda adicionada.
+- 🟡 **Watchdogs sem comparação de `callId`**: `connect`/`reconnect` só
+  olhavam a fase. Um timer de chamada morta chamaria `leave()` na chamada nova.
+  Agora capturam o `callId` no start e comparam no corpo.
+- 🟡 **`nativeRoute` nunca era zerada**: global de módulo, mostrava a rota da
+  chamada anterior para sempre (nativa → navegador). Zerada no `cleanup()`.
+
+### Limite conhecido e honesto
+- **60 fps não é sustentado na captura de tela X11** desta máquina: teto medido
+  de ~29-34 fps com `ximagesrc`, independente dos parâmetros do encoder
+  (testado `cpu-used` -8/-4/0 a 480p e 720p). No Windows/Android o `ideal: 60`
+  fica pedido e o Chromium entrega o que o hardware aguentar.
+- **Android**: o WebView do sistema **não expõe** `getDisplayMedia`
+  (`api.MediaDevices.getDisplayMedia` inexistente). Capturar tela lá exige
+  `MediaProjection` nativo (plugin Rust+Java), não é configuração.
+
 ## [1.1.2-pre-alpha] — 2026-10-08
 
 ### Perfil, preferências e interface

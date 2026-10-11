@@ -895,6 +895,11 @@ export default function MobileShell() {
     if (!incomingCall) return
     const support = getCallsSupport()
     if (support === 'none') { setError(getCallsUnavailableMessage()); return }
+    // Valida ANTES de avisar o peer: se o frame CallAccept sair e o
+    // `acceptInbound` recusar, o chamador conecta sozinho e quem atendeu fica
+    // sem chamada nenhuma (estado dos dois divergentes).
+    const bloqueio = callManager.canAccept(incomingCall.call_id)
+    if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
     try {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
       await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
