@@ -94,6 +94,30 @@ function PeerDot({ s }: { s: NetworkState }) {
 
 // ---------- telas de conta ----------
 
+// Tela de boot. Antes era um `<div>` cinza VAZIO: no desktop o boot mexe em
+// keyring do SO + SQLite + listener de rede, e o app ficava parado numa tela
+// sem explicação (a usuária chamou de "tela cinza"). Agora tem barra, texto e
+// aviso honesto se demorar. Estilo em `src/styles/mobile.css` (.boot*), para
+// valer desde o primeiro paint.
+function BootScreen(){
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    const tm = setTimeout(() => setSlow(true), 5000)
+    return () => clearTimeout(tm)
+  }, [])
+  return (
+    <div className="boot">
+      <div className="boot-logo">DisTorrent</div>
+      <div className="boot-bar"><i /></div>
+      <div className="boot-sub">
+        {slow
+          ? 'ainda iniciando o nó P2P — se demorar muito, confirme se o app nativo está rodando (não só o navegador).'
+          : 'abrindo sua identidade e o nó P2P…'}
+      </div>
+    </div>
+  )
+}
+
 function AuthCard({ children }: { children: any }) {
   const perks = [
     { icon: Icons.lock, title: 'Cifrado fim-a-fim', desc: 'só os aparelhos leem' },
@@ -1671,7 +1695,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
-  if (phase === 'loading') return <div style={{ height: '100vh', background: t.main }} />
+  if (phase === 'loading') return <BootScreen />
   if (phase === 'create') return <CreateAccount onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
 
@@ -2218,18 +2242,18 @@ export default function ThemeShell({ designId }: {designId:string}){
               </span>
             </div>
           ) : (
-            <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 14, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
+            <div className="hide-scrollbar" style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 14, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
               <span style={{ color: muted, display: 'flex' }}><Icon d={Icons.users} size={20} /></span>
-              <span style={{ fontWeight: 700, color: t.heading }}>Amigos</span>
-              <div style={{ width: 1, height: 20, background: borderColor, margin: '0 6px' }} />
+              <span style={{ fontWeight: 700, color: t.heading, flexShrink: 0 }}>Amigos</span>
+              <div style={{ width: 1, height: 20, background: borderColor, margin: '0 6px', flexShrink: 0 }} />
               {([['online', 'Online'], ['todos', 'Todos'], ['pendentes', 'Pendentes'], ['bloqueados', 'Bloqueados']] as const).map(([id, label]) => (
-                <button key={id} onClick={() => setFriendsTab(id)} className={'tab-btn' + (friendsTab === id ? ' active' : '')}>
+                <button key={id} onClick={() => setFriendsTab(id)} className={'tab-btn' + (friendsTab === id ? ' active' : '')} style={{ flexShrink: 0 }}>
                   {label}
                   {id === 'pendentes' && friendRequests.length > 0 && <span className="tab-badge">{friendRequests.length}</span>}
                   {id === 'bloqueados' && friendsBlocked.length > 0 && <span className="tab-badge">{friendsBlocked.length}</span>}
                 </button>
               ))}
-              <button onClick={() => setFriendsTab('adicionar')} className={'tab-btn add' + (friendsTab === 'adicionar' ? ' active' : '')}>Adicionar amigo</button>
+              <button onClick={() => setFriendsTab('adicionar')} className={'tab-btn add' + (friendsTab === 'adicionar' ? ' active' : '')} style={{ flexShrink: 0 }}>Adicionar amigo</button>
               <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
                 {netPill(status)}
                 {/* Downloads acessível SEM conversa aberta — o swarm é global,

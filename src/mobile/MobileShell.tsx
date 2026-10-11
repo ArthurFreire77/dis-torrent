@@ -386,43 +386,32 @@ function LockScreen({ nickname, onUnlock }: { nickname: string; onUnlock: (id: I
   )
 }
 
-// ---------- estilos compartilhados do shell mobile ----------
+// ---------- tela de carregamento (boot) ----------
 
-const mobileCss = `
-.m-root{ background:${t.main}; min-height:100dvh }
-.m-root *{ -webkit-tap-highlight-color:transparent }
-.m-root ::-webkit-scrollbar{ display:none }
-.m-root *{ scrollbar-width:none }
-.m-sec{ display:flex; align-items:center; gap:8px; font-size:10px; font-weight:800; letter-spacing:1.2px; color:${t.muted}; margin:20px 0 10px; text-transform:uppercase }
-.m-sec:first-child{ margin-top:14px }
-.m-root .chan-row{ gap:10px; padding:8px 8px; min-height:44px }
-.m-pill{ display:flex; align-items:center; gap:7px; background:${t.panel}; border:1px solid ${t.border}; border-radius:99px; padding:5px 12px; font-size:10px; font-weight:800; letter-spacing:.6px; color:${t.muted}; backdrop-filter:blur(12px) }
-.m-row{ display:flex; align-items:center; gap:14px; width:100%; padding:12px 12px; background:${t.sidebar}; border:1px solid ${t.border}; border-radius:14px; cursor:pointer; text-align:left; color:${t.text}; margin-bottom:8px; box-shadow:0 1px 2px rgba(0,0,0,.25) }
-.m-row:hover{ background:${t.hover}; border-color:${t.accent}33; transform:translateY(-1px) }
-.m-row.on{ background:${t.selected}; border-color:${t.accent}; box-shadow:0 4px 12px rgba(88,101,242,.25) }
-.m-tab{ background:transparent; border:none; color:${t.muted}; font-size:12px; font-weight:700; padding:8px 12px; border-radius:12px; cursor:pointer; display:flex; align-items:center; gap:7px; transition:.15s }
-.m-tab:hover{ color:${t.text}; background:${t.hover} }
-.m-tab.on{ color:#fff; background:${t.accent}; box-shadow:0 2px 8px rgba(88,101,242,.4) }
-.m-tab.add{ color:${t.green}; border:1px dashed ${t.green}55 }
-.m-tab.add:hover{ background:rgba(35,165,89,.12); color:${t.green} }
-.m-tab.add.on{ color:#fff; background:${t.green}; border-style:solid; border-color:${t.green} }
-.m-badge{ min-width:18px; height:18px; border-radius:99px; background:${t.red}; color:#fff; font-size:10px; font-weight:900; display:inline-flex; align-items:center; justify-content:center; padding:0 6px; box-shadow:0 2px 6px rgba(242,63,66,.4) }
-.m-iconbtn{ width:38px; height:38px; border-radius:12px; background:${t.panel}; border:1px solid ${t.border}; color:${t.muted}; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; padding:0 }
-.m-iconbtn:hover{ background:${t.hover}; color:${t.text}; border-color:${t.accent}55 }
-.m-btn{ background:${t.accent}; color:#fff; border:none; padding:13px 18px; border-radius:14px; font-weight:800; font-size:14px; cursor:pointer; box-shadow:0 4px 12px rgba(88,101,242,.3) }
-.m-btn:disabled{ opacity:.5; cursor:not-allowed }
-.m-btn.green{ background:${t.green}; box-shadow:0 4px 12px rgba(35,165,89,.3) }
-.m-btn.red{ background:${t.red} }
-.m-btn.ghost{ background:${t.panel}; border:1px solid ${t.border}; color:${t.text}; font-weight:700; backdrop-filter:blur(12px) }
-.m-input{ width:100%; background:${t.input}; border:1px solid ${t.border}; border-radius:14px; padding:13px 14px; color:${t.text}; font-size:15px; outline:none; box-sizing:border-box }
-.m-input:focus{ border-color:${t.accent}; box-shadow:0 0 0 3px rgba(88,101,242,.15) }
-.m-input.mono{ font-family:'JetBrains Mono',monospace; font-size:13px }
-.m-err{ background:#2a1518; border:1px solid #f23f4255; color:#ff9c9c; font-size:12px; padding:10px 14px; border-radius:12px; display:flex; gap:8px; align-items:center }
-.m-ok{ background:#1a3329; border:1px solid #23a55955; color:#8cf5b8; font-size:12px; padding:10px 14px; border-radius:12px }
-.m-overlay{ position:fixed; inset:0; background:rgba(0,0,0,.75); backdrop-filter:blur(8px); display:flex; align-items:flex-end; justify-content:center; z-index:90; padding:0 }
-.m-modal{ background:${t.sidebar}; border:1px solid ${t.border}; border-bottom:none; border-radius:20px 20px 0 0; padding:20px; width:100%; max-width:520px; max-height:88dvh; overflow-y:auto }
-.m-fp{ font-family:'JetBrains Mono',monospace; letter-spacing:.5px }
-`
+// Antes era `<div style={{height:'100dvh',background:t.main}}/>`: uma tela
+// CINZA VAZIA enquanto a identidade e o motor P2P subiam. No desktop, onde o
+// boot mexe em keyring do SO + SQLite + listener de rede, isso levava
+// segundos e o app parecia travado. Agora tem barra, texto e — se demorar
+// demais — aviso honesto em vez de silêncio.
+function BootScreen({ native }: { native: boolean }){
+  const [slow, setSlow] = useState(false)
+  useEffect(() => {
+    const tm = setTimeout(() => setSlow(true), 5000)
+    return () => clearTimeout(tm)
+  }, [])
+  return (
+    <div className="boot">
+      <div className="boot-logo">DisTorrent</div>
+      <div className="boot-bar"><i /></div>
+      <div className="boot-sub">
+        {slow
+          ? 'ainda iniciando o nó P2P — se demorar muito, confirme se o app nativo está rodando (não só o navegador).'
+          : 'abrindo sua identidade e o nó P2P…'}
+        {!native && <><br />modo navegador: a rede P2P só conecta abas desta máquina.</>}
+      </div>
+    </div>
+  )
+}
 
 // ---------- app principal ----------
 
@@ -1663,7 +1652,7 @@ export default function MobileShell() {
     )
   }
 
-  if (phase === 'loading') return <div style={{ height: '100dvh', background: t.main }} />
+  if (phase === 'loading') return <BootScreen native={services.kind === 'native'} />
   if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 
@@ -1672,7 +1661,6 @@ export default function MobileShell() {
     const channelName = activeComm?.channels.find(([id]) => id === selConv)?.[1] ?? selConvObj?.title ?? peerTitle
     return (
       <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden' }}>
-        <style>{mobileCss}</style>
         {/* barra superior da conversa */}
         <div style={{ height: 48, display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 8, paddingRight: 8, paddingBottom: 0, paddingTop: 'env(safe-area-inset-top)', background: t.sidebar, borderBottom: `1px solid ${t.border}`, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
           <button aria-label="Voltar" className="m-iconbtn" onClick={() => { setSelConv(null); setSelPeerFp(null); setShowMembers(false) }}>
@@ -1985,7 +1973,6 @@ export default function MobileShell() {
   // ---- shell principal ----
   return (
     <div className="m-root" style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden', position: 'relative' } as any}>
-      <style>{mobileCss}</style>
 
       {/* header — fundo sidebar, título bold, pill de rede do desktop, avatar 32px */}
       <div style={{ height: 48, display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 10, paddingRight: 10, paddingBottom: 0, paddingTop: 'env(safe-area-inset-top)', background: t.sidebar, borderBottom: `1px solid ${t.border}`, flexShrink: 0 }}>

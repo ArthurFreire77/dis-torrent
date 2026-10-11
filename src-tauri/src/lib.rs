@@ -266,8 +266,22 @@ fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identit
         // cair no LockScreen e chamar vault_unlock (export/backup exigem engine).
         return Ok(None);
     }
-    // sem cofre válido: tenta keyring do SO, SQLite direto e backup
-    // 1) keyring
+    // sem cofre válido: tenta achar o segredo. A ORDEM é velocidade: o
+    // SQLite local é um read de arquivo (milissegundos), enquanto o keyring
+    // do SO é ida e volta por D-Bus — e quando o Secret Service não está
+    // rodando/destravado essa chamada TRAVA por segundos. A UI só saía da
+    // tela de boot quando `identity_get` respondia, então o app "ficava uma
+    // eternidade na tela cinza". Quem já tem o segredo em disco nunca mais
+    // passa pelo keyring.
+    // 1) SQLite direto (caminho quente — o persist_secret salvou aqui)
+    if !stored.is_empty() && stored.len() >= 32 {
+        // secret já está no SQLite (caso fallback persist_secret)
+        let _ = store.kv_set("identity.secret.backup", &stored);
+        let _ = store.kv_delete("vault.on");
+        boot_engine_with_store(&app, &state, store)?;
+        return Ok(Some(id));
+    }
+    // 2) keyring do SO (só quando o SQLite não tem)
     if let Ok(entry) = keyring::Entry::new("forge-app", "identity.secret") {
         if let Ok(secret) = entry.get_password() {
             if !secret.is_empty() && secret.len() >= 32 {
@@ -275,25 +289,17 @@ fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identit
                 let _ = store.save_identity(&id, &secret);
                 let _ = store.kv_set("identity.secret.backup", &secret);
                 let _ = store.kv_delete("vault.on");
-                boot_engine_if_needed(&app, &state)?;
+                boot_engine_with_store(&app, &state, store)?;
                 return Ok(Some(id));
             }
         }
-    }
-    // 2) SQLite direto (fallback quando keyring salvou vazio mas secret estava em backup, ou sistema sem keyring)
-    if !stored.is_empty() && stored.len() >= 32 {
-        // secret já está no SQLite (caso fallback persist_secret)
-        let _ = store.kv_set("identity.secret.backup", &stored);
-        let _ = store.kv_delete("vault.on");
-        boot_engine_if_needed(&app, &state)?;
-        return Ok(Some(id));
     }
     // 3) backup kv
     if let Some(bk) = store.kv_get("identity.secret.backup") {
         if !bk.is_empty() && bk.len() >= 32 {
             let _ = store.save_identity(&id, &bk);
             let _ = store.kv_delete("vault.on");
-            boot_engine_if_needed(&app, &state)?;
+            boot_engine_with_store(&app, &state, store)?;
             return Ok(Some(id));
         }
     }
@@ -543,6 +549,17 @@ fn boot_engine_with_secret(
 // ---------------- engine boot/restart ----------------
 
 fn boot_engine_if_needed(app: &AppHandle, state: &State<AppState>) -> Result<(), String> {
+    let store = open_store(state)?;
+    boot_engine_with_store(app, state, store)
+}
+
+/// Boot do motor reusando um `Store` JÁ ABERTO.
+///
+/// `identity_get` abria o banco, olhava o segredo e chamava o boot — que
+/// abria o MESMO arquivo de novo. Cada `Store::open` pega lock e faz parse do
+/// header; na primeira execução do app (disco frio) isso dobrava a espera
+/// antes da UI sair da tela de carregamento.
+fn boot_engine_with_store(app: &AppHandle, state: &State<AppState>, store: Store) -> Result<(), String> {
     if state
         .engine
         .lock()
@@ -553,7 +570,6 @@ fn boot_engine_if_needed(app: &AppHandle, state: &State<AppState>) -> Result<(),
     }
     // engine spawn precisa de runtime tokio — commands sync rodam fora dele
     tauri::async_runtime::block_on(async {
-        let store = open_store(state)?;
         if store.kv_get("vault.on").as_deref() == Some("1")
             && !*state.unlocked.lock().unwrap_or_else(|e| e.into_inner())
         {
@@ -3892,13 +3908,23 @@ fn main() {
                     .map_err(|e| format!("cache: {e}"))?;
             app.manage(AppState {
                 engine: Mutex::new(None),
-                data_dir: dir,
+                data_dir: dir.clone(),
                 unlocked: Mutex::new(false),
                 cache,
                 // 3 tentativas em 15 min, bloqueio de 60s dobrando a cada
                 // reincidência. Ver `forge-core/src/authlimit.rs`.
                 auth_limit: forge_core::authlimit::AuthLimiter::new(),
             });
+            // Pré-aquece o SQLite ENQUANTO a janela/WebView ainda está subindo.
+            // O primeiro comando que a UI chama é `identity_get`, que abre este
+            // mesmo arquivo: sem o aquecimento a tela de boot espera o disco
+            // frio (lock + parse do header) antes de mostrar qualquer coisa.
+            {
+                let warm = dir.join("forge.db");
+                std::thread::spawn(move || {
+                    let _ = Store::open(&warm);
+                });
+            }
             // Liga o WebRTC no WebKitGTK (Linux). TEM que estar NESTE closure:
             // um segundo `.setup()` SOBRESCREVE o anterior no Tauri, e aí o
             // `AppState` nunca é registrado — o app abre mas TODO comando que
