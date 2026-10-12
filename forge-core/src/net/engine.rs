@@ -902,7 +902,9 @@ impl NetworkEngine {
             shutdown: Arc::new(Notify::new()),
             handles: StdMutex::new(Vec::new()),
             relay_in: StdMutex::new(HashMap::new()),
-            relay_backend: StdMutex::new(Arc::new(MultiRelay::default_routes_with_fp(&relay_fp))),
+            relay_backend: StdMutex::new(Arc::new(MultiRelay::routes_from_env_or_default(
+                &relay_fp,
+            ))),
             relay_backend_custom: AtomicBool::new(false),
             relay_proxied: AtomicBool::new(false),
             relay_disabled: AtomicBool::new(!env_relay_enabled()),
@@ -981,7 +983,9 @@ impl NetworkEngine {
             shutdown: Arc::new(Notify::new()),
             handles: StdMutex::new(Vec::new()),
             relay_in: StdMutex::new(HashMap::new()),
-            relay_backend: StdMutex::new(Arc::new(MultiRelay::default_routes_with_fp(&relay_fp))),
+            relay_backend: StdMutex::new(Arc::new(MultiRelay::routes_from_env_or_default(
+                &relay_fp,
+            ))),
             relay_backend_custom: AtomicBool::new(false),
             relay_proxied: AtomicBool::new(false),
             relay_disabled: AtomicBool::new(!env_relay_enabled()),
@@ -1739,7 +1743,7 @@ impl NetworkEngine {
             }
         } else if currently_proxied {
             *self.relay_backend.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(
-                MultiRelay::default_routes_with_fp(&self.identity.fingerprint),
+                MultiRelay::routes_from_env_or_default(&self.identity.fingerprint),
             );
             self.relay_proxied.store(false, Ordering::Relaxed);
             debug!("relay: modo normal/encrypted — rotas públicas diretas restauradas");
@@ -5086,6 +5090,38 @@ impl NetworkEngine {
     #[cfg(target_os = "linux")]
     pub fn native_voice_available(&self) -> bool {
         self.voice_media().is_some()
+    }
+
+    /// Teste de microfone sem chamada (UI de config no Linux). Devolve o id
+    /// do teste para `voice_mic_test_level`/`voice_mic_test_stop`.
+    #[cfg(target_os = "linux")]
+    pub fn voice_mic_test_start(&self) -> Result<u64> {
+        self.voice_media()
+            .ok_or_else(|| ForgeError::Protocol("voz nativa indisponível".into()))?
+            .mic_test_start()
+            .map_err(ForgeError::Protocol)
+    }
+
+    /// Pico 0..1 do mic desde a última leitura.
+    #[cfg(target_os = "linux")]
+    pub fn voice_mic_test_level(&self, id: u64) -> f32 {
+        self.voice_media()
+            .map(|v| v.mic_test_level(id))
+            .unwrap_or(0.0)
+    }
+
+    /// Fecha o teste de microfone (idempotente).
+    #[cfg(target_os = "linux")]
+    pub fn voice_mic_test_stop(&self, id: u64) {
+        if let Some(v) = self.voice_media() {
+            v.mic_test_stop(id);
+        }
+    }
+
+    /// Nome do dispositivo de entrada atual (UI mostra o real, não "padrão").
+    #[cfg(target_os = "linux")]
+    pub fn voice_mic_name(&self) -> String {
+        self.voice_media().map(|v| v.mic_name()).unwrap_or_default()
     }
 
     /// `(call_id, peer_fp)` é uma sessão NATIVA? — a única pergunta que os

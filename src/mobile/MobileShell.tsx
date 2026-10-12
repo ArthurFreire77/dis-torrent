@@ -1773,6 +1773,7 @@ export default function MobileShell() {
               {/* v6: fase (chamando/conectando/reconectando…) com elapsed */}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} />
               <button aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} title={isMuted ? 'Ativar microfone' : 'Silenciar'} className="m-iconbtn" style={isMuted ? { background: t.red, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}>{isMuted ? <Icon d={Icons.micOff} size={16} /> : <Icon d={Icons.mic} size={16} />}</button>
+              <button aria-label={(activeCall as any)?.cameraOn ? 'Desligar câmera' : 'Ligar câmera'} title={(activeCall as any)?.cameraOn ? 'Desligar câmera' : 'Ligar câmera'} className="m-iconbtn" style={(activeCall as any)?.cameraOn ? { background: t.green, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e)))}><Icon d={Icons.video} size={16} /></button>
               <button className="m-btn red" style={{ padding: '9px 14px' }} onClick={() => callManager.leave()}>Sair</button>
             </div>
             <div style={{ fontSize: 11, color: t.muted }} role="status">rota: {callManager.getRungSummary()}</div>

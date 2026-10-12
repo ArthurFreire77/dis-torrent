@@ -319,6 +319,11 @@ export const tauriServices: ForgeServices = {
   voiceVideoStop: (callId, peerFp) => invoke<void>('voice_video_stop', { callId, peerFp }),
   voiceVideoFrame: (callId, peerFp, sinceSeq) =>
     invoke<import('./models').NativeVideoFrame | null>('voice_video_frame', { callId, peerFp, sinceSeq: sinceSeq ?? null }),
+  // Teste de mic nativo sem chamada (Linux: WebKitGTK sem getUserMedia).
+  voiceMicTestStart: () => invoke<number>('voice_mic_test_start'),
+  voiceMicTestLevel: (testId) => invoke<number>('voice_mic_test_level', { testId }),
+  voiceMicTestStop: (testId) => invoke<void>('voice_mic_test_stop', { testId }),
+  voiceMicName: () => invoke<string>('voice_mic_name'),
   // ================= CAMADA SOCIAL v3 =================
   react: (convId, msgId, emoji) => invoke<boolean>('social_react', { convId, msgId, emoji }),
   reactions: (msgId) => invoke<ReactionSummary[]>('social_reactions', { msgId }),

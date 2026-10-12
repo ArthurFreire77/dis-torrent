@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Icon, Icons } from '../../shared/icons'
 import { setPrefs, usePrefs } from '../../shared/prefs'
 import { AUDIO_CONSTRAINTS } from '../../services/callManager'
+import { services } from '../../services'
 
 interface Dev { id: string; label: string }
 
@@ -50,7 +51,18 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     setErr(null)
     try {
       const md = navigator.mediaDevices
-      if (!md?.enumerateDevices) { setErr('Este aparelho não lista dispositivos de áudio.'); return }
+      if (!md?.enumerateDevices) {
+        // Linux nativo (WebKitGTK sem enumerateDevices): mostra o mic real
+        // do motor em vez de lista vazia.
+        if (services.kind === 'native') {
+          const name = await services.voiceMicName().catch(() => '')
+          setMics(name ? [{ id: '', label: name }] : [])
+          if (!name) setErr('Motor de voz indisponível (desbloqueie a identidade).')
+          return
+        }
+        setErr('Este aparelho não lista dispositivos de áudio.')
+        return
+      }
       const list = await md.enumerateDevices()
       const ins = list.filter(d => d.kind === 'audioinput').map((d, i) => ({ id: d.deviceId, label: d.label || `Microfone ${i + 1}` }))
       setMics(ins)
@@ -65,7 +77,13 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     setErr(null)
     try {
       const md = navigator.mediaDevices
-      if (!md?.getUserMedia) { setErr('Captura indisponível neste aparelho.'); return }
+      if (!md?.getUserMedia) {
+        // Linux nativo (WebKitGTK sem getUserMedia): mede o nível direto do
+        // cpal via comando nativo, em poll de ~120ms.
+        if (services.kind === 'native') { await nativeTest(); return }
+        setErr('Captura indisponível neste aparelho.')
+        return
+      }
       const stream = await md.getUserMedia({ audio: { ...(prefs.audioIn ? { deviceId: { exact: prefs.audioIn } } : {}) } })
       const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       if (!AC) { stream.getTracks().forEach(t => t.stop()); setErr('Sem AudioContext para medir o nível.'); return }
@@ -101,6 +119,32 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : 'Microfone bloqueado.')
     }
+  }
+
+  /** Teste via motor nativo (cpal): abre o mic, lê o pico em poll. */
+  async function nativeTest() {
+    const testId = await services.voiceMicTestStart()
+    let alive = true
+    let timer: ReturnType<typeof setInterval> | null = null
+    const stop = () => {
+      alive = false
+      if (timer) clearInterval(timer)
+      services.voiceMicTestStop(testId).catch(() => {})
+      setTesting(false)
+      setLevel(0)
+    }
+    stopRef.current = stop
+    timer = setInterval(async () => {
+      if (!alive) return
+      try {
+        const peak = await services.voiceMicTestLevel(testId)
+        if (!alive) return
+        setLevel(Math.round(Math.min(1, Math.max(0, peak)) * 100))
+      } catch {
+        if (alive) { stop(); setErr('Falha ao ler o microfone.') }
+      }
+    }, 120)
+    setTesting(true)
   }
 
   function toggle(key: 'echo' | 'noise' | 'gain') {

@@ -231,6 +231,10 @@ struct MqttState {
     pump: bool,
     subscribed: HashSet<String>,
     inbox: HashMap<String, Vec<String>>,
+    /// Último erro do pump (para diagnóstico honesto no post/dial).
+    last_err: Option<String>,
+    /// Erros consecutivos (zera a cada evento Ok) — base do backoff.
+    consec_errs: u32,
     /// Acordado a cada publish recebido — o manager pula o poll sem esperar o tick.
     wake: Arc<tokio::sync::Notify>,
 }
@@ -270,6 +274,8 @@ impl MqttRelay {
                 pump: false,
                 subscribed: HashSet::new(),
                 inbox: HashMap::new(),
+                last_err: None,
+                consec_errs: 0,
                 wake: Arc::new(tokio::sync::Notify::new()),
             })),
             posts: Arc::new(AtomicU64::new(0)),
@@ -322,12 +328,17 @@ impl MqttRelay {
 
 /// Pump: mantém a conexão e entrega publishes no inbox POR TÓPICO.
 /// Reconexão: rumqttc 0.25 já reconecta sozinho dentro de `eventloop.poll()`
-/// (backoff interno, sem código manual — aqui só logamos e seguimos no loop;
-/// `poll()` nunca retorna Err fatal, sempre tenta de novo). QoS1
-/// (AtLeastOnce): o broker retém para sessão persistente e reentrega ao
-/// voltar do 4G dormindo; a camada engine já dedupa (retransmissão Hello +
-/// outbox/ACK de DM). Inbox por tópico com cap 512/tópico: best-effort.
+/// (aqui só logamos e seguimos no loop). QoS1 (AtLeastOnce): o broker retém
+/// para sessão persistente e reentrega ao voltar do 4G dormindo; a camada
+/// engine já dedupa (retransmissão Hello + outbox/ACK de DM). Inbox por tópico
+/// com cap 512/tópico: best-effort.
 /// Tópico `distorrent_r_<fp>` e envelope JSON inalterados (compat 4.3.1/4.3.2).
+///
+/// BACKOFF: sem dormir aqui, um broker que reseta (RST/ban/throttle) virava
+/// storm de ~3 connects/s POR PERNA — o próprio storm rende ban de IP e
+/// enterra o relay inteiro. Erros consecutivos dormem 500ms×2^n (teto 30s);
+/// qualquer evento Ok zera. Recusa explícita (NotAuthorized etc.) começa
+/// direto em 5s (não adianta insistir rápido).
 async fn mqtt_pump(
     mut eventloop: rumqttc::EventLoop,
     shared: Arc<StdMutex<MqttState>>,
@@ -340,6 +351,8 @@ async fn mqtt_pump(
                 // o broker em geral já reteve, mas reassinar cobre expiração).
                 let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
                 st.subscribed.clear();
+                st.consec_errs = 0;
+                st.last_err = None;
             }
             Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
                 if let Ok(text) = String::from_utf8(p.payload.to_vec()) {
@@ -370,9 +383,30 @@ async fn mqtt_pump(
                     wake.notify_one(); // push: acorda o manager na hora (sem esperar o tick)
                 }
             }
-            Ok(_) => {}
+            Ok(_) => {
+                shared.lock().unwrap_or_else(|e| e.into_inner()).consec_errs = 0;
+            }
             Err(e) => {
-                tracing::debug!("relay mqtt ({host}) evento/reconexão: {e}");
+                let msg = e.to_string();
+                tracing::debug!("relay mqtt ({host}) evento/reconexão: {msg}");
+                // Recusa explícita do broker (auth/ban/sobrecarga): insistir
+                // rápido só piora — começa o backoff já em 5s.
+                let base_ms: u64 = if msg.contains("NotAuthorized")
+                    || msg.contains("ServiceUnavailable")
+                    || msg.contains("BadUserNamePassword")
+                {
+                    5000
+                } else {
+                    500
+                };
+                let wait = {
+                    let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    st.consec_errs = st.consec_errs.saturating_add(1);
+                    st.last_err = Some(short_err(&msg));
+                    let shift = st.consec_errs.min(6);
+                    (base_ms << shift).min(30_000)
+                };
+                tokio::time::sleep(Duration::from_millis(wait)).await;
             }
         }
     }
@@ -393,6 +427,17 @@ impl RelayBackend for MqttRelay {
             };
             // QoS1: o broker confirma (PUBACK) e retém para sessão persistente —
             // frame com o celular offline é entregue ao voltar (4G dormindo).
+            // Erro HONESTO: timeout sozinho ("relay fechado" no dial) escondia
+            // recusa do broker (NotAuthorized/ban/RST em loop). Anexa o último
+            // erro do pump para o diagnóstico mostrar a causa real.
+            let leg_err = || {
+                self.shared
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .last_err
+                    .clone()
+                    .unwrap_or_default()
+            };
             tokio::time::timeout(
                 Duration::from_secs(10),
                 client.publish(
@@ -403,7 +448,14 @@ impl RelayBackend for MqttRelay {
                 ),
             )
             .await
-            .map_err(|_| ForgeError::Protocol("relay mqtt publish timeout".into()))?
+            .map_err(|_| {
+                let extra = leg_err();
+                ForgeError::Protocol(if extra.is_empty() {
+                    "relay mqtt publish timeout".into()
+                } else {
+                    format!("relay mqtt publish timeout (perna: {extra})")
+                })
+            })?
             .map_err(|e| ForgeError::Protocol(format!("relay mqtt post falhou: {e}")))?;
             Ok(())
         })
@@ -512,9 +564,71 @@ impl MultiRelay {
         }
     }
 
+    /// Rotas a partir de `FORGE_MQTT_BROKERS` (`host:porta,host:porta…`) ou as
+    /// públicas quando ausente/inválida. Broker próprio (Mosquitto/EMQX num
+    /// VPS) nunca te bane: atrás de CGNAT/4G hostil, é o caminho durável —
+    /// os públicos aplicam throttle/ban de IP e o relay morre para todo
+    /// mundo naquele IP. Entradas inválidas são ignoradas (nunca derrubam o
+    /// relay); porta omitida = 1883.
+    pub fn routes_from_env_or_default(fp: &str) -> Self {
+        let custom = std::env::var("FORGE_MQTT_BROKERS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|part| {
+                        let part = part.trim().trim_matches('/');
+                        if part.is_empty() {
+                            return None;
+                        }
+                        // aceita "mqtt://host:porta" ou "host:porta" ou "host"
+                        let bare = part
+                            .strip_prefix("mqtt://")
+                            .or_else(|| part.strip_prefix("tcp://"))
+                            .unwrap_or(part);
+                        let (host, port) = match bare.rsplit_once(':') {
+                            Some((h, p)) if !h.is_empty() => {
+                                let port = p.parse::<u16>().unwrap_or(1883);
+                                (h.to_string(), port)
+                            }
+                            _ => (bare.to_string(), 1883),
+                        };
+                        if host.is_empty() {
+                            return None;
+                        }
+                        Some((host, port))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if custom.is_empty() {
+            return Self::default_routes_with_fp(fp);
+        }
+        tracing::info!(
+            brokers = custom
+                .iter()
+                .map(|(h, p)| format!("{h}:{p}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            "relay: brokers MQTT próprios via FORGE_MQTT_BROKERS"
+        );
+        Self {
+            legs: custom
+                .into_iter()
+                .map(|(host, port)| {
+                    Arc::new(MqttRelay::new_with_fp(&host, port, fp)) as Arc<dyn RelayBackend>
+                })
+                .collect(),
+        }
+    }
+
     /// Rotas alternativas (testes e debug).
     pub fn of(legs: Vec<Arc<dyn RelayBackend>>) -> Self {
         Self { legs }
+    }
+
+    /// Nº de pernas (testes/diagnóstico).
+    pub fn leg_count(&self) -> usize {
+        self.legs.len()
     }
 
     /// Rota de relay para modos anônimos (proxy/Tor ativados manualmente):
@@ -1468,6 +1582,26 @@ pub async fn relay_post_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as TestMutex;
+
+    /// Env é global do processo: serializa os testes que mexem nele.
+    static ENV_LOCK: TestMutex<()> = TestMutex::new(());
+
+    #[test]
+    fn routes_from_env_or_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let fp = "abcdef0123456789";
+        std::env::remove_var("FORGE_MQTT_BROKERS");
+        assert_eq!(MultiRelay::routes_from_env_or_default(fp).leg_count(), 4);
+        std::env::set_var("FORGE_MQTT_BROKERS", "mqtt.seu-vps:1883,outro.lan");
+        assert_eq!(MultiRelay::routes_from_env_or_default(fp).leg_count(), 2);
+        // inválido cai no padrão, nunca derruba o relay
+        std::env::set_var("FORGE_MQTT_BROKERS", " , ,");
+        assert_eq!(MultiRelay::routes_from_env_or_default(fp).leg_count(), 4);
+        std::env::set_var("FORGE_MQTT_BROKERS", "mqtt://a:1883,tcp://b:1884");
+        assert_eq!(MultiRelay::routes_from_env_or_default(fp).leg_count(), 2);
+        std::env::remove_var("FORGE_MQTT_BROKERS");
+    }
 
     #[test]
     fn chunk_reassemble_roundtrip() {

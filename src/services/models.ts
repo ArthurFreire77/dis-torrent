@@ -654,6 +654,12 @@ export interface ForgeServices {
   voiceVideoStart(callId: string, peerFp: string, source: 'camera' | 'screen', monitorId?: number | null): Promise<string>
   voiceVideoStop(callId: string, peerFp: string): Promise<void>
   voiceVideoFrame(callId: string, peerFp: string, sinceSeq?: number | null): Promise<NativeVideoFrame | null>
+  // Teste de microfone NATIVO sem chamada (Linux: o WebKitGTK não tem
+  // getUserMedia, então o teste da UI mede o nível direto do cpal).
+  voiceMicTestStart(): Promise<number>
+  voiceMicTestLevel(testId: number): Promise<number>
+  voiceMicTestStop(testId: number): Promise<void>
+  voiceMicName(): Promise<string>
 
   // ================= CAMADA SOCIAL v3 (paridade Discord) =================
   react(convId: string, msgId: string, emoji: string): Promise<boolean>

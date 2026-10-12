@@ -1378,6 +1378,12 @@ export const browserServices: ForgeServices = {
   voiceVideoStart: () => Promise.reject(new Error('vídeo nativo indisponível no navegador')),
   voiceVideoStop: () => Promise.resolve(),
   voiceVideoFrame: () => Promise.resolve(null),
+  // Teste de mic nativo idem: no browser a página usa getUserMedia direto;
+  // o stub rejeita para a UI cair no caminho do navegador.
+  voiceMicTestStart: () => Promise.reject(new Error('teste de mic nativo indisponível no navegador')),
+  voiceMicTestLevel: () => Promise.resolve(0),
+  voiceMicTestStop: () => Promise.resolve(),
+  voiceMicName: () => Promise.resolve(''),
 
   // ================= CAMADA SOCIAL v3 =================
   react: async (convId, msgId, emoji) => {

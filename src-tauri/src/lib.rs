@@ -2731,6 +2731,61 @@ fn voice_video_frame(
     Ok(serde_json::Value::Null)
 }
 
+// ---------------- teste de microfone nativo (sem chamada) ----------------
+//
+// A tela de config usa getUserMedia, que NÃO existe no WebKitGTK — o teste
+// ficava mudo no Linux. Estes comandos medem o nível direto do cpal.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_mic_test_start(state: State<AppState>) -> Result<u64, String> {
+    engine(&state)?
+        .voice_mic_test_start()
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_mic_test_level(test_id: u64, state: State<AppState>) -> Result<f32, String> {
+    Ok(engine(&state)?.voice_mic_test_level(test_id))
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_mic_test_stop(test_id: u64, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.voice_mic_test_stop(test_id);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn voice_mic_name(state: State<AppState>) -> Result<String, String> {
+    Ok(engine(&state)?.voice_mic_name())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_mic_test_start(_state: State<AppState>) -> Result<u64, String> {
+    Err("teste de mic nativo indisponível nesta plataforma".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_mic_test_level(_test_id: u64, _state: State<AppState>) -> Result<f32, String> {
+    Ok(0.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_mic_test_stop(_test_id: u64, _state: State<AppState>) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn voice_mic_name(_state: State<AppState>) -> Result<String, String> {
+    Ok(String::new())
+}
+
 /// Indicador "digitando…" — o frame Typing existia no protocolo e o engine
 /// já o emitia, mas NÃO havia comando: o frontend invocava `send_typing` e o
 /// catch engolia o erro para sempre (indicador morto no app nativo).
@@ -3793,6 +3848,10 @@ fn main() {
             voice_video_start,
             voice_video_stop,
             voice_video_frame,
+            voice_mic_test_start,
+            voice_mic_test_level,
+            voice_mic_test_stop,
+            voice_mic_name,
             send_typing,
             screen_share_offer,
             screen_share_answer,

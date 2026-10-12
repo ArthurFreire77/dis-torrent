@@ -1183,6 +1183,8 @@ struct Inner {
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     probe_out: Mutex<Option<u32>>,
     probe_in: Mutex<Option<u32>>,
+    /// Receptores do teste de microfone (mic_test_*), por id de subscribe.
+    mic_tests: Mutex<HashMap<u64, UnboundedReceiver<MicFrame>>>,
 }
 
 impl Session {
@@ -1412,8 +1414,70 @@ impl VoiceMedia {
                 sessions: Mutex::new(HashMap::new()),
                 probe_out: Mutex::new(None),
                 probe_in: Mutex::new(None),
+                mic_tests: Mutex::new(HashMap::new()),
             }),
         }))
+    }
+
+    /// Teste de microfone SEM chamada (tela de config no Linux, onde o
+    /// WebKitGTK não tem getUserMedia): abre o mic e devolve um id; a UI lê
+    /// `mic_test_level(id)` em poll e fecha com `mic_test_stop(id)`.
+    /// Erro honesto quando não há mic (a UI mostra, em vez de barra muda).
+    pub fn mic_test_start(&self) -> Result<u64, String> {
+        let hub = self::audio::hub();
+        hub.ensure_mic()?;
+        let (id, rx) = hub.subscribe()?;
+        self.inner
+            .mic_tests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, rx);
+        Ok(id)
+    }
+
+    /// Pico 0..1 das amostras pendentes desde a última leitura. Drena a fila
+    /// (sem drenar, o channel ilimitado cresce sem fim durante o teste).
+    pub fn mic_test_level(&self, id: u64) -> f32 {
+        let mut peak = 0f32;
+        if let Some(rx) = self
+            .inner
+            .mic_tests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&id)
+        {
+            while let Ok(frame) = rx.try_recv() {
+                for s in frame.pcm.iter() {
+                    let v = (*s as f32 / 32768.0).abs();
+                    if v > peak {
+                        peak = v;
+                    }
+                }
+            }
+        }
+        peak.clamp(0.0, 1.0)
+    }
+
+    /// Fecha o teste e libera o mic (idempotente).
+    pub fn mic_test_stop(&self, id: u64) {
+        let dropped = self
+            .inner
+            .mic_tests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id)
+            .is_some();
+        if dropped {
+            self::audio::hub().unsubscribe(id);
+        }
+    }
+
+    /// Nome do dispositivo de entrada atual (para a UI mostrar o real).
+    /// Tenta abrir (best-effort): sem abrir, o nome ainda é "".
+    pub fn mic_name(&self) -> String {
+        let hub = self::audio::hub();
+        let _ = hub.ensure_mic();
+        hub.mic_name()
     }
 
     pub fn has_capture(&self) -> bool {
