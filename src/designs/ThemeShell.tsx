@@ -540,6 +540,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showSettings, setShowSettings] = useState(false)
   /** Seletor completo de compartilhamento (fonte/áudio/qualidade/FPS). */
   const [showScreenPicker, setShowScreenPicker] = useState(false)
+  /** Menu rápido de tela (inteira/janela/config) — só abre no clique. */
+  const [showScreenMenu, setShowScreenMenu] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [showPrivacyModal, setShowPrivacyModal] = useState(false)
   const [addrInput, setAddrInput] = useState('')
@@ -3125,33 +3127,44 @@ export default function ThemeShell({ designId }: {designId:string}){
               ) : (
                 <>
                   <button
-                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
+                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenMenu(v => !v) }}
                     disabled={!supportsScreenShare()}
                     data-testid="call-screen-share"
                     title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte)' : (screenShareUnavailableReason() ?? 'Este navegador não permite compartilhar tela')}
                     aria-label="Compartilhar tela"
-                    style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: '#3a3a3c', color: '#fff', opacity: supportsScreenShare() ? 1 : 0.45, cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    aria-expanded={showScreenMenu}
+                    style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: showScreenMenu ? t.accent : '#3a3a3c', color: '#fff', opacity: supportsScreenShare() ? 1 : 0.45, cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                   ><Icon d={Icons.screen} size={18} /></button>
+                  {showScreenMenu && (
+                  <>
+                  <div
+                    style={{ position: 'fixed', inset: 0, zIndex: 199, background: 'transparent' }}
+                    onClick={() => setShowScreenMenu(false)}
+                    aria-hidden
+                  />
                   <div
                     style={{ position: 'absolute', bottom: 56, left: 0, background: '#232428', border: `1px solid ${borderColor}`, borderRadius: 8, padding: 6, boxShadow: '0 8px 24px rgba(0,0,0,.5)', zIndex: 200, display: 'flex', flexDirection: 'column', gap: 2 }}
                     onClick={e => e.stopPropagation()}
+                    role="menu" aria-label="Compartilhar tela"
                   >
 <button
-                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } callManager.startScreenShare({ source: 'screen', audio: 'system' }).catch((e: any) => setError(String(e?.message ?? e))) }}
+                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenMenu(false); callManager.startScreenShare({ source: 'screen', audio: 'system' }).catch((e: any) => setError(String(e?.message ?? e))) }}
                     disabled={!supportsScreenShare()}
                     style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200, padding: '8px 10px', background: 'transparent', border: 'none', color: '#fff', cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', fontSize: 12.5, fontWeight: 700, textAlign: 'left', borderRadius: 6 }}
                   ><Icon d={Icons.screen} size={16} /> Tela inteira</button>
                   <button
-                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } callManager.startScreenShare({ source: 'window', audio: 'system' }).catch((e: any) => setError(String(e?.message ?? e))) }}
+                    onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenMenu(false); callManager.startScreenShare({ source: 'window', audio: 'system' }).catch((e: any) => setError(String(e?.message ?? e))) }}
                     disabled={!supportsScreenShare()}
                     style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200, padding: '8px 10px', background: 'transparent', border: 'none', color: '#fff', cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', fontSize: 12.5, fontWeight: 700, textAlign: 'left', borderRadius: 6 }}
                   ><Icon d={Icons.grid} size={16} /> Janela/Aba</button>
                     <div style={{ height: 1, background: borderColor, margin: '2px 0' }} />
                     <button
-                      onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }}
+                      onClick={() => { if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenMenu(false); setShowScreenPicker(true) }}
                       style={{ display: 'flex', alignItems: 'center', gap: 8, width: 200, padding: '8px 10px', background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 12.5, fontWeight: 700, textAlign: 'left', borderRadius: 6 }}
                     ><Icon d={Icons.settings} size={16} /> Configurações avançadas…</button>
                   </div>
+                  </>
+                  )}
                 </>
               )}
             </div>
