@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## [1.1.4-pre-alpha] — 2026-10-11
+
+### Câmera e tela no Linux
+
+- **Câmera**: ordem de tentativa era raw-first — YUYV 720p@30 (55 MB/s)
+  não cabe no USB2, queimando 1.5s+ por combinação à toa. MJPG primeiro
+  (cabe e é universal em UVC), taxas reduzidas para `[pedida, 30, 15]`,
+  primeira combinação do device com janela de 3s (firmware frio) e teto de
+  6 falhas por device com diagnóstico honesto ("sem resposta — tente
+  desplugar e plugar de novo"). Varredura num device morto: 60s+ → ~20s.
+- **Tela**: `ximagesrc` sem prova de frame virava tela preta anunciada como
+  ativa. Mesma prova da câmera (1.5s); sem quadro, cai no `appsrc` (xcap).
+- **Relay MQTT (4G)**: backoff exponencial na reconexão (o storm de ~3/s
+  por perna rendia ban de IP), erro honesto com o motivo da recusa e
+  `FORGE_MQTT_BROKERS` para broker próprio.
+- **Voz**: teste de microfone nativo (WebKitGTK não tem getUserMedia) +
+  nome real do device; botão de câmera no mobile; menu de tela só no clique.
+
 ## [1.1.3-pre-alpha] — 2026-10-11
 
 ### Tela cinza no .deb Linux — causa raiz e blindagem
