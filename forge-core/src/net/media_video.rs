@@ -185,11 +185,14 @@ pub fn camera_devices() -> Vec<String> {
 /// por si só não prova nada (o v4l2src entra em Playing e quebra no preroll).
 pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     gst_init()?;
-    //Taxas a tentar, na ordem: a pedida, depois as que as UVC realmente têm.
-    let mut rates: Vec<u32> = vec![fps, 30, 20, 15, 10];
+    // Taxas a tentar, na ordem: a pedida, depois as que as UVC realmente têm.
+    // 20/10 caíram: webcam que faz 20/10 quase sempre faz 30/15, e cada taxa
+    // a mais custa 1.5s × formatos na falha — a varredura passava de 1 min.
+    let mut rates: Vec<u32> = vec![fps, 30, 15];
     rates.dedup();
     let devices = camera_devices();
     let mut errs: Vec<String> = Vec::new();
+    let mut wedged: Vec<String> = Vec::new();
     // 720p primeiro; 480p só entra se NENHUMA combinação de 720p funcionar
     // (webcam antiga/driver sem superfície) — chamada em 480p é melhor que
     // chamada sem imagem.
@@ -197,39 +200,84 @@ pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     for (ri, (w, h)) in resolutions.iter().enumerate() {
         let last_res = ri + 1 == resolutions.len();
         for (i, dev) in devices.iter().enumerate() {
+            if wedged.iter().any(|d| d == dev) {
+                continue; // device mudo nas anteriores: não insiste
+            }
             let last_dev = i + 1 == devices.len();
+            // Teto de falhas por device: hardware saudável conecta na 1ª ou
+            // 2ª combinação (MJPG primeiro); 6 falhas seguidas = device morto
+            // ou travado (firmware wedged entrega zero quadros mas às vezes
+            // cospe erro de negociação entre um silêncio e outro). Sem teto,
+            // a varredura queimava 1 min+ num device morto.
+            let mut failures = 0u32;
+            let mut silences = 0u32;
+            let mut first_combo = true;
             for rate in rates.iter() {
-                // `raw` (YUYV/I420 direto do v4l2src) primeiro — é o caminho sem
-                // decode; `jpeg` (MJPG + jpegdec) entra se o raw não negociar.
-                for raw in [true, false] {
-                    match try_camera_pipeline(codec, dev, *rate, raw, *w, *h) {
+                // MJPG primeiro: YUYV 720p@30 (55 MB/s) não cabe no USB2, e o
+                // raw era tentado antes e queimava 1.5s+ por combinação à toa.
+                // MJPG cabe e é universal em UVC; raw fica de fallback.
+                for raw in [false, true] {
+                    // Primeira combinação do device ganha janela maior (3s):
+                    // firmware frio demora para entregar o 1º quadro.
+                    let proof_ms = if first_combo { 3000 } else { 1500 };
+                    first_combo = false;
+                    match try_camera_pipeline(codec, dev, *rate, raw, *w, *h, proof_ms) {
                         Ok(enc) => return Ok(enc),
-                        Err(e) => errs.push(format!(
-                            "{dev}@{rate} {w}x{h}{}: {e}",
-                            if raw { " raw" } else { " mjpg" }
-                        )),
+                        Err((msg, silent)) => {
+                            errs.push(format!(
+                                "{dev}@{rate} {w}x{h}{}: {msg}",
+                                if raw { " raw" } else { " mjpg" }
+                            ));
+                            failures += 1;
+                            if silent {
+                                silences += 1;
+                            }
+                            if failures >= 6 {
+                                let hint = if silences >= 3 {
+                                    "sem resposta — device travado? tente desplugar e plugar de novo"
+                                } else {
+                                    "6 falhas seguidas"
+                                };
+                                wedged.push(dev.clone());
+                                errs.push(format!("{dev}: {hint}"));
+                                break;
+                            }
+                        }
                     }
                     // Última carta do último device/resolução: taxa livre.
                     if last_res && last_dev && rate == rates.last().unwrap() && raw {
-                        for livre in [true, false] {
-                            match try_camera_pipeline(codec, dev, 0, livre, *w, *h) {
+                        for livre in [false, true] {
+                            match try_camera_pipeline(codec, dev, 0, livre, *w, *h, 1500) {
                                 Ok(enc) => return Ok(enc),
-                                Err(e) => errs.push(format!("{dev}@livre {w}x{h}: {e}")),
+                                Err((msg, _)) => errs.push(format!("{dev}@livre {w}x{h}: {msg}")),
                             }
                         }
                     }
                 }
+                if wedged.iter().any(|d| d == dev) {
+                    break;
+                }
             }
         }
     }
-    Err(format!(
+    let mut msg = format!(
         "nenhuma camera utilizavel ({} tentativas: {})",
         errs.len(),
         errs.join(" | ")
-    ))
+    );
+    if !wedged.is_empty() {
+        msg.push_str(&format!(
+            " — {} sem resposta (tente desplugar e plugar de novo)",
+            wedged.join(", ")
+        ));
+    }
+    Err(msg)
 }
 
 /// Uma tentativa de pipeline de câmera. `rate == 0` = sem filtro de framerate.
+/// `proof_ms` = quanto esperar pelo 1º quadro codificado. Devolve
+/// `(mensagem, silencioso)` no erro: silencioso = pipeline montou e rodou,
+/// mas zero quadros (device travado), diferente de erro de negociação.
 fn try_camera_pipeline(
     codec: VideoCodec,
     device: &str,
@@ -237,8 +285,9 @@ fn try_camera_pipeline(
     raw: bool,
     width: u32,
     height: u32,
-) -> Result<VideoEncoder, String> {
-    let enc = video_encoder(codec, CAMERA_KBPS)?;
+    proof_ms: u64,
+) -> Result<VideoEncoder, (String, bool)> {
+    let enc = video_encoder(codec, CAMERA_KBPS).map_err(|e| (e, false))?;
     let caps = encoded_caps(codec);
     let src = if raw {
         format!("v4l2src device={device}")
@@ -263,18 +312,19 @@ fn try_camera_pipeline(
          appsink name=vedsink emit-signals=false sync=false async=false \
          max-buffers=4 drop=true"
     );
-    let mut enc = build_encoder(&desc, true)?;
+    let mut enc = build_encoder(&desc, true).map_err(|e| (e, false))?;
     // Prova real: um quadro codificado chega? Sem isto, um pipeline que monta
     // e morre no preroll (device ocupado, caps impossível) passaria por válido.
     let t0 = std::time::Instant::now();
-    while t0.elapsed() < Duration::from_millis(1500) {
+    while t0.elapsed() < Duration::from_millis(proof_ms) {
         if enc.poll_encoded_frame(Duration::from_millis(100)).is_some() {
             return Ok(enc);
         }
     }
     let detail = enc
         .take_error()
-        .unwrap_or_else(|| "nenhum quadro em 1.5s".to_string());
+        .map(|e| (e, false))
+        .unwrap_or_else(|| (format!("nenhum quadro em {proof_ms}ms"), true));
     enc.stop();
     Err(detail)
 }
@@ -304,8 +354,23 @@ pub fn new_screen(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
              appsink name=vedsink emit-signals=false sync=false async=false \
              max-buffers=4 drop=true"
         );
-        if let Ok(e) = build_encoder(&desc, true) {
-            return Ok(e);
+        if let Ok(mut e) = build_encoder(&desc, true) {
+            // Prova real igual à da câmera: ximagesrc que monta mas não
+            // entrega (Wayland sem portal, DISPLAY errado, permissão) virava
+            // tela preta anunciada como ativa. Sem quadro em 1.5s, cai no
+            // appsrc (xcap) em vez de mentir.
+            let t0 = std::time::Instant::now();
+            let mut live = false;
+            while t0.elapsed() < Duration::from_millis(1500) {
+                if e.poll_encoded_frame(Duration::from_millis(100)).is_some() {
+                    live = true;
+                    break;
+                }
+            }
+            if live {
+                return Ok(e);
+            }
+            e.stop();
         }
     }
     let desc = format!(
