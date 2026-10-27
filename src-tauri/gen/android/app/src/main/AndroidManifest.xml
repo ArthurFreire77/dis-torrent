@@ -27,6 +27,16 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Foreground service para chamadas (Android 14+ corta mic/camera em
+         background sem isto). O service é iniciado ao entrar em chamada e
+         parado ao sair — a notificação persistente fica visível enquanto a
+         chamada estiver ativa. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Compartilhamento de TELA no Android: NÃO existe hoje.
          `CAPTURE_VIDEO_OUTPUT` é permissão de nível `signature` (só apps
          assinados com a chave do sistema a recebem) e o wry 0.57 não mapeia
@@ -73,5 +83,11 @@
             android:name="android.support.FILE_PROVIDER_PATHS"
             android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Foreground service de chamada: mantém mic/camera vivos em background. -->
+        <service
+          android:name=".CallForegroundService"
+          android:foregroundServiceType="microphone|camera"
+          android:exported="false" />
     </application>
 </manifest>

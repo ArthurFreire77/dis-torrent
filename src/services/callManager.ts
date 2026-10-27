@@ -3,6 +3,7 @@
 // Sinalização via forge-core SecureFrame (cifrado) — no browser fallback via localStorage/BroadcastChannel.
 
 import { services } from './index'
+import { isAndroidRuntime } from './screenShare'
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha1 } from '@noble/hashes/legacy.js'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
@@ -1929,6 +1930,7 @@ export class CallManager {
       } as unknown as CallState
       this.startNativeVoiceMonitor(callId)
       this.onUpdate({ ...this.state })
+      this.startCallForeground()
       return this.state
     }
 
@@ -1973,6 +1975,7 @@ export class CallManager {
     }
     // para grupo >10, convida resto via CallAddParticipant (engine relay)
     this.onUpdate({ ...this.state })
+    this.startCallForeground()
     return this.state
   }
 
@@ -2088,6 +2091,7 @@ export class CallManager {
     this.ensureRelayTransport()
     this.startQualityMonitor()
     this.onUpdate({ ...this.state })
+    this.startCallForeground()
     return this.state
   }
 
@@ -2218,6 +2222,7 @@ export class CallManager {
         this.localStream = null
         this.startNativeVoiceMonitor(callId)
         this.onUpdate({ ...this.state })
+        this.startCallForeground()
         return this.state
       }
       this.state = {
@@ -2316,6 +2321,7 @@ export class CallManager {
         await this.handleOffer(fromFp, pend.callId, pend.sdp)
       }
     } catch { /* offer pendente nunca derruba o accept */ }
+    this.startCallForeground()
     return this.state
   }
 
@@ -3000,6 +3006,7 @@ export class CallManager {
         }
       }
     } catch { /* nunca impede o encerramento */ }
+    this.stopCallForeground()
     this.cleanup()
   }
 
@@ -4453,7 +4460,29 @@ export class CallManager {
     }
   }
 
+  /** Inicia o foreground service de chamada no Android (mantém mic/camera em background).
+   *  Best-effort: falha silenciosa em outras plataformas ou se o plugin não existir. */
+  private startCallForeground() {
+    if (!isAndroidRuntime()) return
+    try {
+      void import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('plugin:callfg|start').catch(() => { /* plugin ausente (build antigo) */ })
+      }).catch(() => { /* sem Tauri: browser, ignora */ })
+    } catch { /* ignore */ }
+  }
+
+  /** Para o foreground service de chamada no Android. */
+  private stopCallForeground() {
+    if (!isAndroidRuntime()) return
+    try {
+      void import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('plugin:callfg|stop').catch(() => { /* ignore */ })
+      }).catch(() => { /* ignore */ })
+    } catch { /* ignore */ }
+  }
+
   private cleanup() {
+    this.stopCallForeground()
     // Captura NATIVA (câmera/tela) antes de qualquer coisa: o `leave` já pede,
     // mas `cleanup` também é alcançado por outros caminhos e um encoder
     // `ximagesrc`/`v4l2src` aberto segura o device até reiniciar o app — e a

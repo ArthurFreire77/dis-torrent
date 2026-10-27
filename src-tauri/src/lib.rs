@@ -3232,6 +3232,32 @@ fn save_file_stream(
     }
 
     if flush {
+        // Strip de EXIF/GPS no streaming — paridade com `save_file`, que hoje só
+        // o caminho órfão fazia. Só imagens, uma vez no fim, sobre o arquivo
+        // inteiro. Se o strip falhar, mantém o original (mesma semântica).
+        if safety.strip_exif {
+            if let Ok(mut f) = fs::File::open(&tmp) {
+                use std::io::Read;
+                let mut head = vec![0u8; 512];
+                let n = f.read(&mut head).unwrap_or(0);
+                head.truncate(n);
+                let sniffed = forge_core::media::sniff_mime(&head);
+                let is_image = matches!(
+                    sniffed,
+                    forge_core::media::SniffedMime::Jpeg
+                        | forge_core::media::SniffedMime::Png
+                        | forge_core::media::SniffedMime::Gif
+                        | forge_core::media::SniffedMime::Webp
+                );
+                if is_image {
+                    if let Ok(all) = fs::read(&tmp) {
+                        if let Ok(clean) = forge_core::media::strip_metadata(&all) {
+                            let _ = fs::write(&tmp, &clean);
+                        }
+                    }
+                }
+            }
+        }
         let dest = unique_download_path(&downloads, &safe);
         if let Err(e) = fs::rename(&tmp, &dest) {
             let _ = fs::remove_file(&tmp);
