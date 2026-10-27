@@ -3552,7 +3552,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               </div>
             </div>
 
-            {/* Fluxo de ativaÃ§Ã£o do proxy: IP + teste online + salvar */}}
+            {/* proxy flow: IP + test online + save */}
             {proxyPendingMode && (
               <div style={{ background: t.rail, border: `1px solid ${t.accent}66`, borderRadius: 10, padding: '12px', marginBottom: 12 }}>
                 <div style={{ fontWeight: 800, fontSize: 13, color: t.heading, marginBottom: 6 }}>

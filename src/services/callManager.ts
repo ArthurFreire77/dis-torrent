@@ -260,59 +260,18 @@ export function getClassicTurnServer(): RTCIceServer {
   }
 }
 
-export type CallPrivacyMode = 'normal' | 'encrypted' | 'proxy' | 'full'
-/**
- * Lê o modo de privacidade de forma síncrona (só existe no modo browser, onde
- * fica em localStorage `forge:privacy_mode`). No app nativo (Tauri) o modo vive
- * no backend Rust (async `privacyGet`) e NÃO é visível aqui — retorna null.
- * Exportado para a UI/testes; ver nota sobre proxy/full em getIceServers().
- */
-export function getCallPrivacyMode(): CallPrivacyMode | null {
-  try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('forge:privacy_mode') : null
-    if (!raw) return null
-    const v: unknown = JSON.parse(raw)
-    return v === 'normal' || v === 'encrypted' || v === 'proxy' || v === 'full' ? v : null
-  } catch { return null }
-}
-
-// ── Privacidade × ICE (correção do vazamento de STUN público) ────────────────
-//
-// PROBLEMA REAL que isto corrige: a lista de ICE sempre incluía os SERVIDORES
-// PÚBLICOS de reserva (Google STUN, openrelay TURN) — INCLUSIVE em proxy/Tor.
-// O ICE do WebRTC não passa pelo SOCKS5 do app (sockets UDP do browser), então
-// nesses modos cada chamada entregava o IP real a terceiros que o modo
-// promete esconder — e a UI apresentava o modo como plenamente ativo.
-//
-// Comportamento NOVO (honesto):
-// - normal/encrypted: lista completa como sempre (rotas de reserva no 4G).
-// - proxy/full: SÓ o TURN/STUN que o usuário configurou EXPLICITAMENTE
-//   (forge:turn_url / VITE_TURN_URL — escolha dele, servidor dele). Os
-//   públicos de terceiros NÃO são consultados. A chamada continua
-//   possível na LAN (candidatos host), e o aviso "não anônima" fica na UI.
-//
-// No nativo o modo chega AQUI via setCallPrivacyForIce(mode) — a UI chama no
-// boot e a cada troca de modo (useEffect no ThemeShell/MobileShell).
-
-/** Modo vigente injetado pela UI (Tauri). `null` = não injetado (usa o
- * localStorage do browser ou assume modo comum). */
-let callPrivacyOverride: CallPrivacyMode | null = null
-
-/** UI nativa informa o modo de privacidade atual (boot + trocas). */
-export function setCallPrivacyForIce(mode: CallPrivacyMode | null): void {
-  callPrivacyOverride = mode
-}
-
-/** Modo que rege o ICE agora (override da UI > localStorage > null). */
-export function getCallPrivacyForIce(): CallPrivacyMode | null {
-  return callPrivacyOverride ?? getCallPrivacyMode()
-}
-
-/** Modo anônimo exige suprimir os SERVIDORES PÚBLICOS de ICE? */
-export function isIcePublicFallbackSuppressed(): boolean {
-  const m = getCallPrivacyForIce()
-  return m === 'proxy' || m === 'full'
-}
+// Privacidade Ã— ICE: a lÃ³gica vive em ./callIcePrivacy (mÃ³dulo standalone
+// testÃ¡vel â€” o callManager nÃ£o Ã© carregÃ¡vel pelo node:test unit por importar
+// a Ã¡rvore de services). Reexporta para que shells/testes importem daqui
+// como sempre, sem duplicar fonte.
+export {
+  getCallPrivacyMode,
+  setCallPrivacyForIce,
+  getCallPrivacyForIce,
+  isIcePublicFallbackSuppressed,
+  type CallPrivacyMode,
+} from './callIcePrivacy'
+import { isIcePublicFallbackSuppressed } from './callIcePrivacy'
 
 // Relay explícito do usuário: via localStorage forge:turn_url (ex: turn:seu-relay:3478)
 // ou via env VITE_TURN_URL (+ VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL; padrão forge/forge).
