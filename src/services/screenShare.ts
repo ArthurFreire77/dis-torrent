@@ -103,8 +103,12 @@ const RETRYABLE_CODES: ReadonlySet<ScreenShareErrorCode> = new Set<ScreenShareEr
 
 export type ScreenRuntimePlatform = 'windows' | 'linux' | 'android' | 'ios' | 'macos' | 'unknown'
 
+export type ScreenBackend = 'display-media' | 'native' | 'none'
+
 export interface ScreenEnvironment {
   platform: ScreenRuntimePlatform
+  /** Quem captura de fato: `getDisplayMedia` no WebView ou o pipeline nativo em Rust. */
+  backend: ScreenBackend
   hasDisplayMedia: boolean
   secureContext: boolean
   displaySurfaces: ScreenSourceKind[]
@@ -167,7 +171,13 @@ export function detectPlatformHint(): 'windows' | 'linux' | 'android' | 'ios' | 
   return 'unknown'
 }
 
-export function detectScreenEnvironment(): ScreenEnvironment {
+/**
+
+ * `nativeAvailable` = o core em Rust assume a captura (Linux/WebKitGTK sem
+ * `getDisplayMedia`). Quem sabe disso é o `callManager`; aqui não importamos
+ * dele para o módulo continuar carregável nos testes em node puro.
+ */
+export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironment {
   const notes: string[] = []
   let platform: ScreenRuntimePlatform = 'unknown'
   if (isAndroidRuntime() || detectPlatformHint() === 'android') platform = 'android'
@@ -181,26 +191,38 @@ export function detectScreenEnvironment(): ScreenEnvironment {
   let secureContext: boolean
   try { secureContext = typeof isSecureContext === 'undefined' ? true : !!isSecureContext } catch { secureContext = true }
 
+  // O caminho nativo só entra quando o WebView NÃO tem getDisplayMedia — é
+  // exatamente o mesmo teste que `startScreenShare` faz. Sem isso a UI mentia:
+  // o WebView do Linux anunciava "compartilhar" mas o picker não tinha fonte.
+  const backend: ScreenBackend = hasDisplayMedia ? 'display-media' : (nativeAvailable ? 'native' : 'none')
+
   const displaySurfaces: ScreenSourceKind[] = ['screen']
   let systemAudio = false
   let surfaceSwitching = false
 
-  if (platform === 'windows') {
+  if (backend === 'native') {
+    // Captura nativa (ximagesrc/xcap): root window / screenshot do portal.
+    notes.push('captura nativa em Rust: envia a tela inteira; janela específica e áudio do sistema ainda não são suportados neste caminho')
+    if (platform === 'linux') {
+      notes.push('Wayland depende do portal de screenshot do desktop — sem PipeWire/ScreenCast contínuo, a taxa de quadros pode cair')
+    }
+  } else if (platform === 'windows') {
     displaySurfaces.push('window', 'monitor')
     systemAudio = true
     surfaceSwitching = true
     notes.push('Windows: captura via WebView2/Chromium (Windows Graphics Capture nativo do engine, aceleração por hardware quando disponível)')
   } else if (platform === 'linux') {
-    displaySurfaces.push('window')
+    displaySurfaces.push('window', 'monitor')
     if (hasDisplayMedia) {
       systemAudio = true
       surfaceSwitching = true
       notes.push('Linux: captura via portal xdg-desktop/PipeWire quando o WebView expõe getDisplayMedia')
     } else {
-      notes.push('Linux: este WebView (WebKitGTK 4.x) não implementa getDisplayMedia — a captura nativa exigiria um build GTK4/WebKit 6 ou integração em Rust')
+      notes.push('Linux: este WebView (WebKitGTK 4.x) não implementa getDisplayMedia — a captura usa o pipeline nativo em Rust')
     }
   } else if (platform === 'android') {
-    systemAudio = true
+    // Chromium no Android NÃO entrega áudio do sistema (AudioPlaybackCapture
+    // exigiria MediaProjection + foreground service, que o app não tem).
     surfaceSwitching = false
     if (hasDisplayMedia) notes.push('Android: captura via MediaProjection do sistema (diálogo oficial aberto pelo app)')
     else notes.push('Android: o WebView do sistema ainda não expõe getDisplayMedia nesta versão')
@@ -208,11 +230,12 @@ export function detectScreenEnvironment(): ScreenEnvironment {
     notes.push('iOS/iPadOS não oferece captura de tela para apps de terceiros')
   }
 
-  if (!hasDisplayMedia) notes.push('getDisplayMedia ausente: compartilhamento de tela indisponível neste engine')
+  if (!hasDisplayMedia && backend !== 'native') notes.push('getDisplayMedia ausente: compartilhamento de tela indisponível neste engine')
   if (!secureContext) notes.push('contexto inseguro: getDisplayMedia é bloqueado pelo browser')
 
   return {
     platform,
+    backend,
     hasDisplayMedia,
     secureContext,
     displaySurfaces,
@@ -232,7 +255,10 @@ export function hasDisplayMedia(): boolean {
 }
 
 export function supportsScreenSource(env: ScreenEnvironment, kind: ScreenSourceKind): boolean {
-  return env.hasDisplayMedia && env.displaySurfaces.includes(kind)
+  // Caminho nativo (Linux/WebKitGTK): só existe captura da tela inteira.
+  if (env.backend === 'native') return kind === 'screen'
+  if (!env.hasDisplayMedia) return false
+  return env.displaySurfaces.includes(kind)
 }
 
 export function buildDisplayMediaConstraints(
@@ -252,9 +278,17 @@ export function buildDisplayMediaConstraints(
     video: { displaySurface, frameRate: { min: 30, ideal: 60 } },
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
+    // Loopback do desktop inclui a voz dos próprios participantes saindo nos
+    // alto-falantes (eco de retorno). Chromium implementa esta opção; engines
+    // que não a conhecem ignoram o campo.
+    restrictOwnAudio: wantsSystemAudio ? 'include' : 'exclude',
     selfBrowserSurface: 'exclude',
     surfaceSwitching: env.surfaceSwitching ? 'include' : 'exclude',
-    monitorTypeSurfaces: opts.source === 'monitor' ? 'include' : 'exclude',
+    // `exclude` REMOVE as superfícies de monitor do seletor do Chromium — e sem
+    // superfície de monitor o engine não oferece áudio do sistema. Só a captura
+    // de janela pode excluir monitores; `screen` e `monitor` precisam de
+    // `include` (era o bug: o modo padrão escondia os monitores).
+    monitorTypeSurfaces: opts.source === 'window' ? 'exclude' : 'include',
     preferCurrentTab: false,
   }
   return constraints
@@ -275,7 +309,11 @@ export function resolveStep(opts: ScreenShareOptions): ScreenQualityStep | null 
 export function fpsOf(step: ScreenQualityStep | null, opts: ScreenShareOptions): number | null {
   const explicit = resolveFps(opts)
   if (explicit !== null) return explicit
-  return step ? 60 : 60
+  // `auto` = não fixa teto nenhum (o capturador escolhe). Antes devolvia 60
+  // sempre, então "Automático" era um teto fixo de 60 fps e `screenConstraints`
+  // impunha frameRate mesmo quando o usuário pediu automático.
+  void step
+  return null
 }
 
 export function screenConstraints(opts: ScreenShareOptions): MediaTrackConstraints {
@@ -313,15 +351,18 @@ export interface ScreenSenderTuning {
 
 export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning {
   const step = resolveStep(opts)
-  const scaleDown = step ? step.scaleDown : (opts.quality === 'auto' ? 1 : 1)
-  const sourceHint = opts.source === 'window'
   const fps = fpsOf(step, opts)
   const bitrateFactor = fps && fps >= 120 ? 1.6 : (fps && fps <= 30 ? 0.6 : 1)
   const maxKbps = step ? Math.round(step.maxBitrateKbps * bitrateFactor) : 6000
   const minKbps = step ? Math.round(step.minBitrateKbps * bitrateFactor) : 800
   return {
-    degradationPreference: sourceHint ? 'maintain-framerate' : 'balanced',
-    scaleResolutionDownBy: scaleDown,
+    // Tela é texto/detalhe: perder resolução borra a leitura, perder frame só
+    // deixa menos fluido. Antes era `window` → maintain-framerate (invertido).
+    degradationPreference: 'maintain-resolution',
+    // A resolução do degrau JÁ é aplicada na captura por `screenConstraints`
+    // (`applyScreenConstraints`). Reduzir de novo aqui era escala dupla: 720p
+    // saía em 640×360 e 480p em ~214×120. Uma alavanca só.
+    scaleResolutionDownBy: 1,
     maxBitrate: maxKbps * 1000,
     minBitrate: minKbps * 1000,
     priority: 'high',
@@ -668,13 +709,22 @@ export interface ScreenSourceChoice {
 }
 
 export function buildSourceChoices(env: ScreenEnvironment, selected: ScreenSourceKind): ScreenSourceChoice[] {
+  const why = (kind: ScreenSourceKind): string => {
+    if (env.backend === 'native') {
+      return kind === 'screen'
+        ? 'tela inteira (todos os monitores)'
+        : 'o caminho nativo envia a tela inteira — janela/monitor específico não é suportado'
+    }
+    if (!env.hasDisplayMedia) return 'não suportado neste WebView'
+    return 'não suportado neste aparelho'
+  }
   const base: ScreenSourceChoice[] = [
     { kind: 'screen', label: 'Tela inteira', available: supportsScreenSource(env, 'screen'), detail: env.platform === 'android' ? 'todo o conteúdo da tela do aparelho' : 'todos os monitores' },
     { kind: 'window', label: 'Janela / aplicativo', available: supportsScreenSource(env, 'window'), detail: 'uma janela ou aba específica' },
     { kind: 'monitor', label: 'Monitor específico', available: supportsScreenSource(env, 'monitor'), detail: 'escolha qual monitor enviar' },
   ]
-  return base.map(c => ({ ...c, available: c.available, detail: c.available ? c.detail : 'não suportado neste aparelho' }))
-    .map(c => (c.kind === selected ? c : c))
+  void selected
+  return base.map(c => ({ ...c, detail: c.available ? c.detail : why(c.kind) }))
 }
 
 export interface MonitorInfo {

@@ -1908,9 +1908,15 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
         "idle" => 1,
         _ => 0,
     };
-    let mut out = all.iter().max_by_key(|peer| gravidade(peer))?.clone();
+    let worst = all.iter().max_by_key(|peer| gravidade(peer))?;
+    let mut out = worst.clone();
 
-    for peer in all.iter().skip(1) {
+    // Soma os contadores de TODOS os peers UMA vez. Antes era `skip(1)`, que
+    // pulava o primeiro elemento do mapa (não o peer escolhido): quando o pior
+    // peer não era o primeiro, ele era contado DUAS vezes e o primeiro era
+    // ignorado — total de pacotes errado no diagnóstico.
+    for peer in all.iter() {
+        if std::ptr::eq(peer, worst) { continue }
         out.packets_in = out.packets_in.saturating_add(peer.packets_in);
         out.packets_out = out.packets_out.saturating_add(peer.packets_out);
         out.plc_frames = out.plc_frames.saturating_add(peer.plc_frames);
@@ -2003,6 +2009,25 @@ mod stats_aggregation_tests {
 
         assert_eq!(stats.video_state.as_deref(), Some("failed"));
         assert_eq!(stats.video_source.as_deref(), Some("camera"));
+    }
+
+    #[test]
+    fn aggregate_does_not_double_count_the_worst_peer() {
+        // O pior peer (failed) NÃO é o primeiro do mapa: era exatamente esse
+        // caso em que o `skip(1)` somava o pior duas vezes e esquecia o primeiro.
+        let mut primeiro = peer("off", None, 1);
+        primeiro.state = "connected".into();
+        primeiro.packets_in = 10;
+        primeiro.packets_out = 20;
+        let mut pior = peer("failed", Some("screen"), 3);
+        pior.state = "failed".into();
+        pior.packets_in = 1;
+        pior.packets_out = 2;
+
+        let stats = aggregate_stats([primeiro, pior]).expect("stats");
+        assert_eq!(stats.state, "failed");
+        assert_eq!(stats.packets_in, 11, "cada peer conta uma vez só");
+        assert_eq!(stats.packets_out, 22);
     }
 }
 
@@ -2372,21 +2397,37 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        // pt/ssrc so' sao negociados depois do answer.
-        let params = match sess.tx.sender.get_parameters().await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[voice] get_parameters falhou: {e}");
+        // pt/ssrc so' sao negociados depois do answer. Antes um erro/vazio
+        // aqui encerrava o loop de envio em SILENCIO: a sessao continuava
+        // "connected", o outro lado deixava de ouvir e so restava um
+        // `eprintln!`. Agora tenta por ~10 s (answer tardio, renegociacao) e,
+        // se realmente nao houver como enviar, marca a sessao como `failed`
+        // com motivo — a UI mostra o erro em vez de fingir normalidade.
+        let mut attempt: u32 = 0;
+        let (pt, ssrc) = loop {
+            if sess.closed.load(Ordering::SeqCst) {
                 return;
             }
-        };
-        let Some(pt) = params.rtp_parameters.codecs.first().map(|c| c.payload_type) else {
-            eprintln!("[voice] sender sem codec negociado");
-            return;
-        };
-        let Some(ssrc) = sess.tx.track.ssrcs().await.first().copied() else {
-            eprintln!("[voice] track sem ssrc");
-            return;
+            let pt = match sess.tx.sender.get_parameters().await {
+                Ok(p) => p.rtp_parameters.codecs.first().map(|c| c.payload_type),
+                Err(e) => {
+                    tracing::debug!("[voice] get_parameters ainda nao pronto: {e}");
+                    None
+                }
+            };
+            let ssrc = sess.tx.track.ssrcs().await.first().copied();
+            if let (Some(pt), Some(ssrc)) = (pt, ssrc) {
+                break (pt, ssrc);
+            }
+            attempt = attempt.saturating_add(1);
+            if attempt >= 20 {
+                let msg = "nao foi possivel enviar audio: o SDP nao negociou codec/SSRC desta sessao"
+                    .to_string();
+                eprintln!("[voice] {msg}");
+                sess.sh.set_state("failed");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         };
 
         let mut enc = match new_encoder() {
@@ -2745,24 +2786,51 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             return;
         }
     };
-    let c = params
-        .rtp_parameters
-        .codecs
+    // Escolhe o PT de um codec que o ENCODER realmente produz.
+    //
+    // Antes pegava o PRIMEIRO codec de vídeo do SDP. Todo Chrome moderno
+    // oferece VP9/AV1 e a ordem negociada costuma deixá-los na frente: o
+    // encoder GStreamer só faz VP8/H264 (`VideoCodec`), então um PT de VP9
+    // recebia bitstream VP8 e o outro lado decodificava lixo. Preferência:
+    // VP8 (sempre existe), depois H264; nenhum dos dois = erro explícito.
+    let neg = &params.rtp_parameters.codecs;
+    let pick = neg
         .iter()
-        .find(|c| c.rtp_codec.mime_type.starts_with("video"))
-        .ok_or_else(|| "vídeo não foi negociado no SDP".to_string());
-    let c = match c {
-        Ok(c) => c,
-        Err(e) => {
-            video_fail(&sh, e);
-            return;
-        }
+        .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("video/VP8"))
+        .or_else(|| {
+            neg.iter()
+                .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("video/H264"))
+        });
+    let Some(c) = pick else {
+        let oferecidos: Vec<&str> = neg
+            .iter()
+            .filter(|c| c.rtp_codec.mime_type.to_ascii_lowercase().starts_with("video"))
+            .map(|c| c.rtp_codec.mime_type.as_str())
+            .collect();
+        video_fail(
+            &sh,
+            format!(
+                "o outro lado não aceitou VP8 nem H264 (ofereceu: {})",
+                if oferecidos.is_empty() {
+                    "nenhum codec de vídeo".to_string()
+                } else {
+                    oferecidos.join(", ")
+                }
+            ),
+        );
+        return;
     };
     let mime = c.rtp_codec.mime_type.clone();
     let pt = c.payload_type;
     let vtl = sess.vtx.track.clone();
     *sh.video_track.lock().unwrap() = Some(vtl.clone());
-    let codec = crate::net::media_video::VideoCodec::from_mime(&mime);
+    let codec = match crate::net::media_video::VideoCodec::supported_from_mime(&mime) {
+        Some(c) => c,
+        None => {
+            video_fail(&sh, format!("codec de vídeo não implementado: {mime}"));
+            return;
+        }
+    };
     let want = codec.mime();
     *sh.video_codec.lock().unwrap() = Some(want.to_string());
     *sh.video_source.lock().unwrap() = Some(want_source.clone());
@@ -2926,7 +2994,14 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     if let Some(mut e) = enc {
         e.stop();
     }
-    let _ = vtl.stop();
+    // NÃO chamar `vtl.stop()` aqui.
+    //
+    // A track de vídeo é criada UMA vez por sessão em `build_session` e a
+    // m-line já foi negociada. `stop()` a deixava sem SSRC: desligar e religar
+    // a câmera na MESMA chamada caía em "a track local ficou sem ssrc" (ou
+    // `write_sample` falhava) e só hangup + nova chamada recuperava — era o
+    // "câmera só liga uma vez". Quem encerra a track é o dono dela: o
+    // `close_key`/drop da sessão, junto com a PeerConnection.
     let mut state = sh.video_state.lock().unwrap();
     if matches!(state.as_str(), "starting" | "live") {
         *state = "off".to_string();
@@ -2967,7 +3042,18 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                     .await
                     .map(|c| c.mime_type.clone())
                     .unwrap_or_else(|| "video/VP8".to_string());
-                let codec = crate::net::media_video::VideoCodec::from_mime(&mime);
+                let codec = match crate::net::media_video::VideoCodec::supported_from_mime(&mime) {
+                    Some(c) => c,
+                    None => {
+                        video_fail(
+                            &sh,
+                            format!(
+                                "codec de vídeo não suportado: {mime} (o decodificador só abre VP8/H264)"
+                            ),
+                        );
+                        break;
+                    }
+                };
                 // PT NEGOCIADO + sprop do SDP remoto: sem os dois, o
                 // `rtp*depay` rejeita tudo (PT != 96) ou o H264 fica preto ate'
                 // chegar SPS in-band. Era o "video so funciona quando o outro

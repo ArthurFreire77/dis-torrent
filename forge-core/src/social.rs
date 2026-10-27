@@ -1707,9 +1707,16 @@ impl crate::storage::Store {
         ts: i64,
         limit: i64,
     ) -> Result<Vec<crate::storage::StoredMessage>, String> {
+        // `limit` vem do frontend (rota de busca): sem clamp, `limit as usize`
+        // negativo virava um número gigante e o `take` não limitava nada.
+        let limit = limit.clamp(1, 500) as usize;
         let conn = self.locked();
+        // `thread_id` PRECISAVA estar no SELECT: o mapper lê `r.get(9)`, mas a
+        // query listava só 9 colunas (0..8). O `query_map` então devolvia Err
+        // por linha e o `.flatten()` descartava TODAS em silêncio — "pular para
+        // mensagem" sempre vinha vazio.
         let mut stmt = conn
-            .prepare("SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id FROM messages WHERE conv_id=?1 ORDER BY ts ASC")
+            .prepare("SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id,thread_id FROM messages WHERE conv_id=?1 ORDER BY ts ASC")
             .map_err(|e| e.to_string())?;
         let all: Vec<crate::storage::StoredMessage> = stmt
             .query_map(params![conv_id], |r| {
@@ -1733,14 +1740,16 @@ impl crate::storage::Store {
             .iter()
             .filter(|m| m.ts < ts)
             .rev()
-            .take(limit as usize / 2)
+            .take(limit / 2)
             .cloned()
             .collect();
         let mut before: Vec<_> = before.into_iter().rev().collect();
+        // O resto vai para o "depois" (com `limit` ímpar, 1 vira 1 em vez de 0).
+        let depois = limit - before.len();
         let after: Vec<_> = all
             .into_iter()
             .filter(|m| m.ts >= ts)
-            .take(limit as usize / 2)
+            .take(depois)
             .collect();
         before.extend(after);
         Ok(before)

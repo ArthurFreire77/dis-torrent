@@ -469,9 +469,24 @@ export function supportsScreenShare(): boolean {
 export function screenShareUnavailableReason(): string | null {
   try {
     if (supportsScreenShare()) return null
-    const env = detectScreenEnvironment()
+    const env = detectScreenEnvironment(getScreenShareBackend() === 'native')
     return env.notes.length ? env.notes.join(' · ') : SCREEN_UNAVAILABLE_MSG
   } catch { return SCREEN_UNAVAILABLE_MSG }
+}
+
+/**
+ * Quem captura a tela AGORA: o WebView (`getDisplayMedia`) ou o core nativo em
+ * Rust. A UI precisa saber a diferença porque as capacidades não são as mesmas
+ * (o caminho nativo não tem janela específica nem áudio do sistema).
+ */
+export type ScreenShareBackend = 'display-media' | 'native' | 'none'
+export function getScreenShareBackend(): ScreenShareBackend {
+  try {
+    const md: any = typeof navigator !== 'undefined' ? (navigator as any).mediaDevices : null
+    if (md?.getDisplayMedia) return 'display-media'
+    if (nativeVoiceAvailable === true) return 'native'
+    return 'none'
+  } catch { return 'none' }
 }
 
 /** Anexa track remota sem derrubar o áudio: mescla no stream existente. */
@@ -688,6 +703,17 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
           localMediaNotice?.('câmera não aceitou as resoluções pedidas — seguindo só com voz')
           return await md.getUserMedia({ ...merged, video: false })
         } catch { /* cai no erro honesto abaixo */ }
+      }
+      // Permissão da CÂMERA negada, câmera em uso ou inexistente: `getUserMedia`
+      // com {audio,video} é atômico e devolvia `null`, deixando a chamada MUDA
+      // mesmo com microfone bom. Tenta áudio puro antes de desistir.
+      if (merged.video && (e as Error)?.name !== 'OverconstrainedError') {
+        try {
+          const s = await md.getUserMedia({ ...merged, video: false })
+          const why = describeMediaError(e)
+          try { localMediaNotice?.(`${why ? `${why.split(' — ')[0]} — ` : ''}seguindo só com voz`) } catch { /* ignore */ }
+          return s
+        } catch { /* nem áudio: cai no erro honesto abaixo */ }
       }
       const honest = describeMediaError(e)
       try { localMediaNotice?.(honest ?? `falha ao abrir microfone/câmera (${(e as Error)?.name ?? 'erro'})`) } catch { /* ignore */ }
@@ -1146,9 +1172,12 @@ function logIceState(pc: RTCPeerConnection, fp: string, callId: string) {
               } catch { /* ignore */ }
             }, ICE_DISCONNECTED_GRACE_MS)
           } catch { /* ignore */ }
-        } else if (st === 'connected' || st === 'completed' || st === 'closed') {
+        } else if (st === 'connected' || st === 'completed') {
           clearGrace()
-          // WebRTC conectou: se estávamos no áudio-via-relay, pode voltar pro WebRTC
+          // WebRTC conectou: se estávamos no áudio-via-relay, pode voltar pro WebRTC.
+          // `closed` NÃO entra aqui: o PC é fechado de propósito em `onPeerBack`
+          // (peer caiu/voltou). Tratar isso como "recuperado" marcava a chamada
+          // como conectada, desligava o relay e deixava todo mundo mudo.
           emitIceRecovered({ fp, callId })
         }
       } catch { /* monitor nunca derruba a chamada */ }
@@ -1158,6 +1187,8 @@ function logIceState(pc: RTCPeerConnection, fp: string, callId: string) {
 
 export class CallManager {
   private pcs = new Map<string, RTCPeerConnection>()
+  /** Trava de reentrância da câmera (dois cliques = dois getUserMedia vivos). */
+  private cameraBusy = false
   /**
    * Candidatos ICE recebidos ANTES de a `remoteDescription` existir.
    * Por que importa: no trickle ICE os candidatos do peer podem chegar pela
@@ -1230,6 +1261,13 @@ export class CallManager {
   private relayRecDedicated = false
   private localStream: MediaStream | null = null
   private screenStream: MediaStream | null = null
+  /**
+   * Sender de áudio da TELA por peer. Existe para ser REUSADO: sem isto, cada
+   * ciclo de compartilhamento criava uma m-line de áudio nova (SDP crescendo,
+   * ICE mais lento e áudio do sistema duplicado). No stop só zeramos a track,
+   * mantendo o sender para o próximo share.
+   */
+  private screenAudioSenders = new Map<RTCPeerConnection, RTCRtpSender>()
   /** Atalho legado: 'monitor' (tela) ou 'window' (janela/aba). Espelha
    *  `screenOptions.source` e existe só para a UI antiga; a fonte de verdade é
    *  o objeto de opções (que também carrega monitor/áudio/qualidade/FPS). */
@@ -1238,7 +1276,7 @@ export class CallManager {
   /** Opções completas de compartilhamento (fonte/áudio/qualidade/FPS). */
   private screenOptions: ScreenShareOptions = { ...SCREEN_DEFAULT_OPTIONS }
   /** Ambiente de captura detectado (plataforma, capacidades, notas). */
-  private screenEnv: ScreenEnvironment = detectScreenEnvironment()
+  private screenEnv: ScreenEnvironment = detectScreenEnvironment(getScreenShareBackend() === 'native')
   /** FPS capturado de verdade (requestVideoFrameCallback) — nunca inventado. */
   private screenMonitor = new ScreenCaptureMonitor()
   /** Agrega getStats em métricas reais de bitrate/FPS/perda/latência. */
@@ -1808,6 +1846,12 @@ export class CallManager {
       } catch { /* sdp legado: ignora */ }
       if (on !== null) {
         p.sharing = on
+        if (!on) {
+          // Não deixa o ÚLTIMO frame da tela congelado no tile depois que o
+          // outro lado parou de compartilhar (parecia que ainda estava no ar).
+          try { delete (p as any).videoUrl } catch { /* ignore */ }
+          try { (p as any).videoSeq = -1 } catch { /* ignore */ }
+        }
         this.onUpdate({ ...st })
       }
     } catch { /* ignore */ }
@@ -1902,7 +1946,11 @@ export class CallManager {
       phase: 'outgoing',
       muted: false,
       deafened: false,
-      cameraOn: kind === 'video',
+      // Deriva do track REAL: `getLocalMedia` pode ter degradado para só voz
+      // (câmera negada/ocupada). Antes era `kind === 'video'` e a UI mostrava
+      // câmera ligada sem imagem — o primeiro clique ainda "desligava" uma
+      // câmera que nunca existiu.
+      cameraOn: this.hasLiveCamera(),
       sharing: false,
       participants: [{ fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined }],
       startAt: Date.now(),
@@ -1936,6 +1984,18 @@ export class CallManager {
     // (45 s) e o microfone antigo ficava preso (substituído sem `stop()`).
     if (this.state && isCallPhaseActive(this.state.phase) && !this.state.callId.startsWith('voice-')) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar num canal de voz')
+    }
+    // Já estou em OUTRO canal de voz: sai antes de entrar. A guarda acima
+    // deixava passar, e o estado/PCs/microfone do canal anterior ficavam vivos
+    // (o usuário aparecia em dois canais e o mic antigo nunca recebia stop).
+    const alvo = `voice-${communityId}-${channelId}`
+    if (
+      this.state
+      && this.state.callId.startsWith('voice-')
+      && this.state.callId !== alvo
+      && isCallPhaseActive(this.state.phase)
+    ) {
+      try { await this.leave() } catch { /* melhor entrar do que travar no canal antigo */ }
     }
     // Re-confere a voz nativa AGORA (o engine re-arma a mídia se o áudio
     // subiu depois do boot) — o mesmo reset do start().
@@ -2226,7 +2286,7 @@ export class CallManager {
       phase: 'connecting',
       muted: false,
       deafened: false,
-      cameraOn: kind === 'video',
+      cameraOn: this.hasLiveCamera(),
       sharing: false,
       participants: [
         { fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined },
@@ -2368,6 +2428,10 @@ export class CallManager {
   }
   private stopRelayFull() {
     this.stopRelaySender()
+    // O AudioContext do relay nunca era fechado: cada chamada deixava um grafo
+    // de áudio vivo (memória + device preso) até reiniciar o app.
+    try { void this.relayAudioCtx?.close() } catch { /* ignore */ }
+    this.relayAudioCtx = null
     this.relayHeaderBytes = null
     this.relayQueues.clear()
     this.relayActive = false
@@ -2983,8 +3047,17 @@ export class CallManager {
     try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
     this.screenRecoveryTimer = null
     this.screenMonitor.detach()
+    this.screenAudioSenders.clear()
     this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
     this.screenStream = null
+    // Frames remotos de tela não sobrevivem ao fim/parada do compartilhamento.
+    try {
+      for (const p of this.state?.participants ?? []) {
+        delete (p as any).videoUrl
+        ;(p as any).videoSeq = -1
+        ;(p as any).sharing = false
+      }
+    } catch { /* ignore */ }
     this.screenLastSize = ''
     this.screenMetrics = emptyScreenMetrics()
     this.screenError = null
@@ -3133,17 +3206,38 @@ export class CallManager {
   }
 
   /**
+   * Acha o m-line de vídeo do PC. Prefere a que já tem track; senão usa a
+   * m-line criada `recvonly` por `ensureMlines` (chamada de voz) — mas nesse
+   * caso é preciso virar `sendrecv` e renegociar, porque `replaceTrack` sozinho
+   * NÃO muda a direção e o vídeo nunca saía. Era o bug "câmera liga mas só o
+   * vídeo remoto aparece".
+   */
+  private findVideoTransceiver(pc: RTCPeerConnection): RTCRtpTransceiver | null {
+    try {
+      const withTrack = pc.getTransceivers().find(t => t.sender?.track?.kind === 'video')
+      if (withTrack) return withTrack
+      return pc.getTransceivers().find(t => (t as any)?.receiver?.track?.kind === 'video') ?? null
+    } catch { return null }
+  }
+
+  /**
    * Acha o sender de vídeo do PC mesmo quando ele está com track nulo
    * (câmera desligada via `replaceTrack(null)`). Sem isso, religar a câmera
    * criaria um m-line novo sem renegociação e o remoto não veria nada.
    */
   private findVideoSender(pc: RTCPeerConnection): RTCRtpSender | null {
     try {
-      const direct = pc.getSenders().find(s => s.track?.kind === 'video')
-      if (direct) return direct
-      const tr = pc.getTransceivers().find(t => (t as any)?.receiver?.track?.kind === 'video')
-      return tr?.sender ?? null
+      return this.findVideoTransceiver(pc)?.sender
+        ?? pc.getSenders().find(s => s.track?.kind === 'video')
+        ?? null
     } catch { return null }
+  }
+
+  /** `cameraOn` só é verdade quando existe track de vídeo VIVA de verdade. */
+  private hasLiveCamera(): boolean {
+    try {
+      return !!this.localStream?.getVideoTracks().some(t => t.readyState === 'live')
+    } catch { return false }
   }
 
   async toggleCamera() {
@@ -3155,29 +3249,45 @@ export class CallManager {
       await this.toggleNativeVideo('camera')
       return
     }
-    if (this.state.cameraOn) {
-      // Desliga: para de ENVIAR vídeo (replaceTrack(null) mantém o m-line) e
-      // solta os tracks locais. O remoto para de receber em vez de congelar.
-      const mine = this.localStream
-      if (mine) {
-        const vids = mine.getVideoTracks()
-        for (const pc of this.pcs.values()) {
-          try {
-            const sender = this.findVideoSender(pc)
-            if (sender) await sender.replaceTrack(null)
-          } catch { /* peer isolado não derruba os demais */ }
+    // Dois cliques rápidos abriam dois getUserMedia; a track perdedora ficava
+    // viva (LED da câmera preso) e o sender oscilava.
+    if (this.cameraBusy) return
+    this.cameraBusy = true
+    try {
+      if (this.state.cameraOn) {
+        // Desliga: para de ENVIAR vídeo (replaceTrack(null) mantém o m-line) e
+        // solta os tracks locais. O remoto para de receber em vez de congelar.
+        // Exceção: compartilhando tela, o sender de vídeo carrega a TELA —
+        // desligar a câmera não pode cortar o compartilhamento dos outros.
+        const mine = this.localStream
+        const camTrack = mine?.getVideoTracks()[0] ?? null
+        if (mine) {
+          if (!this.state.sharing) {
+            for (const pc of this.pcs.values()) {
+              try {
+                const sender = this.findVideoSender(pc)
+                if (!sender) continue
+                // Só derruba o que é NOSSA câmera (nunca a tela de outro fluxo).
+                if (sender.track && camTrack && sender.track.id !== camTrack.id) continue
+                await sender.replaceTrack(null)
+              } catch { /* peer isolado não derruba os demais */ }
+            }
+          }
+          for (const t of mine.getVideoTracks()) {
+            try { t.stop() } catch { /* ignore */ }
+            try { mine.removeTrack(t) } catch { /* ignore */ }
+          }
         }
-        vids.forEach(t => {
-          try { t.stop() } catch { /* ignore */ }
-          try { mine.removeTrack(t) } catch { /* ignore */ }
-        })
-      }
-      this.state.cameraOn = false
-    } else {
-      try {
-        const vs = await getLocalMedia({ video: { ...CAMERA_CONSTRAINTS } })
+        this.state.cameraOn = false
+      } else {
+        const vs = await getLocalMedia({ video: { ...QUALITY_CONSTRAINTS[this.quality] } })
         const track = vs?.getVideoTracks()[0]
-        if (!track) return
+        if (!track) {
+          // getLocalMedia já avisou o motivo via onCallNotice; não inventa
+          // câmera ligada sem imagem.
+          this.state.cameraOn = false
+          return
+        }
         if (!this.localStream) {
           try { this.localStream = new MediaStream([track]) }
           catch { this.localStream = null }
@@ -3185,24 +3295,54 @@ export class CallManager {
           try { this.localStream.addTrack(track) } catch { /* ignore */ }
         }
         if (!this.localStream) return
-        // Por peer: se JÁ existe m-line de vídeo → replaceTrack (sem renegociar);
-        // se NÃO existe (ex.: ligou a câmera numa chamada de voz) → addTrack +
-        // renegociação (offer) para o remoto receber a nova track.
+        // Por peer: m-line existente → replaceTrack (+ renegociação se era
+        // recvonly); sem m-line → addTrack + offer.
+        let sent = 0
+        let lastErr: unknown = null
         for (const [fp, pc] of this.pcs) {
           try {
-            const sender = this.findVideoSender(pc)
-            if (sender) {
-              await sender.replaceTrack(track)
+            if (pc.signalingState === 'closed') continue
+            const tr = this.findVideoTransceiver(pc)
+            let needsOffer = false
+            if (tr) {
+              const dir = tr.direction
+              if (dir === 'recvonly' || dir === 'inactive') {
+                try { tr.direction = 'sendrecv' } catch { /* engine sem setter */ }
+                needsOffer = true
+              }
+              await tr.sender.replaceTrack(track)
             } else {
               pc.addTrack(track, this.localStream)
+              needsOffer = true
+            }
+            if (needsOffer && pc.signalingState === 'stable') {
               const offer = await createTunedOffer(pc)
               await pc.setLocalDescription(offer)
-              if (this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
+              if (this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer))
             }
-          } catch { /* peer isolado não derruba os demais */ }
+            sent++
+          } catch (e) {
+            lastErr = e
+          }
         }
-        this.state.cameraOn = true
-      } catch { /* silent */ }
+        if (this.pcs.size > 0 && sent === 0) {
+          // Nenhum peer aceitou: não finge câmera ligada.
+          try { track.stop() } catch { /* ignore */ }
+          try { this.localStream?.removeTrack(track) } catch { /* ignore */ }
+          this.state.cameraOn = false
+          try {
+            this.onCallNotice?.(`não foi possível enviar a câmera${lastErr ? `: ${(lastErr as Error)?.message ?? lastErr}` : ''}`)
+          } catch { /* ignore */ }
+        } else {
+          this.state.cameraOn = true
+        }
+      }
+    } catch (e) {
+      // Antes era `catch {}`: permissão negada não produzia NENHUMA mensagem e
+      // o botão só "não mudava".
+      try { localMediaNotice?.(describeMediaError(e) ?? `falha ao abrir a câmera (${(e as Error)?.name ?? 'erro'})`) } catch { /* ignore */ }
+    } finally {
+      this.cameraBusy = false
     }
     this.onUpdate({ ...this.state })
   }
@@ -3240,11 +3380,24 @@ export class CallManager {
     // caía no guard de `pcs.size === 0` com erro de "não codifica vídeo" —
     // mentira: o core codifica; faltava a chamada.
     if ((this.state as any)?.nativeMedia) {
-      if (opts?.source) this.screenOptions = normalizeOptions({ source: opts.source }, this.screenOptions)
+      const next = normalizeOptions(opts, this.screenOptions)
+      if (next.source === 'window' || next.source === 'monitor') {
+        // O core só sabe capturar a tela inteira (root window/portal). Antes
+        // aceitava `window` e enviava o desktop COMPLETO — o usuário pedia uma
+        // janela e vazava tudo, sem diálogo do SO.
+        const msg = 'no caminho nativo a captura é sempre da tela inteira — janela ou monitor específico não é suportado'
+        this.setScreenError('unsupported', msg)
+        throw new ScreenShareError('unsupported', msg, false)
+      }
+      const wantsSystem = next.audio === 'system' || next.audio === 'system+mic'
+      if (wantsSystem) {
+        try { this.onCallNotice?.('o caminho nativo não captura áudio do sistema — compartilhando só a tela (o microfone da chamada continua ativo)') } catch { /* ignore */ }
+      }
+      this.screenOptions = { ...next, source: 'screen', audio: wantsSystem ? (next.audio === 'system+mic' ? 'mic' : 'none') : next.audio }
       await this.toggleNativeVideo('screen')
       return
     }
-    this.screenEnv = detectScreenEnvironment()
+    this.screenEnv = detectScreenEnvironment(getScreenShareBackend() === 'native')
     if (!supportsScreenShare()) {
       const reason = screenShareUnavailableReason()
       this.setScreenError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG)
@@ -3435,14 +3588,32 @@ export class CallManager {
     for (const pc of this.pcs.values()) {
       try {
         if (pc.getSenders().some(x => x.track === track)) continue
+        // Reusa o sender de áudio da tela de um share anterior (m-line já
+        // negociada): replaceTrack não exige nova oferta.
+        const existing = this.screenAudioSenders.get(pc)
+        if (existing && pc.getSenders().includes(existing)) {
+          await existing.replaceTrack(track)
+          continue
+        }
         if (pc.signalingState !== 'stable') continue
-        pc.addTrack(track, stream)
+        const sender = pc.addTrack(track, stream)
+        this.screenAudioSenders.set(pc, sender)
         const offer = await createTunedOffer(pc)
         await pc.setLocalDescription(offer)
         const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
         if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
       } catch { /* áudio opcional: vídeo continua */ }
     }
+  }
+
+  /** Zera o áudio da tela nos senders reusáveis, sem fechar a m-line. */
+  private async clearScreenAudioSenders(): Promise<void> {
+    for (const [pc, sender] of this.screenAudioSenders) {
+      try {
+        if (pc.signalingState !== 'closed' && pc.getSenders().includes(sender)) await sender.replaceTrack(null)
+      } catch { /* peer já fechado: nada a limpar */ }
+    }
+    this.screenAudioSenders.clear()
   }
 
   /** Para o compartilhamento e devolve a câmera (ou null) aos remotos. */
@@ -3457,6 +3628,7 @@ export class CallManager {
     this.stopScreenStatsTimer()
     try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
     this.screenRecoveryTimer = null
+    await this.clearScreenAudioSenders()
     this.stopScreenStreamOnly()
     this.screenMonitor.detach()
     this.screenLastSize = ''
@@ -3502,7 +3674,7 @@ export class CallManager {
     const prev = this.screenOptions
     const next = normalizeOptions(patch, this.screenOptions)
     this.screenOptions = next
-    this.screenEnv = detectScreenEnvironment()
+    this.screenEnv = detectScreenEnvironment(getScreenShareBackend() === 'native')
     if (!this.state?.sharing) return
     const sourceChanged = next.source !== prev.source
     const audioChanged = next.audio !== prev.audio
@@ -3523,15 +3695,20 @@ export class CallManager {
   private async recaptureScreen(opts: ScreenShareOptions): Promise<void> {
     const wasSharing = !!this.state?.sharing
     try {
-      this.stopScreenStatsTimer()
-      this.stopScreenStreamOnly()
-      this.screenMonitor.detach()
+      // Captura a NOVA fonte ANTES de tocar na atual: se o usuário cancelar o
+      // seletor do sistema (ou o SO negar), o compartilhamento que já estava no
+      // ar continua vivo. Antes o stream antigo era parado primeiro e um
+      // cancelamento derrubava a tela de todo mundo.
       const stream = await this.acquireScreenStream(opts)
       const track = stream.getVideoTracks()[0]
       if (!track) {
         try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
         throw new ScreenShareError('no-source', 'nenhuma trilha de vídeo na tela compartilhada', true)
       }
+      this.stopScreenStatsTimer()
+      await this.clearScreenAudioSenders()
+      this.stopScreenStreamOnly()
+      this.screenMonitor.detach()
       this.screenStream = stream
       this.watchScreenTrack(track)
       this.screenMonitor.attach(track)
@@ -3547,7 +3724,8 @@ export class CallManager {
     } catch (e) {
       const err = classifyScreenShareError(e)
       this.setScreenError(err.code, err.message)
-      if (this.state) {
+      // NÃO marca sharing=false: a captura anterior (se havia) segue no ar.
+      if (this.state && !wasSharing) {
         this.state.sharing = false
         this.broadcastScreenSignal(false)
         this.onUpdate({ ...this.state })
@@ -3693,7 +3871,7 @@ export class CallManager {
 
   /** Ambiente de captura detectado agora (plataforma + capacidades reais). */
   getScreenShareEnvironment(): ScreenEnvironment {
-    this.screenEnv = detectScreenEnvironment()
+    this.screenEnv = detectScreenEnvironment(getScreenShareBackend() === 'native')
     return this.screenEnv
   }
 

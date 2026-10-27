@@ -7,7 +7,7 @@
 // a chamada (trocar fonte/áudio recaptura, resolução/FPS não).
 
 import { useEffect, useMemo, useState } from 'react'
-import { callManager, screenShareUnavailableReason } from '../services/callManager'
+import { callManager, getScreenShareBackend, screenShareUnavailableReason } from '../services/callManager'
 import {
   detectScreenEnvironment,
   buildSourceChoices,
@@ -67,6 +67,7 @@ function Choice({
   children,
   testId,
   ariaLabel,
+  title,
 }: {
   active: boolean
   disabled?: boolean
@@ -74,12 +75,14 @@ function Choice({
   children: React.ReactNode
   testId?: string
   ariaLabel?: string
+  title?: string
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      title={title}
       data-testid={testId}
       aria-pressed={active}
       aria-label={ariaLabel}
@@ -110,11 +113,14 @@ export default function ScreenSharePicker({
   onClose: () => void
   onError: (msg: string) => void
 }) {
-  const env = useMemo(() => detectScreenEnvironment(), [open])
+  const backend = useMemo(() => getScreenShareBackend(), [open])
+  const env = useMemo(() => detectScreenEnvironment(backend === 'native'), [open, backend])
+  const native = backend === 'native'
   const [opts, setOpts] = useState<ScreenShareOptions>(() => callManager.getScreenShareOptions())
   const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState<string | null>(null)
   const [monitors, setMonitors] = useState<MonitorInfo[]>([])
-  const unavailable = !env.hasDisplayMedia ? screenShareUnavailableReason() : null
+  const unavailable = backend === 'none' ? screenShareUnavailableReason() : null
 
   // Monitores reais da máquina. Só faz sentido quando a fonte é "monitor
   // específico"; fora do app nativo (Android/browser) a lista fica vazia e a UI
@@ -126,14 +132,31 @@ export default function ScreenSharePicker({
     return () => { alive = false }
   }, [open, opts.source])
 
+  // No caminho nativo só existe tela inteira e o áudio do sistema não é
+  // capturado: nunca deixe uma opção armazenada (ex.: `window`/`system`) chegar
+  // ao core fingindo que será honrada.
+  useEffect(() => {
+    if (!open || !native) return
+    if (opts.source !== 'screen' || (opts.audio !== 'none' && opts.audio !== 'mic')) {
+      const next = { ...opts, source: 'screen' as const, audio: (opts.audio === 'mic' ? 'mic' : 'none') as ScreenAudioMode }
+      setOpts(next)
+      void callManager.setScreenShareOptions(next).catch(() => {})
+    }
+  }, [open, native, opts])
+
   const choices = useMemo(() => buildSourceChoices(env, opts.source), [env, opts.source])
 
   async function apply(next: ScreenShareOptions, startNow: boolean) {
     setOpts(next)
+    setSaved(null)
     try {
       await callManager.setScreenShareOptions(next)
-      if (startNow) await callManager.startScreenShare(next)
-      onClose()
+      if (startNow) {
+        await callManager.startScreenShare(next)
+        onClose()
+      } else {
+        setSaved('Opções aplicadas à captura atual.')
+      }
     } catch (e: any) {
       onError(String(e?.message ?? e))
     }
@@ -193,7 +216,16 @@ export default function ScreenSharePicker({
 
       <Row label="Áudio">
         {AUDIO_CHOICES.map((a) => {
-          const disabled = a.needsSystem && !env.systemAudio
+          // `window + áudio do sistema` é impossível no Chromium (loopback só
+          // existe com superfície de monitor). Desabilitar com motivo em vez de
+          // deixar o usuário escolher e receber uma trilha que nunca chega.
+          const windowBlocksSystem = a.needsSystem && opts.source === 'window'
+          const disabled = (a.needsSystem && !env.systemAudio) || windowBlocksSystem
+          const why = windowBlocksSystem
+            ? 'áudio do sistema exige compartilhar um monitor inteiro, não uma janela'
+            : native
+              ? 'o caminho nativo não captura áudio do sistema'
+              : 'áudio do sistema indisponível neste aparelho'
           return (
             <Choice
               key={a.value}
@@ -201,6 +233,7 @@ export default function ScreenSharePicker({
               ariaLabel={a.label}
               active={opts.audio === a.value}
               disabled={disabled}
+              title={disabled ? why : undefined}
               onClick={() => apply({ ...opts, audio: a.value }, false)}
             >
               {a.label}
@@ -238,9 +271,16 @@ export default function ScreenSharePicker({
       </Row>
 
       <div style={{ ...helpStyle, marginTop: -4 }}>
-        Piso operacional {SCREEN_QUALITY_STEPS[0].label}; o degrau muda sozinho se a rede cair.
+        {native
+          ? 'Caminho nativo: a tela inteira é enviada (janela/monitor específico e áudio do sistema ainda não existem aqui).'
+          : `Piso operacional ${SCREEN_QUALITY_STEPS[0].label}; o degrau muda sozinho se a rede cair.`}
         {opts.fps === '120' && ' 120 FPS só é atingido com monitor, encoder e placa que suportem.'}
       </div>
+      {saved && (
+        <div style={{ ...helpStyle, marginTop: ui.xs, color: ui.text }} role="status" data-testid="screen-options-saved">
+          {saved}
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: ui.sm, marginTop: ui.lg, justifyContent: 'flex-end' }}>
         <Button variant="ghost" onClick={onClose} ariaLabel="Cancelar compartilhamento">
@@ -263,9 +303,11 @@ export default function ScreenSharePicker({
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: ui.md, color: ui.muted, fontSize: 11 }}>
         <Icon d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 16v-4 M12 8h.01" size={12} />
-        {supportsScreenSource(env, 'monitor')
-          ? 'No próximo passo o sistema abre o seletor nativo: escolha lá qual monitor ou janela enviar.'
-          : 'O sistema abre o seletor nativo de tela na próxima etapa.'}
+        {native
+          ? 'A captura começa imediatamente ao confirmar (não há seletor do sistema neste caminho).'
+          : supportsScreenSource(env, 'monitor')
+            ? 'No próximo passo o sistema abre o seletor nativo: escolha lá qual monitor ou janela enviar.'
+            : 'O sistema abre o seletor nativo de tela na próxima etapa.'}
       </div>
     </Modal>
   )

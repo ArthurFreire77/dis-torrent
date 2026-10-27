@@ -105,6 +105,24 @@ impl VideoCodec {
             VideoCodec::Vp8
         }
     }
+    /// Como [`VideoCodec::from_mime`], mas NÃO inventa: devolve `None` para
+    /// VP9/AV1/qualquer outro codec que este módulo não codifica.
+    ///
+    /// `from_mime` colapsa tudo que não é H264 em VP8. Usado para escolher o
+    /// payload type do ENVIO, isso produzia um bitstream VP8 rotulado com o PT
+    /// negociado de VP9/AV1 — o par decodificava lixo (preto ou pixelizado) e
+    /// o erro parecia "rede". Aqui o chamador prefere VP8, depois H264, e
+    /// falha com mensagem explícita se o par não aceitar nenhum dos dois.
+    pub fn supported_from_mime(m: &str) -> Option<Self> {
+        let l = m.to_ascii_lowercase();
+        if l.contains("vp8") {
+            Some(VideoCodec::Vp8)
+        } else if l.contains("h264") {
+            Some(VideoCodec::H264)
+        } else {
+            None
+        }
+    }
     pub fn mime(&self) -> &'static str {
         match self {
             VideoCodec::Vp8 => "video/VP8",
@@ -803,5 +821,23 @@ mod tests {
             encoded_caps(VideoCodec::H264),
             "video/x-h264,stream-format=byte-stream,alignment=au"
         );
+    }
+
+    #[test]
+    fn only_implemented_codecs_are_selected_for_sending() {
+        // VP9/AV1 são anunciados no SDP pelo MediaEngine, mas o encoder só
+        // produz VP8/H264. Escolher o PT deles gravava VP8 sob um PT estrangeiro
+        // (o par decodificava lixo) — por isso o filtro tem de devolver None.
+        assert_eq!(
+            VideoCodec::supported_from_mime("video/VP8"),
+            Some(VideoCodec::Vp8)
+        );
+        assert_eq!(
+            VideoCodec::supported_from_mime("video/H264"),
+            Some(VideoCodec::H264)
+        );
+        assert_eq!(VideoCodec::supported_from_mime("video/VP9"), None);
+        assert_eq!(VideoCodec::supported_from_mime("video/AV1"), None);
+        assert_eq!(VideoCodec::supported_from_mime("video/rtx"), None);
     }
 }

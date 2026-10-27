@@ -47,9 +47,25 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
         invoke.reject("nome de arquivo inválido")
         return
       }
-      val src = File(path)
-      if (!src.exists()) {
+      // Defesa em profundidade: o Rust já bloqueia extensão de executável no
+      // `save_file_stream`, mas este plugin é a última porta antes do Downloads
+      // público (e o WebView chama `plugin:downloads|save` direto).
+      val ext = safe.substringAfterLast('.', "").lowercase()
+      if (ext in BLOCKED_EXT) {
+        invoke.reject("extensão de executável/script bloqueada: .$ext")
+        return
+      }
+      val src = try { File(path).canonicalFile } catch (_: Throwable) { File(path) }
+      if (!src.exists() || !src.isFile) {
         invoke.reject("arquivo de origem não encontrado: ${src.name}")
+        return
+      }
+      // O `path` vem do WebView: sem esta checagem, um renderer comprometido
+      // copiava (e APAGAVA) qualquer arquivo legível pelo app — inclusive o
+      // SQLite e o cofre — para a pasta pública. Só aceita arquivo dentro das
+      // áreas do próprio app.
+      if (!isInsideApp(src)) {
+        invoke.reject("caminho de origem fora da área do app")
         return
       }
       // Teto: o swarm limita a ~200MB. Acima disso é bug/ataque — não alocar.
@@ -114,8 +130,41 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
   private fun sanitize(raw: String): String {
     val base = raw.substringAfterLast('/').substringAfterLast('\\')
     val cleaned = base.replace(Regex("[\\x00-\\x1f]"), "").trim()
-    if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") return ""
+    if (cleaned.isEmpty() || cleaned == "." || cleaned == ".." || cleaned.startsWith(".")) return ""
     return if (cleaned.length > 180) cleaned.take(180) else cleaned
+  }
+
+  /**
+   * `true` só para arquivo dentro de `filesDir`/`cacheDir`/`noBackupFilesDir`/
+   * `getExternalFilesDir` (o diretório privado onde o Rust grava o download).
+   * Compara caminhos CANÔNICOS, então `..` e symlink não escapam.
+   */
+  private fun isInsideApp(f: File): Boolean {
+    return try {
+      val p = f.canonicalPath
+      val roots = listOf(
+        activity.filesDir,
+        activity.cacheDir,
+        activity.noBackupFilesDir,
+        activity.getExternalFilesDir(null),
+      )
+      roots.filterNotNull().any { root ->
+        val r = root.canonicalPath
+        p == r || p.startsWith(r + File.separator)
+      }
+    } catch (_: Throwable) {
+      false
+    }
+  }
+
+  private companion object {
+    /** Extensões que o Android/Windows abrem como programa. */
+    val BLOCKED_EXT = setOf(
+      "exe", "msi", "msp", "bat", "cmd", "com", "scr", "pif", "cpl",
+      "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta",
+      "jar", "apk", "dex", "sh", "bash", "py", "rb", "pl", "lnk", "reg",
+      "dll", "so", "dylib", "app", "dmg", "pkg", "deb", "rpm", "elf",
+    )
   }
 
   private fun guessMime(name: String): String {

@@ -2145,7 +2145,11 @@ fn presence_get(fp: String, state: State<AppState>) -> Result<forge_core::social
     open_store(&state)?.presence_get(&fp).map_err(err)
 }
 
-#[tauri::command]
+// `rename_all = "snake_case"`: o contrato do frontend (`profileSet`) manda
+// `display_name`/`avatar_b64`/`banner_b64`. Sem isto o Tauri 2 converte os
+// argumentos para camelCase e o invoke falha com "missing required key
+// displayName" — salvar perfil simplesmente não funcionava.
+#[tauri::command(rename_all = "snake_case")]
 fn profile_set(
     display_name: String,
     about: String,
@@ -3090,10 +3094,23 @@ fn save_file_stream(
     data_b64: String,
     flush: bool,
     total_bytes: u64,
+    state: State<AppState>,
 ) -> Result<String, String> {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use base64::{engine::general_purpose, Engine as _};
+
+    // `job_id` também entra no nome do temporário. Antes ia CRU: um renderer
+    // comprometido mandava `../../algo` e escrevia fora de Downloads (o sufixo
+    // `.forge-part` limitava o dano, mas não o suficiente).
+    if job_id.is_empty()
+        || job_id.len() > 64
+        || !job_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("save_file_stream: job_id inválido".into());
+    }
 
     // Sanitização anti-traversal ANTES de qualquer escrita (mesma regra do
     // save_file: o nome vem de peer remoto).
@@ -3129,6 +3146,22 @@ fn save_file_stream(
         ));
     }
 
+    // SEGURANÇA DE MÍDIA — paridade com `save_file`.
+    //
+    // Este é o caminho usado pelo frontend (`fileSwarm.download`), e até aqui
+    // ele só sanitizava o NOME: um ELF renomeado para `foto.jpg`, ou
+    // `nota.pdf.exe`, chegava ao Downloads real sem passar por magic bytes nem
+    // pela lista de extensões (no Windows a extensão fica oculta por padrão).
+    let safety = open_store(&state)
+        .map(|s| media_safety_read(&s))
+        .unwrap_or(MediaSafetyView {
+            strip_exif: true,
+            block_executables: true,
+        });
+    if safety.block_executables && forge_core::media::extension_is_blocked(&safe) {
+        return Err("save_file_stream bloqueou: extensão de executável/script recebida por P2P — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se tiver certeza.".into());
+    }
+
     let _ = &app;
     let downloads = {
         #[cfg(target_os = "android")]
@@ -3150,22 +3183,67 @@ fn save_file_stream(
 
     let tmp = downloads.join(format!(".{safe}.{job_id}.forge-part"));
 
+    // Magic bytes do PRIMEIRO lote (arquivo ainda vazio): é o equivalente
+    // streaming do que `save_file` faz no arquivo inteiro. Extensão já foi
+    // checada acima; aqui pega o executável disfarçado de imagem/PDF.
+    // Vale também quando o arquivo inteiro chega num lote ÚNICO com
+    // `flush: true` (arquivo pequeno) — antes esse caso pulava a checagem.
+    let primeiro_lote = fs::metadata(&tmp).map(|m| m.len() == 0).unwrap_or(true);
+    if primeiro_lote && safety.block_executables && !bytes.is_empty() {
+        let sniffed = forge_core::media::sniff_mime(&bytes);
+        if sniffed.is_executable() {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!(
+                "save_file_stream bloqueou: executável recebido por P2P (tipo real: {}) — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se você confia na origem.",
+                sniffed.as_str()
+            ));
+        }
+    }
+
+    // Grava o lote ANTES de qualquer flush.
+    //
+    // O último lote chega com `flush: true` E com bytes (ver
+    // `fileSwarm.download`). O código antigo entrava no ramo do flush e
+    // renomeava sem escrever: os últimos até 4 MB eram descartados em silêncio
+    // e o arquivo salvo saía truncado.
+    if !bytes.is_empty() {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&tmp)
+            .map_err(|e| format!("save_file_stream travou em open {}: {e}", tmp.display()))?;
+        f.write_all(&bytes)
+            .map_err(|e| format!("save_file_stream travou em write: {e}"))?;
+        f.sync_all().ok();
+    }
+
+    // Checa o ACUMULADO (não só o lote): um announce com `size` pequeno e
+    // muitos chunks enchia o disco sem que nenhuma chamada isolada passasse
+    // do teto de 32 MB.
+    if total_bytes > 0 {
+        if let Ok(m) = fs::metadata(&tmp) {
+            if m.len() > total_bytes {
+                let _ = fs::remove_file(&tmp);
+                return Err(
+                    "save_file_stream: o peer enviou mais bytes que o tamanho anunciado".into(),
+                );
+            }
+        }
+    }
+
     if flush {
-        if let Err(e) = fs::rename(&tmp, &unique_download_path(&downloads, &safe)) {
+        let dest = unique_download_path(&downloads, &safe);
+        if let Err(e) = fs::rename(&tmp, &dest) {
             let _ = fs::remove_file(&tmp);
             return Err(format!("save_file_stream travou em rename: {e}"));
         }
-        return Ok(safe);
+        // Devolve o caminho FINAL (absoluto), não só o nome. No Android o
+        // `plugin:downloads|save` recebia um nome relativo, não achava o
+        // arquivo (o `File(path)` não existia) e o download caía no intent de
+        // compartilhar em vez de ir para o Downloads real.
+        return Ok(dest.to_string_lossy().to_string());
     }
 
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&tmp)
-        .map_err(|e| format!("save_file_stream travou em open {}: {e}", tmp.display()))?;
-    f.write_all(&bytes)
-        .map_err(|e| format!("save_file_stream travou em write: {e}"))?;
-    f.sync_all().ok();
     Ok(tmp.to_string_lossy().to_string())
 }
 

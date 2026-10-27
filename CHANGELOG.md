@@ -1,5 +1,90 @@
 # CHANGELOG
 
+## [Não lançado] — 2026-10-27
+
+### Chamadas (vídeo/áudio) — bugs corrigidos
+
+- **Câmera só ligava uma vez por chamada (Linux nativo):** a task de envio
+  terminava com `vtl.stop()` na track criada em `build_session`; desligar e
+  religar caía em "a track local ficou sem ssrc". A track agora pertence à
+  sessão e só morre no hangup. O dispositivo (v4l2/GStreamer) continua sendo
+  fechado no stop.
+- **PT/codec de vídeo trocado:** o envio pegava o PRIMEIRO codec de vídeo do
+  SDP (VP9/AV1 no Chrome moderno) e escrevia VP8 sob aquele payload type.
+  Agora prefere VP8, depois H264, recusa com erro explícito quando o par não
+  aceita nenhum dos dois, e `VideoCodec::supported_from_mime` não colapsa mais
+  VP9/AV1 em VP8.
+- **Áudio unilateral silencioso:** `spawn_send_loop` saía sem mensagem quando
+  `get_parameters`/PT/SSRC não estavam prontos. Passa a tentar por ~10 s e
+  marca a sessão como `failed` com motivo (a UI mostra erro em vez de
+  "conectado" mudo).
+- **Câmera em chamada de voz (WebView):** a transceiver criada `recvonly` era
+  reutilizada sem mudar de direção, então o vídeo nunca saía. Agora vira
+  `sendrecv` + renegociação; `cameraOn` deriva de track viva; permissão negada
+  cai para áudio puro em vez de deixar a chamada muda; erro de câmera aparece
+  na UI; dois cliques não abrem dois `getUserMedia`.
+- **ICE `closed` contava como "recuperado":** fechar o PC de um peer derrubado
+  marcava a chamada como conectada e desligava o relay (todo mundo mudo).
+  Só `connected`/`completed` recuperam.
+- **Troca de canal de voz:** entrar em outro canal agora sai do anterior
+  (antes os PCs e o microfone antigo ficavam vivos).
+- **`voice_join` duplicado:** o shell chamava `services.voiceJoin` depois de
+  `callManager.joinVoice`, que já anuncia ao core — duas sessões nativas.
+- **Barra "Voz conectada" fantasma e atalho de mute morto:** a barra deriva do
+  estado real da chamada e o atalho usa `callManager.toggleMute()`.
+- **Tiles de voz vazios:** `<video>` só é renderizado com trilha de vídeo; o
+  `<audio>` remoto existe sempre (antes sumia junto com o vídeo).
+
+### Compartilhamento de tela — bugs corrigidos
+
+- **Monitores escondidos:** `monitorTypeSurfaces:'exclude'` no modo padrão
+  removia os monitores do seletor do Chromium (e com eles o áudio do sistema).
+  Só `window` exclui monitores.
+- **Escala dupla:** a resolução já era aplicada na captura e o encoder dividia
+  de novo (720p saía ~640×360, 480p ~214×120). `scaleResolutionDownBy: 1` e
+  `degradationPreference: 'maintain-resolution'` (texto legível).
+- **"FPS automático" era teto de 60 escondido:** `fpsOf` devolve `null` em
+  `auto`; nenhuma constraint de frameRate é imposta.
+- **Recaptura derrubava o share:** o stream novo é capturado ANTES de parar o
+  antigo; cancelar o seletor do sistema não corta mais a tela de todos.
+- **Áudio da tela acumulava m-lines:** senders são reusados entre ciclos e
+  limpos no stop (menos SDP, sem áudio duplicado).
+- **Caminho nativo Linux honesto:** backend detectado (`display-media` /
+  `native` / `none`); no nativo só a tela inteira é oferecida, áudio do sistema
+  é recusado com aviso e `window`/`monitor` falham explicitamente em vez de
+  enviar o desktop inteiro fingindo ser uma janela.
+- **Frames remotos presos:** parar o share limpa `videoUrl`/`videoSeq` (o tile
+  não congela mais no último quadro).
+
+### Android / Tauri
+
+- **`save_file_stream` (caminho real de download) não filtrava conteúdo:**
+  agora valida `job_id`, aplica a mesma lista de extensões bloqueadas e os
+  magic bytes do primeiro lote do `save_file`, e recusa arquivo maior que o
+  tamanho anunciado (lote e acumulado).
+- **`plugin:downloads|save` aceitava qualquer caminho e apagava a origem:**
+  exige caminho canônico dentro de `filesDir`/`cacheDir`/`noBackupFilesDir`/
+  `getExternalFilesDir` e bloqueia extensões executáveis.
+- **`profile_set`:** `rename_all = "snake_case"` — o frontend envia
+  `display_name`/`avatar_b64`/`banner_b64` e o Tauri 2 esperava camelCase
+  (`missing required key displayName`).
+- **`messages_around`:** a query listava 9 colunas e o mapper lia `get(9)`; o
+  `flatten()` descartava todas as linhas em silêncio ("pular para mensagem"
+  sempre vazio). `limit` agora tem clamp.
+- **Manifest Android:** removida `CAPTURE_VIDEO_OUTPUT` (nível `signature`,
+  não habilitava `getDisplayMedia` e só prometia capacidade falsa);
+  `allowBackup="false"` (mensagens/cofre não vão para backup de nuvem/ADB).
+
+### Testes
+
+- `forge-core/tests/media_voice_*.rs`: gate `#![cfg(target_os = "linux")]`
+  (dois alvos não compilavam no Windows e derrubavam `cargo test`/`clippy
+  --all-targets`).
+- `aggregate_stats`: pior peer não é mais contado duas vezes (teste novo).
+- `tests/screenShareFixes.test.ts`: 7 regressões de tela (monitores,
+  `restrictOwnAudio`, escala única, FPS auto, resolução sob perda, backend
+  nativo, backend ausente).
+
 ## [1.1.4-pre-alpha] — 2026-10-11
 
 ### Câmera e tela no Linux

@@ -5,6 +5,11 @@
 //! (mic -> Opus -> webrtc -> jitter -> decode -> alto-falante, com medição de
 //! latência) roda no binário de validação do módulo, não aqui: este arquivo só
 //! precisa garantir a FORMA da API e que um ciclo offer/answer real acontece.
+//!
+//! `media_voice` só existe em `cfg(target_os = "linux")` (ver `net/mod.rs`).
+//! Sem este gate o alvo inteiro falhava no Windows com `unresolved import`, o
+//! que derrubava `cargo test` e o `cargo clippy --all-targets` do CI.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 

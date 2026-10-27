@@ -426,6 +426,17 @@ const SLASH_BASE = [
   { name: 'dado' },
 ]
 
+/** Um MediaStream só merece `<video>` se tiver trilha de VÍDEO: todo peer em
+ *  chamada de voz tem stream (de áudio), e o tile virava um retângulo vazio
+ *  sem avatar nem nome. */
+function streamHasVideo(s: unknown): boolean {
+  try {
+    const ms = s as MediaStream | null | undefined
+    if (!ms || typeof ms.getVideoTracks !== 'function') return false
+    return ms.getVideoTracks().length > 0
+  } catch { return false }
+}
+
 /** "3d 4h" — legível, para uptime. */
 function fmtShortDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
@@ -816,7 +827,17 @@ export default function ThemeShell({ designId }: {designId:string}){
   // CallManager bind + timers; runtime de BOTS (só responde se eu for o dono —
   // o próprio runtime confere owner_fp) e avisos de chamada (recusada/perdida).
   useEffect(() => {
-    callManager.bind(setActiveCall)
+    callManager.bind((s: any) => {
+      setActiveCall(s)
+      // A barra da sidebar "Voz conectada" era um estado paralelo que o overlay
+      // não limpava: sair da chamada pelo botão do overlay deixava a barra (e
+      // seus botões mortos) na tela. Deriva do estado REAL da chamada.
+      if (!s || !String(s.callId ?? '').startsWith('voice-')) setVoiceChannel(null)
+      if (s) {
+        setIsMuted(!!s.muted)
+        setIsDeafened(!!s.deafened)
+      }
+    })
     // Sonda UNAICA de WebRTC no boot: reporta ao Rust o que a página enxerga.
     // Sem isto não há como provar se o WebKitGTK entregou RTCPeerConnection, e
     // a mensagem de erro acabava culpando o WebView do sistema à toa.
@@ -1663,7 +1684,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     inbox: () => setShowInbox(s => !s),
     bookmarks: () => setShowBookmarks(s => !s),
     escape: () => { setShowSearch(false); setShowPins(false); setShowCmdK(false); setShowInbox(false); setShowBookmarks(false) },
-    mute: () => setIsMuted(v => { const n = !v; try { (callManager as any).setMuted?.(n) } catch { /* noop */ } return n }),
+    mute: () => { try { callManager.toggleMute() } catch { /* noop */ } },
     next: () => { const i = conversations.findIndex(c => c.id === selConv); const nx = conversations[(i + 1) % Math.max(1, conversations.length)]; if (nx) { setSelConv(nx.id); setSelPeerFp(nx.peer_fp || null) } },
     prev: () => { const i = conversations.findIndex(c => c.id === selConv); const pv = conversations[(i - 1 + conversations.length) % Math.max(1, conversations.length)]; if (pv) { setSelConv(pv.id); setSelPeerFp(pv.peer_fp || null) } },
   })
@@ -1995,11 +2016,20 @@ export default function ThemeShell({ designId }: {designId:string}){
                                         setVoiceChannel(null); setVoiceStates([])
                                       } else {
                                         setSelConv(ch.id)
-                                        setVoiceChannel({ communityId: selCommunity!, channelId: ch.id })
                                         try {
+                                          // `joinVoice` JÁ anuncia ao core
+                                          // (`services.voiceJoin`) internamente.
+                                          // Chamar de novo criava uma segunda
+                                          // sessão nativa para o mesmo canal
+                                          // (offers/sessões duplicadas).
                                           await callManager.joinVoice(selCommunity!, ch.id)
-                                          await services.voiceJoin(selCommunity!, ch.id).catch(()=>{})
                                         } catch (e: any) { setError(String(e?.message ?? e)); setVoiceChannel(null); return }
+                                        // Só marca a barra DEPOIS do join: se
+                                        // havia outro canal de voz, o
+                                        // `joinVoice` sai dele e emite
+                                        // `onUpdate(null)` no meio — marcar antes
+                                        // deixava a barra sumir (o bind limpa).
+                                        setVoiceChannel({ communityId: selCommunity!, channelId: ch.id })
                                         services.voiceStates(selCommunity!, ch.id).then(setVoiceStates).catch(()=>{})
                                       }
                                     } else setSelConv(ch.id)
@@ -3062,15 +3092,10 @@ export default function ThemeShell({ designId }: {designId:string}){
           <div style={{ flex: 1, display: 'grid', gridTemplateColumns: `repeat(${Math.min(activeCall.participants.length, 3)}, 1fr)`, gridAutoRows: 'minmax(180px, 1fr)', alignContent: 'stretch', gap: 10, padding: 12, overflowY: 'auto', background: '#1a1a1a' }}>
             {Array.from(new Map((activeCall.participants as any[]).map((p: any) => [p.fp, p])).values()).map((p: any) => (
               <div key={p.fp} style={{ background: `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`, borderRadius: 12, overflow: 'hidden', position: 'relative', minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `2px solid ${p.muted ? t.red + '55' : 'transparent'}`, boxShadow: '0 2px 10px rgba(0,0,0,.35)' }}>
-                {p.stream ? (
-                  <>
-                    {/* remoto: vídeo SEMPRE mudo — o som sai do <audio> abaixo.
-                        Antes os dois tocavam: voz duplicada (eco/comb-filter). */}
-                    <video autoPlay playsInline muted ref={(el:any)=>attachStream(el, p.stream)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    {p.fp!==identity?.fingerprint && (
-                      <audio autoPlay playsInline hidden muted={!!activeCall.deafened} ref={(el:any)=>attachStream(el, p.stream)} />
-                    )}
-                  </>
+                {streamHasVideo(p.stream) ? (
+                  /* remoto: vídeo SEMPRE mudo — o som sai do <audio> abaixo.
+                      Antes os dois tocavam: voz duplicada (eco/comb-filter). */
+                  <video autoPlay playsInline muted ref={(el:any)=>attachStream(el, p.stream)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                 ) : (p as any).videoUrl ? (
                   /* VÍDEO NATIVO (Linux): o core decodifica o RTP em Rust e a UI
                      faz polling do último frame JPEG — não existe MediaStream do
@@ -3084,6 +3109,12 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <div style={{ fontWeight: 700, color: t.heading, marginTop: 12, fontSize: 15 }}>{p.nickname || p.fp.slice(0,8)}</div>
                     <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{p.fp===identity?.fingerprint ? 'você' : 'aguardando o vídeo…'}</div>
                   </div>
+                )}
+                {/* Áudio remoto SEMPRE presente (inclusive quando não há vídeo):
+                    antes ele vivia dentro do ramo `p.stream` e sumia junto com o
+                    vídeo em chamadas só de voz. */}
+                {!!p.stream && p.fp!==identity?.fingerprint && (
+                  <audio autoPlay playsInline hidden muted={!!activeCall.deafened} ref={(el:any)=>attachStream(el, p.stream)} />
                 )}
                 {p.disconnected && (
                   <span style={{ position: 'absolute', top: 8, right: 8, background: '#faa61a', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>RECONECTANDO…</span>

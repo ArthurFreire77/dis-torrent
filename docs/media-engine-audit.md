@@ -110,8 +110,17 @@ Esta máquina estava em X11 (`XDG_SESSION_TYPE=x11`) e tinha webcam V4L2 em
   pode abrir caminho de permissão com semântica diferente. A integração
   ScreenCast + PipeWire e a seleção sustentada de monitor/janela continuam
   pendentes.
-- **Câmera Linux:** o encoder ainda usa `/dev/video0` fixo. Seleção de device,
-  troca durante a chamada e recuperação de hotplug não estão implementadas.
+- **Câmera Linux:** o encoder enumera `/dev/video*` (não usa mais
+  `/dev/video0` fixo) e prova o pipeline com um frame real. Escolha explícita
+  de device pelo usuário, troca durante a chamada e recuperação de hotplug
+  continuam não implementadas. Desligar/religar a câmera na MESMA chamada
+  deixou de matar a track (bug corrigido), mas o caminho de troca
+  câmera↔tela ainda usa um `sleep` de 120 ms em vez de um token de geração —
+  corrida conhecida, sem teste de hardware que a cubra.
+- **Codec de vídeo no Linux:** o encoder implementa VP8 e H264. O SDP ainda
+  anuncia o conjunto padrão do `MediaEngine` (VP9/AV1 inclusive); o envio
+  escolhe VP8, depois H264, e recusa com erro explícito se o par não aceitar
+  nenhum dos dois. Não há PLI/NACK nem adaptação de bitrate (CBR fixo).
 - **Escala mesh:** a câmera/tela abre um encoder por peer destinatário. Uma
   camada de captura/encode compartilhada com fanout RTP por peer reduziria CPU
   e evitaria repetir captura de tela em chamadas de grupo.

@@ -27,12 +27,15 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- Compartilhamento de TELA: em Android 13+ o WebView só libera o
-         getDisplayMedia (com que o app declare isto). Sem a declaração o
-         pedido é negado em runtime — o botão "Tela" não teria como funcionar.
-         Não pedimos nada ao usuário aqui: é o WebView que abre o consentimento
-         do sistema ("projetar esta tela") no gesto de compartir. -->
-    <uses-permission android:name="android.permission.CAPTURE_VIDEO_OUTPUT" />
+    <!-- Compartilhamento de TELA no Android: NÃO existe hoje.
+         `CAPTURE_VIDEO_OUTPUT` é permissão de nível `signature` (só apps
+         assinados com a chave do sistema a recebem) e o wry 0.57 não mapeia
+         display-capture no `onPermissionRequest` — declarar a permissão não
+         habilitava nada e só sugeria uma capacidade falsa. O caminho nativo em
+         Rust também não existe no Android (`cfg(target_os = "linux")`). A UI
+         mostra "captura de tela indisponível neste aparelho", que é a verdade.
+         Para ter MediaProjection seria preciso: permissão própria, foreground
+         service `mediaProjection` + notificação e implementação nativa. -->
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
@@ -44,6 +47,8 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.forge"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
