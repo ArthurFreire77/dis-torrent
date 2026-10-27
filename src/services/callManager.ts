@@ -276,19 +276,59 @@ export function getCallPrivacyMode(): CallPrivacyMode | null {
   } catch { return null }
 }
 
+// ── Privacidade × ICE (correção do vazamento de STUN público) ────────────────
+//
+// PROBLEMA REAL que isto corrige: a lista de ICE sempre incluía os SERVIDORES
+// PÚBLICOS de reserva (Google STUN, openrelay TURN) — INCLUSIVE em proxy/Tor.
+// O ICE do WebRTC não passa pelo SOCKS5 do app (sockets UDP do browser), então
+// nesses modos cada chamada entregava o IP real a terceiros que o modo
+// promete esconder — e a UI apresentava o modo como plenamente ativo.
+//
+// Comportamento NOVO (honesto):
+// - normal/encrypted: lista completa como sempre (rotas de reserva no 4G).
+// - proxy/full: SÓ o TURN/STUN que o usuário configurou EXPLICITAMENTE
+//   (forge:turn_url / VITE_TURN_URL — escolha dele, servidor dele). Os
+//   públicos de terceiros NÃO são consultados. A chamada continua
+//   possível na LAN (candidatos host), e o aviso "não anônima" fica na UI.
+//
+// No nativo o modo chega AQUI via setCallPrivacyForIce(mode) — a UI chama no
+// boot e a cada troca de modo (useEffect no ThemeShell/MobileShell).
+
+/** Modo vigente injetado pela UI (Tauri). `null` = não injetado (usa o
+ * localStorage do browser ou assume modo comum). */
+let callPrivacyOverride: CallPrivacyMode | null = null
+
+/** UI nativa informa o modo de privacidade atual (boot + trocas). */
+export function setCallPrivacyForIce(mode: CallPrivacyMode | null): void {
+  callPrivacyOverride = mode
+}
+
+/** Modo que rege o ICE agora (override da UI > localStorage > null). */
+export function getCallPrivacyForIce(): CallPrivacyMode | null {
+  return callPrivacyOverride ?? getCallPrivacyMode()
+}
+
+/** Modo anônimo exige suprimir os SERVIDORES PÚBLICOS de ICE? */
+export function isIcePublicFallbackSuppressed(): boolean {
+  const m = getCallPrivacyForIce()
+  return m === 'proxy' || m === 'full'
+}
+
 // Relay explícito do usuário: via localStorage forge:turn_url (ex: turn:seu-relay:3478)
 // ou via env VITE_TURN_URL (+ VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL; padrão forge/forge).
 // Padrão = só o configurado. Nenhum STUN/TURN público embutido (P2P puro).
 export function getIceServers(): RTCIceServer[] {
-  // ── Nota sobre os modos proxy/full (limitação documentada, não bug) ─────────
-  // Mesmo quando o modo é legível (browser: getCallPrivacyMode()), a lista NÃO
-  // muda — de propósito:
-  // 1. O ICE do WebRTC no browser/WebView NÃO passa pelo SOCKS5/Tor do app (o
-  //    proxy cobre o TCP do forge-core; a mídia usa sockets UDP do próprio WebRTC).
-  //    Não há como "rotear o ICE pelo Tor" a partir deste módulo.
-  // 2. Em proxy/full a chamada expõe o IP real ao peer de qualquer jeito
-  //    (candidato host/srflx direto). Anonimato real exige VPN/Tor transparente.
-  // No nativo, o modo sequer é legível aqui (só via async services.privacyGet()).
+  // â”€â”€ Privacidade Ã— ICE â€” MUDOU DE POLÃTICA (era: "a lista nÃ£o muda") â”€â”€
+  // O ICE do WebRTC no browser/WebView NÃƒO passa pelo SOCKS5/Tor do app (o
+  // proxy cobre o TCP do forge-core; a mÃ­dia usa sockets UDP do prÃ³prio
+  // WebRTC). NÃ£o hÃ¡ como "rotear o ICE pelo Tor" a partir deste mÃ³dulo â€”
+  // limitaÃ§Ã£o documentada no THREAT_MODEL.
+  // O QUE MUDOU: em proxy/full os SERVIDORES PÃšBLICOS de reserva (Google
+  // STUN, openrelay TURN) ficam FORA da lista â€” consultÃ¡-los entregaria o
+  // IP real a terceiros que o modo promete esconder. Fica sÃ³ o TURN/STUN
+  // configurado EXPLICITAMENTE pelo usuÃ¡rio (servidor dele, escolha dele)
+  // + candidatos host (LAN). A chamada segue possÃ­vel na LAN; a UI mostra
+  // "chamada nÃ£o anÃ´nima" enquanto houver chamada nesses modos.
   const servers: RTCIceServer[] = []
   // também tenta localStorage para UI dinâmica
   const env: any = (import.meta as any)?.env ?? {}
@@ -310,6 +350,13 @@ export function getIceServers(): RTCIceServer[] {
   // ICE saía vazia de servidores → em 4G/CGNAT o ICE só tinha candidatos
   // host/srflx, nunca fechava, e a chamada ficava muda (ou caía no relay).
   // Agora, mesmo sem configurar nada, o ICE tem rotas de reserva públicas.
+  // proxy/full: NÃO consulta os SERVIDORES PÚBLICOS de reserva (Google
+  // STUN / openrelay veriam o IP real que o modo promete esconder). A lista
+  // fica apenas com o que o usuário configurou explicitamente — pode ser
+  // VAZIA, e aí a chamada só fecha na LAN. Comportamento honesto do modo.
+  if (isIcePublicFallbackSuppressed()) {
+    return servers
+  }
   try {
     const classic = getClassicTurnServer()
     const fallback = getFallbackTurnServer()

@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Teto de chaves por mapa de buckets — poda defensiva (mesmo padrão dos maps
 /// do engine: churn de peers não pode crescer sem freio).
@@ -872,6 +872,7 @@ impl NetLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn limiter() -> NetLimiter {
         // Instância crua (não from_env) com defaults — testes nunca dependem

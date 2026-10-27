@@ -1731,6 +1731,26 @@ impl NetworkEngine {
         self.relay_disabled.load(Ordering::Relaxed)
     }
 
+    /// O backend de relay atual roda DE FATO por túnel SOCKS5? (estado
+    /// EFETIVO, não o modo escolhido). Em proxy/full com `false` o relay está
+    /// DESLIGADO (fail-closed) — a UI usa isto para não apresentar o modo
+    /// como plenamente ativo quando o proxy não está operando.
+    pub fn relay_is_proxied(&self) -> bool {
+        self.relay_proxied.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot dos limites de rede (comando `net_limits` / diagnóstico) —
+    /// parâmetros vigentes + contadores de rejeição + concorrência ativa.
+    pub fn net_limits_snapshot(&self) -> crate::net::netlimit::LimitsSnapshot {
+        self.netlimiter.snapshot()
+    }
+
+    /// Reconfigura TODOS os limites de rede em runtime (host/ferramentas).
+    /// Ver `netlimit::Limits` para o significado de cada campo.
+    pub fn net_limits_reconfigure(&self, l: crate::net::netlimit::Limits) {
+        self.netlimiter.reconfigure(l);
+    }
+
     /// Hole punching (furo TCP coordenado) está ligado? Default sim;
     /// `FORGE_PUNCH=0` desliga. A direta outbound/UPnP/LAN segue normal.
     pub fn punch_enabled(&self) -> bool {
@@ -6696,6 +6716,15 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
 
     // 2) Discovery LAN (opcional — off em testes/solo)
     let (disc_tx, mut disc_rx) = mpsc::unbounded_channel::<DiscoveredPeer>();
+    // Gate de privacidade COMPARTILHADO (discovery UDP + mDNS): false em
+    // proxy/full e a descoberta LAN inteira para NA FONTE — broadcaster não
+    // anuncia presença (fp+nickname na LAN), listener/mDNS descartam o que
+    // chega (nada vira dial direto, que vazaria o IP real). Lê o modo a cada
+    // chamada: trocar de modo em runtime vale sem reiniciar o app.
+    let disc_allowed: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let engine = engine.clone();
+        Arc::new(move || !matches!(engine.privacy_mode().as_str(), "proxy" | "full"))
+    };
     let _discovery = if discovery_enabled {
         Some(
             Discovery::spawn(
@@ -6703,7 +6732,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 engine.nickname.clone(),
                 port,
                 disc_tx.clone(),
-                Arc::new(|| true),
+                disc_allowed.clone(),
                 engine.netlimiter.clone(),
             )
             .await?,
@@ -6717,13 +6746,14 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     // Mesmo flag do discovery UDP (`start_with_discovery(false)` desliga
     // ambos). Falha de multicast (ex.: Android sem permissão) é só logada —
     // nunca panica nem quebra o boot; o fallback é o UDP atual.
+    #[cfg(not(target_os = "android"))]
     let _mdns = if discovery_enabled {
         match crate::net::mdns::MdnsDiscovery::spawn(
             engine.keypair.clone(),
             engine.nickname.clone(),
             port,
             disc_tx,
-            Arc::new(|| true),
+            disc_allowed,
         ) {
             Ok(m) => Some(m),
             Err(e) => {

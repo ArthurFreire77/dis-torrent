@@ -1,6 +1,7 @@
 pub mod dht;
 pub mod discovery;
 pub mod engine;
+#[cfg(not(target_os = "android"))]
 pub mod mdns;
 /// AEC + supressao de ruido (speexdsp). Mesmo gate linux-only de `media_voice`.
 #[cfg(target_os = "linux")]

@@ -1556,11 +1556,17 @@ struct PrivacySettings {
     udp_discovery: bool,
     metadata_padding: bool,
     traffic_obfuscation: bool,
+    /// Estado EFETIVO do proxy (relay roteando por SOCKS5 de fato). Em
+    /// proxy/full com `false` o relay está OFF (fail-closed do engine) —
+    /// a UI mostra a verdade, não só o modo escolhido.
+    proxy_effective: bool,
 }
 
 impl PrivacySettings {
     /// Resolve o modo para as flags reais que o engine Rust aplica.
     /// 'encrypted' é o padrão seguro (fallback se modo inválido).
+    /// `proxy_effective` nasce `false` aqui — quem sabe é o ENGINE
+    /// (`relay_is_proxied`), os comandos completam depois.
     fn from_mode(mode: &str) -> Self {
         match mode {
             "normal" => PrivacySettings {
@@ -1570,6 +1576,7 @@ impl PrivacySettings {
                 udp_discovery: true,
                 metadata_padding: false,
                 traffic_obfuscation: false,
+                proxy_effective: false,
             },
             "encrypted" => PrivacySettings {
                 mode: "encrypted".into(),
@@ -1578,22 +1585,27 @@ impl PrivacySettings {
                 udp_discovery: true,
                 metadata_padding: false,
                 traffic_obfuscation: false,
+                proxy_effective: false,
             },
             "proxy" => PrivacySettings {
                 mode: "proxy".into(),
                 encryption_enabled: true, // com criptografia + 1 proxy (esconde IP)
-                tor_proxy: false,         // proxy único, não Tor 7 nós
+                tor_proxy: false,         // proxy único SOCKS5 (não é Tor)
                 udp_discovery: false,     // sem broadcast para esconder IP
                 metadata_padding: false,
                 traffic_obfuscation: true, // tráfego via proxy
+                proxy_effective: false,
             },
             "full" => PrivacySettings {
                 mode: "full".into(),
-                encryption_enabled: true, // Tor 7 nós + criptografia
-                tor_proxy: true,          // SOCKS5 na porta 9050 (TOR)
+                // Tor = SOCKS5 do daemon local (127.0.0.1:9050). O nº de
+                // saltos é do daemon Tor (padrão 3) — o app não controla.
+                encryption_enabled: true,
+                tor_proxy: true,
                 udp_discovery: false,
                 metadata_padding: true,
                 traffic_obfuscation: true,
+                proxy_effective: false,
             },
             _ => PrivacySettings {
                 mode: "encrypted".into(),
@@ -1602,6 +1614,7 @@ impl PrivacySettings {
                 udp_discovery: true,
                 metadata_padding: false,
                 traffic_obfuscation: false,
+                proxy_effective: false,
             },
         }
     }
@@ -1613,7 +1626,19 @@ fn privacy_get(state: State<AppState>) -> Result<PrivacySettings, String> {
     let mode = store
         .kv_get("privacy.mode")
         .unwrap_or_else(|| "encrypted".into());
-    Ok(PrivacySettings::from_mode(&mode))
+    let mut settings = PrivacySettings::from_mode(&mode);
+    // Estado EFETIVO do proxy: o engine sabe se o relay está de fato saindo
+    // por SOCKS5. Sem isto a UI só mostrava o modo ESCOLHIDO — um proxy
+    // morto aparecia como "ativado" (o relay fail-closed ficava invisível).
+    if let Some(eng) = state
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        settings.proxy_effective = eng.relay_is_proxied();
+    }
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -1642,7 +1667,7 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
 
     // Persiste cada flag individualmente para debug e auditoria
     let store = open_store(&state)?;
-    let settings = PrivacySettings::from_mode(&mode);
+    let mut settings = PrivacySettings::from_mode(&mode);
     store
         .kv_set(
             "privacy.encryption",
@@ -1688,7 +1713,35 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
         obfuscation = settings.traffic_obfuscation,
         "modo de privacidade alterado"
     );
+    // Estado efetivo pós-aplicação: o engine acabou de re-rotear o relay —
+    // o valor retornado à UI reflete o que está RODANDO agora (proxy morto
+    // = relay fail-closed = proxy_effective false), não a intenção.
+    // (engine_opt foi movido no `if let` acima — relê do estado.)
+    if let Some(eng) = state
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        settings.proxy_effective = eng.relay_is_proxied();
+    }
     Ok(settings)
+}
+
+/// Snapshot dos limites de rede (rate limits de TCP/UDP/relay/sessões) —
+/// diagnóstico: mostra os tetos vigentes e quantas ações cada classe já
+/// rejeitou. Nada de conteúdo, só contadores.
+#[tauri::command]
+fn net_limits(state: State<AppState>) -> Result<forge_core::net::netlimit::LimitsSnapshot, String> {
+    let engine = state
+        .engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    match engine {
+        Some(eng) => Ok(eng.net_limits_snapshot()),
+        None => Err("motor de rede não está ativo (cofre trancado?)".into()),
+    }
 }
 
 /// Endereço SOCKS5 salvo (ou default por modo: proxy=1080, full/Tor=9050).
@@ -3924,6 +3977,7 @@ fn main() {
             secure_load,
             privacy_get,
             privacy_set,
+            net_limits,
             proxy_addr_get,
             proxy_addr_set,
             proxy_test,

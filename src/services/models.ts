@@ -6,7 +6,8 @@ export type NetworkState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONN
 export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed' | 'ok'
 
 // Modos de privacidade — minimalista.
-// normal = sem cripto, encrypted = com cripto, proxy = com cripto + 1 proxy (esconde IP), full = Tor 7 nós
+// normal = sem cripto, encrypted = com cripto, proxy = com cripto + 1 proxy (esconde IP),
+// full = Tor via SOCKS5 do daemon local (o nº de saltos é do Tor — padrão 3, o app não controla)
 
 export type PrivacyMode = 'normal' | 'encrypted' | 'proxy' | 'full'
 
@@ -50,7 +51,7 @@ export const PRIVACY_MODES: PrivacyModeInfo[] = [
   {
     mode: 'proxy',
     label: 'Seguro +',
-    description: 'Com criptografia + 1 proxy para esconder seu IP. Relay e descoberta desligados neste modo.',
+    description: 'Com criptografia + 1 proxy para esconder seu IP. Relay e descoberta desligados neste modo. Chamadas WebRTC não passam pelo proxy e não são anônimas.',
     flags: { encryption: true, tor_proxy: false, udp_discovery: false, metadata_padding: false, traffic_obfuscation: true },
     crypto_chain: ['1 proxy + X25519 + ChaCha20'],
     data_flow: 'Você → Proxy → Peer',
@@ -58,11 +59,11 @@ export const PRIVACY_MODES: PrivacyModeInfo[] = [
   },
   {
     mode: 'full',
-    label: 'Tor — 7 nós',
-    description: 'Criptografia + 7 proxies Tor para esconder seu IP. Relay, descoberta e STUN do app não passam pelo Tor — chamadas usam STUN direto.',
+    label: 'Tor',
+    description: 'Criptografia + saída pelo SOCKS5 do Tor local (127.0.0.1:9050). Relay, descoberta LAN, DHT e STUN do app ficam OFF. O número de saltos é do seu daemon Tor (padrão: 3) — o app não controla nem verifica. Chamadas WebRTC NÃO passam pelo Tor e não são anônimas.',
     flags: { encryption: true, tor_proxy: true, udp_discovery: false, metadata_padding: true, traffic_obfuscation: true },
-    crypto_chain: ['Tor 7 hops + X25519 + ChaCha20'],
-    data_flow: 'Você → Tor ×7 → Peer',
+    crypto_chain: ['Tor (circuito do daemon local) + X25519 + ChaCha20'],
+    data_flow: 'Você → Tor (daemon local) → Peer',
     pros: [], cons: [], residual_risk: [],
   },
 ]
@@ -79,6 +80,12 @@ export interface PrivacySettings {
   udp_discovery: boolean
   metadata_padding: boolean
   traffic_obfuscation: boolean
+  /**
+   * O relay está DE FATO roteando por SOCKS5 agora? (nativo; no browser é
+   * sempre false). Fail-closed: em proxy/full com `false`, o relay fica OFF —
+   * a UI mostra o estado EFETIVO, não só o modo escolhido.
+   */
+  proxy_effective: boolean
 }
 
 export interface ProxyConfig {

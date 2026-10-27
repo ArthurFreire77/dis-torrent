@@ -989,6 +989,8 @@ export const browserServices: ForgeServices = {
       udp_discovery: mode === 'normal' || mode === 'encrypted',
       metadata_padding: isFull,
       traffic_obfuscation: isProxy || isFull,
+      // Browser: não há motor SOCKS5 — estado efetivo é sempre "sem proxy".
+      proxy_effective: false,
     })
   },
 
@@ -1003,6 +1005,7 @@ export const browserServices: ForgeServices = {
       udp_discovery: mode === 'normal' || mode === 'encrypted',
       metadata_padding: isFull,
       traffic_obfuscation: isProxy || isFull,
+      proxy_effective: false,
     })
   },
 

@@ -28,7 +28,7 @@ import { downloadManager } from '../services/downloadManager'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
-import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, type CallQuality, type IncomingCall } from '../services/callManager'
 import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize } from '../services/fileSwarm'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import { throttleTrailing } from '../shared/perf'
@@ -691,6 +691,18 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [friendsBlocked, setFriendsBlocked] = useState<{fp:string,nickname:string}[]>([])
   const [showProfile, setShowProfile] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
+  // PRIVACIDADE × CHAMADAS: o ICE do WebRTC não passa pelo SOCKS5 do app —
+  // em proxy/full os SERVIDORES PÚBLICOS de STUN/TURN ficam FORA da lista
+  // (terceiros não podem ver o IP que o modo promete esconder) e a UI
+  // avisa que a chamada não é anônima. Propaga a cada mudança de modo,
+  // venha de onde vier (boot, modal, troca manual).
+  const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
+  useEffect(() => {
+    setCallPrivacyForIce(privacyMode)
+    // Estado EFETIVO (relay roteando por SOCKS5 de fato?) para o modal não
+    // vender "proxy ativado" quando o proxy está morto (relay fail-closed).
+    services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
+  }, [privacyMode])
   // --- Canais / Cargos / Bots ---
   const [extraChannels, setExtraChannels] = useState<ChannelMeta[]>([])
   const [roles, setRoles] = useState<RoleView[]>([])
@@ -3056,6 +3068,15 @@ export default function ThemeShell({ designId }: {designId:string}){
             {/* PLURAL: '1 participantes' estava errado. E a rota (LAN/STUN/TURN)
                 virou selo próprio — ela é a resposta de "por que não conecta?". */}
             <span style={{ fontSize: 12, color: muted, whiteSpace: 'nowrap' }}>{activeCall.participants.length} {activeCall.participants.length === 1 ? 'participante' : 'participantes'}</span>
+            {/* HONESTIDADE (proxy/full): a mídia WebRTC NÃO passa pelo
+                SOCKS5/Tor do app — não presenting o modo como protetor da
+                chamada. O aviso fica visível o tempo todo no modo anônimo. */}
+            {(privacyMode === 'proxy' || privacyMode === 'full') && (
+              <span
+                title="A mídia (áudio/vídeo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes da chamada veem seu IP real. Mensagens e arquivos seguem protegidos pelo modo."
+                style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.5, background: `${t.yellow}22`, color: t.yellow, padding: '3px 8px', borderRadius: 99, whiteSpace: 'nowrap', cursor: 'help' }}
+              >chamada não anônima</span>
+            )}
             <span
               title={callManager.getRungSummary() === 'TURN' ? 'Rota via TURN: os dois estão atrás de CGNAT e o tráfego WebRTC sai pelo servidor TURN' : callManager.getRungSummary() === 'LAN' ? 'Rota direta na rede local' : 'Rota direta via STUN (saiu do NAT)'}
               style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.5, background: callManager.getRungSummary() === 'n/d' ? '#3a3a3c' : `${t.green}22`, color: callManager.getRungSummary() === 'n/d' ? muted : t.green, padding: '3px 8px', borderRadius: 99, whiteSpace: 'nowrap' }}
@@ -3517,19 +3538,21 @@ export default function ThemeShell({ designId }: {designId:string}){
               })}
             </div>
 
-            {/* Estado do proxy — sempre visível, honesto */}
+            {/* Estado do proxy â€” sempre visÃ­vel, honesto: mostra o EFETIVO, nÃ£o sÃ³ o escolhido */}
             <div style={{ background: t.rail, border: `1px solid ${t.border}`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: muted }}>
-                {(privacyMode === 'proxy' || privacyMode === 'full') ? 'PROXY: ATIVADO' : 'Proxy: Desativado'}
+                {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE â€” relay desligado (fail-closed)') : 'Proxy: Desativado'}
               </div>
               <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>
                 {(privacyMode === 'proxy' || privacyMode === 'full')
-                  ? `tráfego do relay saindo por ${proxyAddr || '…'} (SOCKS5 — sem ntfy, sem HTTP externo)`
-                  : 'nenhuma conexão passa por proxy — relay MQTT direto dos brokers públicos'}
+                  ? (privacyProxyEffective
+                      ? `trÃ¡fego do relay saindo por ${proxyAddr || 'â€”'} (SOCKS5 â€” sem ntfy, sem HTTP externo)`
+                      : 'o proxy nÃ£o respondeu ou o endereÃ§o Ã© invÃ¡lido: o relay fica DESLIGADO atÃ© ele voltar (fail-closed, sem fallback direto)')
+                  : 'nenhuma conexÃ£o passa por proxy â€” relay MQTT direto dos brokers pÃºblicos'}
               </div>
             </div>
 
-            {/* Fluxo de ativação do proxy: IP + teste online + salvar */}
+            {/* Fluxo de ativaÃ§Ã£o do proxy: IP + teste online + salvar */}}
             {proxyPendingMode && (
               <div style={{ background: t.rail, border: `1px solid ${t.accent}66`, borderRadius: 10, padding: '12px', marginBottom: 12 }}>
                 <div style={{ fontWeight: 800, fontSize: 13, color: t.heading, marginBottom: 6 }}>

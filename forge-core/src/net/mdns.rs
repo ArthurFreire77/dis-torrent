@@ -14,6 +14,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::sync::mpsc;
@@ -82,6 +83,11 @@ impl MdnsDiscovery {
             ("pk", pubkey_hex.as_str()),
         ];
 
+        // Bandeira de vida COMPARTILHADA: o watcher de privacidade segura a
+        // MESMA Arc que vai no Self — Drop (restart_engine/shutdown) derruba
+        // o thread. Uma Arc por construção deixaria o watcher órfão.
+        let alive = Arc::new(AtomicBool::new(true));
+
         let daemon = match ServiceDaemon::new() {
             Ok(d) => d,
             Err(e) => {
@@ -89,7 +95,7 @@ impl MdnsDiscovery {
                 return Ok(Self {
                     daemon: None,
                     fullname: String::new(),
-                    alive: Arc::new(AtomicBool::new(true)),
+                    alive,
                 });
             }
         };
@@ -107,9 +113,74 @@ impl MdnsDiscovery {
             }
         };
         let fullname = info.get_fullname().to_string();
+        let mut announced = false;
         match daemon.register(info) {
-            Ok(()) => info!("mDNS anunciando {instance} ({MDNS_SERVICE_TYPE}) porta {tcp_port}"),
+            Ok(()) => {
+                info!("mDNS anunciando {instance} ({MDNS_SERVICE_TYPE}) porta {tcp_port}");
+                announced = true;
+            }
             Err(e) => warn!("mDNS register falhou ({e}) — anúncio off, browse segue"),
+        }
+        // WATCHER DE PRIVACIDADE: liga/desliga o ANÚNCIO conforme o modo
+        // (poll 2s — trocar de modo em runtime vale sem reiniciar o app).
+        // Em proxy/full a presença na LAN (fp+nickname) não pode vazar:
+        // unregister() pára de responder por _distorrent._tcp; o
+        // re-register traz o MESMO instance/host/TXT (determinístico).
+        {
+            let daemon_w = daemon.clone();
+            let allowed_w = allowed.clone();
+            let alive_w = alive.clone();
+            let fullname_w = fullname.clone();
+            let instance_w = instance.clone();
+            let host_w = host.clone();
+            let tcp_port_w = tcp_port;
+            let nick_txt_w = nick_txt.clone();
+            let port_txt_w = port_txt.clone();
+            let fp_w = fp.clone();
+            let pubkey_w = pubkey_hex.clone();
+            let announced_w = announced;
+            let _ = std::thread::Builder::new()
+                .name("forge-mdns-privacy".into())
+                .spawn(move || {
+                    let mut announced = announced_w;
+                    while alive_w.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_secs(2));
+                        let anon = !allowed_w();
+                        if anon && announced {
+                            match daemon_w.unregister(&fullname_w) {
+                                Ok(_) => {
+                                    announced = false;
+                                    debug!("mDNS: anúncio removido — modo anônimo (proxy/full)");
+                                }
+                                Err(e) => debug!("mDNS unregister (privacidade) falhou: {e}"),
+                            }
+                        } else if !anon && !announced {
+                            let props = [
+                                ("fp", fp_w.as_str()),
+                                ("tcp_port", port_txt_w.as_str()),
+                                ("nickname", nick_txt_w.as_str()),
+                                ("pk", pubkey_w.as_str()),
+                            ];
+                            match ServiceInfo::new(
+                                MDNS_SERVICE_TYPE,
+                                &instance_w,
+                                &host_w,
+                                (),
+                                tcp_port_w,
+                                &props[..],
+                            ) {
+                                Ok(i) => match daemon_w.register(i.enable_addr_auto()) {
+                                    Ok(()) => {
+                                        announced = true;
+                                        debug!("mDNS: anúncio restaurado — modo normal");
+                                    }
+                                    Err(e) => warn!("mDNS re-register falhou: {e}"),
+                                },
+                                Err(e) => warn!("mDNS ServiceInfo (re-register): {e}"),
+                            }
+                        }
+                    }
+                });
         }
         let receiver = match daemon.browse(MDNS_SERVICE_TYPE) {
             Ok(r) => r,
@@ -118,16 +189,23 @@ impl MdnsDiscovery {
                 return Ok(Self {
                     daemon: Some(daemon),
                     fullname,
-                    alive: Arc::new(AtomicBool::new(true)),
+                    alive,
                 });
             }
         };
 
         let own_fp = fp.clone();
+        let allowed_b = allowed.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("forge-mdns-browse".into())
             .spawn(move || {
                 while let Ok(event) = receiver.recv() {
+                    // PRIVACIDADE: evento resolvido em modo anônimo não vira
+                    // dial direto (vazaria o IP real). Gate por evento — a
+                    // troca de modo em runtime vale na hora.
+                    if !allowed_b() {
+                        continue;
+                    }
                     let ServiceEvent::ServiceResolved(resolved) = event else { continue };
                     let txt = resolved.get_properties();
                     let peer_fp = txt.get_property_val_str("fp").unwrap_or("").trim().to_lowercase();
@@ -201,7 +279,7 @@ impl MdnsDiscovery {
         Ok(Self {
             daemon: Some(daemon),
             fullname,
-            alive: Arc::new(AtomicBool::new(true)),
+            alive,
         })
     }
 }

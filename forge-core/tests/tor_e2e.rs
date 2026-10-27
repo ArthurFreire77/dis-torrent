@@ -5,13 +5,19 @@
 //!   1. Engine B escuta localmente; o daemon Tor publica um serviço onion
 //!      apontando para ele (assim B fica alcançável SEM IP público/NAT —
 //!      é o NAT traversal do Tor).
-//!   2. Engine A em privacidade "full" (Tor 7 nós) conecta a
-//!      `<onion>.onion:80` via SOCKS5 do Tor — o hostname NUNCA resolve
-//!      localmente, vai ao proxy e a rede resolve dentro dos circuitos.
+//!   2. Engine A em privacidade "full" (Tor via SOCKS5 do daemon local —
+//!      o comprimento do circuito é do Tor, padrão 3 saltos) conecta a
+//!      `<onion>.onion:80` — o hostname NUNCA resolve localmente, vai ao
+//!      proxy e a rede resolve dentro dos circuitos.
 //!   3. Handshake autenticado + DM ida-e-volta com ACK entregue.
 //!
 //! Requer: binário `tor` + internet (bootstrap de consenso). Rodar com:
 //!   cargo test --test tor_e2e -- --ignored --nocapture
+//
+// LINUX ONLY: usa `std::os::unix::fs::PermissionsExt` (Tor recusa
+// HiddenServiceDir permissivo). Sem este gate, `cargo check --tests` no
+// Windows (job core-win do CI) falha em código que nem roda ali.
+#![cfg(target_os = "linux")]
 
 use std::sync::Arc;
 use std::time::Duration;
