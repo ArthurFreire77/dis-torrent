@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## [1.1.5] — 2026-10-27
+
+### Release de correção (pós-auditoria)
+
+- Bump de versão 1.1.4-pre-alpha → 1.1.5.
+- Chamadas: câmera religa na mesma chamada, PT/codec de vídeo, ICE `closed` não conta como recuperado, fallback de áudio quando câmera é negada, troca de canal de voz, barra "Voz conectada" derivada do estado real.
+- Compartilhamento de tela: monitores não escondidos, sem escala dupla, FPS `auto` sem teto, recaptura segura, senders de áudio reusados, caminho nativo Linux honesto.
+- Android/Tauri: `save_file_stream` com magic bytes + extensão + job_id + tamanho; `plugin:downloads|save` com caminho restrito; `profile_set`/`messages_around` corrigidos; manifest sem `CAPTURE_VIDEO_OUTPUT` e `allowBackup=false`.
+- Mídia nativa Linux: `vtl.stop()` removido (câmera religa), envio escolhe VP8→H264 com erro explícito, `spawn_send_loop` com retry, `aggregate_stats` sem double-count.
+- Testes: 114/114 unit (7 novos de tela), `typecheck`/`lint`/`build` verdes.
+
+### Binários
+
+Os instaladores (Windows .exe/.msi, Linux .AppImage/.deb, Android .apk) **não são gerados neste repositório** — exigem toolchain Rust + Android SDK em máquina dedicada ou via CI. Ver `AGENTS.md` (gitignored, local) para o backlog e o plano de release.
+
 ## [Não lançado] — 2026-10-27
 
 ### Chamadas (vídeo/áudio) — bugs corrigidos
