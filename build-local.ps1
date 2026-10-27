@@ -43,7 +43,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "Unit tests falharam" -ForegroundColor Red
 
 # 6. Build Tauri
 Write-Host "`n[6/6] Tauri build (isso pode demorar varios minutos)..." -ForegroundColor Yellow
-npm run tauri:build
+npm run tauri build -- --bundles nsis
 if ($LASTEXITCODE -ne 0) { Write-Host "Tauri build falhou" -ForegroundColor Red; exit 1 }
 
 # Resultado

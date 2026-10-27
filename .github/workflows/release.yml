@@ -24,7 +24,7 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      - run: npm run tauri build
+      - run: npm run tauri build -- --bundles nsis
       - uses: actions/upload-artifact@v4
         with:
           name: windows-bundle
@@ -57,7 +57,7 @@ jobs:
             gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-libav zip unzip coreutils
       - run: npm ci
-      - run: npm run tauri build
+      - run: npm run tauri build -- --bundles deb,appimage
       - uses: actions/upload-artifact@v4
         with:
           name: linux-bundle
