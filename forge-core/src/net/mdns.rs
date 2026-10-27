@@ -12,6 +12,7 @@
 //!   existente segue como fallback.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -30,10 +31,14 @@ pub const MDNS_SERVICE_TYPE: &str = "_distorrent._tcp.local.";
 pub struct MdnsDiscovery {
     daemon: Option<ServiceDaemon>,
     fullname: String,
+    /// Vida do watcher de privacidade — `Drop` seta false e o thread sai
+    /// (sem isto, `restart_engine` vazava um thread dormindo para sempre).
+    alive: Arc<AtomicBool>,
 }
 
 impl Drop for MdnsDiscovery {
     fn drop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
         if let Some(daemon) = self.daemon.take() {
             if !self.fullname.is_empty() {
                 if let Err(e) = daemon.unregister(&self.fullname) {
@@ -51,11 +56,17 @@ impl MdnsDiscovery {
     /// Sobe anúncio + browse. `tx` recebe peers descobertos (não-eu).
     /// Nunca panica: falha de multicast vira `warn` + descoberta degradada
     /// (`daemon: None`, só o UDP segue) ou `Err` logado pelo chamador.
+    ///
+    /// `allowed` = gate de privacidade EM TEMPO REAL (false em proxy/full):
+    /// eventos resolvidos são descartados (nada vira dial direto) e o
+    /// watcher (des)registra o ANÚNCIO — fp+nickname não vazam presença
+    /// na LAN no modo anônimo, sem reiniciar o app.
     pub fn spawn(
         keypair: Arc<Keypair>,
         nickname: String,
         tcp_port: u16,
         tx: mpsc::UnboundedSender<DiscoveredPeer>,
+        allowed: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> crate::Result<Self> {
         let fp = keypair.fingerprint();
         let pubkey_hex = keypair.public_hex();
@@ -78,6 +89,7 @@ impl MdnsDiscovery {
                 return Ok(Self {
                     daemon: None,
                     fullname: String::new(),
+                    alive: Arc::new(AtomicBool::new(true)),
                 });
             }
         };
@@ -106,6 +118,7 @@ impl MdnsDiscovery {
                 return Ok(Self {
                     daemon: Some(daemon),
                     fullname,
+                    alive: Arc::new(AtomicBool::new(true)),
                 });
             }
         };
@@ -188,6 +201,7 @@ impl MdnsDiscovery {
         Ok(Self {
             daemon: Some(daemon),
             fullname,
+            alive: Arc::new(AtomicBool::new(true)),
         })
     }
 }

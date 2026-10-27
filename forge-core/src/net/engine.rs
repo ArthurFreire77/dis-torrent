@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use crate::net::netlimit::{Decision, FrameVerdict, NetLimiter};
 use crate::net::socks5::{socks5_connect, split_host_port, SocksTarget};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Notify};
@@ -688,6 +689,11 @@ pub struct NetworkEngine {
     /// Anti-spam: último `(hash_do_conteúdo, ts_ms)` por peer — repetida
     /// em <60s é descartada.
     spam_dup: StdMutex<HashMap<String, (String, i64)>>,
+    /// Limites de rede (rate limits/concorrência/tetos) — o "rate limit para
+    /// tudo": TCP inbound, discovery UDP, relay, frames/bytes por sessão,
+    /// dials outbound. `Arc` porque discovery/mDNS compartilham a MESMA
+    /// instância (limites globais de verdade, não por cópia).
+    pub(crate) netlimiter: Arc<NetLimiter>,
     /// Mídia nativa viva, ou `None` (verbatim do boot). Mutável para o re-arm
     /// em `voice_gate` (dispositivo de áudio que aparece depois do boot).
     #[cfg(target_os = "linux")]
@@ -945,6 +951,7 @@ impl NetworkEngine {
             )),
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
+            netlimiter: NetLimiter::from_env(),
             #[cfg(target_os = "linux")]
             voice: StdMutex::new(build_voice_media()),
             #[cfg(target_os = "linux")]
@@ -1026,6 +1033,7 @@ impl NetworkEngine {
             )),
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
+            netlimiter: NetLimiter::from_env(),
             #[cfg(target_os = "linux")]
             voice: StdMutex::new(build_voice_media()),
             #[cfg(target_os = "linux")]
@@ -1188,6 +1196,31 @@ impl NetworkEngine {
                 // Reavalia o intermediário peer-relay: em proxy/full (ou sob
                 // kill-switch) a seleção cai para None na hora.
                 self.refresh_peer_relay();
+                // SESSÕES DIRETAS VIVAS NÃO PODEM FICAR FORA DA POLÍTICA NOVA
+                // (correção de estado): ao entrar em proxy/full, as conexões
+                // diretas (que expõem o IP real ao peer) são derrubadas — o
+                // laço de maintain re-discará PELO proxy na próxima tentativa
+                // (lê o modo a cada volta). Sessões relay seguem vivas: nelas
+                // o relay já roda por túnel SOCKS5. Sair do modo anônimo NÃO
+                // derruba nada (mais privacidade que o pedido não viola).
+                if matches!(mode, "proxy" | "full") {
+                    let direct: Vec<String> = {
+                        let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+                        links
+                            .iter()
+                            .filter(|(_, l)| l.get_state() == PeerLinkState::Online && !l.via_relay)
+                            .map(|(fp, _)| fp.clone())
+                            .collect()
+                    };
+                    for fp in direct {
+                        info!(%fp, "sessão direta encerrada: política anônima em vigor");
+                        self.disconnect_peer(&fp);
+                    }
+                    // Endpoint público anunciado é segredo morto no modo
+                    // anônimo (punch/announce já são gates; o cache não
+                    // precisa sobreviver à troca).
+                    *self.public_addr.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                }
                 Ok(())
             }
             _ => Err(ForgeError::Protocol(format!(
@@ -5882,6 +5915,24 @@ fn stun_allowed(engine: &Arc<NetworkEngine>) -> bool {
     !matches!(engine.privacy_mode().as_str(), "proxy" | "full")
 }
 
+/// Inbound DIRETO (TCP accept) é permitido no modo atual? Em `proxy`/`full`
+/// NÃO: quem escanear a porta receberia o Hello em claro (fp+nickname) e a
+/// sessão direta que nasceria entregaria o IP real ao peer — exatamente o
+/// que estes modos prometem esconder. Peers continuam alcançando pelo relay
+/// (neste modo ele SÓ roda por túnel SOCKS5 — `refresh_relay_for_privacy`).
+/// O teste Tor E2E continua válido: o RESPONDEDOR roda em modo normal.
+fn direct_inbound_allowed(engine: &Arc<NetworkEngine>) -> bool {
+    !matches!(engine.privacy_mode().as_str(), "proxy" | "full")
+}
+
+/// Hole punching (furo TCP/UDP direto) é permitido no modo atual? Em
+/// `proxy`/`full` NÃO: o furo cria conexão TCP/UDP DIRETA ao peer (vaza o IP
+/// real) e publica nosso endpoint público a ele. A sessão relay (proxada) é
+/// a única rota anônima; o upgrade direto fica para os modos normais.
+fn punch_allowed_by_privacy(engine: &Arc<NetworkEngine>) -> bool {
+    !matches!(engine.privacy_mode().as_str(), "proxy" | "full")
+}
+
 /// `FORGE_NO_RELAY` liga o kill-switch do relay no boot? Aceita
 /// 1/true/yes/on (case-insensitive); qualquer outro valor = relay ligado.
 fn env_no_relay() -> bool {
@@ -6218,7 +6269,16 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 if cancelled(&cancel) {
                     break;
                 }
-                nat_map_port(port_upnp, ext_port.clone()).await;
+                // PRIVACIDADE: UPnP/NAT-PMP é descoberta local (SSDP
+                // multicast na LAN) + abre porta no roteador — em modo
+                // anônimo fica OFF junto com o resto da descoberta
+                // (anúncio LAN expõe presença; porta aberta contradiz o
+                // "esconder IP"). O lease existente expira sozinho (1h).
+                if matches!(engine_nat.privacy_mode().as_str(), "proxy" | "full") {
+                    debug!("upnp/nat-pmp suspenso: modo anônimo (proxy/full)");
+                } else {
+                    nat_map_port(port_upnp, ext_port.clone()).await;
+                }
                 tokio::select! {
                     _ = cancel.changed() => break,
                     _ = sleep(NAT_RENEW_INTERVAL) => {}
@@ -6572,9 +6632,32 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     c = listener.accept() => c,
                 };
                 match conn {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer)) => {
+                        // PRIVACIDADE (fail-closed): em proxy/full o listener
+                        // direto não aceita ninguém — o Hello é EM CLARO (fp,
+                        // nickname) e um port-scanner descobriria a presença
+                        // no IP real, quebrando o "esconder IP" do modo. Par
+                        // seguem chegando via relay (que neste modo só roda
+                        // por túnel SOCKS5 — ver `relay_allowed`).
+                        if !direct_inbound_allowed(&engine) {
+                            debug!("inbound direto recusado: modo anônimo (proxy/full)");
+                            continue;
+                        }
+                        // RATE LIMIT: cada accept era uma task de handshake
+                        // criptográfico sem freio — mil connects de um mesmo
+                        // host = mil tasks (DoS de CPU/RAM). Por IP E global.
+                        if engine.netlimiter.allow_tcp_accept(peer.ip()) == Decision::Blocked {
+                            debug!(%peer, "accept descartado: rate limit de TCP inbound");
+                            continue; // stream cai (drop) — o OS RST cuida do resto
+                        }
+                        // Concorrência: teto de handshakes simultâneos vivos.
+                        let Some(hs_slot) = engine.netlimiter.try_handshake_slot() else {
+                            debug!(%peer, "accept descartado: teto de handshakes concorrentes");
+                            continue;
+                        };
                         let engine = engine.clone();
                         tokio::spawn(async move {
+                            let _hs_slot = hs_slot; // libera no fim do handshake (Drop)
                             match crate::net::transport::handshake_with_fp(
                                 stream,
                                 engine.keypair.clone(),
@@ -6620,6 +6703,8 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 engine.nickname.clone(),
                 port,
                 disc_tx.clone(),
+                Arc::new(|| true),
+                engine.netlimiter.clone(),
             )
             .await?,
         )
@@ -6638,6 +6723,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             engine.nickname.clone(),
             port,
             disc_tx,
+            Arc::new(|| true),
         ) {
             Ok(m) => Some(m),
             Err(e) => {
@@ -6700,6 +6786,14 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         tokio::select! {
             Some(peer) = disc_rx.recv() => {
                 if peer.fp == engine.identity.fingerprint { continue; }
+                // PRIVACIDADE (defesa em profundidade): em proxy/full a
+                // descoberta LAN inteira fica OFF — o broadcaster/mDNS são
+                // gates na FONTE (discovery.rs/mdns.rs), mas mesmo um
+                // datagrama que chegue aqui (race na troca de modo, broadcast
+                // já em voo) NÃO pode virar dial DIRETO: vazaria o IP real.
+                if matches!(engine.privacy_mode().as_str(), "proxy" | "full") {
+                    continue;
+                }
                 let addr_str = peer.addr.to_string();
                 let record = PeerRecord {
                     fp: peer.fp.clone(),
@@ -6761,6 +6855,13 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
     while let Some(cmd) = rx.recv().await {
         match cmd {
             EngineCmd::ConnectTo(addr, expected_fp) => {
+                // Teto de dials outbound concorrentes (antes do dedup!): sem
+                // isto, uma descoberta em rede grande disparava centenas de
+                // laços de dial simultâneos (fd/CPU). Sem vaga: NÃO insere a
+                // chave de dedup — o próximo tick de descoberta re-engatilha.
+                let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
+                    continue;
+                };
                 // Dedup por destino: 1 laço direto por `fp@addr`. Sem isto, a
                 // descoberta (mDNS/bootstrap/announce) re-engatilhava N laços
                 // concorrentes para o mesmo peer (vazamento de tarefas + redial).
@@ -6778,15 +6879,22 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 if fresh {
                     let engine = engine.clone();
                     tokio::spawn(async move {
+                        let _dial_slot = dial_slot; // vaga segura até o fim do laço (eterno)
                         connect_and_maintain(engine, ConnTarget::Addr(addr), expected_fp).await
                     });
                 }
+                // !fresh: laço vivo já existe (e já segura uma vaga) — o
+                // slot caído aqui libera a vaga no fim da iteração.
             }
             EngineCmd::ConnectHost {
                 host,
                 port,
                 expected_fp,
             } => {
+                // Mesmo teto do ConnectTo (é o mesmo tipo de laço eterno).
+                let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
+                    continue;
+                };
                 let key = format!("{}@{host}:{port}", expected_fp.as_deref().unwrap_or(""));
                 let fresh = {
                     let mut set = engine
@@ -6801,6 +6909,7 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 if fresh {
                     let engine = engine.clone();
                     tokio::spawn(async move {
+                        let _dial_slot = dial_slot;
                         connect_and_maintain(engine, ConnTarget::Host(host, port), expected_fp)
                             .await
                     });
@@ -6809,6 +6918,10 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
             EngineCmd::ConnectRelay(fp) => {
                 // Idempotente: um maintain eterno por peer (bootstrap insiste a
                 // cada 5s; disconnect remove o link mas o maintain velho segue).
+                // Mesmo teto de dials: laço relay é o mesmo custo (task+poll).
+                let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
+                    continue;
+                };
                 let fresh = engine
                     .relay_maintains
                     .lock()
@@ -6816,7 +6929,10 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     .insert(fp.clone());
                 if fresh {
                     let engine = engine.clone();
-                    tokio::spawn(async move { connect_relay_and_maintain(engine, fp).await });
+                    tokio::spawn(async move {
+                        let _dial_slot = dial_slot;
+                        connect_relay_and_maintain(engine, fp).await
+                    });
                 }
             }
             EngineCmd::LookupAnnounce(fp) => {
@@ -7031,21 +7147,19 @@ async fn connect_and_maintain(
                 match timeout(CONNECT_TIMEOUT, socks5_connect(&proxy_addr, &socks_target)).await {
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
-                        // .onion NUNCA tem fallback direto (impossível sem Tor) — falha limpa
-                        let is_onion =
-                            matches!(&target, ConnTarget::Host(h, _) if h.ends_with(".onion"));
-                        if is_onion {
-                            return Err(e);
-                        }
-                        debug!("proxy {proxy_addr} falhou ({e}) — tentando direto (fallback)");
-                        match &target {
-                            ConnTarget::Addr(sa) => {
-                                timeout(CONNECT_TIMEOUT, TcpStream::connect(*sa))
-                                    .await
-                                    .map_err(|_| ForgeError::Protocol("connect timeout".into()))??
-                            }
-                            ConnTarget::Host(h, p) => resolve_and_connect(h, *p).await?,
-                        }
+                        // FAIL-CLOSED (correção de vazamento): neste modo NUNCA
+                        // caímos para conexão direta. O fallback silencioso
+                        // entregava o IP REAL ao peer justamente quando o
+                        // usuário pediu anonimato e o proxy falhou — o pior
+                        // momento possível para "tentar direto". (.onion
+                        // sempre foi assim; agora TODO alvo é.)
+                        // O redial/backoff segue; o relay (aqui só via SOCKS5)
+                        // cobre a rota. Diagnóstico registra o motivo.
+                        debug!(
+                            proxy = %proxy_addr,
+                            "proxy falhou ({e}) — SEM fallback direto (modo anônimo fail-closed)"
+                        );
+                        return Err(e);
                     }
                     Err(_) => return Err(ForgeError::Protocol("proxy connect timeout".into())),
                 }
@@ -7711,6 +7825,13 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
                     if last_hello.len() > 512 {
                         last_hello.clear();
                     }
+                    // RATE LIMIT: cada Hello novo (eph fresco) nasceria uma
+                    // task de handshake viva — o dedup acima só barra
+                    // REPETIÇÃO do mesmo Hello, não a fábrica de novos.
+                    if engine.netlimiter.allow_relay_hello(&from) == Decision::Blocked {
+                        debug!(%from, "relay: Hello descartado — rate limit por peer");
+                        continue;
+                    }
                     if is_online(&engine, &from) {
                         // Redial com sessão (half-open?) viva: força respondente
                         // novo que SUBSTITUI via eleição (sem esperar 120s).
@@ -7761,6 +7882,12 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             // sem sessão: só Hello inicia conversa (ciphertext sem dono é lixo)
             if let Some(hello_fp) = parse_relay_hello(&frame) {
                 if hello_fp == from {
+                    // RATE LIMIT (mesma regra do fluxo de cima): Hello novo
+                    // além da taxa = fábrica de respondentes, não dial legítimo.
+                    if engine.netlimiter.allow_relay_hello(&from) == Decision::Blocked {
+                        debug!(%from, "relay: Hello (sem sessão) descartado — rate limit");
+                        continue;
+                    }
                     debug!(%from, "relay: Hello recebido — atendendo");
                     spawn_relay_responder(engine.clone(), from, frame);
                 }
@@ -7788,6 +7915,25 @@ async fn register_and_run(
     let my_fp = engine.identity.fingerprint.clone();
     let i_prefer_outbound = my_fp.as_str() < peer_fp; // menor fp prefere a própria dial
     let this_is_my_preference = initiator == i_prefer_outbound;
+
+    // TETO GLOBAL DE SESSÕES: sem isto, um swarm de peers (ou um atacante com
+    // N identidades) multiplicava sockets/tasks/fds sem limite central — cada
+    // sessão viva custa reader+writer+cripto por frame. Acima do teto, a
+    // sessão nova é recusada (o par rediala quando houver vaga).
+    {
+        let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
+        let online = links
+            .values()
+            .filter(|l| l.get_state() == PeerLinkState::Online)
+            .count();
+        if online >= engine.netlimiter.limits().sessions_max {
+            debug!(
+                peer_fp,
+                online, "sessão recusada: teto global de sessões online"
+            );
+            return false;
+        }
+    }
 
     {
         let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -8018,6 +8164,22 @@ async fn register_and_run(
                             crate::metrics::FrameClass::by_index(frame_class(&frame)),
                             wire as u64,
                         );
+                        // RATE LIMIT por sessão (frames E bytes — um não
+                        // substitui o outro): rajada legítima só perde frames
+                        // (throttle, o protocolo reenvia); flooding na casa do
+                        // abuso encerra a sessão (Kill) — antes disto um peer
+                        // autenticado podia inundar 1 MiB/frame a taxa livre.
+                        match engine.netlimiter.allow_frame_in(peer_fp, wire as u64) {
+                            FrameVerdict::Allow => {}
+                            FrameVerdict::Drop(reason) => {
+                                debug!("frame de {peer_fp} descartado: {reason}");
+                                continue; // volta ao select — sessão preservada
+                            }
+                            FrameVerdict::Kill(reason) => {
+                                warn!(peer_fp, "sessão encerrada por limite: {reason}");
+                                break Err(ForgeError::Protocol(reason.to_string()));
+                            }
+                        }
                         if let Err(e) = handle_frame(&engine, peer_fp, peer_pubkey, peer_nick, frame).await {
                             debug!("frame rejeitado de {peer_fp}: {e}");
                         }
@@ -8051,6 +8213,9 @@ async fn register_and_run(
         }
     };
     if removed {
+        // Higiene do rate limiter: os buckets por peer morrem com a sessão
+        // (churn de peers não acumula mapa morto — o prune é só rede de seg.).
+        engine.netlimiter.forget_peer(peer_fp);
         // não confirmadas → PENDING again (outbox)
         if let Ok(ids) = engine.store.revert_unacked_to_pending(peer_fp) {
             for id in ids {
@@ -8141,6 +8306,13 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
     if !engine.punch_enabled() {
         return;
     }
+    // PRIVACIDADE: em proxy/full o furo é TCP/UDP DIRETO ao peer — vazaria o
+    // IP real e publicaria nosso endpoint público. A sessão relay (proxada)
+    // é a única rota anônima; upgrade direto é para os modos normais.
+    if !punch_allowed_by_privacy(&engine) {
+        debug!(%peer_fp, "punch upgrade suspenso: modo anônimo (proxy/full)");
+        return;
+    }
     let generation = {
         let mut map = engine
             .punch_upgrades
@@ -8186,6 +8358,12 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
             }
             // Kill-flag pode ter ligado/desligado em runtime.
             if !engine.punch_enabled() {
+                break;
+            }
+            // Modo anônimo pode ter sido ligado DEPOIS do spawn (troca de
+            // modo em runtime): o loop vivo também precisa respeitar.
+            if !punch_allowed_by_privacy(&engine) {
+                debug!(%peer_fp, "punch upgrade encerrado: modo anônimo em runtime");
                 break;
             }
             // Endpoint público próprio. Normalmente o tick de announce já
@@ -8274,6 +8452,13 @@ async fn punch_and_register(
     at_ms: u64,
 ) {
     if !engine.punch_enabled() {
+        return;
+    }
+    // PRIVACIDADE (defesa em profundidade): o PunchDial pode ter sido
+    // enfileirado ANTES da troca de modo — não executa furo direto em
+    // modo anônimo, mesmo com o frame já na mão.
+    if !punch_allowed_by_privacy(&engine) {
+        debug!(%want_fp, "punch dial ignorado: modo anônimo (proxy/full)");
         return;
     }
     let Ok(remote) = endpoint.parse::<SocketAddr>() else {
@@ -8840,6 +9025,15 @@ async fn handle_frame(
             | SecureFrame::ScreenShareOffer { .. }
             | SecureFrame::ScreenShareAnswer { .. }
     ) {
+        // RATE LIMIT de sinalização: trickle ICE legítimo é dezenas num
+        // segundo, NÃO centenas — acima disso é flood que entope a fila
+        // realtime (que também carrega voz). Frame descartado; a chamada
+        // segue (o ICE tem redundância por natureza).
+        if engine.netlimiter.allow_call_signal(peer_fp) == Decision::Blocked {
+            return Err(ForgeError::Protocol(
+                "sinalização de chamada descartada (rate limit)".into(),
+            ));
+        }
         let is_friend = engine
             .store
             .get_friend(peer_fp)
@@ -9111,6 +9305,14 @@ async fn handle_frame(
             }
         }
         SecureFrame::FriendRequest { nickname } => {
+            // RATE LIMIT: pedido de amizade é 1x por sessão na prática —
+            // repetição rápida é spam de protocolo (o outbox já reenvia o
+            // mesmo pedido com backoff; o receptor re-age idempotentemente).
+            if engine.netlimiter.allow_friend_request(peer_fp) == Decision::Blocked {
+                return Err(ForgeError::Protocol(
+                    "friend request descartado (rate limit)".into(),
+                ));
+            }
             if engine.is_blocked(peer_fp) {
                 return Ok(()); // silenciosamente ignora bloqueados
             }
@@ -9874,6 +10076,14 @@ async fn handle_frame(
             // também envia evento estendido com chunk_hashes via kv (UI lê ao receber FileAnnounceEv)
         }
         SecureFrame::FileChunkRequest { file_id, index } => {
+            // RATE LIMIT: cada pedido vira leitura de disco + frame de 256 KB
+            // de volta — flood de pedidos é DoS de IO/banda (swarm legítimo
+            // pede em lote, ~20/s, bem abaixo do teto).
+            if engine.netlimiter.allow_chunk_request(peer_fp) == Decision::Blocked {
+                return Err(ForgeError::Protocol(
+                    "chunk request descartado (rate limit)".into(),
+                ));
+            }
             let _ = engine.events.send(EngineEvent::FileChunkRequestEv {
                 file_id,
                 index,

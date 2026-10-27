@@ -20,6 +20,11 @@ pub mod media_video;
 #[cfg(target_os = "linux")]
 pub mod media_voice;
 pub mod natpmp;
+/// Limites de rede centralizados (rate limits, concorrência, tetos) — o
+/// "rate limit para tudo": TCP inbound, discovery UDP, relay, frames/bytes
+/// por sessão, dials outbound. Independente do antispam (política de
+/// CONTEÚDO por mensagem) e do authlimit (vault).
+pub mod netlimit;
 pub mod peer_relay;
 pub mod relay;
 pub mod socks5;

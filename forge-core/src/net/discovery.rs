@@ -12,6 +12,7 @@ use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
 use crate::identity::Keypair;
+use crate::net::netlimit::{Decision, NetLimiter};
 use crate::Result;
 
 pub const DISCOVERY_PORT: u16 = 45900;
@@ -41,11 +42,20 @@ pub struct Discovery {
 
 impl Discovery {
     /// Sobe UDP listener + broadcaster. `tx` recebe peers descobertos (não-eu).
+    ///
+    /// `allowed` = gate de privacidade EM TEMPO REAL (false em proxy/full):
+    /// o broadcaster NÃO anuncia (presença fp+nickname na LAN é vazamento
+    /// documentado do modo anônimo) e o listener descarta datagramas — a
+    /// descoberta inteira fica off sem reiniciar o app.
+    /// `limiter` = rate limit de datagramas por origem (compartilhado com o
+    /// engine — a MESMA instância, senão cada cópia teria o próprio mapa).
     pub async fn spawn(
         keypair: Arc<Keypair>,
         nickname: String,
         tcp_port: u16,
         tx: mpsc::UnboundedSender<DiscoveredPeer>,
+        allowed: Arc<dyn Fn() -> bool + Send + Sync>,
+        limiter: Arc<NetLimiter>,
     ) -> Result<Self> {
         let bound = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await {
             Ok(s) => s,
@@ -66,10 +76,19 @@ impl Discovery {
             let socket = socket.clone();
             let keypair = keypair.clone();
             let nickname = nickname.clone();
+            let allowed = allowed.clone();
             tokio::spawn(async move {
                 let mut tick = interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
                 loop {
                     tick.tick().await;
+                    // PRIVACIDADE (gate na FONTE): em modo anônimo não
+                    // anunciamos presença na LAN — o broadcast carrega
+                    // fp+nickname e contradiz o "esconder presença" do modo.
+                    // Gate por TICK: trocar de modo em runtime liga/desliga
+                    // na próxima rodada (≤2s), sem reiniciar.
+                    if !allowed() {
+                        continue;
+                    }
                     let ann = Announcement {
                         proto: crate::protocol::PROTOCOL_NAME.to_string(),
                         fp: keypair.fingerprint(),
@@ -124,11 +143,24 @@ impl Discovery {
         // listener
         {
             let socket = socket;
+            let allowed = allowed;
+            let limiter = limiter;
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 loop {
                     match socket.recv_from(&mut buf).await {
                         Ok((n, from)) => {
+                            // PRIVACIDADE: datagrama em modo anônimo é ruído —
+                            // descarta antes de QUALQUER parse/dial.
+                            if !allowed() {
+                                continue;
+                            }
+                            // RATE LIMIT: sem isto, um host na LAN inundava a
+                            // porta 45900 com anúncios válidos e cada um
+                            // virava upsert+evento+dial (DoS de CPU/IO).
+                            if limiter.allow_disc_datagram(from.ip()) == Decision::Blocked {
+                                continue;
+                            }
                             let Ok(ann) = serde_json::from_slice::<Announcement>(&buf[..n]) else {
                                 continue;
                             };
