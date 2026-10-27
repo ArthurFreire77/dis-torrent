@@ -78,15 +78,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install NDK
-        run: sdkmanager "ndk;27.0.12077973" "cmake;3.22.1"
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-34 build-tools;34.0.0 ndk;27.0.12077973 cmake;3.22.1
       - name: Dependencias de sistema
         run: |
           sudo apt-get update
