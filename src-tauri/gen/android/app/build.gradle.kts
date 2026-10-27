@@ -16,12 +16,12 @@ val tauriProperties = Properties().apply {
 // Assinatura de release via env vars (padrão Tauri) — keystore fora do repo
 val keystoreProperties = Properties().apply {
     val env = System.getenv()
-    val path = env["TAURI_ANDROID_KEYSTORE_PATH"]
+    val path = "E:/Programas/dis-torrent/src-tauri/gen/android/keystore2.jks"
     if (path != null) {
         setProperty("storeFile", path)
-        setProperty("storePassword", env["TAURI_ANDROID_KEYSTORE_PASSWORD"] ?: "")
-        setProperty("keyAlias", env["TAURI_ANDROID_KEY_ALIAS"] ?: "")
-        setProperty("keyPassword", env["TAURI_ANDROID_KEY_PASSWORD"] ?: "")
+        setProperty("storePassword", "pass123")
+        setProperty("keyAlias", "key0")
+        setProperty("keyPassword", "pass123")
     }
 }
 

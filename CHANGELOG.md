@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## [1.1.6-pre-alpha] — 2026-10-27
+
+### Release de correção (build local)
+
+- Bump de versão 1.1.5-pre-alpha → 1.1.6-pre-alpha.
+- Build Windows (.exe) gerado localmente (5.84 MB).
+- Build Android (.apk release assinado) gerado localmente (2.49 MB).
+- Rust instalado localmente (rustc 1.99.1, cargo 1.99.1, rustfmt, clippy).
+- Android SDK/NDK configurados (NDK 27.0.12077973, JDK 17).
+- AGENTS.md atualizado com comandos de build local e aprendizados.
+
 ## [1.1.5-pre-alpha] — 2026-10-27
 
 ### Release de correção (pós-auditoria)

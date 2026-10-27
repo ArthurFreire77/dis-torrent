@@ -1386,7 +1386,14 @@ export class CallManager {
   private iceRecoveredOff: (() => void) | null = null
   private relayWindowHandler: ((e: Event) => void) | null = null
 
-  constructor(private getIdentity: () => { fingerprint: string; nickname: string } | null) {}
+  // Parameter property ("constructor(private x)") não é suportada pelo
+  // node --experimental-strip-types (testes unit) — campo explícito tem o
+  // mesmo efeito e mantém o módulo importável pelos testes.
+  private readonly getIdentity: () => { fingerprint: string; nickname: string } | null
+
+  constructor(getIdentity: () => { fingerprint: string; nickname: string } | null) {
+    this.getIdentity = getIdentity
+  }
 
   bind(cb: (s: CallState | null) => void) {
     this.onUpdate = (s) => cb(s)

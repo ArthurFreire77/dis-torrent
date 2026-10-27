@@ -13,7 +13,7 @@ import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { attachStream } from '../shared/mediaAttach'
 import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
-import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import MobileMessage from './MobileMessage'
 import { EmojiPicker } from '../shared/EmojiPicker'
@@ -493,6 +493,16 @@ export default function MobileShell() {
   const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
+  // PRIVACIDADE × CHAMADAS (mesma regra do ThemeShell): o ICE do WebRTC não
+  // passa pelo SOCKS5 do app — em proxy/full os SERVIDORES PÚBLICOS de
+  // STUN/TURN ficam fora da lista e a UI avisa que a chamada não é anônima.
+  const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
+  useEffect(() => {
+    setCallPrivacyForIce(privacyMode)
+    // Estado EFETIVO do proxy (relay roteando por SOCKS5 de fato?) — o modal
+    // não pode vender "proxy ativado" com o proxy morto (fail-closed).
+    services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
+  }, [privacyMode])
   // --- proxy SOCKS5 (modo proxy/Tor): endereço + teste online + ativação ---
   const [proxyAddr, setProxyAddr] = useState('')
   const [proxyIsDefault, setProxyIsDefault] = useState(true)
@@ -1770,6 +1780,15 @@ export default function MobileShell() {
               <span style={{ fontSize: 13, fontWeight: 800, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={15} /> : <Icon d={Icons.phone} size={15} />} Em chamada • {fmtCallDuration(callDuration)} • {(activeCall.participants ?? []).length} na sala</span>
               </span>
+              {/* HONESTIDADE (proxy/full): a mÃ­dia WebRTC sai direto (UDP do
+                  WebView), fora do proxy/Tor do app â€” nÃ£o apresentar o modo
+                  como protetor da chamada. */}
+              {(privacyMode === 'proxy' || privacyMode === 'full') && (
+                <span
+                  title="A mÃ­dia (Ã¡udio/vÃ­deo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes veem seu IP real. Mensagens e arquivos seguem protegidos."
+                  style={{ fontSize: 9, fontWeight: 800, background: `${t.yellow}22`, color: t.yellow, padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', cursor: 'help', flexShrink: 0 }}
+                >nÃ£o anÃ´nima</span>
+              )}
               {/* v6: fase (chamando/conectando/reconectando…) com elapsed */}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} />
               <button aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} title={isMuted ? 'Ativar microfone' : 'Silenciar'} className="m-iconbtn" style={isMuted ? { background: t.red, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}>{isMuted ? <Icon d={Icons.micOff} size={16} /> : <Icon d={Icons.mic} size={16} />}</button>
@@ -2336,19 +2355,21 @@ export default function MobileShell() {
               })}
             </div>
 
-            {/* Estado do proxy — sempre visível, honesto */}
+            {/* Estado do proxy â€” sempre visÃ­vel, honesto: EFETIVO, nÃ£o sÃ³ o escolhido */}
             <div style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: t.muted }}>
-                {(privacyMode === 'proxy' || privacyMode === 'full') ? 'PROXY: ATIVADO' : 'Proxy: Desativado'}
+                {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE â€” relay desligado (fail-closed)') : 'Proxy: Desativado'}
               </div>
               <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>
                 {(privacyMode === 'proxy' || privacyMode === 'full')
-                  ? `relay saindo por ${proxyAddr || '…'} (SOCKS5 — sem ntfy, sem HTTP externo)`
-                  : 'nenhuma conexão passa por proxy — relay MQTT direto dos brokers públicos'}
+                  ? (privacyProxyEffective
+                      ? `relay saindo por ${proxyAddr || 'â€”'} (SOCKS5 â€” sem ntfy, sem HTTP externo)`
+                      : 'o proxy nÃ£o respondeu ou Ã© invÃ¡lido: o relay fica DESLIGADO atÃ© ele voltar (fail-closed, sem fallback direto)')
+                  : 'nenhuma conexÃ£o passa por proxy â€” relay MQTT direto dos brokers pÃºblicos'}
               </div>
             </div>
 
-            {/* Fluxo de ativação do proxy: IP + teste online + salvar */}
+            {/* Fluxo de ativaÃ§Ã£o do proxy: IP + teste online + salvar */}}
             {proxyPendingMode && (
               <div style={{ background: t.input, border: `1px solid ${t.accent}66`, borderRadius: 10, padding: '12px', marginBottom: 12 }}>
                 <div style={{ fontWeight: 800, fontSize: 13, color: t.heading, marginBottom: 6 }}>
