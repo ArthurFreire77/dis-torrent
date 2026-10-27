@@ -1916,7 +1916,9 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
     // peer não era o primeiro, ele era contado DUAS vezes e o primeiro era
     // ignorado — total de pacotes errado no diagnóstico.
     for peer in all.iter() {
-        if std::ptr::eq(peer, worst) { continue }
+        if std::ptr::eq(peer, worst) {
+            continue;
+        }
         out.packets_in = out.packets_in.saturating_add(peer.packets_in);
         out.packets_out = out.packets_out.saturating_add(peer.packets_out);
         out.plc_frames = out.plc_frames.saturating_add(peer.plc_frames);
@@ -2421,8 +2423,9 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             }
             attempt = attempt.saturating_add(1);
             if attempt >= 20 {
-                let msg = "nao foi possivel enviar audio: o SDP nao negociou codec/SSRC desta sessao"
-                    .to_string();
+                let msg =
+                    "nao foi possivel enviar audio: o SDP nao negociou codec/SSRC desta sessao"
+                        .to_string();
                 eprintln!("[voice] {msg}");
                 sess.sh.set_state("failed");
                 return;
