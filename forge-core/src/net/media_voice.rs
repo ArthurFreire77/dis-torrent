@@ -2804,7 +2804,12 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     let Some(c) = pick else {
         let oferecidos: Vec<&str> = neg
             .iter()
-            .filter(|c| c.rtp_codec.mime_type.to_ascii_lowercase().starts_with("video"))
+            .filter(|c| {
+                c.rtp_codec
+                    .mime_type
+                    .to_ascii_lowercase()
+                    .starts_with("video")
+            })
             .map(|c| c.rtp_codec.mime_type.as_str())
             .collect();
         video_fail(
