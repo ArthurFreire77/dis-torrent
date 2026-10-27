@@ -83,11 +83,5 @@
             android:name="android.support.FILE_PROVIDER_PATHS"
             android:resource="@xml/file_paths" />
         </provider>
-
-        <!-- Foreground service de chamada: mantém mic/camera vivos em background. -->
-        <service
-          android:name=".CallForegroundService"
-          android:foregroundServiceType="microphone|camera"
-          android:exported="false" />
     </application>
 </manifest>
