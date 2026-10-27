@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## [1.1.5] — 2026-10-27
+## [1.1.5-pre-alpha] — 2026-10-27
 
 ### Release de correção (pós-auditoria)
 
