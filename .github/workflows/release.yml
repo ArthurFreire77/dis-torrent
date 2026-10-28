@@ -157,12 +157,22 @@ jobs:
     needs: [build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      # O NOME da release carrega o sufixo (-pre-alpha) do package.json, mas a
+      # release NÃO é marcada como pre-release: `prerelease: true` fazia o
+      # GitHub esconder a 1.1.7 em "Pre-releases" e nunca marcar como Latest.
+      # A tag continua LIMPA (v1.1.7) — é ela que o GitHub usa para decidir.
+      - name: Versão do package.json
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          name: DisTorrent ${{ steps.ver.outputs.version }}
+          prerelease: false
           # Lista por extensão (sem glob `**/*` e sem negação): o action-gh-release
           # não suporta `!padrão` — no run anterior o APK sem assinatura acabou
           # anexado mesmo assim. O APK assinado é gerado localmente
@@ -174,7 +184,14 @@ jobs:
             artifacts/**/*.AppImage
             artifacts/**/*.apk
           draft: false
-          prerelease: true
           body: |
-            Release automatizada via GitHub Actions.
-            Veja CHANGELOG.md para detalhes.
+            Instaladores da versão `${{ steps.ver.outputs.version }}`.
+
+            - **Windows:** instalador NSIS (`*_x64-setup.exe`)
+            - **Linux:** pacote `.deb` e `.AppImage`
+            - **Android:** APK arm64 assinado — gerado no build local
+              (`build-android.ps1`) e anexado a esta release; o CI só valida a
+              compilação (sem keystore ele produz APK não assinado, que não é
+              publicado aqui).
+
+            Detalhes em CHANGELOG.md.
