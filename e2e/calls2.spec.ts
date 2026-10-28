@@ -24,12 +24,12 @@ async function createAccount(page: Page, name: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 });
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 });
 }
 
 async function fpOf(page: Page): Promise<string> {
   return page.evaluate(() => {
-    const raw = sessionStorage.getItem('forge:identity') ?? '';
+    const raw = sessionStorage.getItem('distorrent:identity') ?? '';
     return (JSON.parse(raw) as { fingerprint: string }).fingerprint;
   });
 }

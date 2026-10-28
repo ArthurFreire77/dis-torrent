@@ -38,7 +38,7 @@ import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 
-// DisTorrent — visual Discord original. Dados 100% reais do motor (forge-core).
+// DisTorrent — visual Discord original. Dados 100% reais do motor (distorrent-core).
 // Fluxo: criar conta (nome + senha opcional) → desbloqueio por senha a cada abertura.
 
 const t = {
@@ -536,7 +536,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     return () => window.clearTimeout(t)
   }, [jumpTarget, messages])
   const [input, setInput] = useState('')
-  const draftKey = (c: string) => `forge:draft:${c}`
+  const draftKey = (c: string) => `distorrent:draft:${c}`
   useEffect(() => {
     if (!selConv) return
     try { setInput(localStorage.getItem(draftKey(selConv)) ?? '') } catch { setInput('') }
@@ -676,7 +676,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [createdServerId, setCreatedServerId] = useState<string | null>(null)
   const [joinToken, setJoinToken] = useState('')
   useEffect(() => {
-    // Link de convite público: /d/forge?invite=TOKEN (vindo da rota /invite/:token)
+    // Link de convite público: /d/distorrent?invite=TOKEN (vindo da rota /invite/:token)
     try {
       const q = new URLSearchParams(window.location.search)
       const invite = q.get('invite')
@@ -781,7 +781,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   useEffect(() => {
     services.version().then(setVersion).catch(() => {})
-    // 1 login só com nome: identidade fica em forge.db + keyring/backup
+    // 1 login só com nome: identidade fica em distorrent.db + keyring/backup
     services.identityGet().then(id => {
       if (id) {
         setIdentity(id)
@@ -884,9 +884,9 @@ export default function ThemeShell({ designId }: {designId:string}){
     // "Criar conta".
     try {
       void services.identityGet()
-        .then(() => console.info('[forge-probe] AppState OK — identity_get respondeu'))
-        .catch((e) => console.warn('[forge-probe] AppState FALHOU:', String(e)))
-    } catch (e) { console.warn('[forge-probe] AppState FALHOU:', String(e)) }
+        .then(() => console.info('[distorrent-probe] AppState OK — identity_get respondeu'))
+        .catch((e) => console.warn('[distorrent-probe] AppState FALHOU:', String(e)))
+    } catch (e) { console.warn('[distorrent-probe] AppState FALHOU:', String(e)) }
     let stopBots: (() => void) | undefined
     try { stopBots = botRuntime.start() } catch { /* runtime é best-effort */ }
     try { downloadManager.load() } catch { /* fila segue vazia */ }
@@ -949,8 +949,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     const v = turnInput.trim()
     if (v !== '' && !isValidTurnUrl(v)) { setTurnMsg('formato inválido — use turn:host:porta (ex: turn:seu-vps:3478)'); return }
     try {
-      if (v === '') localStorage.removeItem('forge:turn_url')
-      else localStorage.setItem('forge:turn_url', v)
+      if (v === '') localStorage.removeItem('distorrent:turn_url')
+      else localStorage.setItem('distorrent:turn_url', v)
       setTurnMsg(v === '' ? 'TURN removido — P2P puro (só rede local/NAT aberto).' : 'TURN salvo! Vale para as próximas chamadas.')
     } catch { setTurnMsg('não foi possível salvar neste navegador.') }
   }
@@ -972,12 +972,12 @@ export default function ThemeShell({ designId }: {designId:string}){
     const onVoice = () => {
       if (voiceChannel) services.voiceStates(voiceChannel.communityId, voiceChannel.channelId).then(setVoiceStates).catch(()=>{})
     }
-    window.addEventListener('forge:voice_changed', onVoice)
+    window.addEventListener('distorrent:voice_changed', onVoice)
     return () => {
       notify.cancel()
       swarmNotifyRef.current = () => {}
       fileSwarm.onChange = prev
-      window.removeEventListener('forge:voice_changed', onVoice)
+      window.removeEventListener('distorrent:voice_changed', onVoice)
     }
   }, [voiceChannel])
 
@@ -2271,7 +2271,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           ) : selConv ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, fontWeight: 800, fontSize: 18 }}>{conversations.find(c=>c.id===selConv)?.kind==='group' ? <Icon d={Icons.users} size={18}/> : '@'}</span>
-              <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}{conversations.find(c=>c.id===selConv)?.kind==='group' ? ` • ${(() => { try{ const v=localStorage.getItem(`forge:extras:group_members:${selConv}`); if(v){return JSON.parse(v).length} }catch { /* silent */ } return 0})()} membros` : ''}</span>
+              <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}{conversations.find(c=>c.id===selConv)?.kind==='group' ? ` • ${(() => { try{ const v=localStorage.getItem(`distorrent:extras:group_members:${selConv}`); if(v){return JSON.parse(v).length} }catch { /* silent */ } return 0})()} membros` : ''}</span>
               {/* CALL toolbar idêntico Discord — sem hard-disable: se o WebView
                   não tiver WebRTC/permissão, o clique explica o que falta em vez de
                   ser um botão morto (o snapshot de `callsSupport` é de render). */}
@@ -3438,7 +3438,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 6 }}>CHAMADAS — QUALIDADE E TURN</div>
             <div style={{ fontSize: 11, color: muted, marginBottom: 8, lineHeight: 1.5 }}>
-              Qualidade salva em <span style={{ fontFamily: 'JetBrains Mono' }}>forge:call_quality</span> • TURN em <span style={{ fontFamily: 'JetBrains Mono' }}>forge:turn_url</span> (formato <span style={{ fontFamily: 'JetBrains Mono' }}>turn:host:porta</span>).
+              Qualidade salva em <span style={{ fontFamily: 'JetBrains Mono' }}>distorrent:call_quality</span> • TURN em <span style={{ fontFamily: 'JetBrains Mono' }}>distorrent:turn_url</span> (formato <span style={{ fontFamily: 'JetBrains Mono' }}>turn:host:porta</span>).
             </div>
             <label htmlFor="call-quality-pref" style={{ display: 'block', fontSize: 11, fontWeight: 700, color: muted, marginBottom: 6 }}>QUALIDADE PREFERIDA</label>
             <select id="call-quality-pref" aria-label="Qualidade preferida das chamadas" value={callQuality} onChange={e => changeQuality(e.target.value as CallQuality)} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', color: text, fontSize: 14, marginBottom: 12 }}>

@@ -3,16 +3,16 @@
     windows_subsystem = "windows"
 )]
 
-//! FORGE shell — Tauri é apenas a casca: todo o motor (identidade, storage,
-//! rede P2P) vive em forge-core. Commands abaixo expõem a API ao WebView.
+//! DisTorrent shell — Tauri é apenas a casca: todo o motor (identidade, storage,
+//! rede P2P) vive em distorrent-core. Commands abaixo expõem a API ao WebView.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use forge_core::net::engine::{NetworkEngine, NetworkState};
-use forge_core::protocol::MessageEnvelope;
-use forge_core::storage::{PeerRecord, Store, StoredMessage};
-use forge_core::{Identity, Keypair};
+use distorrent_core::net::engine::{NetworkEngine, NetworkState};
+use distorrent_core::protocol::MessageEnvelope;
+use distorrent_core::storage::{PeerRecord, Store, StoredMessage};
+use distorrent_core::{Identity, Keypair};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -23,7 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// scoped storage (API 29+) **nega** escrita direta em
 /// `/storage/emulated/0/Download`; o caminho oficial é o `MediaStore`, que
 /// precisa de código nativo (Kotlin — `DownloadsPlugin.kt`). Este plugin liga
-/// o `com.forge.app.DownloadsPlugin` e expõe `plugin:downloads|save` pro
+/// o plugin Kotlin `com.distorrent.app.DownloadsPlugin` e expõe `plugin:downloads|save` pro
 /// frontend — que chama DEPOIS do `save_file`, copiando o rascunho privado
 /// para o Downloads público de verdade.
 ///
@@ -44,7 +44,7 @@ fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
                 // arquivo baixado para a pasta Downloads pública). Um app que
                 // abre e diz "não consegui salvar em Downloads" é infinitamente
                 // melhor que um app que não abre.
-                match api.register_android_plugin("com.forge.app", "DownloadsPlugin") {
+                match api.register_android_plugin("com.distorrent.app", "DownloadsPlugin") {
                     // O handle TEM que ficar vivo enquanto o app viver (é o que
                     // o próprio Tauri faz com o AppPlugin). Antes ele era
                     // descartado no fim do setup — bug latente.
@@ -73,10 +73,10 @@ struct AppState {
     engine: Mutex<Option<Arc<NetworkEngine>>>,
     data_dir: PathBuf,
     unlocked: Mutex<bool>,
-    cache: forge_core::cache::DiskLru,
+    cache: distorrent_core::cache::DiskLru,
     /// Limite de tentativas de senha/token. Vive no processo nativo, então
     /// recarregar a página ou o WebView NÃO cria uma janela nova.
-    auth_limit: forge_core::authlimit::AuthLimiter,
+    auth_limit: distorrent_core::authlimit::AuthLimiter,
 }
 
 /// Origem da chamada de desbloqueio. Num app desktop há uma origem só, então
@@ -96,7 +96,7 @@ fn auth_key(store: &Store, suffix: &str) -> String {
         .load_identity()
         .map(|i| i.fingerprint)
         .unwrap_or_else(|| "no-identity".to_string());
-    forge_core::authlimit::AuthLimiter::key(&format!("{account}:{suffix}"), AUTH_ORIGIN)
+    distorrent_core::authlimit::AuthLimiter::key(&format!("{account}:{suffix}"), AUTH_ORIGIN)
 }
 
 /// Verifica o orçamento antes de gastar o Argon2id.
@@ -106,8 +106,8 @@ fn auth_key(store: &Store, suffix: &str) -> String {
 /// manda é esta função, não a UI.
 fn auth_guard(state: &State<AppState>, key: &str) -> Result<(), String> {
     match state.auth_limit.check(key) {
-        forge_core::authlimit::Decision::Allowed => Ok(()),
-        forge_core::authlimit::Decision::Blocked { retry_after } => {
+        distorrent_core::authlimit::Decision::Allowed => Ok(()),
+        distorrent_core::authlimit::Decision::Blocked { retry_after } => {
             let secs = retry_after.as_secs().max(1);
             tracing::warn!(
                 fingerprint = %key,
@@ -201,7 +201,7 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 fn db_path(state: &State<AppState>) -> PathBuf {
-    state.data_dir.join("forge.db")
+    state.data_dir.join("distorrent.db")
 }
 
 fn open_store(state: &State<AppState>) -> Result<Store, String> {
@@ -300,7 +300,7 @@ fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identit
         return Ok(Some(id));
     }
     // 2) keyring do SO (só quando o SQLite não tem)
-    if let Ok(entry) = keyring::Entry::new("forge-app", "identity.secret") {
+    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
         if let Ok(secret) = entry.get_password() {
             if !secret.is_empty() && secret.len() >= 32 {
                 // restaura no SQLite para robustez futura
@@ -353,7 +353,7 @@ fn identity_create(
         Some(pass) if !pass.is_empty() => {
             // cofre: secret cifrada com a senha no SQLite local
             let secret_hex = kp.secret_hex();
-            let blob = forge_core::vault::seal_secret(&secret_hex, pass).map_err(err)?;
+            let blob = distorrent_core::vault::seal_secret(&secret_hex, pass).map_err(err)?;
             store
                 .save_identity(&identity, &hex::encode(&blob))
                 .map_err(err)?;
@@ -404,7 +404,7 @@ fn vault_unlock(
     let stored = store.load_secret_hex().ok_or("sem cofre")?;
     let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
 
-    let secret = match forge_core::vault::open_sealed(&blob, &password) {
+    let secret = match distorrent_core::vault::open_sealed(&blob, &password) {
         Ok(s) => s,
         Err(e) => {
             // A senha NÃO aparece no log nem no erro devolvido.
@@ -439,11 +439,11 @@ fn vault_change(old: String, new: String, state: State<AppState>) -> Result<(), 
 
     let stored = store.load_secret_hex().ok_or("sem cofre")?;
     let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
-    let secret = match forge_core::vault::open_sealed(&blob, &old) {
+    let secret = match distorrent_core::vault::open_sealed(&blob, &old) {
         Ok(s) => s,
         Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
     };
-    let newblob = match forge_core::vault::seal_secret(&secret, &new) {
+    let newblob = match distorrent_core::vault::seal_secret(&secret, &new) {
         Ok(b) => b,
         Err(e) => return Err(e.to_string()),
     };
@@ -492,7 +492,7 @@ fn persist_secret(store: &Store, kp: &Keypair, identity: &Identity) -> Result<()
         let _ = store.kv_set("identity.secret.backup", &secret);
         return Ok(());
     }
-    match keyring::Entry::new("forge-app", "identity.secret") {
+    match keyring::Entry::new("distorrent-app", "identity.secret") {
         Ok(entry) => match entry.set_password(&secret) {
             Ok(_) => {
                 // salva também backup no SQLite para caso keyring fique indisponível após reboot
@@ -525,7 +525,7 @@ fn load_secret(store: &Store, unlocked: bool) -> Result<String, String> {
     if !stored.is_empty() {
         return Ok(stored);
     }
-    if let Ok(entry) = keyring::Entry::new("forge-app", "identity.secret") {
+    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
         if let Ok(s) = entry.get_password() {
             if !s.is_empty() {
                 return Ok(s);
@@ -628,7 +628,7 @@ fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
-                    if let Err(e) = handle.emit("forge://event", &ev) {
+                    if let Err(e) = handle.emit("distorrent://event", &ev) {
                         tracing::warn!("emit falhou: {e}");
                     }
                 }
@@ -637,10 +637,10 @@ fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
                 // `break` matava o pump para sempre — nenhum evento chegava
                 // mais à WebView (sem ring, sem sinalização) até REINICIAR o
                 // app, que é exatamente o sintoma reportado.
-                Err(forge_core::BroadcastRecvError::Lagged(n)) => {
+                Err(distorrent_core::BroadcastRecvError::Lagged(n)) => {
                     tracing::warn!("eventos descartados na UI ({n}) — pump segue vivo");
                 }
-                Err(forge_core::BroadcastRecvError::Closed) => break,
+                Err(distorrent_core::BroadcastRecvError::Closed) => break,
             }
         }
     });
@@ -687,7 +687,7 @@ fn peers_list(state: State<AppState>) -> Result<Vec<PeerView>, String> {
 /// exista de fato no contexto da página (depende do build do WebKitGTK).
 #[tauri::command]
 fn webrtc_report(info: String) {
-    eprintln!("[forge-probe] {info}");
+    eprintln!("[distorrent-probe] {info}");
 }
 
 #[tauri::command]
@@ -709,7 +709,7 @@ fn net_diag(state: State<AppState>) -> Result<NetDiagView, String> {
 #[tauri::command]
 async fn relay_status(
     state: State<'_, AppState>,
-) -> Result<Vec<forge_core::net::relay::RelayLegStatus>, String> {
+) -> Result<Vec<distorrent_core::net::relay::RelayLegStatus>, String> {
     // Diagnóstico honesto das pernas do relay. Se o motor existe, respeita o
     // modo de privacidade: em proxy/Tor o probe passa pelo SOCKS5 (nítido —
     // NÃO revela o IP real aos hosts públicos). Sem motor (sem identidade),
@@ -721,7 +721,7 @@ async fn relay_status(
         .clone();
     match engine {
         Some(engine) => Ok(engine.relay_diagnostics().await),
-        None => Ok(forge_core::net::relay::check_relay_legs().await),
+        None => Ok(distorrent_core::net::relay::check_relay_legs().await),
     }
 }
 
@@ -793,7 +793,7 @@ fn communities_list(state: State<AppState>) -> Result<Vec<CommunityView>, String
 fn create_community(
     name: String,
     channels: Option<Vec<String>>,
-    options: Option<forge_core::net::engine::CommunityCreateOptions>,
+    options: Option<distorrent_core::net::engine::CommunityCreateOptions>,
     state: State<AppState>,
 ) -> Result<String, String> {
     let name = name.trim().to_string();
@@ -855,7 +855,7 @@ fn send_channel_message(
     channel_id: String,
     body: String,
     state: State<AppState>,
-) -> Result<forge_core::storage::StoredMessage, String> {
+) -> Result<distorrent_core::storage::StoredMessage, String> {
     if body.trim().is_empty() {
         return Err("mensagem vazia".into());
     }
@@ -921,7 +921,7 @@ fn channel_create(
     category: Option<String>,
     kind: Option<String>,
     state: State<AppState>,
-) -> Result<forge_core::storage::ChannelMetaRow, String> {
+) -> Result<distorrent_core::storage::ChannelMetaRow, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("nome do canal não pode ser vazio".into());
@@ -1000,7 +1000,7 @@ fn channel_set_category(
 fn channel_list(
     community_id: String,
     state: State<AppState>,
-) -> Result<Vec<forge_core::storage::ChannelMetaRow>, String> {
+) -> Result<Vec<distorrent_core::storage::ChannelMetaRow>, String> {
     engine(&state)?.channel_list(&community_id).map_err(err)
 }
 
@@ -1027,7 +1027,7 @@ fn role_create(
     hoist: bool,
     mentionable: bool,
     state: State<AppState>,
-) -> Result<forge_core::storage::RoleRow, String> {
+) -> Result<distorrent_core::storage::RoleRow, String> {
     if name.trim().is_empty() {
         return Err("nome do cargo não pode ser vazio".into());
     }
@@ -1106,7 +1106,7 @@ fn role_delete(
 fn roles_list(
     community_id: String,
     state: State<AppState>,
-) -> Result<Vec<forge_core::storage::RoleRow>, String> {
+) -> Result<Vec<distorrent_core::storage::RoleRow>, String> {
     engine(&state)?.roles_list(&community_id).map_err(err)
 }
 
@@ -1170,7 +1170,7 @@ fn member_kick(community_id: String, fp: String, state: State<AppState>) -> Resu
 fn server_rules_get(
     community_id: String,
     state: State<AppState>,
-) -> Result<forge_core::moderation::ServerRules, String> {
+) -> Result<distorrent_core::moderation::ServerRules, String> {
     engine(&state)?
         .server_rules_get(community_id.trim())
         .map_err(err)
@@ -1178,7 +1178,7 @@ fn server_rules_get(
 
 #[tauri::command]
 fn server_rules_set(
-    rules: forge_core::moderation::ServerRules,
+    rules: distorrent_core::moderation::ServerRules,
     state: State<AppState>,
 ) -> Result<(), String> {
     engine(&state)?.server_rules_set(rules).map_err(err)
@@ -1189,7 +1189,7 @@ fn audit_list(
     community_id: String,
     limit: Option<i64>,
     state: State<AppState>,
-) -> Result<Vec<forge_core::moderation::AuditEntry>, String> {
+) -> Result<Vec<distorrent_core::moderation::AuditEntry>, String> {
     engine(&state)?
         .audit_list(community_id.trim(), limit.unwrap_or(100))
         .map_err(err)
@@ -1253,11 +1253,11 @@ fn validate_name(
     state: State<AppState>,
 ) -> Result<NameCheckView, String> {
     let _ = &state;
-    let k = forge_core::names::NameKind::from_str(kind.trim())
+    let k = distorrent_core::names::NameKind::from_str(kind.trim())
         .ok_or_else(|| "tipo inválido (user|server|channel)".to_string())?;
     let scope = existing.unwrap_or_default();
-    let policy = forge_core::names::NamePolicy::for_kind(k);
-    let c = forge_core::names::validate_name(k, &raw, &scope, &policy);
+    let policy = distorrent_core::names::NamePolicy::for_kind(k);
+    let c = distorrent_core::names::validate_name(k, &raw, &scope, &policy);
     Ok(NameCheckView {
         ok: c.ok,
         normalized: c.normalized,
@@ -1268,7 +1268,7 @@ fn validate_name(
 
 #[tauri::command]
 fn random_name() -> String {
-    forge_core::names::random_name()
+    distorrent_core::names::random_name()
 }
 
 #[derive(serde::Serialize)]
@@ -1286,7 +1286,7 @@ fn bot_create(
     avatar: Option<String>,
     role_id: Option<String>,
     state: State<AppState>,
-) -> Result<forge_core::storage::BotRow, String> {
+) -> Result<distorrent_core::storage::BotRow, String> {
     if name.trim().is_empty() {
         return Err("nome do bot não pode ser vazio".into());
     }
@@ -1318,7 +1318,7 @@ fn bot_update(
             return Err("config do bot muito grande (máx 16KB)".into());
         }
     }
-    let merged = forge_core::storage::BotPatch {
+    let merged = distorrent_core::storage::BotPatch {
         name: name.or(p.name),
         avatar: avatar.or(p.avatar),
         // flat Some(x) → Some(Some(x)); "" ou null limpam o cargo
@@ -1353,7 +1353,7 @@ fn bot_delete(community_id: String, bot_id: String, state: State<AppState>) -> R
 fn bots_list(
     community_id: String,
     state: State<AppState>,
-) -> Result<Vec<forge_core::storage::BotRow>, String> {
+) -> Result<Vec<distorrent_core::storage::BotRow>, String> {
     engine(&state)?.bots_list(&community_id).map_err(err)
 }
 
@@ -1365,7 +1365,7 @@ fn bot_post_message(
     bot_id: String,
     body: String,
     state: State<AppState>,
-) -> Result<forge_core::storage::StoredMessage, String> {
+) -> Result<distorrent_core::storage::StoredMessage, String> {
     if body.trim().is_empty() {
         return Err("mensagem vazia".into());
     }
@@ -1478,7 +1478,7 @@ fn friends_list(status: Option<String>, state: State<AppState>) -> Result<Vec<Pe
 fn friend_request(
     peer_fp: String,
     state: State<AppState>,
-) -> Result<forge_core::net::engine::FriendOutcome, String> {
+) -> Result<distorrent_core::net::engine::FriendOutcome, String> {
     let fp = peer_fp.trim().to_lowercase();
     if !fp.chars().all(|c| c.is_ascii_hexdigit()) || fp.len() != 12 {
         return Err("fingerprint deve ter 12 hex chars".into());
@@ -1516,7 +1516,7 @@ fn friend_unblock(peer_fp: String, state: State<AppState>) -> Result<(), String>
 #[tauri::command]
 fn conversations_list(
     state: State<AppState>,
-) -> Result<Vec<forge_core::storage::Conversation>, String> {
+) -> Result<Vec<distorrent_core::storage::Conversation>, String> {
     Ok(engine(&state)?.conversations())
 }
 
@@ -1525,7 +1525,7 @@ fn dm_open(
     peer_fp: String,
     peer_nick: String,
     state: State<AppState>,
-) -> Result<forge_core::storage::Conversation, String> {
+) -> Result<distorrent_core::storage::Conversation, String> {
     engine(&state)?.open_dm(&peer_fp, &peer_nick).map_err(err)
 }
 
@@ -1533,7 +1533,7 @@ fn dm_open(
 fn messages_list(
     conv_id: String,
     state: State<AppState>,
-) -> Result<Vec<forge_core::storage::StoredMessage>, String> {
+) -> Result<Vec<distorrent_core::storage::StoredMessage>, String> {
     Ok(engine(&state)?.messages(&conv_id))
 }
 
@@ -1542,7 +1542,7 @@ fn message_send(
     conv_id: String,
     body: String,
     state: State<AppState>,
-) -> Result<forge_core::storage::StoredMessage, String> {
+) -> Result<distorrent_core::storage::StoredMessage, String> {
     if body.trim().is_empty() {
         return Err("mensagem vazia".into());
     }
@@ -1750,7 +1750,7 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
 /// diagnóstico: mostra os tetos vigentes e quantas ações cada classe já
 /// rejeitou. Nada de conteúdo, só contadores.
 #[tauri::command]
-fn net_limits(state: State<AppState>) -> Result<forge_core::net::netlimit::LimitsSnapshot, String> {
+fn net_limits(state: State<AppState>) -> Result<distorrent_core::net::netlimit::LimitsSnapshot, String> {
     let engine = state
         .engine
         .lock()
@@ -1875,7 +1875,7 @@ async fn proxy_test(addr: String) -> Result<u64, String> {
     if trimmed.is_empty() {
         return Err("informe o endereço do proxy (ex.: 127.0.0.1:9050 para Tor)".into());
     }
-    forge_core::net::relay::proxy_online_test(&trimmed).await
+    distorrent_core::net::relay::proxy_online_test(&trimmed).await
 }
 
 // ---------------- vault export/import ----------------
@@ -2084,7 +2084,7 @@ fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identit
                     pubkey_hex
                 },
                 nickname: nick,
-                created_at: forge_core::identity::now_ms(),
+                created_at: distorrent_core::identity::now_ms(),
             };
             store
                 .save_identity(&imported_identity, &blob)
@@ -2141,14 +2141,14 @@ fn social_react(conv_id: String, msg_id: String, emoji: String, state: State<App
 }
 
 #[tauri::command]
-fn social_reactions(msg_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::ReactionSummary>, String> {
+fn social_reactions(msg_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
     let store = open_store(&state)?;
     let rows = store.reactions_for_msg(&msg_id).map_err(err)?;
     Ok(store.mark_reactions_mine(rows, &identity_fp(&state)))
 }
 
 #[tauri::command]
-fn social_reactions_bulk(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<forge_core::social::ReactionSummary>, String> {
+fn social_reactions_bulk(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
     let store = open_store(&state)?;
     let rows = store.reactions_for_msgs(&msg_ids).map_err(err)?;
     Ok(store.mark_reactions_mine(rows, &identity_fp(&state)))
@@ -2175,12 +2175,12 @@ fn social_pin(conv_id: String, msg_id: String, pinned: bool, state: State<AppSta
 }
 
 #[tauri::command]
-fn social_pins(conv_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::MsgMetaView>, String> {
+fn social_pins(conv_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
     open_store(&state)?.pins_list(&conv_id).map_err(err)
 }
 
 #[tauri::command]
-fn social_meta_bulk(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<forge_core::social::MsgMetaView>, String> {
+fn social_meta_bulk(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
     open_store(&state)?.msg_meta_bulk(&msg_ids).map_err(err)
 }
 
@@ -2219,7 +2219,7 @@ fn read_set(conv_id: String, ts: i64, state: State<AppState>) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn read_all(state: State<AppState>) -> Result<Vec<forge_core::social::ReadCursor>, String> {
+fn read_all(state: State<AppState>) -> Result<Vec<distorrent_core::social::ReadCursor>, String> {
     open_store(&state)?.read_all().map_err(err)
 }
 
@@ -2242,12 +2242,12 @@ fn presence_set(status: String, custom: String, custom_emoji: String, state: Sta
 }
 
 #[tauri::command]
-fn presence_list(state: State<AppState>) -> Result<Vec<forge_core::social::PresenceView>, String> {
+fn presence_list(state: State<AppState>) -> Result<Vec<distorrent_core::social::PresenceView>, String> {
     open_store(&state)?.presence_list().map_err(err)
 }
 
 #[tauri::command]
-fn presence_get(fp: String, state: State<AppState>) -> Result<forge_core::social::PresenceView, String> {
+fn presence_get(fp: String, state: State<AppState>) -> Result<distorrent_core::social::PresenceView, String> {
     open_store(&state)?.presence_get(&fp).map_err(err)
 }
 
@@ -2263,19 +2263,19 @@ fn profile_set(
     banner_b64: String,
     accent: String,
     state: State<AppState>,
-) -> Result<forge_core::social::ProfileView, String> {
+) -> Result<distorrent_core::social::ProfileView, String> {
     engine(&state)?
         .social_profile_set(&display_name, &about, &avatar_b64, &banner_b64, &accent)
         .map_err(err)
 }
 
 #[tauri::command]
-fn profile_get(fp: String, state: State<AppState>) -> Result<forge_core::social::ProfileView, String> {
+fn profile_get(fp: String, state: State<AppState>) -> Result<distorrent_core::social::ProfileView, String> {
     open_store(&state)?.profile_get(&fp).map_err(err)
 }
 
 #[tauri::command]
-fn profile_list(state: State<AppState>) -> Result<Vec<forge_core::social::ProfileView>, String> {
+fn profile_list(state: State<AppState>) -> Result<Vec<distorrent_core::social::ProfileView>, String> {
     open_store(&state)?.profile_list().map_err(err)
 }
 
@@ -2292,7 +2292,7 @@ fn nickname_get(community_id: String, fp: String, state: State<AppState>) -> Res
 // ---------- busca / histórico ----------
 
 #[tauri::command]
-fn message_search(q: forge_core::social::SearchQuery, state: State<AppState>) -> Result<Vec<forge_core::social::SearchHit>, String> {
+fn message_search(q: distorrent_core::social::SearchQuery, state: State<AppState>) -> Result<Vec<distorrent_core::social::SearchHit>, String> {
     open_store(&state)?.message_search(&q).map_err(err)
 }
 
@@ -2311,14 +2311,14 @@ fn thread_create(
     kind: String,
     tags: String,
     state: State<AppState>,
-) -> Result<forge_core::social::ThreadRow, String> {
+) -> Result<distorrent_core::social::ThreadRow, String> {
     engine(&state)?
         .social_thread_create(&community_id, &parent_channel, &name, &kind, &tags)
         .map_err(err)
 }
 
 #[tauri::command]
-fn thread_list(community_id: String, parent: String, state: State<AppState>) -> Result<Vec<forge_core::social::ThreadRow>, String> {
+fn thread_list(community_id: String, parent: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::ThreadRow>, String> {
     open_store(&state)?.threads_list(&community_id, &parent).map_err(err)
 }
 
@@ -2355,12 +2355,12 @@ fn member_timeout(community_id: String, fp: String, until_ms: i64, reason: Strin
 }
 
 #[tauri::command]
-fn ban_list(community_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::BanRow>, String> {
+fn ban_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::BanRow>, String> {
     open_store(&state)?.ban_list(&community_id).map_err(err)
 }
 
 #[tauri::command]
-fn timeout_list(community_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::BanRow>, String> {
+fn timeout_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::BanRow>, String> {
     open_store(&state)?.timeout_list(&community_id).map_err(err)
 }
 
@@ -2385,14 +2385,14 @@ fn poll_create(
     multi: bool,
     ends_at: i64,
     state: State<AppState>,
-) -> Result<forge_core::social::PollRow, String> {
+) -> Result<distorrent_core::social::PollRow, String> {
     engine(&state)?
         .social_poll_create(&community_id, &channel_id, &question, options, multi, ends_at)
         .map_err(err)
 }
 
 #[tauri::command]
-fn poll_list(community_id: String, channel_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::PollRow>, String> {
+fn poll_list(community_id: String, channel_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::PollRow>, String> {
     open_store(&state)?.poll_list(&community_id, &channel_id).map_err(err)
 }
 
@@ -2411,12 +2411,12 @@ fn poll_tally(poll_id: String, state: State<AppState>) -> Result<(Vec<i64>, i64,
 }
 
 #[tauri::command]
-fn event_upsert(ev: forge_core::social::EventRow, state: State<AppState>) -> Result<(), String> {
+fn event_upsert(ev: distorrent_core::social::EventRow, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.social_event_upsert(ev).map_err(err)
 }
 
 #[tauri::command]
-fn event_list(community_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::EventRow>, String> {
+fn event_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::EventRow>, String> {
     open_store(&state)?.event_list(&community_id).map_err(err)
 }
 
@@ -2431,12 +2431,12 @@ fn event_delete(community_id: String, event_id: String, state: State<AppState>) 
 }
 
 #[tauri::command]
-fn emoji_upsert(e: forge_core::social::EmojiRow, state: State<AppState>) -> Result<(), String> {
+fn emoji_upsert(e: distorrent_core::social::EmojiRow, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.social_emoji_upsert(e).map_err(err)
 }
 
 #[tauri::command]
-fn emoji_list(community_id: String, state: State<AppState>) -> Result<Vec<forge_core::social::EmojiRow>, String> {
+fn emoji_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::EmojiRow>, String> {
     open_store(&state)?.emoji_list(&community_id).map_err(err)
 }
 
@@ -2488,7 +2488,7 @@ fn secure_store(key: String, value: String) -> Result<(), String> {
     if is_reserved_key(&key) {
         return Err("chave reservada do sistema".into());
     }
-    let entry = keyring::Entry::new("forge-app", &key).map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new("distorrent-app", &key).map_err(|e| e.to_string())?;
     entry.set_password(&value).map_err(|e| e.to_string())
 }
 
@@ -2497,7 +2497,7 @@ fn secure_load(key: String) -> Result<Option<String>, String> {
     if is_reserved_key(&key) {
         return Err("chave reservada do sistema".into());
     }
-    let entry = keyring::Entry::new("forge-app", &key).map_err(|e| e.to_string())?;
+    let entry = keyring::Entry::new("distorrent-app", &key).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(v) => Ok(Some(v)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -2510,7 +2510,7 @@ fn create_group(
     title: String,
     members: Vec<String>,
     state: State<AppState>,
-) -> Result<forge_core::storage::Conversation, String> {
+) -> Result<distorrent_core::storage::Conversation, String> {
     engine(&state)?.create_group(&title, members).map_err(err)
 }
 
@@ -2588,7 +2588,7 @@ fn call_offer(
     engine(&state)?
         .call_signal(
             &target_fp,
-            forge_core::protocol::SecureFrame::CallOffer { call_id, sdp },
+            distorrent_core::protocol::SecureFrame::CallOffer { call_id, sdp },
         )
         .map_err(err)
 }
@@ -2603,7 +2603,7 @@ fn call_answer(
     engine(&state)?
         .call_signal(
             &target_fp,
-            forge_core::protocol::SecureFrame::CallAnswer { call_id, sdp },
+            distorrent_core::protocol::SecureFrame::CallAnswer { call_id, sdp },
         )
         .map_err(err)
 }
@@ -2619,7 +2619,7 @@ fn call_ice(
     engine(&state)?
         .call_signal(
             &target_fp,
-            forge_core::protocol::SecureFrame::CallIce {
+            distorrent_core::protocol::SecureFrame::CallIce {
                 call_id,
                 candidate,
                 mid,
@@ -2650,7 +2650,7 @@ fn call_add_participant(
 // perguntam se a camada existe e exponem mute/hangup/estatísticas.
 //
 // `voice_media_available` devolve `false` quando não há mídia nativa (build
-// sem ela, plataforma diferente de Linux, ou `FORGE_NO_NATIVE_VOICE=1`). Nesse
+// sem ela, plataforma diferente de Linux, ou `DISTORRENT_NO_NATIVE_VOICE=1`). Nesse
 // caso a UI deve seguir 100% pelo WebRTC do navegador, como sempre.
 
 #[cfg(target_os = "linux")]
@@ -2667,7 +2667,7 @@ fn voice_media_available(state: State<AppState>) -> Result<bool, String> {
         .clone()
     {
         Some(e) => Ok(e.voice_media_available()),
-        None => Ok(forge_core::net::engine::native_voice_capable()),
+        None => Ok(distorrent_core::net::engine::native_voice_capable()),
     }
 }
 
@@ -2708,7 +2708,7 @@ fn voice_set_deafened(call_id: String, deafened: bool, state: State<AppState>) -
 // ---------------- vídeo nativo (câmera/tela) — Linux ----------------
 //
 // O caminho NATIVO de vídeo (encoder/decoder GStreamer em
-// `forge-core/src/net/media_video.rs`) já existe no core; o que faltava era
+// `distorrent-core/src/net/media_video.rs`) já existe no core; o que faltava era
 // a PONTE até a UI. Sem estes comandos, os botões de câmera/tela no Linux
 // chamavam getUserMedia/getDisplayMedia (que o WebKitGTK não expõe para
 // RTCPeerConnection) e a capacidade inteira ficava morta.
@@ -2776,7 +2776,7 @@ fn voice_video_frame(
 }
 
 // Fora do Linux a camada nativa NÃO EXISTE (webrtc-rs/cpal/libopus nem entram
-// no build — ver forge-core/Cargo.toml). Estes stubs respondem exatamente o que
+// no build — ver distorrent-core/Cargo.toml). Estes stubs respondem exatamente o que
 // o Linux responderia com a camada desligada, então a UI não tem nenhum caminho
 // novo para aprender e o WebRTC do navegador permanece intocado.
 #[cfg(not(target_os = "linux"))]
@@ -2918,7 +2918,7 @@ fn screen_share_offer(
     engine(&state)?
         .call_signal(
             &target_fp,
-            forge_core::protocol::SecureFrame::ScreenShareOffer { call_id, sdp },
+            distorrent_core::protocol::SecureFrame::ScreenShareOffer { call_id, sdp },
         )
         .map_err(err)
 }
@@ -2936,7 +2936,7 @@ fn screen_share_answer(
     engine(&state)?
         .call_signal(
             &target_fp,
-            forge_core::protocol::SecureFrame::ScreenShareAnswer { call_id, sdp },
+            distorrent_core::protocol::SecureFrame::ScreenShareAnswer { call_id, sdp },
         )
         .map_err(err)
 }
@@ -3073,18 +3073,18 @@ fn save_file(
             strip_exif: true,
             block_executables: true,
         });
-    let sniffed = forge_core::media::sniff_mime(&bytes);
+    let sniffed = distorrent_core::media::sniff_mime(&bytes);
     if sniffed.is_executable() && safety.block_executables {
         return Err(format!(
             "save_file bloqueou: executável recebido por P2P (tipo real: {}) — risco de malware. Se você confia na origem, desligue o bloqueio em Configurações → Cofre & Backup → Mídia e baixe de novo.",
             sniffed.as_str()
         ));
     }
-    if forge_core::media::extension_is_blocked(&name) && safety.block_executables {
+    if distorrent_core::media::extension_is_blocked(&name) && safety.block_executables {
         return Err("save_file bloqueou: extensão de executável/script recebida por P2P — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se tiver certeza.".into());
     }
     let bytes = if safety.strip_exif {
-        match forge_core::media::strip_metadata(&bytes) {
+        match distorrent_core::media::strip_metadata(&bytes) {
             Ok(clean) => clean,
             Err(e) => {
                 tracing::warn!("save_file: imagem com metadados intactos (strip falhou: {e}) — salvando original");
@@ -3150,7 +3150,7 @@ fn save_file(
     // ESCRITA ATÔMICA (v6): grava em .tmp e renomeia no fim — um crash/app
     // morto no meio do write NÃO deixa um arquivo corrompido com nome final
     // (o usuário veria "foto.png" quebrada). O tmp morre junto em falha.
-    let tmp = path.with_extension("forge-part");
+    let tmp = path.with_extension("distorrent-part");
     if let Err(e) = fs::write(&tmp, &bytes) {
         // limpa possível tmp de tentativa anterior antes de reportar
         let _ = fs::remove_file(&tmp);
@@ -3190,7 +3190,7 @@ fn save_file(
 /// temporario e as seguintes reabrem esse mesmo arquivo em append. `flush: true`
 /// faz rename atomico e devolve o caminho final.
 ///
-/// Se o app morrer no meio, sobra um `.forge-part` (mesmo comportamento de antes,
+/// Se o app morrer no meio, sobra um `.distorrent-part` (mesmo comportamento de antes,
 /// que ja gravava em .tmp) — nunca um arquivo corrompido com nome final.
 #[tauri::command]
 fn save_file_stream(
@@ -3208,7 +3208,7 @@ fn save_file_stream(
 
     // `job_id` também entra no nome do temporário. Antes ia CRU: um renderer
     // comprometido mandava `../../algo` e escrevia fora de Downloads (o sufixo
-    // `.forge-part` limitava o dano, mas não o suficiente).
+    // `.distorrent-part` limitava o dano, mas não o suficiente).
     if job_id.is_empty()
         || job_id.len() > 64
         || !job_id
@@ -3264,7 +3264,7 @@ fn save_file_stream(
             strip_exif: true,
             block_executables: true,
         });
-    if safety.block_executables && forge_core::media::extension_is_blocked(&safe) {
+    if safety.block_executables && distorrent_core::media::extension_is_blocked(&safe) {
         return Err("save_file_stream bloqueou: extensão de executável/script recebida por P2P — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se tiver certeza.".into());
     }
 
@@ -3287,7 +3287,7 @@ fn save_file_stream(
     fs::create_dir_all(&downloads)
         .map_err(|e| format!("save_file_stream travou em mkdir: {e}"))?;
 
-    let tmp = downloads.join(format!(".{safe}.{job_id}.forge-part"));
+    let tmp = downloads.join(format!(".{safe}.{job_id}.distorrent-part"));
 
     // Magic bytes do PRIMEIRO lote (arquivo ainda vazio): é o equivalente
     // streaming do que `save_file` faz no arquivo inteiro. Extensão já foi
@@ -3296,7 +3296,7 @@ fn save_file_stream(
     // `flush: true` (arquivo pequeno) — antes esse caso pulava a checagem.
     let primeiro_lote = fs::metadata(&tmp).map(|m| m.len() == 0).unwrap_or(true);
     if primeiro_lote && safety.block_executables && !bytes.is_empty() {
-        let sniffed = forge_core::media::sniff_mime(&bytes);
+        let sniffed = distorrent_core::media::sniff_mime(&bytes);
         if sniffed.is_executable() {
             let _ = fs::remove_file(&tmp);
             return Err(format!(
@@ -3347,17 +3347,17 @@ fn save_file_stream(
                 let mut head = vec![0u8; 512];
                 let n = f.read(&mut head).unwrap_or(0);
                 head.truncate(n);
-                let sniffed = forge_core::media::sniff_mime(&head);
+                let sniffed = distorrent_core::media::sniff_mime(&head);
                 let is_image = matches!(
                     sniffed,
-                    forge_core::media::SniffedMime::Jpeg
-                        | forge_core::media::SniffedMime::Png
-                        | forge_core::media::SniffedMime::Gif
-                        | forge_core::media::SniffedMime::Webp
+                    distorrent_core::media::SniffedMime::Jpeg
+                        | distorrent_core::media::SniffedMime::Png
+                        | distorrent_core::media::SniffedMime::Gif
+                        | distorrent_core::media::SniffedMime::Webp
                 );
                 if is_image {
                     if let Ok(all) = fs::read(&tmp) {
-                        if let Ok(clean) = forge_core::media::strip_metadata(&all) {
+                        if let Ok(clean) = distorrent_core::media::strip_metadata(&all) {
                             let _ = fs::write(&tmp, &clean);
                         }
                     }
@@ -3379,7 +3379,7 @@ fn save_file_stream(
     Ok(tmp.to_string_lossy().to_string())
 }
 
-/// Teto do fluxo em lotes. Espelha a validacao do frontend (VITE_FORGE_MAX_FILE_MB,
+/// Teto do fluxo em lotes. Espelha a validacao do frontend (VITE_DISTORRENT_MAX_FILE_MB,
 /// default 2 GB) — este e' o que impede um peer de nos fazer preencher o disco.
 const MAX_STREAM_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -3454,7 +3454,7 @@ fn unique_download_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
 fn get_app_version(app: tauri::AppHandle) -> String {
     // A versão do APP é a do tauri.conf.json (mesma do package.json, e a
     // mesma que nomeia os instaladores). CARGO_PKG_VERSION é a do CRATE Rust
-    // (2.2.0 — histórico FORGE), não do produto: a tela Sobre mostrava
+    // (2.2.0 — histórico DisTorrent), não do produto: a tela Sobre mostrava
     // "versão 2.2.0" num app 1.1.0-pre-alpha.1.
     app.config()
         .version
@@ -3468,7 +3468,7 @@ fn get_app_version(app: tauri::AppHandle) -> String {
 struct StormVaultExportView {
     path: String,
     bytes: u64,
-    header: forge_core::stormvault::StormVaultHeader,
+    header: distorrent_core::stormvault::StormVaultHeader,
 }
 
 #[derive(Debug, Serialize)]
@@ -3529,9 +3529,9 @@ async fn stormvault_export(
         None
     };
     let max = max_messages.map(|m| m.min(5_000_000) as usize);
-    let data = forge_core::stormvault::collect(&store, secret, max).map_err(err)?;
-    let sealed = forge_core::stormvault::seal_with_password(&data, &password).map_err(err)?;
-    let header = forge_core::stormvault::read_header(&sealed).map_err(err)?;
+    let data = distorrent_core::stormvault::collect(&store, secret, max).map_err(err)?;
+    let sealed = distorrent_core::stormvault::seal_with_password(&data, &password).map_err(err)?;
+    let header = distorrent_core::stormvault::read_header(&sealed).map_err(err)?;
 
     let base = export_base_dir(&app)?;
     std::fs::create_dir_all(&base)
@@ -3539,7 +3539,7 @@ async fn stormvault_export(
     let fname = format!(
         "distorrent-cofre-{}-{}.stormvault",
         identity.fingerprint,
-        forge_core::identity::now_ms()
+        distorrent_core::identity::now_ms()
     );
     let path = unique_download_path(&base, &fname);
     // Escrita atômica: tmp + rename — crash no meio não deixa cofre
@@ -3553,7 +3553,7 @@ async fn stormvault_export(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("falha ao gravar o cofre: {e}"));
     }
-    forge_core::metrics::metrics().vault_op();
+    distorrent_core::metrics::metrics().vault_op();
     // zera a senha da memória asim que possível (best-effort; String não é zeroizável)
     drop(password);
     Ok(StormVaultExportView {
@@ -3594,7 +3594,7 @@ async fn stormvault_import(
     content_b64: String,
     password: String,
     state: State<'_, AppState>,
-) -> Result<forge_core::stormvault::ImportReport, String> {
+) -> Result<distorrent_core::stormvault::ImportReport, String> {
     use base64::{engine::general_purpose, Engine as _};
     let bytes = general_purpose::STANDARD
         .decode(content_b64.trim())
@@ -3617,19 +3617,19 @@ async fn stormvault_import(
         engine(&state)?;
     }
     let report =
-        match forge_core::stormvault::import_with_password(&store, &bytes, &password) {
+        match distorrent_core::stormvault::import_with_password(&store, &bytes, &password) {
             Ok(r) => r,
             Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
         };
     auth_ok(&state, &key);
-    forge_core::metrics::metrics().vault_op();
+    distorrent_core::metrics::metrics().vault_op();
     drop(password);
     Ok(report)
 }
 
 fn list_backup_files(state: &State<AppState>) -> Result<Vec<BackupView>, String> {
     Ok(
-        forge_core::stormvault::list_backup_files(&backups_dir(state))
+        distorrent_core::stormvault::list_backup_files(&backups_dir(state))
             .into_iter()
             .map(|(file, created_ms, bytes)| BackupView {
                 file,
@@ -3652,15 +3652,15 @@ async fn stormvault_backup_now(state: State<'_, AppState>) -> Result<BackupView,
     let eng = engine(&state)?;
     let secret = eng.secret_hex();
     let store = open_store(&state)?;
-    let data = forge_core::stormvault::collect(&store, Some(secret.clone()), None).map_err(err)?;
-    let key = forge_core::stormvault::backup_key_for(&secret);
-    let sealed = forge_core::stormvault::seal_with_key(&data, &key).map_err(err)?;
+    let data = distorrent_core::stormvault::collect(&store, Some(secret.clone()), None).map_err(err)?;
+    let key = distorrent_core::stormvault::backup_key_for(&secret);
+    let sealed = distorrent_core::stormvault::seal_with_key(&data, &key).map_err(err)?;
     let dir = backups_dir(&state);
     std::fs::create_dir_all(&dir).map_err(|e| format!("pasta de backups: {e}"))?;
-    let now = forge_core::identity::now_ms();
-    let file = forge_core::stormvault::backup_file_name(now);
+    let now = distorrent_core::identity::now_ms();
+    let file = distorrent_core::stormvault::backup_file_name(now);
     std::fs::write(dir.join(&file), &sealed).map_err(|e| format!("gravar backup: {e}"))?;
-    forge_core::metrics::metrics().vault_op();
+    distorrent_core::metrics::metrics().vault_op();
     prune_backups(&state).map_err(err)?;
     Ok(BackupView {
         file,
@@ -3674,7 +3674,7 @@ async fn stormvault_backup_now(state: State<'_, AppState>) -> Result<BackupView,
 async fn stormvault_backup_restore(
     file: String,
     state: State<'_, AppState>,
-) -> Result<forge_core::stormvault::ImportReport, String> {
+) -> Result<distorrent_core::stormvault::ImportReport, String> {
     // sanitiza: basename exato, sem traversal, só o padrão de backup
     let safe = std::path::Path::new(&file)
         .file_name()
@@ -3690,15 +3690,15 @@ async fn stormvault_backup_restore(
     let bytes = std::fs::read(backups_dir(&state).join(safe))
         .map_err(|_| "backup não encontrado".to_string())?;
     let eng = engine(&state)?;
-    let key = forge_core::stormvault::backup_key_for(&eng.secret_hex());
-    let data = forge_core::stormvault::open_with_key(&bytes, &key)
+    let key = distorrent_core::stormvault::backup_key_for(&eng.secret_hex());
+    let data = distorrent_core::stormvault::open_with_key(&bytes, &key)
         .map_err(|e| format!("não abriu como backup automático ({e}) — use Importar com senha"))?;
     if data.identity.fingerprint != eng.identity().fingerprint {
         return Err("backup de outra conta — restaure na conta certa".into());
     }
     let store = open_store(&state)?;
-    let report = forge_core::stormvault::import_merge_only(&store, &data).map_err(err)?;
-    forge_core::metrics::metrics().vault_op();
+    let report = distorrent_core::stormvault::import_merge_only(&store, &data).map_err(err)?;
+    distorrent_core::metrics::metrics().vault_op();
     Ok(report)
 }
 
@@ -3723,10 +3723,10 @@ fn stormvault_backup_get_retention(state: State<AppState>) -> Result<i64, String
 /// Apaga backups além da retenção (lógica no core — testável).
 fn prune_backups(state: &State<AppState>) -> Result<usize, String> {
     let store = open_store(state)?;
-    forge_core::stormvault::prune_backup_files(
+    distorrent_core::stormvault::prune_backup_files(
         &backups_dir(state),
         backup_retention_days(&store),
-        forge_core::identity::now_ms(),
+        distorrent_core::identity::now_ms(),
     )
     .map_err(err)
 }
@@ -3751,10 +3751,10 @@ fn vault_wipe(
         *guard = None;
     }
     *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = false;
-    if let Ok(entry) = keyring::Entry::new("forge-app", "identity.secret") {
+    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
         let _ = entry.delete_password();
     }
-    for f in ["forge.db", "forge.db-wal", "forge.db-shm"] {
+    for f in ["distorrent.db", "distorrent.db-wal", "distorrent.db-shm"] {
         let _ = std::fs::remove_file(state.data_dir.join(f));
     }
     let _ = std::fs::remove_dir_all(backups_dir(&state));
@@ -3791,7 +3791,7 @@ struct WipeReport {
 /// Snapshot de métricas do motor (só contagens/latências — nada sensível).
 #[tauri::command]
 fn metrics_snapshot() -> serde_json::Value {
-    forge_core::metrics::metrics().snapshot()
+    distorrent_core::metrics::metrics().snapshot()
 }
 
 /// RTT estimado (EMA, ms) de um peer — None se ainda sem amostra Ping/Pong.
@@ -3842,11 +3842,11 @@ fn cache_get(key: String, state: State<AppState>) -> Result<Option<String>, Stri
     check_cache_key(&key)?;
     match state.cache.get(&key).map_err(err)? {
         Some(bytes) => {
-            forge_core::metrics::metrics().cache_hit();
+            distorrent_core::metrics::metrics().cache_hit();
             Ok(Some(general_purpose::STANDARD.encode(&bytes)))
         }
         None => {
-            forge_core::metrics::metrics().cache_miss();
+            distorrent_core::metrics::metrics().cache_miss();
             Ok(None)
         }
     }
@@ -3931,14 +3931,14 @@ fn media_safety_set(
 
 fn log_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,forge_core=info"))
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,distorrent_core=info"))
 }
 
 fn main() {
-    // Logs estruturados (JSON, 1 evento por linha) com FORGE_LOG_JSON=1 —
+    // Logs estruturados (JSON, 1 evento por linha) com DISTORRENT_LOG_JSON=1 —
     // para coleta em arquivo/SIEM. Nunca logar chaves, senhas ou conteúdo
     // de mensagens (revisar qualquer novo `tracing::` antes de mergear).
-    if std::env::var("FORGE_LOG_JSON").as_deref() == Ok("1") {
+    if std::env::var("DISTORRENT_LOG_JSON").as_deref() == Ok("1") {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter(log_filter())
@@ -4164,7 +4164,7 @@ fn main() {
                 .app_data_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&dir).ok();
-            tracing::info!(?dir, "FORGE iniciando");
+            tracing::info!(?dir, "DisTorrent iniciando");
             // Cache fontconfig privado (imune ao ~/.cache/fontconfig
             // envenenado — ver isolate_fontconfig_cache). Aqui com o data_dir
             // autoritativo; o run() já fez best-effort antes de tudo.
@@ -4172,14 +4172,14 @@ fn main() {
             isolate_fontconfig_cache_managed(&dir);
             // cache LRU de disco (avatares/thumbnails/spool de chunks) — teto
             // persistido em kv, padrão 256MB
-            let cap_mb: u64 = Store::open(&dir.join("forge.db"))
+            let cap_mb: u64 = Store::open(&dir.join("distorrent.db"))
                 .ok()
                 .and_then(|s| s.kv_get("cache.cap_mb"))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(256)
                 .clamp(16, 4096);
             let cache =
-                forge_core::cache::DiskLru::open(dir.join("cache"), Some(cap_mb * 1024 * 1024))
+                distorrent_core::cache::DiskLru::open(dir.join("cache"), Some(cap_mb * 1024 * 1024))
                     .map_err(|e| format!("cache: {e}"))?;
             app.manage(AppState {
                 engine: Mutex::new(None),
@@ -4187,15 +4187,15 @@ fn main() {
                 unlocked: Mutex::new(false),
                 cache,
                 // 3 tentativas em 15 min, bloqueio de 60s dobrando a cada
-                // reincidência. Ver `forge-core/src/authlimit.rs`.
-                auth_limit: forge_core::authlimit::AuthLimiter::new(),
+                // reincidência. Ver `distorrent-core/src/authlimit.rs`.
+                auth_limit: distorrent_core::authlimit::AuthLimiter::new(),
             });
             // Pré-aquece o SQLite ENQUANTO a janela/WebView ainda está subindo.
             // O primeiro comando que a UI chama é `identity_get`, que abre este
             // mesmo arquivo: sem o aquecimento a tela de boot espera o disco
             // frio (lock + parse do header) antes de mostrar qualquer coisa.
             {
-                let warm = dir.join("forge.db");
+                let warm = dir.join("distorrent.db");
                 std::thread::spawn(move || {
                     let _ = Store::open(&warm);
                 });
@@ -4209,7 +4209,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("erro ao rodar forge");
+        .expect("erro ao rodar distorrent");
 }
 
 /// LIGA O WEBRTC NO WEBCOMPATÍVEL DO LINUX.
@@ -4246,9 +4246,9 @@ fn enable_webrtc(app: &tauri::AppHandle) {
             // erro de CSP, de carregamento de asset ou exceção na UI fica
             // INVISÍVEL: o app só mostra uma janela cinza sem explicação.
             settings.set_enable_write_console_messages_to_stdout(true);
-            eprintln!("[forge] WebKitGTK: enable_webrtc = LIGADO");
+            eprintln!("[distorrent] WebKitGTK: enable_webrtc = LIGADO");
         }
-        None => eprintln!("[forge] WebKitGTK: settings() = None — WebRTC NÃO ligado"),
+        None => eprintln!("[distorrent] WebKitGTK: settings() = None — WebRTC NÃO ligado"),
     }
     });
 
@@ -4263,7 +4263,7 @@ fn enable_webrtc(_app: &tauri::AppHandle) {}
 pub fn run_mobile() {
     // Android: DHT mainline BitTorrent LIGADA (paridade com desktop).
     // Sem isto o celular nunca anuncia/faz lookup na rede BitTorrent.
-    std::env::set_var("FORGE_DHT", "1");
+    std::env::set_var("DISTORRENT_DHT", "1");
     main();
 }
 
@@ -4271,7 +4271,7 @@ pub fn run_mobile() {
 pub fn run() {
     // PRODUÇÃO: liga a DHT mainline BitTorrent (descoberta descentralizada).
     // Testes não setam → engines de teste ficam isolados da rede BitTorrent.
-    std::env::set_var("FORGE_DHT", "1");
+    std::env::set_var("DISTORRENT_DHT", "1");
     #[cfg(target_os = "linux")]
     isolate_fontconfig_cache_best_effort();
     main();
@@ -4287,10 +4287,10 @@ pub fn run() {
 /// de CPU antes do primeiro paint — a janela abre cinza, sem splash, sem
 /// BootScreen e sem nem mensagem no console. Chromium não é afetado.
 ///
-/// A correção: `FONTCONFIG_FILE` próprio (`forge-fonts.conf`, ao lado deste
+/// A correção: `FONTCONFIG_FILE` próprio (`distorrent-fonts.conf`, ao lado deste
 /// fonte), com os mesmos diretórios e regras do sistema (`/etc/fonts/conf.d`
 /// — que inclui o 50-user.conf com as personalizações do usuário), mas
-/// `<cachedir>` APENAS em `~/.cache/forge-fontconfig`. O cache envenenado
+/// `<cachedir>` APENAS em `~/.cache/distorrent-fontconfig`. O cache envenenado
 /// nunca é lido nem escrito por nós, e brew/outros nunca tocam no nosso.
 /// Respeita `FONTCONFIG_FILE` pré-existente (quem setou sabe o que faz).
 /// Primeira execução: cache vazio = varredura ao vivo (lento uma vez),
@@ -4300,7 +4300,7 @@ fn isolate_fontconfig_cache_best_effort() {
     if std::env::var_os("FONTCONFIG_FILE").is_some() {
         return;
     }
-    let Some(data_dir) = dirs::data_dir().map(|d| d.join("com.forge.app")) else {
+    let Some(data_dir) = dirs::data_dir().map(|d| d.join("com.distorrent.app")) else {
         return;
     };
     isolate_fontconfig_cache(&data_dir);
@@ -4317,8 +4317,8 @@ fn isolate_fontconfig_cache_managed(data_dir: &std::path::Path) {
 
 #[cfg(target_os = "linux")]
 fn isolate_fontconfig_cache(data_dir: &std::path::Path) {
-    const CONF: &str = include_str!("../fontconfig/forge-fonts.conf");
-    let target = data_dir.join("forge-fonts.conf");
+    const CONF: &str = include_str!("../fontconfig/distorrent-fonts.conf");
+    let target = data_dir.join("distorrent-fonts.conf");
     let fresh = std::fs::read_to_string(&target).map(|c| c == CONF).unwrap_or(false);
     if !fresh {
         if let Err(e) = std::fs::create_dir_all(data_dir)
@@ -4329,5 +4329,5 @@ fn isolate_fontconfig_cache(data_dir: &std::path::Path) {
         }
     }
     std::env::set_var("FONTCONFIG_FILE", &target);
-    eprintln!("[forge] fontconfig: cache privado em {}", target.display());
+    eprintln!("[distorrent] fontconfig: cache privado em {}", target.display());
 }

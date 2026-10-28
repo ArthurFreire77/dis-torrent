@@ -12,7 +12,7 @@ import {
   serializeQueue, verifyFileIntegrity,
 } from './downloadQueue'
 
-const LS_KEY = 'forge:downloads:v1'
+const LS_KEY = 'distorrent:downloads:v1'
 /** Janela de amostragem da velocidade (ms). */
 const SPEED_WINDOW_MS = 2000
 /** Sem seeder e sem progresso por este tempo → failed honesto (retry manual). */
@@ -169,7 +169,7 @@ class DownloadManager {
    *
    * Solta também os CHUNKS do swarm: `fileSwarm.files` guardava cada arquivo
    * com o `Map<data>` inteiro em RAM (até 200 MB por arquivo) e o
-   * `forge:filemeta:*` no localStorage crescia para sempre — e como
+   * `distorrent:filemeta:*` no localStorage crescia para sempre — e como
    * `restoreLocalFiles()` re-registrava tudo a cada boot, o cache LRU do spool
    * sofria churn de evicção constante. Só libera os chunks; o item continua
    * re-adicionável (o metadado fica, para o re-download).
@@ -385,7 +385,7 @@ class DownloadManager {
     } catch { /* notificação é best-effort — nunca derruba o save */ }
     try {
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('forge:download_done', { detail: { file_id: item.file_id, name: item.name, savedPath: item.savedPath } }))
+        window.dispatchEvent(new CustomEvent('distorrent:download_done', { detail: { file_id: item.file_id, name: item.name, savedPath: item.savedPath } }))
       }
     } catch { /* ignore */ }
   }

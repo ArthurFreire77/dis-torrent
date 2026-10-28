@@ -1,4 +1,4 @@
-// Sanitização de texto — espelho TS de forge-core/src/names.rs.
+// Sanitização de texto — espelho TS de distorrent-core/src/names.rs.
 // Puro, sem dependências, seguro em WebView Android/iOS e desktop.
 // O CORE (Rust) re-valida tudo — isto é só feedback instantâneo na UI.
 

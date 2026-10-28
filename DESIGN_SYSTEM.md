@@ -3,7 +3,7 @@
 O design é **único e congelado**. Este documento é referência, não guia de
 mudança — ver [`CONTRIBUTING.md`](CONTRIBUTING.md) regra 1.
 
-> Fork de seis variantes (NEXUS, AURORA, FORGE, PULSE, VEIL, IGUAL) existiram
+> Fork de seis variantes (NEXUS, AURORA, DisTorrent, PULSE, VEIL, IGUAL) existiram
 > durante o desenvolvimento. A variante escolhida foi a **IGUAL** e as outras
 > foram descartadas; o que está em produção é o tema único abaixo.
 

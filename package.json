@@ -1,5 +1,6 @@
 {
   "name": "distorent",
+  "description": "DisTorrent — Comunicação descentralizada P2P",
   "private": true,
   "version": "1.1.7-pre-alpha",
   "type": "module",
@@ -12,8 +13,8 @@
     "test": "npm run typecheck && npm run lint && npm run test:unit && npm run build",
     "test:unit": "node --experimental-strip-types --test tests/index.ts",
     "test:e2e": "playwright test",
-    "test:rust": "cd forge-core && cargo test",
-    "test:rust:clippy": "cd forge-core && cargo clippy --all-targets -- -D warnings",
+    "test:rust": "cd distorrent-core && cargo test",
+    "test:rust:clippy": "cd distorrent-core && cargo clippy --all-targets -- -D warnings",
     "host": "cd host && cargo run --",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

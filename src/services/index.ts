@@ -1,4 +1,4 @@
-import type { ForgeServices } from './models'
+import type { DisTorrentServices } from './models'
 import { tauriServices } from './tauri'
 import { browserServices } from './browser'
 
@@ -9,6 +9,6 @@ function isTauriRuntime(): boolean {
   const w = window as unknown as Record<string, unknown>
   return '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
 }
-export const services: ForgeServices = isTauriRuntime() ? tauriServices : browserServices
+export const services: DisTorrentServices = isTauriRuntime() ? tauriServices : browserServices
 
 export * from './models'

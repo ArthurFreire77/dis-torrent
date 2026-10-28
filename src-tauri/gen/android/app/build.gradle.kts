@@ -39,7 +39,7 @@ val releaseKeystore: java.io.File? =
 
 android {
     compileSdk = 36
-    namespace = "com.forge.app"
+    namespace = "com.distorrent.app"
     signingConfigs {
         if (releaseKeystore != null) {
             create("release") {
@@ -52,7 +52,7 @@ android {
     }
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.forge.app"
+        applicationId = "com.distorrent.app"
         minSdk = 24
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
@@ -91,7 +91,7 @@ android {
 }
 
 rust {
-    rootDirRel = "../../../"
+    rootDirRel = "../../"
 }
 
 dependencies {

@@ -1210,7 +1210,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
-name = "forge-core"
+name = "distorrent-core"
 version = "1.0.0"
 dependencies = [
  "aec-rs",
@@ -1254,10 +1254,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "forge-host"
+name = "distorrent-host"
 version = "5.3.0"
 dependencies = [
- "forge-core",
+ "distorrent-core",
  "serde_json",
  "tokio",
  "tracing",

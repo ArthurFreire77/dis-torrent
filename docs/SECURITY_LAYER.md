@@ -8,7 +8,7 @@
 
 | Item | Onde | Estado |
 |---|---|---|
-| Handshake X25519 ECDH efêmero + HKDF-SHA256 + ChaCha20Poly1305 | `forge-core/src/protocol.rs::session_key` | REAL (existente) |
+| Handshake X25519 ECDH efêmero + HKDF-SHA256 + ChaCha20Poly1305 | `distorrent-core/src/protocol.rs::session_key` | REAL (existente) |
 | Mensagem assinada ed25519, receptor re-verifica SEMPRE | `protocol.rs::MessageEnvelope` | REAL (existente) |
 | Fingerprint = `blake3(pubkey)[0..12]` hex, vínculo fp↔pubkey | `identity.rs` | REAL (existente) |
 | Cofre: Argon2id → ChaCha20Poly1305; chave no keyring do SO (Android Keystore / Keychain / DPAPI) | `vault.rs` + `src-tauri keyring` | REAL (existente) |
@@ -96,7 +96,7 @@ import { EncryptedBadge, ModerationPanel } from '../components/security/Security
 // config do servidor: <ModerationPanel communityId={cid} isOwner={amIOwner} />
 ```
 
-`ForgeServices` ganhou 9 métodos (nativo via invoke, browser via
+`DisTorrentServices` ganhou 9 métodos (nativo via invoke, browser via
 localStorage honesto entre abas): `serverRulesGet/Set`, `auditList`,
 `reputationGet`, `safetyNumber`, `moderate`, `reportUser`, `validateName`,
 `randomName`. TS espelho em `src/core/security/` (`sanitize`, `names`,
@@ -118,7 +118,7 @@ localStorage honesto entre abas): `serverRulesGet/Set`, `auditList`,
 
 ## 7. Testes
 
-- `cargo test -p forge-core --lib` — 80 testes (names, antispam,
+- `cargo test -p distorrent-core --lib` — 80 testes (names, antispam,
   moderation, vault, protocolo, engine).
 - `cargo test --test security_layer` — 9 testes de penetração: MITM,
   transcript amarrado, replay/dup, spoof de nome, flood, links,

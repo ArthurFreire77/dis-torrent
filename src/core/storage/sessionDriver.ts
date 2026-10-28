@@ -1,6 +1,6 @@
 import type { StorageDriver } from './driver'
 
-const PREFIX = 'forge:'
+const PREFIX = 'distorrent:'
 
 export class SessionDriver implements StorageDriver {
   get<T>(key: string): T | null {

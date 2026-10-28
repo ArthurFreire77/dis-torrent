@@ -2,14 +2,14 @@
 // - Identidade ed25519 REAL
 // - Mensagens DM e canal funcionais (persistidas em localStorage, broadcast cross-tab)
 // - Presença real via heartbeat + BroadcastChannel (online/offline correto)
-// - Eventos engine simulados com fidelidade ao forge-core (message_new, message_status, peer_online/offline, etc)
+// - Eventos engine simulados com fidelidade ao distorrent-core (message_new, message_status, peer_online/offline, etc)
 // Não inventa peers fake: online = heartbeat recente (<15s) ou BroadcastChannel ativo.
 
 import type {
   AuditEntry,
   Conversation,
   EngineEvent,
-  ForgeServices,
+  DisTorrentServices,
   FriendView,
   ModerationAction,
   NameKind,
@@ -80,8 +80,8 @@ function getNamespaced<T>(base: string, fallbackKeys: string[] = []): T | null {
         sharedDriver.set(ns, v)
         return v
       }
-      // tenta double prefix legado 'forge:forge:...' via localStorage direto
-      const doubleKey = `forge:forge:${k}`
+      // tenta double prefix legado 'distorrent:distorrent:...' via localStorage direto
+      const doubleKey = `distorrent:distorrent:${k}`
       const raw = localStorage.getItem(doubleKey)
       if (raw) {
         const parsed = JSON.parse(raw) as T
@@ -89,7 +89,7 @@ function getNamespaced<T>(base: string, fallbackKeys: string[] = []): T | null {
         localStorage.removeItem(doubleKey)
         return parsed
       }
-      const singleRaw = localStorage.getItem(`forge:${k}`)
+      const singleRaw = localStorage.getItem(`distorrent:${k}`)
       if (singleRaw) {
         const parsed = JSON.parse(singleRaw) as T
         sharedDriver.set(ns, parsed)
@@ -121,7 +121,7 @@ function writeMsgs(list: StoredMessage[]) {
 
 // friends helpers namespaced
 function getFriends(status: string): FriendView[] {
-  return getNamespaced<FriendView[]>(`friends:${status}`, [`friends:${status}`, `forge:friends:${status}`]) ?? []
+  return getNamespaced<FriendView[]>(`friends:${status}`, [`friends:${status}`, `distorrent:friends:${status}`]) ?? []
 }
 function setFriends(status: string, list: FriendView[]): void {
   setNamespaced(`friends:${status}`, list)
@@ -131,14 +131,14 @@ function setFriends(status: string, list: FriendView[]): void {
 type CB = (ev: EngineEvent) => void
 const listeners = new Set<CB>()
 // Dedupe: eventos entregues via `listeners` não devem ser re-entregues via
-// window 'forge:bus' (emit faz os dois). Marcamos o objeto; o listener de
+// window 'distorrent:bus' (emit faz os dois). Marcamos o objeto; o listener de
 // window em subscribe() pula os marcados, mas ainda recebe eventos externos
 // (ex.: testes que disparam window.dispatchEvent direto).
 const viaListeners = new WeakSet<object>()
 let bc: BroadcastChannel | null = null
 try {
   if (typeof BroadcastChannel !== 'undefined') {
-    bc = new BroadcastChannel('forge-bus-v2')
+    bc = new BroadcastChannel('distorrent-bus-v2')
     bc.onmessage = (ev) => {
       const data = ev.data as EngineEvent
       // entrega local sem re-broadcast
@@ -147,7 +147,7 @@ try {
       }
       viaListeners.add(data)
       // também dispara window event para fileSwarm/voice compat
-      try { window.dispatchEvent(new CustomEvent('forge:bus', { detail: data })) } catch { /* ignore */ }
+      try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: data })) } catch { /* ignore */ }
       // mensagens cross-tab: persistência já compartilhada via localStorage,
       // mas para DM com direction invertida, tratamos aqui
       handleIncomingBroadcast(data)
@@ -159,17 +159,17 @@ function emit(ev: EngineEvent) {
   for (const cb of listeners) try { cb(ev) } catch { /* ignore */ }
   viaListeners.add(ev)
   try { bc?.postMessage(ev) } catch { /* ignore */ }
-  try { window.dispatchEvent(new CustomEvent('forge:bus', { detail: ev })) } catch { /* ignore */ }
+  try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: ev })) } catch { /* ignore */ }
 }
 
 function isChannelMessageId(convId: string): boolean {
   try {
-    const raw = localStorage.getItem('forge:extras:communities') ?? '[]'
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
     const list = JSON.parse(raw) as any[]
     for (const c of list) if (c.channels?.some(([cid]: any) => cid === convId)) return true
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i) ?? ''
-      if (k.startsWith('forge:extras:channels:')) {
+      if (k.startsWith('distorrent:extras:channels:')) {
         const arr = JSON.parse(localStorage.getItem(k) ?? '[]') as any[]
         if (arr.some((x: any) => x.id === convId)) return true
       }
@@ -240,7 +240,7 @@ function handleIncomingBroadcast(ev: EngineEvent) {
     const inboundEv: any = { ...inbound, type: 'message_new' }
     for (const cb of listeners) try { cb(inboundEv) } catch { /* ignore */ }
     viaListeners.add(inboundEv)
-    try { window.dispatchEvent(new CustomEvent('forge:bus', { detail: inboundEv })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: inboundEv })) } catch { /* ignore */ }
   }
   // grupo: a aba criadora persiste a conversa no PRÓPRIO namespace (por fp) e
   // anuncia via group_synced — o receptor cria o espelho no namespace dele.
@@ -250,7 +250,7 @@ function handleIncomingBroadcast(ev: EngineEvent) {
     const me = store.load()
     if (!me) return
     let members: [string, string][]
-    try { members = JSON.parse(localStorage.getItem(`forge:extras:group_members:${conv_id}`) ?? '[]') } catch { members = [] }
+    try { members = JSON.parse(localStorage.getItem(`distorrent:extras:group_members:${conv_id}`) ?? '[]') } catch { members = [] }
     const isMember = members.some(([fp]) => fp === me.fingerprint)
     if (!isMember) return
     const convs = readConvos()
@@ -260,7 +260,7 @@ function handleIncomingBroadcast(ev: EngineEvent) {
     const gsEv: any = { type: 'group_synced', conv_id, title: title || 'Grupo' }
     for (const cb of listeners) try { cb(gsEv) } catch { /* ignore */ }
     viaListeners.add(gsEv)
-    try { window.dispatchEvent(new CustomEvent('forge:bus', { detail: gsEv })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: gsEv })) } catch { /* ignore */ }
   }
   // canal: replica channel message para outras abas se ainda não tiver
   if ((ev as any).type === 'channel_message_new') {
@@ -276,12 +276,12 @@ function handleIncomingBroadcast(ev: EngineEvent) {
     const chEv: any = { ...cloned, type: 'message_new' }
     for (const cb of listeners) try { cb(chEv) } catch { /* ignore */ }
     viaListeners.add(chEv)
-    try { window.dispatchEvent(new CustomEvent('forge:bus', { detail: chEv })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: chEv })) } catch { /* ignore */ }
   }
 }
 
 // ---------- Presença (heartbeat) ----------
-const PRESENCE_PREFIX = 'forge:presence:'
+const PRESENCE_PREFIX = 'distorrent:presence:'
 const PRESENCE_TTL_MS = 15000
 let heartbeatTimer: number | null = null
 
@@ -292,7 +292,7 @@ function touchPresence() {
   if (!me) return
   const payload = { fp: me.fingerprint, nickname: me.nickname, pubkey_hex: me.pubkey_hex, ts: Date.now() }
   try { localStorage.setItem(presenceKey(me.fingerprint), JSON.stringify(payload)) } catch { /* ignore */ }
-  try { localStorage.setItem('forge:presence:heartbeat', String(Date.now())) } catch { /* ignore */ }
+  try { localStorage.setItem('distorrent:presence:heartbeat', String(Date.now())) } catch { /* ignore */ }
 }
 
 function getPresenceMap(): Map<string, { fp: string; nickname: string; pubkey_hex: string; ts: number }> {
@@ -386,7 +386,7 @@ function onBrowserStorageEvent(e: StorageEvent) {
     }
     emit({ type: 'state_changed', state: store.load() ? 'CONNECTED' : 'DISCONNECTED', online_peers: onlineCount() })
   }
-  if (e.key === 'forge:messages' || e.key === 'forge:conversations') {
+  if (e.key === 'distorrent:messages' || e.key === 'distorrent:conversations') {
     // outra aba escreveu mensagens/conversas — notifica listeners para refresh
     // não faz broadcast adicional, apenas sinaliza
   }
@@ -396,14 +396,14 @@ function onLegacyFriendRequest() { /* mantém compat */ }
 
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', onBrowserStorageEvent)
-  // fallback BroadcastChannel via CustomEvent 'forge:friend_request' legado
-  window.addEventListener('forge:friend_request' as any, onLegacyFriendRequest as EventListener)
+  // fallback BroadcastChannel via CustomEvent 'distorrent:friend_request' legado
+  window.addEventListener('distorrent:friend_request' as any, onLegacyFriendRequest as EventListener)
 }
 
 export function disposeBrowserGlobalListeners() {
   if (typeof window === 'undefined') return
   window.removeEventListener('storage', onBrowserStorageEvent)
-  window.removeEventListener('forge:friend_request' as any, onLegacyFriendRequest as EventListener)
+  window.removeEventListener('distorrent:friend_request' as any, onLegacyFriendRequest as EventListener)
 }
 
 // HMR (Vite): descarrega listeners globais no hot-reload para não duplicar emits.
@@ -435,7 +435,7 @@ function pushMessageDirect(msg: StoredMessage) {
   writeMsgs([...all, msg])
 }
 
-// ---------- Implementação ForgeServices ----------
+// ---------- Implementação DisTorrentServices ----------
 
 // =====================================================================
 // CAMADA SOCIAL v3 — implementação local (localStorage + BroadcastChannel).
@@ -469,7 +469,7 @@ function meFp(): string {
 function blankMeta(msgId: string, convId: string): MsgMetaView {
   return { msg_id: msgId, conv_id: convId, reply_to: '', forwarded_from: '', edited_body: '', edited_at: 0, deleted: false, pinned: false, pinned_by: '', pinned_at: 0, mentioned: false }
 }
-export const browserServices: ForgeServices = {
+export const browserServices: DisTorrentServices = {
   kind: 'browser',
 
   version: async () => `${APP_VERSION}-web`,
@@ -612,7 +612,7 @@ export const browserServices: ForgeServices = {
     // também emite local para o listener de handleIncomingBroadcast criar pending_in no receptor
     // (em multi-tab o bc já entrega; emit aqui garante que sender também veja peer_discovered)
     emit({ type: 'peer_discovered', fp, nickname: entry.nickname, addr: 'local' } as any)
-    try { window.dispatchEvent(new CustomEvent('forge:friend_request', { detail: entry })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:friend_request', { detail: entry })) } catch { /* ignore */ }
     const outcome = isOnline(fp) ? 'sent' : 'queued_offline'
     return Promise.resolve(outcome as any)
   },
@@ -681,12 +681,12 @@ export const browserServices: ForgeServices = {
     Promise.reject(new Error('cofre disponível no app nativo')),
 
   communitiesList: () => {
-    const raw = localStorage.getItem('forge:extras:communities') ?? '[]'
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
     try { return Promise.resolve(JSON.parse(raw)) } catch { return Promise.resolve([]) }
   },
 
   createCommunity: (name, channels, opts) => {
-    const raw = localStorage.getItem('forge:extras:communities') ?? '[]'
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
     let list: import('./models').CommunityView[] = []
     try { list = JSON.parse(raw) } catch { /* browser mode */ }
     const cid = `local-${Math.random().toString(36).slice(2, 10)}`
@@ -702,7 +702,7 @@ export const browserServices: ForgeServices = {
       description: opts?.description ?? '', category: opts?.category ?? '', icon: opts?.icon ?? '',
     }
     list.push(cv)
-    localStorage.setItem('forge:extras:communities', JSON.stringify(list))
+    localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
     // materializa canais com kind/categoria para o sidebar/voice funcionarem.
     // Reaproveita o MESMO id da tupla acima, senão o canal aparece duplicado.
     seeds.forEach((c, i) => {
@@ -712,8 +712,8 @@ export const browserServices: ForgeServices = {
     for (const r of opts?.roles ?? []) LX.createLocalRole(cid, r)
     LX.saveCommunityMeta(cid, { description: opts?.description, category: opts?.category, icon: opts?.icon })
     if (opts?.rulesText) {
-      try { localStorage.setItem(`forge:rules:${cid}`, JSON.stringify({ community_id: cid, spam_level: 'medium', banned_words: [], blocked_domains: [], moderators: [], shadow_banned: [], updated_at: Date.now() })) } catch { /* ignore */ }
-      try { localStorage.setItem(`forge:rules:text:${cid}`, opts.rulesText) } catch { /* ignore */ }
+      try { localStorage.setItem(`distorrent:rules:${cid}`, JSON.stringify({ community_id: cid, spam_level: 'medium', banned_words: [], blocked_domains: [], moderators: [], shadow_banned: [], updated_at: Date.now() })) } catch { /* ignore */ }
+      try { localStorage.setItem(`distorrent:rules:text:${cid}`, opts.rulesText) } catch { /* ignore */ }
     }
     emit({ type: 'community_joined', community_id: cid, name } as any)
     try { bc?.postMessage({ type: 'community_joined', community_id: cid, name }) } catch { /* ignore */ }
@@ -721,7 +721,7 @@ export const browserServices: ForgeServices = {
   },
 
   communitySetMeta: (communityId, patch) => {
-    const raw = localStorage.getItem('forge:extras:communities') ?? '[]'
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
     let list: import('./models').CommunityView[] = []
     try { list = JSON.parse(raw) } catch { /* browser mode */ }
     const idx = list.findIndex(c => c.id === communityId)
@@ -732,7 +732,7 @@ export const browserServices: ForgeServices = {
       category: patch.category ?? list[idx].category ?? '',
       icon: patch.icon ?? list[idx].icon ?? '',
     }
-    localStorage.setItem('forge:extras:communities', JSON.stringify(list))
+    localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
     LX.saveCommunityMeta(communityId, patch)
     return Promise.resolve()
   },
@@ -740,13 +740,13 @@ export const browserServices: ForgeServices = {
   communityRename: (communityId, name) => {
     const trimmed = name.trim()
     if (!trimmed) return Promise.reject(new Error('nome vazio'))
-    const raw = localStorage.getItem('forge:extras:communities') ?? '[]'
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
     let list: import('./models').CommunityView[] = []
     try { list = JSON.parse(raw) } catch { /* browser mode */ }
     const idx = list.findIndex(c => c.id === communityId)
     if (idx < 0) return Promise.reject(new Error('comunidade não encontrada'))
     list[idx] = { ...list[idx], name: trimmed }
-    localStorage.setItem('forge:extras:communities', JSON.stringify(list))
+    localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
     emit({ type: 'community_joined', community_id: communityId, name: trimmed } as any)
     try { bc?.postMessage({ type: 'community_joined', community_id: communityId, name: trimmed }) } catch { /* ignore */ }
     return Promise.resolve()
@@ -759,7 +759,7 @@ export const browserServices: ForgeServices = {
     const cid = m[1]
     // modo navegador (dev local, sem rede): cria o espelho local do servidor
     // para o fluxo de convite funcionar 100% dentro do escopo local honesto
-    const raw = localStorage.getItem('forge:extras:communities') ?? '[]'
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
     let list: import('./models').CommunityView[] = []
     try { list = JSON.parse(raw) } catch { /* browser mode */ }
     if (!list.some(c => c.id === cid)) {
@@ -773,7 +773,7 @@ export const browserServices: ForgeServices = {
         members: me ? [[me.fingerprint, me.nickname, 'member']] : [],
       }
       list.push(cv)
-      localStorage.setItem('forge:extras:communities', JSON.stringify(list))
+      localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
       emit({ type: 'community_joined', community_id: cid, name: cv.name } as any)
       try { bc?.postMessage({ type: 'community_joined', community_id: cid, name: cv.name }) } catch { /* ignore */ }
     }
@@ -965,10 +965,10 @@ export const browserServices: ForgeServices = {
       if (detail && typeof detail === 'object' && viaListeners.has(detail)) return
       try { cb(detail) } catch { /* ignore */ }
     }
-    window.addEventListener('forge:bus', onBus as EventListener)
+    window.addEventListener('distorrent:bus', onBus as EventListener)
     return () => {
       listeners.delete(cb)
-      window.removeEventListener('forge:bus', onBus as EventListener)
+      window.removeEventListener('distorrent:bus', onBus as EventListener)
     }
   },
 
@@ -1047,9 +1047,9 @@ export const browserServices: ForgeServices = {
     const conv: Conversation = { id, kind: 'group', title: title || members.slice(0, 2).join(', '), peer_fp: '', created_at: Date.now() }
     const all = [conv, ...readConvos()]
     writeConvos(all)
-    localStorage.setItem(`forge:extras:group_members:${id}`, JSON.stringify(members.map((fp: string) => [fp, ''] as [string, string])))
+    localStorage.setItem(`distorrent:extras:group_members:${id}`, JSON.stringify(members.map((fp: string) => [fp, ''] as [string, string])))
     if (me) {
-      const k = `forge:extras:group_members:${id}`
+      const k = `distorrent:extras:group_members:${id}`
       try {
         const cur = JSON.parse(localStorage.getItem(k) ?? '[]')
         if (!cur.find((x: any) => x[0] === me.fingerprint)) {
@@ -1059,17 +1059,17 @@ export const browserServices: ForgeServices = {
       } catch { /* silent */ }
     }
     try { bc?.postMessage({ type: 'group_synced', conv_id: id, title }) } catch { /* ignore */ }
-    window.dispatchEvent(new CustomEvent('forge:groups_changed'))
+    window.dispatchEvent(new CustomEvent('distorrent:groups_changed'))
     emit({ type: 'group_synced' as any, conv_id: id, title } as any)
     return Promise.resolve(conv)
   },
   groupMembers: (cid) => {
-    try { const v = localStorage.getItem(`forge:extras:group_members:${cid}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
+    try { const v = localStorage.getItem(`distorrent:extras:group_members:${cid}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
     return Promise.resolve([])
   },
   groupAdd: (cid, fp) => {
-    try { const k = `forge:extras:group_members:${cid}`; const cur = JSON.parse(localStorage.getItem(k) ?? '[]'); if (!cur.find((x: any) => x[0] === fp)) { cur.push([fp, '']); localStorage.setItem(k, JSON.stringify(cur)) } } catch { /* silent */ }
-    window.dispatchEvent(new CustomEvent('forge:groups_changed'))
+    try { const k = `distorrent:extras:group_members:${cid}`; const cur = JSON.parse(localStorage.getItem(k) ?? '[]'); if (!cur.find((x: any) => x[0] === fp)) { cur.push([fp, '']); localStorage.setItem(k, JSON.stringify(cur)) } } catch { /* silent */ }
+    window.dispatchEvent(new CustomEvent('distorrent:groups_changed'))
     try { bc?.postMessage({ type: 'channel_created', community_id: cid, channel_id: fp, name: fp } as any) } catch { /* ignore */ }
     emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
     try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
@@ -1085,7 +1085,7 @@ export const browserServices: ForgeServices = {
     })()
     const callId = `call-${Date.now().toString(36)}-${rand}`
     try {
-      localStorage.setItem(`forge:call:invite:${callId}`, JSON.stringify({ targetFp, kind, at: Date.now() }))
+      localStorage.setItem(`distorrent:call:invite:${callId}`, JSON.stringify({ targetFp, kind, at: Date.now() }))
       const ev: any = { type: 'call_incoming', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', kind, target_fp: targetFp }
       // emit() já faz listeners + bc.postMessage + window — sem post duplo
       emit(ev)
@@ -1148,48 +1148,48 @@ export const browserServices: ForgeServices = {
   screenShareAnswer: () => Promise.resolve(),
   voiceJoin: (cid, ch) => {
     const me = store.load(); if (!me) return Promise.resolve()
-    const k = `forge:voice:${cid}:${ch}`
+    const k = `distorrent:voice:${cid}:${ch}`
     let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch { /* silent */ }
     if (!arr.find((x: any) => x[0] === me.fingerprint)) { arr.push([me.fingerprint, false, false]); localStorage.setItem(k, JSON.stringify(arr)) }
-    window.dispatchEvent(new CustomEvent('forge:voice_changed'))
+    window.dispatchEvent(new CustomEvent('distorrent:voice_changed'))
     emit({ type: 'voice_joined' as any, community_id: cid, channel_id: ch, fp: me.fingerprint } as any)
     return Promise.resolve()
   },
   voiceLeave: (cid, ch) => {
     const me = store.load(); if (!me) return Promise.resolve()
-    const k = `forge:voice:${cid}:${ch}`
+    const k = `distorrent:voice:${cid}:${ch}`
     let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch { /* silent */ }
     arr = arr.filter((x: any) => x[0] !== me.fingerprint); localStorage.setItem(k, JSON.stringify(arr))
-    window.dispatchEvent(new CustomEvent('forge:voice_changed'))
+    window.dispatchEvent(new CustomEvent('distorrent:voice_changed'))
     emit({ type: 'voice_left' as any, community_id: cid, channel_id: ch, fp: me.fingerprint } as any)
     return Promise.resolve()
   },
   voiceState: (cid, ch, muted, deaf) => {
     const me = store.load(); if (!me) return Promise.resolve()
-    const k = `forge:voice:${cid}:${ch}`
+    const k = `distorrent:voice:${cid}:${ch}`
     let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch { /* silent */ }
     const idx = arr.findIndex((x: any) => x[0] === me.fingerprint)
     if (idx >= 0) { arr[idx] = [me.fingerprint, muted, deaf]; localStorage.setItem(k, JSON.stringify(arr)) }
-    window.dispatchEvent(new CustomEvent('forge:voice_changed'))
+    window.dispatchEvent(new CustomEvent('distorrent:voice_changed'))
     emit({ type: 'voice_state_changed' as any, community_id: cid, channel_id: ch, fp: me.fingerprint, muted, deafened: deaf } as any)
     return Promise.resolve()
   },
   voiceStates: (cid, ch) => {
-    try { const v = localStorage.getItem(`forge:voice:${cid}:${ch}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
+    try { const v = localStorage.getItem(`distorrent:voice:${cid}:${ch}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
     return Promise.resolve([])
   },
   fileAnnounce: (fid, name, size, chunks, hash, chunkHashes?: string[]) => {
     try {
       // persiste chunk_hashes para verificação (browser local) — usado pelo receptor
       if (chunkHashes?.length) {
-        try { localStorage.setItem(`forge:file:chunk_hashes:${fid}`, JSON.stringify(chunkHashes)) } catch { /* ignore */ }
-        try { localStorage.setItem(`forge:filemeta:${fid}`, JSON.stringify({ name, size, chunks, hash, chunkHashes })) } catch { /* ignore */ }
+        try { localStorage.setItem(`distorrent:file:chunk_hashes:${fid}`, JSON.stringify(chunkHashes)) } catch { /* ignore */ }
+        try { localStorage.setItem(`distorrent:filemeta:${fid}`, JSON.stringify({ name, size, chunks, hash, chunkHashes })) } catch { /* ignore */ }
       }
-      localStorage.setItem(`forge:file:${fid}`, JSON.stringify({ name, size, chunks, hash, chunk_hashes: chunkHashes ?? null, at: Date.now(), from: store.load()?.fingerprint ?? 'local' }))
+      localStorage.setItem(`distorrent:file:${fid}`, JSON.stringify({ name, size, chunks, hash, chunk_hashes: chunkHashes ?? null, at: Date.now(), from: store.load()?.fingerprint ?? 'local' }))
       const ev: any = { type: 'file_announce', file_id: fid, name, size, chunks, hash, chunk_hashes: chunkHashes ?? null, from_fp: store.load()?.fingerprint ?? 'local' }
       emit(ev)
       try { bc?.postMessage(ev) } catch { /* ignore */ }
-      window.dispatchEvent(new CustomEvent('forge:file_announce', { detail: { file_id: fid, name, size, chunks, hash } }))
+      window.dispatchEvent(new CustomEvent('distorrent:file_announce', { detail: { file_id: fid, name, size, chunks, hash } }))
     } catch { /* silent */ }
     return Promise.resolve()
   },
@@ -1200,7 +1200,7 @@ export const browserServices: ForgeServices = {
       // emite localmente para o holder na mesma tab (caso self) e broadcast para outras abas
       emit(ev)
       try { bc?.postMessage(ev) } catch { /* ignore */ }
-      window.dispatchEvent(new CustomEvent('forge:file_chunk_request', { detail: ev }))
+      window.dispatchEvent(new CustomEvent('distorrent:file_chunk_request', { detail: ev }))
     } catch { /* silent */ }
     return Promise.resolve()
   },
@@ -1210,7 +1210,7 @@ export const browserServices: ForgeServices = {
       const ev: any = { type: 'file_chunk_data', file_id: fileId, index, data_b64: dataB64, from_fp: me, target_fp: targetFp }
       emit(ev)
       try { bc?.postMessage(ev) } catch { /* ignore */ }
-      window.dispatchEvent(new CustomEvent('forge:file_chunk_data', { detail: ev }))
+      window.dispatchEvent(new CustomEvent('distorrent:file_chunk_data', { detail: ev }))
     } catch { /* silent */ }
     return Promise.resolve()
   },
@@ -1220,7 +1220,7 @@ export const browserServices: ForgeServices = {
   // o app nativo aplica no core. Honesto: funciona entre abas locais.
   serverRulesGet: (cid) => {
     try {
-      const raw = localStorage.getItem(`forge:rules:${cid}`)
+      const raw = localStorage.getItem(`distorrent:rules:${cid}`)
       if (raw) return Promise.resolve(JSON.parse(raw) as ServerRules)
     } catch { /* ignore */ }
     return Promise.resolve({
@@ -1229,20 +1229,20 @@ export const browserServices: ForgeServices = {
     })
   },
   serverRulesSet: (rules) => {
-    try { localStorage.setItem(`forge:rules:${rules.community_id}`, JSON.stringify({ ...rules, updated_at: Date.now() })) } catch { /* ignore */ }
+    try { localStorage.setItem(`distorrent:rules:${rules.community_id}`, JSON.stringify({ ...rules, updated_at: Date.now() })) } catch { /* ignore */ }
     appendLocalAudit(rules.community_id, 'rules', '', 'regras atualizadas')
     return Promise.resolve()
   },
   auditList: (cid, limit) => {
     try {
-      const raw = localStorage.getItem(`forge:audit:${cid}`)
+      const raw = localStorage.getItem(`distorrent:audit:${cid}`)
       const list = raw ? (JSON.parse(raw) as AuditEntry[]) : []
       return Promise.resolve(list.slice(-(limit ?? 100)).reverse())
     } catch { return Promise.resolve([]) }
   },
   reputationGet: (fp) => {
     try {
-      const raw = localStorage.getItem(`forge:repute:${fp}`)
+      const raw = localStorage.getItem(`distorrent:repute:${fp}`)
       if (raw) {
         const v = JSON.parse(raw) as { trust: ReputationView['trust']; score: number; reports: number }
         return Promise.resolve(v)
@@ -1262,15 +1262,15 @@ export const browserServices: ForgeServices = {
     appendLocalAudit(cid, action, target, reason ?? '')
     // browser local: ban/mute aplicam reputação local honesta
     try {
-      const cur = JSON.parse(localStorage.getItem(`forge:repute:${target}`) ?? '{"trust":"new","score":0,"reports":0}')
+      const cur = JSON.parse(localStorage.getItem(`distorrent:repute:${target}`) ?? '{"trust":"new","score":0,"reports":0}')
       if (action === 'ban') { cur.trust = 'banned'; cur.score = -100 }
       if (action === 'unban' || action === 'unmute') { cur.trust = 'new'; cur.score = 0 }
       if (action === 'mute') { cur.trust = 'suspicious'; cur.score = Math.min(cur.score, -15) }
-      localStorage.setItem(`forge:repute:${target}`, JSON.stringify(cur))
+      localStorage.setItem(`distorrent:repute:${target}`, JSON.stringify(cur))
     } catch { /* ignore */ }
     if (action === 'shadow_ban' || action === 'unshadow') {
       try {
-        const rk = `forge:rules:${cid}`
+        const rk = `distorrent:rules:${cid}`
         const rules = JSON.parse(localStorage.getItem(rk) ?? '{}') as Partial<ServerRules>
         const list = new Set(rules.shadow_banned ?? [])
         if (action === 'shadow_ban') list.add(target)
@@ -1283,12 +1283,12 @@ export const browserServices: ForgeServices = {
   reportUser: (targetFp, cid, reason) => {
     appendLocalAudit(cid ?? '', 'report', targetFp, reason ?? '')
     try {
-      const cur = JSON.parse(localStorage.getItem(`forge:repute:${targetFp}`) ?? '{"trust":"new","score":0,"reports":0}')
+      const cur = JSON.parse(localStorage.getItem(`distorrent:repute:${targetFp}`) ?? '{"trust":"new","score":0,"reports":0}')
       cur.score = Math.max(-100, (cur.score ?? 0) - 10)
       cur.reports = (cur.reports ?? 0) + 1
       if (cur.score <= -30) cur.trust = 'banned'
       else if (cur.score <= -10) cur.trust = 'suspicious'
-      localStorage.setItem(`forge:repute:${targetFp}`, JSON.stringify(cur))
+      localStorage.setItem(`distorrent:repute:${targetFp}`, JSON.stringify(cur))
     } catch { /* ignore */ }
     return Promise.resolve()
   },
@@ -1320,7 +1320,7 @@ export const browserServices: ForgeServices = {
         const doomed: string[] = []
         for (let i = 0; i < storage.length; i++) {
           const k = storage.key(i)
-          if (k && k.startsWith('forge:')) doomed.push(k)
+          if (k && k.startsWith('distorrent:')) doomed.push(k)
         }
         doomed.forEach((k) => storage.removeItem(k))
       }
@@ -1335,14 +1335,14 @@ export const browserServices: ForgeServices = {
   }),
   peerRtt: () => Promise.resolve(null),
   cacheGet: (key) => {
-    try { return Promise.resolve(localStorage.getItem(`forge:cache:${key}`)) } catch { return Promise.resolve(null) }
+    try { return Promise.resolve(localStorage.getItem(`distorrent:cache:${key}`)) } catch { return Promise.resolve(null) }
   },
   cachePut: (key, dataB64) => {
-    try { localStorage.setItem(`forge:cache:${key}`, dataB64) } catch { /* quota — silencioso */ }
+    try { localStorage.setItem(`distorrent:cache:${key}`, dataB64) } catch { /* quota — silencioso */ }
     return Promise.resolve()
   },
   cacheDelete: (key) => {
-    try { localStorage.removeItem(`forge:cache:${key}`) } catch { /* ignore */ }
+    try { localStorage.removeItem(`distorrent:cache:${key}`) } catch { /* ignore */ }
     return Promise.resolve()
   },
   cacheStats: () => {
@@ -1351,7 +1351,7 @@ export const browserServices: ForgeServices = {
       let entries = 0
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i)
-        if (k && k.startsWith('forge:cache:')) {
+        if (k && k.startsWith('distorrent:cache:')) {
           entries++
           total += (localStorage.getItem(k) ?? '').length
         }
@@ -1363,13 +1363,13 @@ export const browserServices: ForgeServices = {
   },
   cacheSetCap: () => Promise.resolve(),
   mediaSafetyGet: () => Promise.resolve({
-    strip_exif: localStorage.getItem('forge:media:strip_exif') !== '0',
-    block_executables: localStorage.getItem('forge:media:block_exec') !== '0',
+    strip_exif: localStorage.getItem('distorrent:media:strip_exif') !== '0',
+    block_executables: localStorage.getItem('distorrent:media:block_exec') !== '0',
   }),
   mediaSafetySet: (stripExif, blockExecutables) => {
     try {
-      localStorage.setItem('forge:media:strip_exif', stripExif ? '1' : '0')
-      localStorage.setItem('forge:media:block_exec', blockExecutables ? '1' : '0')
+      localStorage.setItem('distorrent:media:strip_exif', stripExif ? '1' : '0')
+      localStorage.setItem('distorrent:media:block_exec', blockExecutables ? '1' : '0')
     } catch { /* ignore */ }
     return Promise.resolve()
   },
@@ -1730,7 +1730,7 @@ export const browserServices: ForgeServices = {
 
 function appendLocalAudit(communityId: string, action: string, target: string, reason: string) {
   try {
-    const k = `forge:audit:${communityId}`
+    const k = `distorrent:audit:${communityId}`
     const list = JSON.parse(localStorage.getItem(k) ?? '[]') as AuditEntry[]
     const me = store.load()?.fingerprint ?? 'local'
     list.push({

@@ -9,7 +9,7 @@ Cada aresta do mesh usa uma sessão `(call_id, peer_fp)` e uma PeerConnection.
 O frontend cria ofertas/respostas, envia candidatos ICE pela sinalização do
 DisTorrent e tenta ICE restart com orçamento limitado. O caminho nativo Rust
 mantém uma sessão por peer, reutiliza-a durante renegociação e remove a sessão,
-tasks, tracks e PeerConnection no hangup (`forge-core/src/net/media_voice.rs`).
+tasks, tracks e PeerConnection no hangup (`distorrent-core/src/net/media_voice.rs`).
 
 | Plataforma | Captura e transporte | Recepção e reprodução |
 |---|---|---|

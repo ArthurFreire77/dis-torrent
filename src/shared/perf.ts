@@ -1,5 +1,5 @@
 // Utilidades de performance (sem dependências): coalescing/throttle de refreshes.
-// Visual FORGE inalterado — só reduzem a frequência de setState/re-render.
+// Visual DisTorrent inalterado — só reduzem a frequência de setState/re-render.
 //
 // Gargalos que motivaram:
 // - refreshFriends a cada 3s (polling) + 1x por evento + 1x por ação do usuário

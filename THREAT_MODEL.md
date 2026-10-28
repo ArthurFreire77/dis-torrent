@@ -6,7 +6,7 @@
   telefone, nenhum cadastro. Mas seu IP é visível a quem você conecta.
 - **Torneamento opcional de rede** — o modo **Tor** (`privacy.mode = full`) roda
   o tráfego Direct **e** o relay pelo SOCKS5 do daemon Tor local
-  (`FORGE_TOR_ADDR`, padrão `127.0.0.1:9050`). O **número de saltos do circuito
+  (`DISTORRENT_TOR_ADDR`, padrão `127.0.0.1:9050`). O **número de saltos do circuito
   é do daemon Tor** (padrão 3: guard/middle/exit) — o app não controla nem
   verifica. Announce, descoberta LAN (UDP/mDNS), DHT, PEX e STUN ficam
   DESLIGADOS; handshakes inbound diretos são RECUSADOS (port-scanner não ganha
@@ -38,9 +38,9 @@
 | **Ataque de sincronização** (peer envia lixo ao reconectar) | Toda mensagem do outbox é assinada pelo autor e revalidada ao chegar | — |
 | **Abuso de permissões** | N/A nesta fase (sem comunidades). Fase comunidades: validação no CORE, nunca na UI | — |
 
-## Bootstrap HTTP (FORGE_BOOTSTRAP_URL) — o que sai do seu dispositivo
+## Bootstrap HTTP (DISTORRENT_BOOTSTRAP_URL) — o que sai do seu dispositivo
 
-**Desligado por padrão.** Não existe endpoint embutido: sem `FORGE_BOOTSTRAP_URL`
+**Desligado por padrão.** Não existe endpoint embutido: sem `DISTORRENT_BOOTSTRAP_URL`
 apontando para um tracker que você mesmo hospeda (`host --bootstrap PORTA`), o
 announce e o lookup de amigos por tracker não rodam — o motor funciona só com
 LAN (UDP/mDNS), MQTT, STUN/UPnP/NAT-PMP e hole punching. Para ativar, aponte a
@@ -88,7 +88,7 @@ Todo caminho de entrada tem limite, em dois andares — **throttle** (excedente
 descartado, sessão preservada; o protocolo reenvia) e **kill** (flooding
 deliberado/bug, sessão encerrada). Taxa e tamanho são independentes: um teto
 de frames/s não substitui teto de bytes por mensagem. Defaults (env
-`FORGE_LIMIT_*` para reconfigurar sem build; snapshot via comando
+`DISTORRENT_LIMIT_*` para reconfigurar sem build; snapshot via comando
 `net_limits`/diagnóstico):
 
 | Camada | Throttle (por peer) | Kill (por peer) | Global |

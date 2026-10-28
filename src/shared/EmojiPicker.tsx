@@ -25,7 +25,7 @@ export function EmojiPicker({
   const [q, setQ] = useState('')
   const [tab, setTab] = useState<string>('recentes')
   const [recent, setRecent] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem('forge:emoji:recent') ?? '[]') as string[] } catch { return [] }
+    try { return JSON.parse(localStorage.getItem('distorrent:emoji:recent') ?? '[]') as string[] } catch { return [] }
   })
   const searchRef = useRef<HTMLInputElement | null>(null)
   const boxRef = useRef<HTMLDivElement | null>(null)
@@ -76,7 +76,7 @@ export function EmojiPicker({
     onPick(e2)
     const next = [e2, ...recent.filter((x) => x !== e2)].slice(0, 24)
     setRecent(next)
-    try { localStorage.setItem('forge:emoji:recent', JSON.stringify(next)) } catch { /* quota */ }
+    try { localStorage.setItem('distorrent:emoji:recent', JSON.stringify(next)) } catch { /* quota */ }
   }
 
   const shown = results ? [{ id: 'busca', label: 'Resultados', icon: '', emojis: results }] : groups

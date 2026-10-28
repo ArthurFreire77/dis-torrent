@@ -4,9 +4,9 @@
 #   .\scripts\verify-apk.ps1 -Path "caminho\app-arm64-release.apk"
 #
 # POR QUE ESTE SCRIPT EXISTE (regressão 1.1.6):
-# o APK publicado tinha 2,49 MB e NENHUM lib/*/libforge_lib.so: o app abria e o
+# o APK publicado tinha 2,49 MB e NENHUM lib/*/libdistorrent_lib.so: o app abria e o
 # Android matava na hora ("parou de funcionar") com UnsatisfiedLinkError em
-# System.loadLibrary("forge_lib"). Tamanho de APK não é prova de nada, então
+# System.loadLibrary("distorrent_lib"). Tamanho de APK não é prova de nada, então
 # verificamos o CONTEÚDO: a biblioteca nativa tem que estar lá, e o APK tem que
 # ser grande o bastante para conter Rust + WebView + assets.
 #
@@ -41,10 +41,10 @@ $zip = [System.IO.Compression.ZipFile]::OpenRead($apk.FullName)
 try {
     $entries = $zip.Entries
 
-    $libs = $entries | Where-Object { $_.FullName -match '^lib/[^/]+/libforge_lib\.so$' }
+    $libs = $entries | Where-Object { $_.FullName -match '^lib/[^/]+/libdistorrent_lib\.so$' }
     if (-not $libs) {
         $abis = ($entries | Where-Object { $_.FullName -like 'lib/*' } | ForEach-Object { $_.FullName }) -join ', '
-        Fail "nenhum lib/*/libforge_lib.so dentro do APK. O app vai morrer no boot com UnsatisfiedLinkError. Entradas lib/: [$abis]"
+        Fail "nenhum lib/*/libdistorrent_lib.so dentro do APK. O app vai morrer no boot com UnsatisfiedLinkError. Entradas lib/: [$abis]"
     }
 
     Write-Host "`nBibliotecas nativas:" -ForegroundColor Green
@@ -56,8 +56,8 @@ try {
         }
     }
 
-    if (-not ($libs | Where-Object { $_.FullName -eq "lib/$ExpectedAbi/libforge_lib.so" })) {
-        Fail "ABI esperada ausente: lib/$ExpectedAbi/libforge_lib.so (o aparelho alvo não roda este APK)."
+    if (-not ($libs | Where-Object { $_.FullName -eq "lib/$ExpectedAbi/libdistorrent_lib.so" })) {
+        Fail "ABI esperada ausente: lib/$ExpectedAbi/libdistorrent_lib.so (o aparelho alvo não roda este APK)."
     }
 
     # Frontend/config do Tauri: no Tauri 2 os assets vão embutidos na .so, mas o
@@ -105,5 +105,5 @@ if ($apksigner) {
     Write-Host "`n(aviso) apksigner não encontrado — não verifiquei a assinatura." -ForegroundColor Yellow
 }
 
-Write-Host "`nAPK VÁLIDO: $sizeMB MB, libforge_lib.so presente." -ForegroundColor Green
+Write-Host "`nAPK VÁLIDO: $sizeMB MB, libdistorrent_lib.so presente." -ForegroundColor Green
 exit 0

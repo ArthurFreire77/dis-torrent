@@ -6,12 +6,12 @@ async function createAccount(page: Page, name: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 });
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 });
 }
 
 async function fpOf(page: Page): Promise<string> {
   return page.evaluate(() => {
-    const raw = sessionStorage.getItem('forge:identity') ?? '';
+    const raw = sessionStorage.getItem('distorrent:identity') ?? '';
     return (JSON.parse(raw) as { fingerprint: string }).fingerprint;
   });
 }
@@ -64,10 +64,10 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
 test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   await createAccount(page, 'Carol');
 
-  // Acima do teto (o default e' 2 GB, configuravel por VITE_FORGE_MAX_FILE_MB).
+  // Acima do teto (o default e' 2 GB, configuravel por VITE_DISTORRENT_MAX_FILE_MB).
   // Usa 8 GB para ser barrado independente do teto configurado.
   await page.evaluate(() =>
-    window.dispatchEvent(new CustomEvent('forge:bus', { detail: {
+    window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-big', name: 'big.bin',
       size: 8 * 1024 * 1024 * 1024, chunks: 32768, hash: 'a'.repeat(32), from_fp: 'abcdef123456',
     } }))
@@ -76,7 +76,7 @@ test('limites de arquivo são barrados com erro visível', async ({ page }) => {
 
   // chunks acima do limite rejeitado
   await page.evaluate(() =>
-    window.dispatchEvent(new CustomEvent('forge:bus', { detail: {
+    window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-chunks', name: 'x.bin',
       size: 1024, chunks: 40000, hash: 'b'.repeat(32), from_fp: 'abcdef123456',
     } }))

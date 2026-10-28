@@ -1944,12 +1944,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
-name = "forge"
+name = "distorrent"
 version = "2.2.0"
 dependencies = [
  "base64 0.22.1",
  "dirs 5.0.1",
- "forge-core",
+ "distorrent-core",
  "hex",
  "keyring",
  "reqwest 0.12.28",
@@ -1963,7 +1963,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "forge-core"
+name = "distorrent-core"
 version = "1.0.0"
 dependencies = [
  "aec-rs",

@@ -18,7 +18,7 @@ import { test, expect, chromium, type Page } from '@playwright/test'
 
 declare global {
   interface Window {
-    __forgeScreenProbe?: {
+    __distorrentScreenProbe?: {
       ok: boolean
       why?: string
       surface?: string
@@ -106,7 +106,7 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           sendParamsApplied: false, audioTracks: 0, degradedAfterPressure: false,
           renegotiationStable: false, peersReusedSender: false,
         }
-        window.__forgeScreenProbe = probe
+        window.__distorrentScreenProbe = probe
 
         async function run() {
           const env = detectScreenEnvironment()
@@ -281,13 +281,13 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
       `,
     })
 
-    await page.waitForFunction(() => window.__forgeScreenProbe !== undefined, { timeout: 20000 })
+    await page.waitForFunction(() => window.__distorrentScreenProbe !== undefined, { timeout: 20000 })
     await page.waitForFunction(() => {
-      const p = window.__forgeScreenProbe
+      const p = window.__distorrentScreenProbe
       return !!p && (p.ok === true || !!p.why)
     }, { timeout: 45000 })
 
-    const probe = await page.evaluate(() => window.__forgeScreenProbe)
+    const probe = await page.evaluate(() => window.__distorrentScreenProbe)
     console.log('SCREEN PROBE', JSON.stringify(probe, null, 1))
 
     // Se a máquina não tem display nenhum (sandbox), isso é um pulo honesto:

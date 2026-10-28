@@ -70,6 +70,6 @@ export async function accountWithConversation(page: Page, name: string, server =
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 })
   await page.getByPlaceholder('Seu nome').fill(name)
   await page.getByRole('button', { name: 'Criar conta' }).click()
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 })
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 })
   await createServerViaWizard(page, server)
 }

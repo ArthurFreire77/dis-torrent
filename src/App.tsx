@@ -28,7 +28,7 @@ function useIsMobile(){
 function AutoRoute(){
   const isMobile = useIsMobile()
   if(isMobile) return <Navigate to="/m" replace />
-  return <Navigate to="/d/forge" replace />
+  return <Navigate to="/d/distorrent" replace />
 }
 
 // Rota do shell de PC: em largura de celular entrega o shell mobile no mesmo
@@ -36,13 +36,13 @@ function AutoRoute(){
 function DesktopRoute(){
   const isMobile = useIsMobile()
   if(isMobile) return <MobileShell />
-  return <ThemeShell designId="forge" />
+  return <ThemeShell designId="distorrent" />
 }
 
 // Link de convite público: /invite/TOKEN → abre o shell com o token pré-preenchido
 function InviteRoute({ token }: { token: string }){
   const isMobile = useIsMobile()
-  const target = isMobile ? '/m' : '/d/forge'
+  const target = isMobile ? '/m' : '/d/distorrent'
   return <Navigate to={`${target}?invite=${encodeURIComponent(token)}`} replace />
 }
 
@@ -51,7 +51,7 @@ export default function App(){
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<AutoRoute />} />
-        <Route path="/d/forge" element={<DesktopRoute />} />
+        <Route path="/d/distorrent" element={<DesktopRoute />} />
         <Route path="/m" element={<MobileShell />} />
         <Route path="/mobile" element={<MobileShell />} />
         <Route path="/invite/:token" element={<InviteRouteWrapper />} />

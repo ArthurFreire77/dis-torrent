@@ -19,7 +19,7 @@ async function criarConta(page: Page, nome: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 })
   await page.getByPlaceholder('Seu nome').fill(nome)
   await page.getByRole('button', { name: 'Criar conta' }).click()
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 })
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 })
 }
 
 async function abrirConfiguracoes(page: Page) {

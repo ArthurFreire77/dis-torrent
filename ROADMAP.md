@@ -2,13 +2,13 @@
 
 Cada fase só é marcada como FEITA quando testada/executável de verdade (não "a UI existe").
 
-- [x] **Design FORGE congelado** (UI aprovada; tokens em `DESIGN_SYSTEM.md`)
+- [x] **Design DisTorrent congelado** (UI aprovada; tokens em `DESIGN_SYSTEM.md`)
 - [x] **F2 — Identidade real** (ed25519 + fingerprint blake3; keyring do SO; onboarding)
 - [x] **F3 — Storage real** (SQLite WAL bundled; repos no core; UI nunca acessa storage)
 - [x] **F4 — P2P real LAN** (discovery UDP + handshake autenticado + sessão cifrada + heartbeat/reconnect)
 - [x] **F5 — Mensagens reais DM** (assinadas, ACK de entrega, outbox pós-reconexão, estados SENDING/SENT/DELIVERED/PENDING)
 - [ ] **F6 — Instaladores por CI** (GitHub Actions: deb/rpm/AppImage, msi, dmg; logs + crash handling)
-- [ ] **F7 — Community Host headless** (binário `host/` usando forge-core: init/start/status/invite/peers/backup)
+- [ ] **F7 — Community Host headless** (binário `host/` usando distorrent-core: init/start/status/invite/peers/backup)
 - [ ] **F8 — Comunidades reais** (Community ID, owner, canais, categorias; schema v2)
 - [ ] **F9 — Permissões no core** (owner/admin/mod/member; toda operação validada pelo motor, nunca pela UI)
 - [ ] **F10 — Convites** (token assinado com expiração e revogação; sem segredo permanente em URL)

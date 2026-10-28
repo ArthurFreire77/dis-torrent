@@ -1,4 +1,4 @@
-// Tipos espelhados do forge-core (Rust) — contrato único entre UI e motor.
+// Tipos espelhados do distorrent-core (Rust) — contrato único entre UI e motor.
 // Nada aqui é mock: reflete exatamente o que o engine produce.
 
 export type NetworkState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING'
@@ -348,7 +348,7 @@ export interface FileSwarmView { file_id: string; name: string; size: number; ch
 
 
 // =====================================================================
-// CAMADA SOCIAL v3 — espelha `forge_core::social` (nada aqui é mock)
+// CAMADA SOCIAL v3 — espelha `distorrent_core::social` (nada aqui é mock)
 // =====================================================================
 
 export interface ReactionSummary {
@@ -489,7 +489,7 @@ export interface SearchQuery {
 
 export const EMPTY_SEARCH: SearchQuery = { text: '', from: '', conv: '', has: '', before: 0, limit: 50 }
 
-export interface ForgeServices {
+export interface DisTorrentServices {
   kind: 'native' | 'browser'
   version(): Promise<string>
   identityGet(): Promise<Identity | null>
@@ -787,7 +787,7 @@ export interface MediaSafetySettings {
   block_executables: boolean
 }
 
-// --- Segurança (espelha forge-core moderation/names) ---
+// --- Segurança (espelha distorrent-core moderation/names) ---
 
 export type SpamLevel = 'low' | 'medium' | 'high'
 export type TrustLevel = 'new' | 'trusted' | 'suspicious' | 'banned'
@@ -822,7 +822,7 @@ export interface ReputationView {
 
 /**
  * Estado da camada de voz NATIVA (webrtc-rs + cpal + Opus), espelhando
- * `forge_core::net::media_voice::VoiceStats`. Nomes em snake_case porque o
+ * `distorrent_core::net::media_voice::VoiceStats`. Nomes em snake_case porque o
  * struct é serializado direto pelo Rust.
  *
  * `null` em `voiceMediaStats` = a chamada NÃO é nativa (ou não há mídia

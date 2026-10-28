@@ -5,7 +5,7 @@
 import type { BotView, ChannelMeta, RoleView } from './models'
 import { DEFAULT_ROLE_COLORS, PERMS, BOT_AVATARS } from './models'
 
-const LS_PREFIX = 'forge:extras:'
+const LS_PREFIX = 'distorrent:extras:'
 
 function key(kind: string, communityId: string) {
   return `${LS_PREFIX}${kind}:${communityId}`

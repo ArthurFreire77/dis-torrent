@@ -23,9 +23,9 @@ Toda a pilha de rede já está implementada e **nenhuma peça é obrigatória**:
 | Torne virtual por peer | Túnel com IP determinístico `fd9d::/64` | `net/vtunnel.rs` |
 
 **Não há libp2p, QUIC nem circuit-v2 neste projeto.** A stack de rede é própria,
-sobre tokio. **Nada passa por servidor da FORGE ou de terceiros** — não existe
+sobre tokio. **Nada passa por servidor da DisTorrent ou de terceiros** — não existe
 padrão embutido para nenhum endpoint auxiliar, inclusive o tracker HTTP, que roda
-desligado até você apontar `FORGE_BOOTSTRAP_URL` para o seu.
+desligado até você apontar `DISTORRENT_BOOTSTRAP_URL` para o seu.
 
 ## O que ainda pode precisar de infraestrutura
 
@@ -46,5 +46,5 @@ desligado até você apontar `FORGE_BOOTSTRAP_URL` para o seu.
    da conexão mostra `RECONNECTING`/`OFFLINE`, nunca um "conectado" falso.
 4. Metadados mínimos: endpoints auxiliares **nunca** recebem corpos de mensagem.
    O tráfego é cifrado E2E antes de sair do processo.
-5. Kill-switches: `FORGE_NO_RELAY`, `FORGE_NO_TUNNEL`, `FORGE_NO_ANNOUNCE`,
-   `FORGE_NO_DHT` derrubam cada peça isoladamente para depurar.
+5. Kill-switches: `DISTORRENT_NO_RELAY`, `DISTORRENT_NO_TUNNEL`, `DISTORRENT_NO_ANNOUNCE`,
+   `DISTORRENT_NO_DHT` derrubam cada peça isoladamente para depurar.

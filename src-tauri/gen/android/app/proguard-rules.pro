@@ -6,12 +6,12 @@
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
 # DownloadsPlugin é resolvido por NOME via register_android_plugin
-# ("com.forge.app.DownloadsPlugin") e os @Command por reflexão. O R8 renomeia
+# ("com.distorrent.app.DownloadsPlugin") e os @Command por reflexão. O R8 renomeia
 # classes/métodos em release (isMinifyEnabled = true) e o registro passaria a
 # falhar em runtime — só no aparelho, só na release, só quando alguém baixa
 # um arquivo. Mantemos classe e membros annotated.
--keep class com.forge.app.DownloadsPlugin { *; }
--keepclassmembers class com.forge.app.DownloadsPlugin {
+-keep class com.distorrent.app.DownloadsPlugin { *; }
+-keepclassmembers class com.distorrent.app.DownloadsPlugin {
     @app.tauri.annotation.Command <methods>;
 }
 

@@ -18,7 +18,7 @@ export interface Prefs {
   gain: boolean
 }
 
-const KEY = 'forge:prefs:v1'
+const KEY = 'distorrent:prefs:v1'
 
 const DEFAULTS: Prefs = {
   theme: 'dark',

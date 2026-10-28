@@ -8,8 +8,8 @@
 (às vezes nem chegava a desenhar a tela).
 
 **Causa raiz.** O APK publicado tinha **2,49 MB** e, abrindo o `.apk` como zip, não
-existia **nenhum** `lib/*/libforge_lib.so` e nem os assets do frontend. O
-`System.loadLibrary("forge_lib")` do Tauri falhava com `UnsatisfiedLinkError` na
+existia **nenhum** `lib/*/libdistorrent_lib.so` e nem os assets do frontend. O
+`System.loadLibrary("distorrent_lib")` do Tauri falhava com `UnsatisfiedLinkError` na
 criação da Activity → o Android encerra o processo imediatamente. Não era crash de
 Kotlin, nem R8, nem permissão: era um APK sem a biblioteca nativa (e sem a UI).
 Mesma coisa nos releases anteriores: a 1.1.5 e a 1.1.4 tinham 20 MB, a 1.1.6 caiu
@@ -22,7 +22,7 @@ para 2,49 MB — regressão de empacotamento, não de código.
   as variáveis `DISTORRENT_KEYSTORE_PATH` / `DISTORRENT_KEYSTORE_PASSWORD` /
   `DISTORRENT_KEY_ALIAS` / `DISTORRENT_KEY_PASSWORD`. Sem keystore o release sai
   **não assinado** em vez de falhar no meio do build.
-- Novo `scripts/verify-apk.ps1`: recusa APK sem `lib/arm64-v8a/libforge_lib.so`,
+- Novo `scripts/verify-apk.ps1`: recusa APK sem `lib/arm64-v8a/libdistorrent_lib.so`,
   sem assets do frontend, sem assinatura ou com tamanho suspeito. É a trava que
   impede publicar outro APK oco — roda no build local e no CI.
 - Novo `build-android.ps1`: build completo e verificável (frontend + Rust arm64 +
@@ -41,7 +41,7 @@ para 2,49 MB — regressão de empacotamento, não de código.
 
 **Causa raiz.** O gatilho era o **stub do instalador NSIS** do Tauri, não o app:
 
-- o binário puro (`forge.exe`, 24 MB) passa limpo **até** baixado com
+- o binário puro (`distorrent.exe`, 24 MB) passa limpo **até** baixado com
   Mark-of-the-Web;
 - trocar a compressão do NSIS (LZMA → zlib) **não resolveu** — o arquivo novo
   (8,13 MB) foi detectado do mesmo jeito, inclusive depois de baixado;
@@ -61,7 +61,7 @@ branco).
 7.578.486 bytes, `sha256 7388723c…` → `Zone.Identifier` aplicado →
 `MpCmdRun -Scan`: **"found no threats"**, arquivo preservado e hash inalterado.
 Instalação silenciosa testada em diretório temporário: instalou
-`forge.exe` (versão `1.1.7-pre-alpha`), criou desinstalador e removeu tudo no
+`distorrent.exe` (versão `1.1.7-pre-alpha`), criou desinstalador e removeu tudo no
 uninstall.
 
 ### Também nesta release (outro trabalho no mesmo diretório)
@@ -109,7 +109,7 @@ confirmado" e o Windows Defender coloca o arquivo em quarentena
 
 **Diagnóstico.** Não é código malicioso nem assinatura de vírus: é heurística de
 machine learning (`!ml`) sobre o **instalador NSIS**. Os `.exe` das 1.1.5 e 1.1.6
-passam limpos, o binário do app (`forge.exe`, 24 MB) passa limpo **até com
+passam limpos, o binário do app (`distorrent.exe`, 24 MB) passa limpo **até com
 Mark-of-the-Web**, mas o pacote NSIS é acusado. Trocar a compressão para `zlib`
 não resolveu: o scan local dizia "no threats", porém o download (com MOTW) e a
 proteção em tempo real continuavam detectando — o problema é o formato NSIS em
@@ -242,7 +242,7 @@ Os instaladores (Windows .exe/.msi, Linux .AppImage/.deb, Android .apk) **não s
 
 ### Testes
 
-- `forge-core/tests/media_voice_*.rs`: gate `#![cfg(target_os = "linux")]`
+- `distorrent-core/tests/media_voice_*.rs`: gate `#![cfg(target_os = "linux")]`
   (dois alvos não compilavam no Windows e derrubavam `cargo test`/`clippy
   --all-targets`).
 - `aggregate_stats`: pior peer não é mais contado duas vezes (teste novo).
@@ -264,7 +264,7 @@ Os instaladores (Windows .exe/.msi, Linux .AppImage/.deb, Android .apk) **não s
   ativa. Mesma prova da câmera (1.5s); sem quadro, cai no `appsrc` (xcap).
 - **Relay MQTT (4G)**: backoff exponencial na reconexão (o storm de ~3/s
   por perna rendia ban de IP), erro honesto com o motivo da recusa e
-  `FORGE_MQTT_BROKERS` para broker próprio.
+  `DISTORRENT_MQTT_BROKERS` para broker próprio.
 - **Voz**: teste de microfone nativo (WebKitGTK não tem getUserMedia) +
   nome real do device; botão de câmera no mobile; menu de tela só no clique.
 
@@ -279,9 +279,9 @@ Os instaladores (Windows .exe/.msi, Linux .AppImage/.deb, Android .apk) **não s
   primeiro paint — janela cinza, `about:blank` nunca comitava, zero output
   no console. Chromium nunca foi afetado.
 - **Blindagem no código**: o app agora usa `FONTCONFIG_FILE` próprio
-  (`src-tauri/fontconfig/forge-fonts.conf`, mesmas fontes/regras do sistema
+  (`src-tauri/fontconfig/distorrent-fonts.conf`, mesmas fontes/regras do sistema
   via `/etc/fonts/conf.d`) com `<cachedir>` só em
-  `~/.cache/forge-fontconfig`. Cache compartilhado envenenado nunca mais
+  `~/.cache/distorrent-fontconfig`. Cache compartilhado envenenado nunca mais
   trava o app — verificado com o arquivo venenoso presente.
 - **Diagnóstico no Linux**: console JS espelhado no stdout
   (`enable_write_console_messages_to_stdout`) e `useHttpsScheme: false`.
@@ -290,7 +290,7 @@ Os instaladores (Windows .exe/.msi, Linux .AppImage/.deb, Android .apk) **não s
 
 ### Chamadas e vídeo — qualidade e estabilidade (medido, não estimado)
 
-Instrumento novo: `cargo run --example media_probe` (forge-core/examples) abre
+Instrumento novo: `cargo run --example media_probe` (distorrent-core/examples) abre
 os dispositivos REAIS e imprime o que aconteceu — microfone (cpal), câmera
 (v4l2src), tela (xcap) e os encoders. Todos os números abaixo são dele.
 
@@ -345,7 +345,7 @@ os dispositivos REAIS e imprime o que aconteceu — microfone (cpal), câmera
 
 Dois bugs REAIS encontrados por teste novo
 (`call_cycle_repeats_cleanly_round_after_round`, `rejected_call_leaves_nothing_
-held_behind` em forge-core/tests/integration.rs — 2 engines, chamada de verdade):
+held_behind` em distorrent-core/tests/integration.rs — 2 engines, chamada de verdade):
 
 - **Quem recebia o fim continuava dentro da chamada**: `handle_frame(CallEnd)`
   fazia `leave_call(call_id, peer_fp)` — removia só PAR que desligou. Em 1:1 o
@@ -571,7 +571,7 @@ Republicação do projeto com histórico limpo e documentação revisada.
 - **Instaladores** passam a ser GitHub Releases em vez de arquivos no repositório.
 
 Nota de numeração: as entradas abaixo são o registro histórico do projeto sob
-nomes e numerações anteriores (FORGE 2.x–5.x). A partir daqui a numeração é
+nomes e numerações anteriores (DisTorrent 2.x–5.x). A partir daqui a numeração é
 `1.0.0-pre-alpha.N` e o CHANGELOG passa a ser gerado em ordem cronológica a
 partir das tags do Git.
 
@@ -583,7 +583,7 @@ com áudio pelo túnel de sinalização (o "relay"), de latência alta — a ori
 praticamente toda complaint de chamada. Agora a voz é um plano de mídia nativo em
 Rust, e o relay saiu do caminho de chamadas.
 
-### Voz nativa (`forge-core/src/net/media_voice.rs`)
+### Voz nativa (`distorrent-core/src/net/media_voice.rs`)
 - **webrtc-rs 0.21** (ICE/UDP/DTLS/SRTP reais) + **cpal 0.18** + **Opus**. A
   sinalização reaproveita os frames que já existiam (`CallOffer`/`CallAnswer`/
   `CallIce`): o core Rust intercepta antes do JS e fala SDP padrão, então um peer
@@ -650,7 +650,7 @@ Rust, e o relay saiu do caminho de chamadas.
   barata). Precisa de replug físico.
 
 ### Operação
-- `forge-core/dev/safe-build.sh` — guardião de build: aborta com RAM livre
+- `distorrent-core/dev/safe-build.sh` — guardião de build: aborta com RAM livre
   < 2 GB, trava o build em 3 GB (`systemd-run --scope -p MemoryMax`) e usa 1 job
   com nice 19. Existe porque um build sem teto derrubou a máquina.
 - zram (7 GB, zstd, prioridade 100) + swapfile de 4 GB, `swappiness=100`:
@@ -821,7 +821,7 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 
 ### v3.0 — Mudanças de API
 - **Senha mínima 8 caracteres** (antes 4) — argon2id + OWASP compliant
-- **Versão unificada**: forge-core, src-tauri, host, package.json — todos 3.0.0
+- **Versão unificada**: distorrent-core, src-tauri, host, package.json — todos 3.0.0
 
 ### Corrigido (Rust core — 8 fixes)
 - `Mutex poisoning cascade`: todos `.lock().unwrap()` → `.unwrap_or_else(|e| e.into_inner())` em storage.rs, engine.rs, lib.rs (13+ ocorrências)
@@ -904,11 +904,11 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 - **Rede Tor real**: cliente SOCKS5 próprio (RFC 1928) com suporte a HOSTNAME/ONION — conecta a `endereco.onion:80` através do Tor SEM resolver DNS local (tokio-socks removido)
 - **`connect_host`**: `ip:porta`, `dominio:porta` e `.onion:porta` — no app (Configurações → Avançado) e na API do engine
 - **Teste Tor E2E real** (`tests/tor_e2e.rs`, `--ignored`): tor daemon publica serviço onion do peer B, peer A em privacidade "full" conecta via circuitos reais, handshake autenticado + DM com ACK entregue — validado nesta máquina (Tor 0.4.9)
-- **Tracker bootstrap self-hosted**: `forge-host --bootstrap 8090` sobe tracker HTTP (announce/lookup com validação e TTL de 15 min) — deploy em VPS próprio, zero dependência de terceiros; endpoints testados via curl
-- **Multi-tracker**: `FORGE_BOOTSTRAP_URL` aceita lista separada por vírgula; announce em todos, lookup até encontrar
+- **Tracker bootstrap self-hosted**: `distorrent-host --bootstrap 8090` sobe tracker HTTP (announce/lookup com validação e TTL de 15 min) — deploy em VPS próprio, zero dependência de terceiros; endpoints testados via curl
+- **Multi-tracker**: `DISTORRENT_BOOTSTRAP_URL` aceita lista separada por vírgula; announce em todos, lookup até encontrar
 
 ### Corrigido (nada local/dead)
-- Bootstrap padrão apontava para `forge-bootstrap.fly.dev` que está MORTO — descoberta pela internet quebrada por padrão; agora sem default fake: sem tracker configurado, o motor avisa e UPnP/manual seguem ativos
+- Bootstrap padrão apontava para `distorrent-bootstrap.fly.dev` que está MORTO — descoberta pela internet quebrada por padrão; agora sem default fake: sem tracker configurado, o motor avisa e UPnP/manual seguem ativos
 - `connect_addr` resolvia domínio localmente ANTES de checar proxy — em modo Tor o alvo vazava por DNS; agora hostname vai ao SOCKS5 dentro dos circuitos
 
 ## 2.2.0 — Servidores 100% reais + sync P2P + E2E 2-usuários via proxy (2026-08-31)
@@ -921,7 +921,7 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 - `community_rename` nativo (antes só existia no modo navegador)
 - Grupos DM sincronizados: frames `GroupCreated`/`GroupMemberAdded`, re-sync no flush de conexão e lazy-join seguro para amigos aceitos — mensagens de grupo antes falhavam com "apenas DM nesta fase"
 - Migração SQLite v4 (topic/category/kind em canais; tabelas roles/member_roles/bots)
-- E2E `forge-core/tests/e2e_two_users.rs`: dois usuários completos em "redes diferentes" conectados por PROXY TCP — amizade, DM ida-e-volta com ACK, grupo, comunidade com convite assinado, sincronização de canais/cargos, kick, queda de rede → pending → reconexão → entrega, e identidade estável após reinício
+- E2E `distorrent-core/tests/e2e_two_users.rs`: dois usuários completos em "redes diferentes" conectados por PROXY TCP — amizade, DM ida-e-volta com ACK, grupo, comunidade com convite assinado, sincronização de canais/cargos, kick, queda de rede → pending → reconexão → entrega, e identidade estável após reinício
 
 ### Corrigido (segurança — auditoria completa)
 - Sequestro de comunidade via `CommunityState` forjado (gate pela autoridade gravada + convite assinado)
@@ -980,7 +980,7 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 ## 2.1.2 — Correções auditoria P0 (2026-08-31)
 
 ### Corrigido
-- Fingerprint `blake3(pub_bytes)` alinhado TS↔Rust `forge-core/src/identity.rs:89` (era `blake3(hex_str)`)
+- Fingerprint `blake3(pub_bytes)` alinhado TS↔Rust `distorrent-core/src/identity.rs:89` (era `blake3(hex_str)`)
 - Teste flaky `sign_verify_ok_and_tamper_fail` `identity.rs:130` — flip determinístico
 - Lint 0 warnings: `callManager.ts:114,132` unused, `ThemeShell.tsx:431` idx, `browser.ts:8` imports
 - FileSwarm `src/services/fileSwarm.ts:41` hash fraco `h*31` → `blake3` `toHexBlake3` + `chunkHashes` + verificação `onChunkData`
@@ -996,11 +996,11 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 - **UI idêntica ao Discord original**: paleta oficial (#313338/#2b2d31/#1e1f22, blurple #5865f2), avatares padrão, rodapé de usuário estilo Discord — mantendo todos os dados reais
 - **Amigos reais**: pedidos assinados (FriendRequest/Accept/Reject/Remove), aceitar/recusar, bloquear/desbloquear; bloqueio é aplicado no core (mensagens de bloqueado são rejeitadas pelo motor, testado)
 - Seções SOLICITAÇÕES / AMIGOS / CONVERSAS DIRETAS na sidebar
-- Instalação user-space: `~/.local/bin/forge` + entrada no menu de aplicativos
+- Instalação user-space: `~/.local/bin/distorrent` + entrada no menu de aplicativos
 
 ### Corrigido
 - **Crash na abertura do app** (engine era spawnado fora do runtime tokio dos commands do Tauri — agora o boot roda em `tauri::async_runtime`)
-- **Ícone**: substituído o placeholder (logo Firefox) por ícone FORGE próprio (blurple #5865f2, "F" branco) em 32/48/128/256/512
+- **Ícone**: substituído o placeholder (logo Firefox) por ícone DisTorrent próprio (blurple #5865f2, "F" branco) em 32/48/128/256/512
 - Eleição de sessão determinística (dial simultâneo não gera mais flaps de conexão)
 - Discovery funciona também entre dois processos na mesma máquina (loopback broadcast)
 - 4 testes de integração de amizade (19/19 total verde)
@@ -1008,7 +1008,7 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 ## 0.2.0 — Motor real (2026-08-30)
 
 ### Adicionado
-- **`forge-core`**: motor Rust puro com identidade ed25519, storage SQLite (WAL) e rede P2P real
+- **`distorrent-core`**: motor Rust puro com identidade ed25519, storage SQLite (WAL) e rede P2P real
   - Handshake autenticado (ed25519 sobre transcript + X25519 efêmero → HKDF → ChaCha20Poly1305)
   - Discovery LAN via UDP broadcast (porta 45900) com validação de fingerprint
   - Engine com estados reais de conexão (DISCONNECTED/CONNECTING/CONNECTED/RECONNECTING), heartbeat 10s, timeout 25s, reconexão com backoff 1s→15s
@@ -1017,7 +1017,7 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
   - 15 testes (11 unit + 4 integração com dois nós reais em TCP)
 - Shell Tauri 2 (migração do 1.6 — Ubuntu 24.04 removeu libsoup-2.4)
 - Keyring do SO para a chave privada (fallback SQLite documentado)
-- Camada `services` na UI (nativo/navegador-honesto) + hooks; FORGE visual intocado
+- Camada `services` na UI (nativo/navegador-honesto) + hooks; DisTorrent visual intocado
 - Docs: ARCHITECTURE v2, PROTOCOL v1 (implementado), THREAT_MODEL, AUX_SERVICES
 
 ### Removido
@@ -1025,4 +1025,4 @@ reproduzíveis atrás de NAT simétrico (4G/5G).
 - Protótipo `src/lab/DesignLab.tsx` e artefatos de build (`dist`, `vite.config.js/.d.ts`, tsbuildinfo)
 
 ## 0.1.0 — Protótipo visual
-- FORGE e 5 designs alternativos; UI React + Vite; identidade parcial (ed25519 em TS)
+- DisTorrent e 5 designs alternativos; UI React + Vite; identidade parcial (ed25519 em TS)

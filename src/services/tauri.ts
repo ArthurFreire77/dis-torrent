@@ -1,4 +1,4 @@
-// Implementação NATIVA: Tauri 2 → forge-core (Rust).
+// Implementação NATIVA: Tauri 2 → distorrent-core (Rust).
 // Toda operação sensível é validada no core — a UI apenas reflete estado real.
 
 import { invoke } from '@tauri-apps/api/core'
@@ -10,7 +10,7 @@ import type {
   ChannelMeta,
   Conversation,
   EngineEvent,
-  ForgeServices,
+  DisTorrentServices,
   FriendView,
   FriendOutcome,
   Identity,
@@ -39,7 +39,7 @@ import type {
   SearchHit,
 } from './models'
 
-export const tauriServices: ForgeServices = {
+export const tauriServices: DisTorrentServices = {
   kind: 'native',
 
   version: () => invoke<string>('get_app_version'),
@@ -143,7 +143,7 @@ export const tauriServices: ForgeServices = {
   },
 
   subscribe: (cb) => {
-    const un = listen<EngineEvent>('forge://event', (e) => cb(normalizeNativeEvent(e.payload)))
+    const un = listen<EngineEvent>('distorrent://event', (e) => cb(normalizeNativeEvent(e.payload)))
     return () => {
       un.then((f) => f()).catch(() => {})
     }
@@ -303,7 +303,7 @@ export const tauriServices: ForgeServices = {
     invoke<void>('media_safety_set', { stripExif, blockExecutables }),
 
   // Voz nativa (webrtc-rs + cpal + Opus) — só existe onde o core a constrói
-  // (Linux; desligável por FORGE_NO_NATIVE_VOICE=1). Onde não existe o comando
+  // (Linux; desligável por DISTORRENT_NO_NATIVE_VOICE=1). Onde não existe o comando
   // devolve false/null e o WebRTC do navegador segue intacto.
   voiceMediaAvailable: () => invoke<boolean>('voice_media_available'),
   voiceMediaStats: (callId) => invoke<VoiceMediaStats | null>('voice_media_stats', { callId }),
@@ -395,7 +395,7 @@ export const tauriServices: ForgeServices = {
   bookmarkList: (convId) => invoke<[string, string][]>('bookmark_list', { convId }),
 }
 
-// forge-core serializa variantes *Ev com o sufixo (ex.: FileAnnounceEv ->
+// distorrent-core serializa variantes *Ev com o sufixo (ex.: FileAnnounceEv ->
 // 'file_announce_ev'), enquanto a UI/browser usa o nome curto ('file_announce').
 // Sem este alias, no app nativo o anúncio de arquivo (e sinalização de chamada)
 // nunca chegava aos handlers — arquivo não aparecia e download não iniciava.

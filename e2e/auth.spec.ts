@@ -4,5 +4,5 @@ test('criar conta e navegar para app', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 10000 });
   await page.getByPlaceholder('Seu nome').fill('Alice');
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 10000 });
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 10000 });
 });

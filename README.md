@@ -15,7 +15,7 @@ nem senha para esquecer.
 │  commands IPC · keyring do SO · cofre com senha (Argon2id)  │
 └──────────────────────────┬───────────────────────────────────┘
                            ▼
-┌─ forge-core (Rust puro, sem UI) ─────────────────────────────┐
+┌─ distorrent-core (Rust puro, sem UI) ─────────────────────────────┐
 │  identidade · protocolo · SQLite · DHT · relay · STUN/TUN    │
 │  tunnel virtual · voz nativa (Linux) · criptografia         │
 └──────────────────────────────────────────────────────────────┘
@@ -57,7 +57,7 @@ nem senha para esquecer.
 - **Rate limits em TODO caminho de rede** — TCP inbound por IP/global, teto de
   handshakes e sessões, frames E bytes por sessão (throttle + kill), discovery
   UDP, Hellos de relay, chunks, sinalização de chamada, dials outbound
-  (`FORGE_LIMIT_*` reconfigura; `net_limits` expõe no diagnóstico).
+  (`DISTORRENT_LIMIT_*` reconfigura; `net_limits` expõe no diagnóstico).
 - **Estados verdadeiros** — `CONECTADO / CONECTANDO / RECONECTANDO / OFFLINE` e
   `pendente → enviando → enviado → entregue`. Nada de texto fixo ou spinner eterno.
 
@@ -72,7 +72,7 @@ ed25519 e mensagens entre abas via `BroadcastChannel`, mas o estado de rede most
 | Ferramenta | Versão | Para quê |
 |---|---|---|
 | **Node.js** | 20+ | build do frontend, Vite, testes |
-| **Rust** | 1.77+ | `forge-core`, `src-tauri`, `host` |
+| **Rust** | 1.77+ | `distorrent-core`, `src-tauri`, `host` |
 | **Linux** | Ubuntu 24.04+ (recomendado) | WebKitGTK 4.1 |
 | **Android SDK + NDK** | opcional | só para build Android |
 
@@ -138,14 +138,14 @@ Para redes diferentes existem quatro caminhos, todos **automáticos**:
 4. **Relay** — fallback quando o hole punching falha (vê IPs e volume, nunca
    conteúdo, porque o tráfego já está cifrado E2E)
 
-O tracker HTTP (`FORGE_BOOTSTRAP_URL`) é **opcional e auto-hospedável** — sem
+O tracker HTTP (`DISTORRENT_BOOTSTRAP_URL`) é **opcional e auto-hospedável** — sem
 ele, announce e lookup por tracker ficam desligados e nada acima para de funcionar.
 
 ### Community Host (tracker bootstrap, opcional)
 
 ```bash
 npm run host -- --bootstrap 8090
-FORGE_BOOTSTRAP_URL=http://seu-vps:8090 npm run tauri:dev
+DISTORRENT_BOOTSTRAP_URL=http://seu-vps:8090 npm run tauri:dev
 ```
 
 ### Android
@@ -180,14 +180,14 @@ Todas opcionais. Veja [`.env.example`](.env.example) com comentários.
 
 | Variável | Padrão | Efeito |
 |---|---|---|
-| `FORGE_BOOTSTRAP_URL` | *(vazio)* | Tracker HTTP. Aceita lista separada por vírgula |
-| `FORGE_PROXY_ADDR` | `127.0.0.1:1080` | SOCKS5 para o modo "Seguro +" |
-| `FORGE_TOR_ADDR` | `127.0.0.1:9050` | SOCKS5 do Tor para o modo "Tor" |
-| `FORGE_PORT` | aleatória | Porta TCP de escuta |
-| `FORGE_DISCOVERY_BROADCASTS` | — | Broadcasts extras de discovery (VPN/ZeroTier) |
-| `FORGE_NO_RELAY` / `FORGE_NO_TUNNEL` / `FORGE_NO_ANNOUNCE` / `FORGE_NO_DHT` | `0` | Kill-switches de feature |
-| `FORGE_NO_NATIVE_VOICE` | `0` | Força o WebRTC do navegador no lugar da voz nativa |
-| `VITE_FORGE_MAX_FILE_MB` | `2048` | Teto de tamanho por arquivo no swarm, em MB (2 GB). Não remova o teto sem motivo: é a validação anti-DoS (ver abaixo) |
+| `DISTORRENT_BOOTSTRAP_URL` | *(vazio)* | Tracker HTTP. Aceita lista separada por vírgula |
+| `DISTORRENT_PROXY_ADDR` | `127.0.0.1:1080` | SOCKS5 para o modo "Seguro +" |
+| `DISTORRENT_TOR_ADDR` | `127.0.0.1:9050` | SOCKS5 do Tor para o modo "Tor" |
+| `DISTORRENT_PORT` | aleatória | Porta TCP de escuta |
+| `DISTORRENT_DISCOVERY_BROADCASTS` | — | Broadcasts extras de discovery (VPN/ZeroTier) |
+| `DISTORRENT_NO_RELAY` / `DISTORRENT_NO_TUNNEL` / `DISTORRENT_NO_ANNOUNCE` / `DISTORRENT_NO_DHT` | `0` | Kill-switches de feature |
+| `DISTORRENT_NO_NATIVE_VOICE` | `0` | Força o WebRTC do navegador no lugar da voz nativa |
+| `VITE_DISTORRENT_MAX_FILE_MB` | `2048` | Teto de tamanho por arquivo no swarm, em MB (2 GB). Não remova o teto sem motivo: é a validação anti-DoS (ver abaixo) |
 | `RUST_LOG` | `info` | Filtro de log |
 
 ---
@@ -199,7 +199,7 @@ npm run typecheck        # tsc
 npm run lint             # eslint
 npm run test:unit        # node:test
 npm run build            # typecheck + vite build
-npm run test:rust        # forge-core: 33 suítes, 150 testes unitários
+npm run test:rust        # distorrent-core: 33 suítes, 150 testes unitários
 npm run test:rust:clippy # clippy com -D warnings
 npm run test:e2e         # Playwright (17 specs)
 ```
@@ -212,7 +212,7 @@ Os testes multi-engine que dependem de portas distintas às vezes colidem em
 `51413` quando o binário roda em paralelo — é uma limitação conhecida do design
 de teste, não do produto.
 
-CI (`.github/workflows/ci.yml`) roda web + `forge-core` + `host` + build do
+CI (`.github/workflows/ci.yml`) roda web + `distorrent-core` + `host` + build do
 `.deb` em cada push.
 
 ---
@@ -230,7 +230,7 @@ CI (`.github/workflows/ci.yml`) roda web + `forge-core` + `host` + build do
 │   ├── core/             crypto, sanitização, nomes, storage driver
 │   └── shared/           UI compartilhada, markdown, ícones
 │
-├── forge-core/           MOTOR RUST PURO (sem UI, sem Tauri)
+├── distorrent-core/           MOTOR RUST PURO (sem UI, sem Tauri)
 │   ├── src/              identity, protocol, storage, vault, stormvault,
 │   │                     names, antispam, moderation, social, metrics, cache
 │   │   └── net/          engine, transport, discovery, mdns, stun, natpmp,

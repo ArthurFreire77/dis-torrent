@@ -124,7 +124,7 @@ jobs:
       # um build "universal" falharia no meio (ou pior: sairia sem as .so de
       # algumas ABIs). arm64 cobre todos os aparelhos atuais.
       - run: npm run tauri android build -- --apk --target aarch64
-      - name: Verificar APK (libforge_lib.so presente)
+      - name: Verificar APK (libdistorrent_lib.so presente)
         working-directory: src-tauri/gen/android/app/build/outputs/apk
         run: |
           set -euo pipefail
@@ -149,8 +149,8 @@ jobs:
               unzip -l "$apk"
               exit 1
             fi
-            if ! unzip -l "$apk" | grep -Eq 'lib/[^/]+/libforge_lib\.so'; then
-              echo "::error::$apk sem libforge_lib.so — o app morre no boot"
+            if ! unzip -l "$apk" | grep -Eq 'lib/[^/]+/libdistorrent_lib\.so'; then
+              echo "::error::$apk sem libdistorrent_lib.so — o app morre no boot"
               unzip -l "$apk"
               exit 1
             fi

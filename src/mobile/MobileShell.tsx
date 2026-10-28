@@ -34,7 +34,7 @@ import { PRIVACY_MODES } from '../services/models'
 // Glass + blur, bottom-nav, cards arredondados, composer flutuante — 100% mobile
 const MONO = "'JetBrains Mono', monospace"
 
-/** Fingerprint = 12 hex chars (blake3 truncado, ver forge-core/identity.rs). */
+/** Fingerprint = 12 hex chars (blake3 truncado, ver distorrent-core/identity.rs). */
 const FP_RE = /^[0-9a-f]{12}$/
 
 /** Item do autocompletar do composer mobile (mesma forma do desktop). */
@@ -426,7 +426,7 @@ export default function MobileShell() {
   const { conversations, refresh: refreshConvos } = useConversations(phase === 'app')
   const { messages, append, patchStatus, replaceOptimistic, failOptimistic } = useMessages(selConv)
   const [input, setInput] = useState('')
-  const draftKey = (c: string) => `forge:draft:${c}`
+  const draftKey = (c: string) => `distorrent:draft:${c}`
   useEffect(() => {
     if (!selConv) return
     try { setInput(localStorage.getItem(draftKey(selConv)) ?? '') } catch { setInput('') }
@@ -718,8 +718,8 @@ export default function MobileShell() {
     const v = turnInput.trim()
     if (v !== '' && !isValidTurnUrl(v)) { setTurnMsg('formato inválido — use turn:host:porta (ex: turn:seu-vps:3478)'); return }
     try {
-      if (v === '') localStorage.removeItem('forge:turn_url')
-      else localStorage.setItem('forge:turn_url', v)
+      if (v === '') localStorage.removeItem('distorrent:turn_url')
+      else localStorage.setItem('distorrent:turn_url', v)
       setTurnMsg(v === '' ? 'TURN removido — P2P puro (só rede local/NAT aberto).' : 'TURN salvo! Vale para as próximas chamadas.')
     } catch { setTurnMsg('não foi possível salvar neste aparelho.') }
   }
@@ -2310,7 +2310,7 @@ export default function MobileShell() {
                 <button className="m-btn" style={{ flex: 1 }} onClick={saveTurnUrl}>Salvar TURN</button>
               </div>
               {turnMsg && <div className={turnMsg.startsWith('formato') ? 'm-err' : 'm-ok'} style={{ marginTop: 8 }}>{turnMsg}</div>}
-              <div style={{ fontSize: 11, color: t.muted, marginTop: 8, lineHeight: 1.5 }}>Formato <span className="m-fp">turn:host:porta</span> • salvo em <span className="m-fp">forge:turn_url</span>.</div>
+              <div style={{ fontSize: 11, color: t.muted, marginTop: 8, lineHeight: 1.5 }}>Formato <span className="m-fp">turn:host:porta</span> • salvo em <span className="m-fp">distorrent:turn_url</span>.</div>
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>MICROFONE</div>

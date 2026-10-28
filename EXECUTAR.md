@@ -38,7 +38,7 @@ fingerprint (Amigos → Adicionar) e converse.
 3. **Rede Tor** — em privacidade "Tor — 7 nós", o app conecta a serviços
    `.onion` (peer publicando um onion service fica alcançável sem IP público
    e sem abrir porta no roteador). Teste real incluso:
-   `cd forge-core && cargo test --test tor_e2e -- --ignored --nocapture`;
+   `cd distorrent-core && cargo test --test tor_e2e -- --ignored --nocapture`;
 4. **Manual** — Configurações → Avançado → `ip:porta`, `dominio:porta` ou
    `endereco.onion:80`.
 
@@ -70,9 +70,9 @@ alocação nos dois lados). O handshake viaja pela SINALIZAÇÃO já existente
    com RTT honesto (`tunnel_ping` → `TunnelPong`).
 5. Diagnóstico por peer (`peer_diag`) mostra `tunnel_up`, `virtual_ip` e os
    contadores `tunnel_rx_frames`/`tunnel_tx_frames`. Kill-switch:
-   `FORGE_NO_TUNNEL=1` derruba tudo sem afetar direto/relay.
+   `DISTORRENT_NO_TUNNEL=1` derruba tudo sem afetar direto/relay.
 
-E2E: `cd forge-core && cargo test --test vtunnel_e2e -- --nocapture` — dois
+E2E: `cd distorrent-core && cargo test --test vtunnel_e2e -- --nocapture` — dois
 peers só-relay sobem o túnel, trocam ping com RTT, e DM + sinalização de
 chamada + frame de 200KB passam INTEIROS pela sessão do túnel.
 
@@ -82,7 +82,7 @@ Passo a passo (ZeroTier, grátis, Linux + Android):
 2. Autorize os dois membros no painel https://my.zerotier.com.
 3. Anote os IPs virtuais (ex. `10.147.0.10` e `10.147.0.11`).
 4. No PC, exponha o broadcast da descoberta para a subnet virtual:
-   `FORGE_DISCOVERY_BROADCASTS=10.147.0.255:45900 npm run tauri:dev`
+   `DISTORRENT_DISCOVERY_BROADCASTS=10.147.0.255:45900 npm run tauri:dev`
    (o broadcast limitado não sai pela rota padrão até o adaptador virtual —
    sem isso os peers não se acham sozinhos).
 5. Se a descoberta não achar em ~10s: Configurações → Avançado →
@@ -96,9 +96,9 @@ direto com o IP do outro aparelho.
 ```bash
 npm run host -- --bootstrap 8090        # no seu VPS público
 # nos clientes:
-FORGE_BOOTSTRAP_URL=http://seu-vps:8090 npm run tauri:dev
+DISTORRENT_BOOTSTRAP_URL=http://seu-vps:8090 npm run tauri:dev
 ```
-Aceita lista de trackers (resiliência): `FORGE_BOOTSTRAP_URL=http://a:8090,http://b:8090`.
+Aceita lista de trackers (resiliência): `DISTORRENT_BOOTSTRAP_URL=http://a:8090,http://b:8090`.
 Sem tracker configurado, announce/descovery por tracker ficam desligados —
 UPnP e endereço manual continuam funcionando.
 
@@ -107,7 +107,7 @@ através de um **proxy TCP** simulando redes distintas — amizade, DM, grupo,
 comunidade com convite assinado, canais, cargos, kick, queda de rede e
 reconexão:
 ```bash
-cd forge-core && cargo test --test e2e_two_users -- --nocapture
+cd distorrent-core && cargo test --test e2e_two_users -- --nocapture
 ```
 
 ## 4) Testes completos
@@ -132,11 +132,11 @@ abrir porta e sem vazar o IP real) e nível de log.
 
 ## 7) Estrutura
 ```
-forge-core/   motor Rust puro: identidade ed25519, SQLite, rede P2P (TCP
+distorrent-core/   motor Rust puro: identidade ed25519, SQLite, rede P2P (TCP
               autenticado + sessão ChaCha20Poly1305), amigos, comunidades,
               canais, cargos, bots, grupos, chamadas (sinalização), arquivos
 src-tauri/    casca Tauri 2 (commands IPC, keyring, cofre com senha)
 src/          UI React (ThemeShell desktop + MobileShell)
-host/         Community Host headless (fase seguinte, usa forge-core)
+host/         Community Host headless (fase seguinte, usa distorrent-core)
 docs/         arquitetura, protocolo, ameaças e screenshots de auditoria
 ```

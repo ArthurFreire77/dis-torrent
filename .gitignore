@@ -35,7 +35,7 @@ vite.config.d.ts
 .direnv/
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rust / Cargo (forge-core, src-tauri, host, aec-probe)
+# Rust / Cargo (distorrent-core, src-tauri, host, aec-probe)
 # ─────────────────────────────────────────────────────────────────────────────
 target/
 **/target/
@@ -110,10 +110,10 @@ __pycache__/
 # ─────────────────────────────────────────────────────────────────────────────
 # Banco de dados local / logs / dados de runtime
 # ─────────────────────────────────────────────────────────────────────────────
-/forge.db
-/forge.db-journal
-/forge.db-wal
-/forge.db-shm
+/distorrent.db
+/distorrent.db-journal
+/distorrent.db-wal
+/distorrent.db-shm
 *.db
 *.db-journal
 *.db-wal

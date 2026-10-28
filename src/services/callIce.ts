@@ -17,7 +17,7 @@ import { sha1 } from '@noble/hashes/legacy.js'
 // .ts explícito: node strip-types exige a extensão; o tsconfig do projeto
 // tem allowImportingTsExtensions e o Vite resolve igual.
 import { isIcePublicFallbackSuppressed } from './callIcePrivacy.ts'
-export const TURN_URL_KEY = 'forge:turn_url'
+export const TURN_URL_KEY = 'distorrent:turn_url'
 
 export function isValidTurnUrl(u: string): boolean {
   const v = (u ?? '').trim()
@@ -35,7 +35,7 @@ export function getTurnUrl(): string {
 
 // ── P2P puro: nenhum servidor de terceiro no padrão ─────────────────────────
 // A lista padrão de ICE é VAZIA (só candidatos host locais) + o que o usuário
-// configurar explicitamente (forge:turn_url / VITE_TURN_URL). Os fallbacks
+// configurar explicitamente (distorrent:turn_url / VITE_TURN_URL). Os fallbacks
 // públicos (Google STUN, openrelay TURN com credencial pública e cota de
 // ~20 GB/mês) SAÍRAM do padrão: mídia 100% P2P, sem VPS e sem terceiro.
 // Consequência honesta: fora da LAN, NAT restritivo/4G pode não fechar rota —
@@ -120,13 +120,13 @@ export function getClassicTurnServer(): RTCIceServer {
   }
 }
 
-// Relay explícito do usuário: via localStorage forge:turn_url (ex: turn:seu-relay:3478)
-// ou via env VITE_TURN_URL (+ VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL; padrão forge/forge).
+// Relay explícito do usuário: via localStorage distorrent:turn_url (ex: turn:seu-relay:3478)
+// ou via env VITE_TURN_URL (+ VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL; padrão distorrent/distorrent).
 // Padrão = só o configurado. Nenhum STUN/TURN público embutido (P2P puro).
 export function getIceServers(): RTCIceServer[] {
   // â”€â”€ Privacidade Ã— ICE â€” MUDOU DE POLÃTICA (era: "a lista nÃ£o muda") â”€â”€
   // O ICE do WebRTC no browser/WebView NÃƒO passa pelo SOCKS5/Tor do app (o
-  // proxy cobre o TCP do forge-core; a mÃ­dia usa sockets UDP do prÃ³prio
+  // proxy cobre o TCP do distorrent-core; a mÃ­dia usa sockets UDP do prÃ³prio
   // WebRTC). NÃ£o hÃ¡ como "rotear o ICE pelo Tor" a partir deste mÃ³dulo â€”
   // limitaÃ§Ã£o documentada no THREAT_MODEL.
   // O QUE MUDOU: em proxy/full os SERVIDORES PÃšBLICOS de reserva (Google
@@ -138,8 +138,8 @@ export function getIceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = []
   // também tenta localStorage para UI dinâmica
   const env: any = (import.meta as any)?.env ?? {}
-  const turnUser = (env.VITE_TURN_USERNAME as string | undefined) || 'forge'
-  const turnCred = (env.VITE_TURN_CREDENTIAL as string | undefined) || 'forge'
+  const turnUser = (env.VITE_TURN_USERNAME as string | undefined) || 'distorrent'
+  const turnCred = (env.VITE_TURN_CREDENTIAL as string | undefined) || 'distorrent'
   try {
     const ls = getTurnUrl()
     if (ls && isValidTurnUrl(ls)) servers.push({ urls: ls.trim(), username: turnUser, credential: turnCred })

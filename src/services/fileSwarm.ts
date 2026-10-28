@@ -9,7 +9,7 @@ import { invoke as tauriInvoke } from '@tauri-apps/api/core'
 
 
 /**
- * Teto de tamanho por arquivo. Configuravel por FORGE_MAX_FILE_MB (bundle nao
+ * Teto de tamanho por arquivo. Configuravel por DISTORRENT_MAX_FILE_MB (bundle nao
  * tem terminal: exporte antes de subir o app, ou use um launcher).
  *
  * PADRAO: 2 GB. O teto nao e' arbitrario — e' a validacao anti-DoS: sem ele, um
@@ -22,7 +22,7 @@ const MAX_FILE_MB = (() => {
   const raw = (() => {
     try {
       const meta = import.meta as unknown as { env?: Record<string, string> }
-      return meta.env?.VITE_FORGE_MAX_FILE_MB
+      return meta.env?.VITE_DISTORRENT_MAX_FILE_MB
     } catch { return undefined }
   })()
   const n = Number(raw)
@@ -36,11 +36,11 @@ export const MAX_CHUNKS = Math.ceil(MAX_FILE_SIZE / CHUNK) + 1 // folga de 1 chu
 export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_MB) >= 1024
   ? `${(MAX_FILE_MB / 1024).toFixed(MAX_FILE_MB % 1024 === 0 ? 0 : 1)} GB`
   : `${Math.round(MAX_FILE_MB)} MB`
-export const FILE_MARKER = '__FORGE_FILE__'
+export const FILE_MARKER = '__DISTORRENT_FILE__'
 
 /**
  * Prefixo do corpo de mensagem de arquivo, como gerado por `encodeFileBody`:
- *   "<emoji clipe> <nome> (<tamanho>) __FORGE_FILE__:<base64>"
+ *   "<emoji clipe> <nome> (<tamanho>) __DISTORRENT_FILE__:<base64>"
  * A UI usa isto para decidir se a mensagem e' um arquivo (e renderizar o card)
  * em vez de passar o texto pelo markdown. Importar daqui evita divergencia.
  */
@@ -252,7 +252,7 @@ interface DownloadsSaveResult { path?: string; name?: string }
  * Android: move o arquivo do diretório privado do app para a pasta
  * **Downloads de verdade** (MediaStore, API 29+ — sem permissão; pasta
  * legada abaixo disso). Sem isto o arquivo parava em
- * /data/data/com.forge.app/files/… — "uma pasta estranha" que nenhum
+ * /data/data/com.distorrent.app/files/… — "uma pasta estranha" que nenhum
  * explorador de arquivos mostra.
  *
  * O Rust já gravou o arquivo com escrita atômica; aqui é só cópia local
@@ -334,7 +334,7 @@ export class FileSwarm {
       // core antigo sem chunk_hashes: tenta anúncio básico (integridade por chunk fica opcional)
       await services.fileAnnounce(file_id, safeName, buf.length, chunks, hash).catch(() => { /* best-effort */ })
     }
-    try { localStorage.setItem(`forge:filemeta:${file_id}`, JSON.stringify({ name: safeName, size: buf.length, chunks, hash, chunkHashes })) } catch { /* silent */ }
+    try { localStorage.setItem(`distorrent:filemeta:${file_id}`, JSON.stringify({ name: safeName, size: buf.length, chunks, hash, chunkHashes })) } catch { /* silent */ }
     this.onChange?.()
     return sf
   }
@@ -369,20 +369,20 @@ export class FileSwarm {
     let ch = this.validChunkHashes(chunkHashes, chunks) ? chunkHashes : undefined
     if (!ch) {
       try {
-        const raw = localStorage.getItem(`forge:file:chunk_hashes:${file_id}`)
+        const raw = localStorage.getItem(`distorrent:file:chunk_hashes:${file_id}`)
         if (raw) { const parsed = JSON.parse(raw); if (this.validChunkHashes(parsed, chunks)) ch = parsed } 
       } catch { /* ignore */ }
     }
     // fallback localStorage meta
     if (!ch) {
       try {
-        const j = localStorage.getItem(`forge:filemeta:${file_id}`)
+        const j = localStorage.getItem(`distorrent:filemeta:${file_id}`)
         if (j) { const o = JSON.parse(j); if (this.validChunkHashes(o?.chunkHashes, chunks)) ch = o.chunkHashes }
       } catch { /* ignore */ }
     }
     const sf: SwarmFile = { file_id, name: safeName, size, chunks, hash, chunkHashes: ch, have: new Set(), data: new Map(), seeders: new Set([from_fp]), owner_fp: from_fp }
     this.files.set(file_id, sf)
-    try { localStorage.setItem(`forge:filemeta:${file_id}`, JSON.stringify({ name: safeName, size, chunks, hash, chunkHashes: ch })) } catch { /* silent */ }
+    try { localStorage.setItem(`distorrent:filemeta:${file_id}`, JSON.stringify({ name: safeName, size, chunks, hash, chunkHashes: ch })) } catch { /* silent */ }
     this.onChange?.()
     // NUNCA inicia download aqui (objetivo: arquivos não baixam sozinhos).
     return true
@@ -825,7 +825,7 @@ export class FileSwarm {
     for (const k of [...this.reqPeer.keys()]) if (k.startsWith(prefix)) this.reqPeer.delete(k)
     this.rr.delete(file_id)
     this.saving.delete(file_id)
-    try { localStorage.removeItem(`forge:filemeta:${file_id}`) } catch { /* ignore */ }
+    try { localStorage.removeItem(`distorrent:filemeta:${file_id}`) } catch { /* ignore */ }
     this.onChange?.()
   }
 

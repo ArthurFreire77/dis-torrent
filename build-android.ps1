@@ -7,7 +7,7 @@
 #
 # POR QUE ESTE SCRIPT EXISTE:
 # o build manual antigo (cargo build + `mklink /H` + gradle com `-x rustBuild*`)
-# produzia um APK SEM a libforge_lib.so quando o hard link falhava — e ninguém
+# produzia um APK SEM a libdistorrent_lib.so quando o hard link falhava — e ninguém
 # percebia, porque o gradle termina "com sucesso" com jniLibs vazio. O app
 # instalava e morria no boot ("parou de funcionar"). Aqui o Tauri CLI cuida do
 # Rust + jniLibs (sem link manual) e o resultado é VERIFICADO antes de sair.
@@ -70,13 +70,25 @@ try {
     # (ou, no caminho manual antigo, seguia com jniLibs VAZIO e gerava o APK oco
     # que morria no boot na 1.1.6). Uma cópia de 18 MB é rápida e não depende
     # de política do sistema.
-    $so = "src-tauri\target\aarch64-linux-android\release\libforge_lib.so"
-    if (-not (Test-Path $so)) { throw "libforge_lib.so não compilada: $so" }
+    $so = "src-tauri\target\aarch64-linux-android\release\libdistorrent_lib.so"
+    if (-not (Test-Path $so)) { throw "libdistorrent_lib.so não compilada: $so" }
     $jniLibs = "src-tauri\gen\android\app\src\main\jniLibs\arm64-v8a"
     New-Item -ItemType Directory -Path $jniLibs -Force | Out-Null
-    Copy-Item $so "$jniLibs\libforge_lib.so" -Force
-    if ((Get-Item "$jniLibs\libforge_lib.so").Length -lt 1MB) { throw "libforge_lib.so copiada parece truncada" }
-    Write-Host "  libforge_lib.so em jniLibs: $([math]::Round((Get-Item "$jniLibs\libforge_lib.so").Length/1MB,2)) MB" -ForegroundColor Green
+    Copy-Item $so "$jniLibs\libdistorrent_lib.so" -Force
+    if ((Get-Item "$jniLibs\libdistorrent_lib.so").Length -lt 1MB) { throw "libdistorrent_lib.so copiada parece truncada" }
+
+    # Hard link (ou cópia, se symlink exigir Developer Mode) do lib para o
+    # caminho alternativo que alguns ambientes do Tauri 2 usam
+    $altJniLibs = "src-tauri\gen\android\app\src\main\jniLibs\arm64"
+    New-Item -ItemType Directory -Path $altJniLibs -Force | Out-Null
+    try {
+        if (Test-Path "$jniLibs\libdistorrent_lib.so") {
+            New-Item -ItemType HardLink -Path "$altJniLibs\libdistorrent_lib.so" -Value "$jniLibs\libdistorrent_lib.so" -Force | Out-Null
+        }
+    } catch {
+        Copy-Item "$jniLibs\libdistorrent_lib.so" "$altJniLibs\libdistorrent_lib.so" -Force
+    }
+    Write-Host "  libdistorrent_lib.so em jniLibs: $([math]::Round((Get-Item "$jniLibs\libdistorrent_lib.so").Length/1MB,2)) MB" -ForegroundColor Green
 
     Write-Host "`n[3/4] gradle (skip rustBuild — Rust já está pronto)..." -ForegroundColor Yellow
     $flavor = if ($Debug) { "debug" } else { "release" }
@@ -85,7 +97,7 @@ try {
         "rustBuildArm64Debug", "rustBuildArmDebug", "rustBuildX86Debug", "rustBuildX86_64Debug", "rustBuildUniversalDebug"
     ) | ForEach-Object { "-x", $_ }
     # Só a ABI arm64: `assembleRelease` puro compila as 5 flavors e as outras 4
-    # saem SEM a libforge_lib.so (só a arm64 foi copiada para jniLibs) — APK
+    # saem SEM a libdistorrent_lib.so (só a arm64 foi copiada para jniLibs) — APK
     # que instala e morre no boot, o mesmo defeito da 1.1.6.
     & "src-tauri\gen\android\gradlew.bat" -p "src-tauri\gen\android" "assembleArm64$flavor" @skip
     if ($LASTEXITCODE -ne 0) { throw "gradle assembleArm64$flavor falhou" }

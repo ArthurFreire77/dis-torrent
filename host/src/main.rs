@@ -1,9 +1,9 @@
-//! forge-host — Community Host headless + tracker bootstrap (v1: nó P2P texto).
+//! distorrent-host — Community Host headless + tracker bootstrap (v1: nó P2P texto).
 //!
-//! Roda o mesmo motor do app (forge-core) SEM interface gráfica:
+//! Roda o mesmo motor do app (distorrent-core) SEM interface gráfica:
 //!
-//!   forge-host --nick NodeA --db /tmp/forge-a
-//!   forge-host --nick NodeB --db /tmp/forge-b
+//!   distorrent-host --nick NodeA --db /tmp/distorrent-a
+//!   distorrent-host --nick NodeB --db /tmp/distorrent-b
 //!
 //! Na mesma rede, os dois se descobrem (UDP) e conectam (TCP autenticado).
 //! stdin:
@@ -16,10 +16,10 @@
 //! É a base do Community Host completo (F7): comunidades/convites entram no mesmo binário.
 //!
 //! ── Tracker bootstrap self-hosted ───────────────────────────────────────────
-//! `forge-host --bootstrap 8090` sobe um tracker HTTP para descoberta pela
+//! `distorrent-host --bootstrap 8090` sobe um tracker HTTP para descoberta pela
 //! INTERNET (o app anuncia ip:porta e consulta amigos pelo fingerprint —
 //! igual torrent num tracker). Ponha num VPS público e aponte os clientes:
-//!   FORGE_BOOTSTRAP_URL=http://seu-vps:8090
+//!   DISTORRENT_BOOTSTRAP_URL=http://seu-vps:8090
 //! Endpoints: POST /announce · GET /peers/<fp> · GET /healthz (TTL 15 min).
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -27,9 +27,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use forge_core::net::engine::{NetworkEngine, NetworkState};
-use forge_core::storage::Store;
-use forge_core::Keypair;
+use distorrent_core::net::engine::{NetworkEngine, NetworkState};
+use distorrent_core::storage::Store;
+use distorrent_core::Keypair;
 
 /// Entrada anunciada por um peer no tracker.
 #[derive(Clone)]
@@ -181,16 +181,16 @@ fn arg(name: &str) -> Option<String> {
 #[tokio::main]
 async fn main() {
     // PRODUÇÃO: liga a DHT mainline BitTorrent (descoberta descentralizada).
-    std::env::set_var("FORGE_DHT", "1");
+    std::env::set_var("DISTORRENT_DHT", "1");
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,forge_core=info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,distorrent_core=info")),
         )
         .init();
 
     let nick = arg("--nick").unwrap_or_else(|| "Host".into());
-    let db = arg("--db").unwrap_or_else(|| "forge-host.db".into());
+    let db = arg("--db").unwrap_or_else(|| "distorrent-host.db".into());
     let bootstrap_port = arg("--bootstrap").and_then(|p| p.parse::<u16>().ok());
 
     // tracker bootstrap (opcional): descoberta pela internet, self-hosted

@@ -10,7 +10,7 @@ async function createAccount(page: Page, name: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 });
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 });
 }
 
 test('wizard completo: 4 passos criam servidor com convite', async ({ page }) => {

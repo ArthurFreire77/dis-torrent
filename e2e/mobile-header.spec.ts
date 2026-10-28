@@ -18,11 +18,11 @@ async function boot(page: Page) {
   // Servidores só podem ser criados no app de PC. Prepara a comunidade pelo
   // fluxo real do desktop e depois abre a mesma conta na interface mobile.
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('/d/forge');
+  await page.goto('/d/distorrent');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill('Movel');
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  await expect(page).toHaveURL(/\/d\/forge/, { timeout: 15000 });
+  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 });
   await createServerViaWizard(page, 'Servidor Cabecalho');
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/m');

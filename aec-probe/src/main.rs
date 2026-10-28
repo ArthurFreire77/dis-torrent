@@ -2,7 +2,7 @@
 //!
 //! Usa o arquivo de PRODUCAO via `#[path]`, nao uma copia.
 
-#[path = "../../forge-core/src/net/media_dsp.rs"]
+#[path = "../../distorrent-core/src/net/media_dsp.rs"]
 mod media_dsp;
 
 use media_dsp::*;
@@ -163,7 +163,7 @@ fn cenario(delay_ms: usize, eco_gain: f32, falante: f32, ns: bool, label: &str) 
 fn main() {
     println!("=================================================================");
     println!(" AEC — cancelamento de eco + supressao de ruido");
-    println!(" codigo medido: forge-core/src/net/media_dsp.rs (via #[path])");
+    println!(" codigo medido: distorrent-core/src/net/media_dsp.rs (via #[path])");
     println!(" frame={} | taxa={} Hz | filtro={} ms = {} amostras",
         FRAME_SAMPLES, SAMPLE_RATE, FILTER_LENGTH_MS, FILTER_LENGTH);
     println!(" janela: 3 s..10 s (filtro adaptativo ja convergiu)");

@@ -8,7 +8,7 @@
  *
  * DESIGN (deliberadamente mínimo):
  * - Ring buffer fixo (`RING_CAP`): um app de horas não pode crescer sem teto.
- * - Nível `FORGE_LOG` (`error` por default) filtra o que vai para o console;
+ * - Nível `DISTORRENT_LOG` (`error` por default) filtra o que vai para o console;
  *   o BUFFER sempre guarda tudo acima de `warn`, para o diagnóstico mostrar
  *   o que aconteceu mesmo sem reload.
  * - `exportDiagnostics()` devolve texto pronto para colar — é o que o painel
@@ -38,19 +38,19 @@ export interface LogLine {
 }
 
 const RING_CAP = 600
-const PREFIX = '[forge]'
+const PREFIX = '[distorrent]'
 
 /** Ring buffer. `splice` no início é O(n) mas n=600 e só acontece acima do teto. */
 const ring: LogLine[] = []
 
 const listeners = new Set<(l: LogLine) => void>()
 
-/** Nível mínimo que vai para o console. `FORGE_LOG=debug` abre tudo. */
+/** Nível mínimo que vai para o console. `DISTORRENT_LOG=debug` abre tudo. */
 function consoleLevel(): LogLevel {
   try {
-    const raw = (globalThis as unknown as { localStorage?: Storage }).localStorage?.getItem('forge:loglevel')
+    const raw = (globalThis as unknown as { localStorage?: Storage }).localStorage?.getItem('distorrent:loglevel')
     const fromLs = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
-    const env = typeof process !== 'undefined' ? String(process.env?.FORGE_LOG ?? '').trim().toLowerCase() : ''
+    const env = typeof process !== 'undefined' ? String(process.env?.DISTORRENT_LOG ?? '').trim().toLowerCase() : ''
     const v = env || fromLs
     if (v === 'debug' || v === 'info' || v === 'warn' || v === 'error') return v
   } catch { /* storage/indisponível — segue o default */ }

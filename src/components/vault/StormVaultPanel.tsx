@@ -112,13 +112,13 @@ export function StormVaultPanel() {
     try {
       const r = await services.vaultWipe(wipeText)
       setWipeText('')
-      // espelha o wipe no estado web (WebView guarda prefs/downloads em forge:*)
+      // espelha o wipe no estado web (WebView guarda prefs/downloads em distorrent:*)
       try {
         for (const storage of [localStorage, sessionStorage]) {
           const doomed: string[] = []
           for (let i = 0; i < storage.length; i++) {
             const k = storage.key(i)
-            if (k && k.startsWith('forge:')) doomed.push(k)
+            if (k && k.startsWith('distorrent:')) doomed.push(k)
           }
           doomed.forEach((k) => storage.removeItem(k))
         }

@@ -1,4 +1,4 @@
-// Hooks que ligam a UI FORGE aos services reais. Nenhum dado fictício aqui.
+// Hooks que ligam a UI DisTorrent aos services reais. Nenhum dado fictício aqui.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { services } from '../services'

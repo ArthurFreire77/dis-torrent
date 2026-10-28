@@ -460,7 +460,7 @@ function emptyMeta(id: string, convId: string): MsgMetaView {
   return { msg_id: id, conv_id: convId, reply_to: '', forwarded_from: '', edited_body: '', edited_at: 0, deleted: false, pinned: false, pinned_by: '', pinned_at: 0, mentioned: false }
 }
 
-// paleta local (espelha o FORGE do shell)
+// paleta local (espelha o DisTorrent do shell)
 const T_MAIN = '#313338'
 const T_INPUT = '#1e1f22'
 const T_BORDER = '#3f4147'

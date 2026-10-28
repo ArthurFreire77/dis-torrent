@@ -31,7 +31,7 @@ jobs:
       - run: npm run build
 
   core:
-    name: forge-core (fmt + test + clippy)
+    name: distorrent-core (fmt + test + clippy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: forge-core
+          workspaces: distorrent-core
       - name: Dependências de sistema (SQLite bundled, ALSA/Opus, glib)
         run: |
           sudo apt-get update
@@ -55,19 +55,19 @@ jobs:
             gstreamer1.0-libav \
             zip unzip coreutils
       - run: cargo fmt --check
-        working-directory: forge-core
+        working-directory: distorrent-core
       # clippy sem -D warnings: o crate tem ~59 avisos pré-existentes
       # (pub excessivo, type_complexity). Zerar isso é trabalho próprio.
       - name: clippy (erros decompilam o build; avisos não)
         run: cargo clippy --all-targets
-        working-directory: forge-core
+        working-directory: distorrent-core
 
   # Testes que dependem de rede real (broker MQTT publico, NAT, colisao de
   # porta entre engines no mesmo processo) sao instaveis por natureza: falham
   # em runner limpo. Rodam em job separado com retry, para nao derrubar o
   # gate de qualidade do job `core`.
   core-net:
-    name: forge-core (test, tolerante a flake)
+    name: distorrent-core (test, tolerante a flake)
     runs-on: ubuntu-latest
     needs: core
     continue-on-error: true
@@ -76,7 +76,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: forge-core
+          workspaces: distorrent-core
       - name: Dependencias de sistema
         run: |
           sudo apt-get update
@@ -92,7 +92,7 @@ jobs:
             zip unzip coreutils
       # Sem rede externa o runner erra por timeout; corta o broker publico.
       - name: Suites deterministicas
-        working-directory: forge-core
+        working-directory: distorrent-core
         run: |
           for t in integration identity_crypto storage_protocol friends \
                    channels community_meta security_layer social_layer \
@@ -107,14 +107,14 @@ jobs:
           done
       - name: Testes unitarios da lib (150 #[test])
         run: cargo test --lib
-        working-directory: forge-core
+        working-directory: distorrent-core
       # Relatorio, nao gate. As 14 suites de rede que falham aqui dependem de
       # broker MQTT publico ou disputam a porta 51413 entre engines do mesmo
       # processo — instaveis em runner limpo, nao indicative de regressao.
       # `|| true` mantem o job verde; o log preserva o diagnostico.
       - name: Suite completa (relatorio, nao bloqueia)
         run: cargo test --no-fail-fast || echo "::warning::suites de rede instaveis neste runner — ver log"
-        working-directory: forge-core
+        working-directory: distorrent-core
 
   host:
     name: host (check)
@@ -125,7 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: host
-      # O host depende de forge-core, que puxa gstreamer (precisa de glib-dev)
+      # O host depende de distorrent-core, que puxa gstreamer (precisa de glib-dev)
       # e cpal/opus (precisa de ALSA). Sem isto, glib-sys falha no build script.
       - name: Dependências de sistema
         run: |

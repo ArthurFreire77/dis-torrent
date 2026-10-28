@@ -110,7 +110,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   const [emojiOpen, setEmojiOpen] = useState(false)
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  // Mensagem de arquivo tem TEXTO no corpo (o marker __FORGE_FILE__:base64).
+  // Mensagem de arquivo tem TEXTO no corpo (o marker __DISTORRENT_FILE__:base64).
   // Checar `!body` nunca era verdadeiro, entao o card nunca aparecia e o
   // RichText imprimia o marker cru. Detecta pelo prefixo, como o desktop.
   const isFile = !!renderFile && body.startsWith(FILE_PREFIX)

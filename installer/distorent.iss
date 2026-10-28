@@ -6,7 +6,7 @@
 ; "no threats"; quem acende a heurística é o download — com Mark-of-the-Web o
 ; Defender/SmartScreen reprocessa o pacote e o Edge marca como perigoso. Trocar
 ; a compressão do NSIS (LZMA -> zlib) NÃO resolveu, e o binário puro do app
-; (forge.exe) passa limpo até COM MOTW. Conclusão: o gatilho é o stub do NSIS.
+; (distorrent.exe) passa limpo até COM MOTW. Conclusão: o gatilho é o stub do NSIS.
 ; O Inno usa outro motor de setup e passou no teste completo (baixado pela URL
 ; pública + MOTW + MpCmdRun: "found no threats").
 ;
@@ -14,7 +14,7 @@
 ;   pwsh -File scripts/build-installer.ps1
 ; ou direto:
 ;   ISCC.exe /DAppVersion=1.1.7-pre-alpha /DNumericVersion=1.1.7.0 ^
-;            /DSourceExe=src-tauri\target\release\forge.exe installer\distorent.iss
+;            /DSourceExe=src-tauri\target\release\distorrent.exe installer\distorent.iss
 
 #ifndef AppVersion
   #define AppVersion "1.1.7-pre-alpha"
@@ -23,14 +23,14 @@
   #define NumericVersion "1.1.7.0"
 #endif
 #ifndef SourceExe
-  #define SourceExe "..\src-tauri\target\release\forge.exe"
+  #define SourceExe "..\src-tauri\target\release\distorrent.exe"
 #endif
 #ifndef OutputDir
   #define OutputDir "..\src-tauri\target\release\bundle\inno"
 #endif
 
 #define AppName "DisTorrent"
-#define AppExeName "forge.exe"
+#define AppExeName "distorrent.exe"
 #define AppRepo "https://github.com/ArthurFreire77/dis-torrent"
 
 [Setup]

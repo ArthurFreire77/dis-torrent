@@ -8,7 +8,7 @@ interface Dev { id: string; label: string }
 
 function applyAudio() {
   try {
-    const p = JSON.parse(localStorage.getItem('forge:prefs:v1') ?? '{}')
+    const p = JSON.parse(localStorage.getItem('distorrent:prefs:v1') ?? '{}')
     const next: MediaTrackConstraints = {
       echoCancellation: p.echo !== false,
       noiseSuppression: p.noise !== false,

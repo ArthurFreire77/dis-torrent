@@ -1,23 +1,23 @@
 # ARCHITECTURE — arquitetura do motor
 
-> **FORGE é o Design System oficial e congelado.** `src/designs/ThemeShell.tsx` + `src/shared/icons.tsx` são imutáveis visualmente (cores, tipografia, espaçamento, ícones SVG, layout). Toda a evolução do produto acontece embaixo da UI.
+> **DisTorrent é o Design System oficial e congelado.** `src/designs/ThemeShell.tsx` + `src/shared/icons.tsx` são imutáveis visualmente (cores, tipografia, espaçamento, ícones SVG, layout). Toda a evolução do produto acontece embaixo da UI.
 
 ## 1. Estado atual — o que é REAL (verificado por testes)
 
 | Componente | Status | Verificação |
 |---|---|---|
-| **Identidade ed25519** | REAL | `forge-core/src/identity.rs` — 4 unit tests |
+| **Identidade ed25519** | REAL | `distorrent-core/src/identity.rs` — 4 unit tests |
 | **Mensagens assinadas** (blake3 transcript) | REAL | `protocol.rs::MessageEnvelope::verify_with_pubkey` — anti-tamper testado |
-| **Storage SQLite** (WAL, bundled) | REAL | `storage.rs` — 4 unit tests; app: `app_data_dir/forge.db` |
+| **Storage SQLite** (WAL, bundled) | REAL | `storage.rs` — 4 unit tests; app: `app_data_dir/distorrent.db` |
 | **P2P: handshake autenticado** (ed25519 + X25519 efêmero + ChaCha20Poly1305) | REAL | 2 nós reais em TCP localhost — `tests/integration.rs` |
 | **P2P: discovery LAN** (UDP broadcast 45900) | REAL | anúncio assinável, anti-spoof de fingerprint |
 | **Estados de conexão** CONNECTED/CONNECTING/RECONNECTING/DISCONNECTED | REAL | máquina de estados por peer + agregada, heartbeat 10s, timeout 25s, backoff 1s→15s |
 | **Estados de mensagem** PENDING/SENDING/SENT/DELIVERED/FAILED | REAL | ACK criptográfico real; outbox persistente reenvia após reconexão — testado |
 | **Keyring do SO** para chave privada | REAL (fallback SQLite documentado) | `src-tauri/src/main.rs::persist_secret` |
-| **UI FORGE ligada ao motor** | REAL | `services → hooks → ThemeShell`; `mocks.ts` DELETADO |
+| **UI DisTorrent ligada ao motor** | REAL | `services → hooks → ThemeShell`; `mocks.ts` DELETADO |
 | App desktop instalável | REAL | `npm run tauri:build` (Tauri 2) — `.deb` + `.AppImage` no Linux, `.msi`/NSIS no Windows |
 | Android | REAL | `npx tauri android build --apk`; voz nativa é só no Linux, no Android o WebRTC do navegador assume |
-| Comunidades / canais / cargos / bots | REAL | `forge-core/src/social.rs` + migrations v4/v6 |
+| Comunidades / canais / cargos / bots | REAL | `distorrent-core/src/social.rs` + migrations v4/v6 |
 | Voz e vídeo (WebRTC + nativo Linux) | REAL | `net/media_voice.rs` (webrtc-rs + Opus + cpal + AEC) |
 | iOS | NÃO é alvo | Não há build iOS neste repositório |
 
@@ -32,7 +32,7 @@ P2P-first, local-first, crypto-first, modular. Nenhum backend central obrigatór
 | Domínio | Escolhido | Motivo |
 |---|---|---|
 | Shell desktop | **Tauri 2 (Rust)** | WebKitGTK 4.1/soup3 (compila no Ubuntu 24.04); base para mobile |
-| **Motor** | **`forge-core` (crate Rust pura)** | Sem dependência de UI/Tauri → reusável pelo Community Host headless e testes |
+| **Motor** | **`distorrent-core` (crate Rust pura)** | Sem dependência de UI/Tauri → reusável pelo Community Host headless e testes |
 | Transporte P2P | **tokio TCP + frames length-prefixed** | Base de toda a rede; o envelope é independente do transporte |
 | Descoberta | UDP broadcast + mDNS | `net/discovery.rs` |
 | Internet | UPnP/NAT-PMP, STUN, hole punching, DHT mainline, relay MQTT | `net/natpmp.rs`, `stun.rs`, `dht.rs`, `relay.rs` |
@@ -41,13 +41,13 @@ P2P-first, local-first, crypto-first, modular. Nenhum backend central obrigatór
 | Sessão | **X25519 efêmero → HKDF-SHA256 → ChaCha20Poly1305** (nonce por direção) | Primitivas maduras (RustCrypto), composição documentada no threat model |
 | Identidade | **ed25519-dalek 2 + blake3** | Fingerprint = `blake3(pubkey)[0..12]` hex — igual no Rust e no TS (noble) |
 | Storage | **rusqlite (SQLite bundled, WAL)** | Local-first real; a UI nunca acessa direto |
-| UI | React 18 + TS strict + Vite | Intocado (FORGE) |
+| UI | React 18 + TS strict + Vite | Intocado (DisTorrent) |
 | Android | Tauri 2 mobile (quando estável p/ nosso conjunto de features) | Capacitor descartado — não abre sockets TCP/UDP reais |
 
 ## 4. Topologia de módulos
 
 ```
-├─ forge-core/            # MOTOR (Rust puro, sem UI)
+├─ distorrent-core/            # MOTOR (Rust puro, sem UI)
 │  ├─ src/identity.rs     # ed25519, fingerprint, assinatura
 │  ├─ src/protocol.rs     # envelope assinado, frames, handshake transcript, session key
 │  ├─ src/storage.rs      # SQLite: kv, peers, conversations, messages, outbox
@@ -59,18 +59,18 @@ P2P-first, local-first, crypto-first, modular. Nenhum backend central obrigatór
 │  ├─ src/main.rs         # commands → engine; eventos engine → WebView; keyring
 │  ├─ capabilities/       # permissões Tauri 2 (core:default)
 │  └─ tauri.conf.json     # bundle deb/rpm/appimage/msi/dmg
-├─ src/                   # UI (FORGE congelado)
+├─ src/                   # UI (DisTorrent congelado)
 │  ├─ services/models.ts  # contrato TS espelhando os tipos do core
 │  ├─ services/tauri.ts   # invoke + listen (nativo)
 │  ├─ services/browser.ts # fallback honesto: sem rede, estado = DISCONNECTED
 │  ├─ app/hooks.ts        # useIdentity, useNetwork, useMessages, useEngineEvents
-│  └─ designs/ThemeShell.tsx # FORGE — consome apenas hooks
-└─ host/                  # (próxima fase) Community Host binário headless usando forge-core
+│  └─ designs/ThemeShell.tsx # DisTorrent — consome apenas hooks
+└─ host/                  # (próxima fase) Community Host binário headless usando distorrent-core
 ```
 
 **Regras de dependência (enforçadas por design):**
 - UI → services → (IPC) → core. A UI **não** importa nada de rede/storage.
-- `forge-core` **não** conhece Tauri/React.
+- `distorrent-core` **não** conhece Tauri/React.
 - Todo comando sensível é validado no core; a UI não pode forjar estado.
 
 ## 5. Fluxo de mensagem real (implementado)

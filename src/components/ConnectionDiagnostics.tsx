@@ -1,4 +1,4 @@
-// Diagnóstico de conexão — FORGE visual congelado: usa a mesma paleta/tipografia
+// Diagnóstico de conexão — DisTorrent visual congelado: usa a mesma paleta/tipografia
 // do ThemeShell (t.*), sem redesenhar nada. Reutilizado no desktop e no mobile.
 import { useEffect, useMemo, useState } from 'react'
 import { services } from '../services'
@@ -46,7 +46,7 @@ export function buildDiagReport(args: {
     if (nd.stun_ok === null) lines.push('STUN: ainda não testado')
     else if (nd.stun_ok) lines.push(`STUN: ok (${nd.stun_addr ?? '?'})`)
     else lines.push('STUN: falhou (sem binding NAT — direto impossível, relay resolve)')
-    if (nd.dht_ok === null) lines.push('DHT BitTorrent: desligada (FORGE_NO_DHT ou modo proxy/Tor)')
+    if (nd.dht_ok === null) lines.push('DHT BitTorrent: desligada (DISTORRENT_NO_DHT ou modo proxy/Tor)')
     else if (nd.dht_ok) lines.push('DHT BitTorrent: ok — nó anunciando na rede BitTorrent')
     else lines.push('DHT BitTorrent: falhou (UDP bloqueado?)')
     if (nd.announce_addr) lines.push(`anúncio: ${nd.announce_addr}${nd.nat_source ? ` (via ${nd.nat_source === 'upnp' ? 'UPnP/NAT-PMP local, sem servidor' : nd.nat_source === 'public-ip' ? 'IP público direto' : 'STUN público'})` : ''}`)
@@ -249,7 +249,7 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
                 ? <div>anúncio: {netDiag.announce_addr}{netDiag.nat_source ? ` (via ${netDiag.nat_source === 'upnp' ? 'UPnP/NAT-PMP local, sem servidor' : netDiag.nat_source === 'public-ip' ? 'IP público direto' : 'STUN público'})` : ''}</div>
                 : netDiag != null && <div>anúncio: não anunciado — STUN é UDP e não abre porta TCP; sem UPnP o par não chega. Relay e túnel cobrem isso (e é por isso que o overlay não fica mais preso em “Conectando…”).</div>}
               {netDiag?.dht_ok === true && <div>DHT BitTorrent: <span style={{ color: t.green, fontWeight: 800 }}>ok</span> — descoberta descentralizada ativa</div>}
-              {netDiag?.dht_ok === false && <div>DHT BitTorrent: <span style={{ color: t.yellow, fontWeight: 800 }}>off/falhou</span> — (FORGE_NO_DHT, UDP bloqueado ou modo proxy/Tor)</div>}
+              {netDiag?.dht_ok === false && <div>DHT BitTorrent: <span style={{ color: t.yellow, fontWeight: 800 }}>off/falhou</span> — (DISTORRENT_NO_DHT, UDP bloqueado ou modo proxy/Tor)</div>}
             </div>
           </div>
 

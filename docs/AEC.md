@@ -1,7 +1,7 @@
 # Cancelamento de eco (AEC) e supressão de ruído — voz nativa
 
-Implementado em `forge-core/src/net/media_dsp.rs`, ligado ao pipeline em
-`forge-core/src/net/media_voice.rs`. Linux only (mesmo gate de `media_voice`).
+Implementado em `distorrent-core/src/net/media_dsp.rs`, ligado ao pipeline em
+`distorrent-core/src/net/media_voice.rs`. Linux only (mesmo gate de `media_voice`).
 
 ## O que foi escolhido, e por quê
 
@@ -58,7 +58,7 @@ a prever a voz local e a apaga. Três garantias:
 
 ## Medições
 
-`forge-core/tests` não serve (o harness é binário porque o DSP é independente):
+`distorrent-core/tests` não serve (o harness é binário porque o DSP é independente):
 há `aec-probe/`, um crate que faz `#[path]` do arquivo **de produção**. Não é
 cópia — o número medido é o do módulo que entra no binário.
 
@@ -70,7 +70,7 @@ cópia — o número medido é o do módulo que entra no binário.
 | caixa + sala (25 ms, 0,50) | −36,59 dBFS | −48,91 dBFS | **12,32 dB** | 0,979 → **0,011** |
 | fone/mesa (6 ms, 0,20) | −44,09 dBFS | −56,42 dBFS | **12,34 dB** | 0,952 → ~0,000 |
 
-Teste no lib (`cargo test -p forge-core --lib -- --nocapture aec_reduz_eco`):
+Teste no lib (`cargo test -p distorrent-core --lib -- --nocapture aec_reduz_eco`):
 
 ```
 === AEC: ANTES -39.41 dBFS | DEPOIS -49.12 dBFS | reducao 9.72 dB ===

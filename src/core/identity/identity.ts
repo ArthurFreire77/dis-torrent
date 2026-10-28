@@ -1,6 +1,6 @@
 import { generateKeypair, fingerprintOf, hex } from './crypto'
 
-// Mesma forma do forge-core::identity::Identity (serde snake_case) —
+// Mesma forma do distorrent-core::identity::Identity (serde snake_case) —
 // o modo navegador espelha exatamente o contrato do motor nativo.
 export type UserIdentity = {
   fingerprint: string // 12 hex

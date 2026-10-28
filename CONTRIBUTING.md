@@ -6,7 +6,7 @@ Uma funcionalidade só está pronta quando **funciona de verdade** e tem teste. 
 
 ## Regras do projeto
 
-1. **Design FORGE congelado** — não mude cores/layout/ícones em `src/designs/ThemeShell.tsx`. A UI consome dados; não produz.
+1. **Design DisTorrent congelado** — não mude cores/layout/ícones em `src/designs/ThemeShell.tsx`. A UI consome dados; não produz.
 2. **Nada de dados fictícios** — proibido reintroduzir mocks. Estados vazios são estados vazios.
 3. **Autorização no core** — a UI nunca decide permissões; o motor valida.
 4. **Crypto só de biblioteca** — ed25519-dalek/x25519-dalek/chacha20poly1305/blake3/@noble. Nenhuma primitiva própria.
@@ -18,7 +18,7 @@ Uma funcionalidade só está pronta quando **funciona de verdade** e tem teste. 
 1. Fork + branch `feat/...` ou `fix/...`
 2. Rode **antes** do PR:
    ```bash
-   cd forge-core && cargo test && cargo clippy -- -D warnings
+   cd distorrent-core && cargo test && cargo clippy -- -D warnings
    npm run typecheck && npm run lint && npm run build
    ```
 3. PR descrevendo: o que é REAL no que você fez, e o que ainda não é (se houver).
@@ -26,9 +26,9 @@ Uma funcionalidade só está pronta quando **funciona de verdade** e tem teste. 
 
 ## Estrutura
 
-- `forge-core/` — motor Rust (identidade, storage, rede). Sem dependência de UI.
+- `distorrent-core/` — motor Rust (identidade, storage, rede). Sem dependência de UI.
 - `src-tauri/` — casca Tauri (commands + eventos).
-- `src/` — UI React FORGE (services → hooks → ThemeShell).
+- `src/` — UI React DisTorrent (services → hooks → ThemeShell).
 - `host/` — Community Host headless (próxima fase).
 
 Novas features de rede/protocolo entram em `PROTOCOL.md` antes do código.

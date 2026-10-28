@@ -11,7 +11,7 @@ async function createAccountMobile(page: Page, name: string) {
 
 async function fpOf(page: Page): Promise<string> {
   return page.evaluate(() => {
-    const raw = sessionStorage.getItem('forge:identity') ?? '';
+    const raw = sessionStorage.getItem('distorrent:identity') ?? '';
     return (JSON.parse(raw) as { fingerprint: string }).fingerprint;
   });
 }

@@ -2,7 +2,7 @@
 #
 # Uso:
 #   .\scripts\build-installer.ps1              # builda o app (se preciso) + instalador
-#   .\scripts\build-installer.ps1 -SkipBuild   # só reempacota o forge.exe existente
+#   .\scripts\build-installer.ps1 -SkipBuild   # só reempacota o distorrent.exe existente
 #   .\scripts\build-installer.ps1 -Scan        # + teste do Defender com MOTW
 #
 # POR QUE ESTE SCRIPT EXISTE:
@@ -35,7 +35,7 @@ if ($base -notmatch '^\d+\.\d+\.\d+$') { Fail "versão não parseável em packag
 $numericVersion = "$base.0"
 
 # --- App já buildado? (o instalador empacota o .exe do Tauri) ---
-$appExe = Join-Path $root "src-tauri\target\release\forge.exe"
+$appExe = Join-Path $root "src-tauri\target\release\distorrent.exe"
 if (-not $SkipBuild) {
     $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
     if (-not $npm) { Fail "npm.cmd não encontrado no PATH (rode com Node no PATH — ver AGENTS.md §3)." }

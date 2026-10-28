@@ -2,7 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 
 // Cofre & Backup (5.4) no modo browser (rota mobile /m):
 // - painel mostra aviso "app nativo" (export/import exigem o nativo)
-// - modo pânico limpa chaves forge:* do localStorage
+// - modo pânico limpa chaves distorrent:* do localStorage
 // - 2 mensagens numa DM aparecem (cobre a janela de mensagens da UI)
 
 async function createAccount(page: Page, name: string) {
@@ -16,7 +16,7 @@ async function createAccount(page: Page, name: string) {
 
 async function fpOf(page: Page): Promise<string> {
   return page.evaluate(() => {
-    const raw = sessionStorage.getItem('forge:identity') ?? '';
+    const raw = sessionStorage.getItem('distorrent:identity') ?? '';
     return (JSON.parse(raw) as { fingerprint: string }).fingerprint;
   });
 }
@@ -43,11 +43,11 @@ test('cofre mostra aviso de app nativo no modo browser', async ({ page }) => {
 });
 
 // Gate aberto (contrato stormvault + vaultWipe no browserServices): reativado.
-test('modo pânico do browser limpa chaves forge: e mantém as demais', async ({ page }) => {
+test('modo pânico do browser limpa chaves distorrent: e mantém as demais', async ({ page }) => {
   await createAccount(page, 'Panico');
   await page.evaluate(() => {
-    localStorage.setItem('forge:teste:a', '1');
-    localStorage.setItem('forge:teste:b', '2');
+    localStorage.setItem('distorrent:teste:a', '1');
+    localStorage.setItem('distorrent:teste:b', '2');
     localStorage.setItem('outra-chave', 'fica');
   });
   await page.getByRole('button', { name: 'Você' }).last().click();
@@ -55,7 +55,7 @@ test('modo pânico do browser limpa chaves forge: e mantém as demais', async ({
   await page.getByRole('button', { name: 'Apagar tudo' }).click();
   await expect(page.getByText('Dados locais apagados')).toBeVisible({ timeout: 10000 });
   const keys = await page.evaluate(() => Object.keys(localStorage));
-  expect(keys.filter((k) => k.startsWith('forge:'))).toEqual([]);
+  expect(keys.filter((k) => k.startsWith('distorrent:'))).toEqual([]);
   expect(keys).toContain('outra-chave');
 });
 

@@ -11,14 +11,14 @@ export type CallPrivacyMode = 'normal' | 'encrypted' | 'proxy' | 'full'
 
 /**
  * Lê o modo de privacidade de forma síncrona — só existe no MODO BROWSER,
- * onde fica em localStorage `forge:privacy_mode`. No app nativo (Tauri) o
+ * onde fica em localStorage `distorrent:privacy_mode`. No app nativo (Tauri) o
  * modo vive no backend Rust (async `privacyGet`) e NÃO é legível aqui;
  * quem informa é a UI via `setCallPrivacyForIce` (boot + trocas).
  */
 export function getCallPrivacyMode(): CallPrivacyMode | null {
   try {
     const raw =
-      typeof localStorage !== 'undefined' ? localStorage.getItem('forge:privacy_mode') : null
+      typeof localStorage !== 'undefined' ? localStorage.getItem('distorrent:privacy_mode') : null
     if (!raw) return null
     const v: unknown = JSON.parse(raw)
     return v === 'normal' || v === 'encrypted' || v === 'proxy' || v === 'full' ? v : null
@@ -38,7 +38,7 @@ export function getCallPrivacyMode(): CallPrivacyMode | null {
 // Comportamento NOVO (honesto):
 // - normal/encrypted: lista completa como sempre (rotas de reserva no 4G).
 // - proxy/full: SÓ o TURN/STUN que o usuário configurou EXPLICITAMENTE
-//   (forge:turn_url / VITE_TURN_URL — escolha dele, servidor dele). Os
+//   (distorrent:turn_url / VITE_TURN_URL — escolha dele, servidor dele). Os
 //   públicos de terceiros NÃO são consultados. A chamada continua
 //   possível na LAN (candidatos host), e o aviso "não anônima" fica na UI.
 

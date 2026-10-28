@@ -1,6 +1,6 @@
 // CallManager — mesh WebRTC onde todos semeiam (relay) igual BitTorrent
 // Cada peer mantém RTCPeerConnection para cada outro participante (full-mesh).
-// Sinalização via forge-core SecureFrame (cifrado) — no browser fallback via localStorage/BroadcastChannel.
+// Sinalização via distorrent-core SecureFrame (cifrado) — no browser fallback via localStorage/BroadcastChannel.
 
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
@@ -44,7 +44,7 @@ export interface IncomingCall {
 
 export type CallQuality = '480p' | '720p' | '1080p' | '4K'
 
-export const CALL_QUALITY_KEY = 'forge:call_quality'
+export const CALL_QUALITY_KEY = 'distorrent:call_quality'
 export const QUALITY_ORDER: CallQuality[] = ['480p', '720p', '1080p', '4K']
 
 export const QUALITY_CONSTRAINTS: Record<CallQuality, MediaTrackConstraints> = {
@@ -487,7 +487,7 @@ export function getCallsUnavailableMessage(): string {
     // e o `RTCPeerConnection` está no binário, mas não é exposto. Não é WebView
     // desatualizado, e nenhuma configuração do app resolve.
     if (native && isLinuxDesktop && !d.hasRTC) {
-      return `${CALLS_UNAVAILABLE_MSG}: ${what}. Este é o WebKitGTK do Linux, que vem compilado sem WebRTC — não é falta de atualização, e não há como corrigir pelo app. A voz nativa em Rust também não subiu (sem dispositivo de áudio, ou desligada por FORGE_NO_NATIVE_VOICE=1), então no desktop Linux resta a conversa por texto.`
+      return `${CALLS_UNAVAILABLE_MSG}: ${what}. Este é o WebKitGTK do Linux, que vem compilado sem WebRTC — não é falta de atualização, e não há como corrigir pelo app. A voz nativa em Rust também não subiu (sem dispositivo de áudio, ou desligada por DISTORRENT_NO_NATIVE_VOICE=1), então no desktop Linux resta a conversa por texto.`
     }
     let hint: string
     if (native) {
@@ -604,7 +604,7 @@ export interface IceMediaReport {
   rttMs: number | null
   bytesOut: number
 }
-export interface ForgeNatEndpoint { addr: string; source: string }
+export interface DistorrentNatEndpoint { addr: string; source: string }
 
 /**
  * Diagnóstico por peer para o painel em tempo real (ver getCallDiagnostics).
@@ -805,14 +805,14 @@ function emitIceRecovered(info: IceRecoveredInfo) {
 // Fallback: captura o mic via MediaRecorder (audio/webm;codecs=opus, fatias de
 // 500ms ≈ 8KB, cabem no limite do frame cifrado) e envia cada fatia pela
 // sinalização existente. Verificação de assinatura em 2026-09-04:
-// - ForgeServices NÃO possui `callSignal(fp, callId, payload)` — só
+// - DisTorrentServices NÃO possui `callSignal(fp, callId, payload)` — só
 //   callOffer/callAnswer/callIce (models.ts + tauri.ts + browser.ts).
 // - Por isso o transporte é `callIce(fp, callId, JSON{kind:'audio-chunk'…},
 //   'audio-relay')`: mesmo caminho cifrado do ICE, sem tocar outros arquivos.
 //   Se um futuro engine expuser `callSignal`, o envio tenta ele primeiro via
 //   `(services as any).callSignal` sem quebrar o contrato atual.
 // - No modo browser `callIce` é no-op, então há também BroadcastChannel +
-//   window CustomEvent `forge:call-relay` para demo multi-aba local.
+//   window CustomEvent `distorrent:call-relay` para demo multi-aba local.
 // Receptor: AudioContext com fila por peer + jitter buffer simples; descarta
 // atraso >2s. WebRTC continua preferido: relay só liga se ICE falhar
 // (failed imediato / disconnected >5s via subscribeIceFailures) ou toggle manual.
@@ -821,8 +821,8 @@ export const RELAY_ICE_FAIL_MS = 5000
 export const RELAY_MAX_DELAY_MS = 2000
 export const RELAY_MID = 'audio-relay'
 export const RELAY_VIA_LABEL = 'via relay (latência alta)'
-export const RELAY_BC_NAME = 'forge-call-relay-v1'
-export const RELAY_WINDOW_EVENT = 'forge:call-relay'
+export const RELAY_BC_NAME = 'distorrent-call-relay-v1'
+export const RELAY_WINDOW_EVENT = 'distorrent:call-relay'
 export interface RelayChunkPayload {
   kind: 'audio-chunk'
   seq: number
@@ -1074,7 +1074,7 @@ export class CallManager {
   private iceServersUsed: RTCIceServer[] | null = null
   private iceReports = new Map<string, IceMediaReport>()
   /** Endpoint NAT próprio vindo do motor (evento nat_endpoint). */
-  private forgeNat: ForgeNatEndpoint | null = null
+  private distorrentNat: DistorrentNatEndpoint | null = null
   /** Watchdog da reconexão: sem mídia viva por 30s → encerra honesto. */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly RECONNECT_TIMEOUT_MS = 30_000
@@ -1313,7 +1313,7 @@ export class CallManager {
         try {
           const addr = String((ev as any).addr ?? '')
           const source = String((ev as any).source ?? '')
-          if (addr && source) this.forgeNat = { addr, source }
+          if (addr && source) this.distorrentNat = { addr, source }
         } catch { /* nunca derruba o bus */ }
       }
       if (ev.type === 'call_ended') {
@@ -2312,7 +2312,7 @@ export class CallManager {
         this.relayBc.onmessage = (ev: MessageEvent) => {
           try {
             const d: any = (ev as any).data
-            if (!d || d.type !== 'forge-call-relay') return
+            if (!d || d.type !== 'distorrent-call-relay') return
             if (typeof d.payload !== 'string') return
             if (d.from_fp === this.myFp) return
             this.handleRelayChunk(String(d.from_fp ?? ''), String(d.call_id ?? ''), d.payload)
@@ -2451,7 +2451,7 @@ export class CallManager {
     // 2) Sinalização existente: callIce com mid 'audio-relay' (cifrado via SecureFrame/relay).
     try { services.callIce(targetFp, callId, payload, RELAY_MID).catch(() => {}) } catch { /* ignore */ }
     // 3) Demo local multi-aba (browser: callIce é no-op) — BroadcastChannel + window event.
-    try { this.relayBc?.postMessage({ type: 'forge-call-relay', call_id: callId, from_fp: this.myFp, payload }) } catch { /* ignore */ }
+    try { this.relayBc?.postMessage({ type: 'distorrent-call-relay', call_id: callId, from_fp: this.myFp, payload }) } catch { /* ignore */ }
     try {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent(RELAY_WINDOW_EVENT, { detail: { call_id: callId, from_fp: this.myFp, payload } }))
@@ -4411,8 +4411,8 @@ export const callManager = new CallManager(() => {
   if (cachedCallIdentity) return cachedCallIdentity
   // 2) fallback legado (nunca gravado pelo app — mantido por compat)
   try {
-    const raw = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('forge:identity') : null)
-      ?? localStorage.getItem('forge:identity') ?? localStorage.getItem('identity') ?? ''
+    const raw = (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('distorrent:identity') : null)
+      ?? localStorage.getItem('distorrent:identity') ?? localStorage.getItem('identity') ?? ''
     if (!raw) return null
     const j = JSON.parse(raw)
     return { fingerprint: j.fingerprint ?? 'local', nickname: j.nickname ?? 'você' }
