@@ -37,6 +37,23 @@ Receptor valida SEMPRE: `author_fp == peer da conexão`, `verify(sig, pubkey do 
 - Mensagem (out): `pending → sending → sent → delivered` (ou `failed`); (in): `ok`
 - Outbox: mensagens `pending` são reenviadas ao reconectar (até ACK); dedupe por `id` no receptor.
 
+## Limites de rede (net/`netlimit.rs`) — taxa ≠ tamanho
+
+Todo caminho de entrada tem rate limit em dois andares: **throttle** (token
+bucket apertado — excedente descartado, sessão preservada; o protocolo
+reenvia) e **kill** (token bucket 5x mais largo — flooding/bug encerra a
+sessão). Frames e BYTES são limitados INDEPENDENTEMENTE por peer; há tetos
+globais (accepts, frames, sessões online) e de concorrência (handshakes
+inbound, dials outbound). Defaults reconfiguráveis por env `FORGE_LIMIT_*`;
+snapshot no diagnóstico via comando `net_limits`. Tabela completa em
+[`THREAT_MODEL.md`](THREAT_MODEL.md).
+
+Privacidade em `proxy`/`full` (Tor): dial **fail-closed** (sem fallback direto
+quando o SOCKS5 falha), inbound direto **recusado**, discovery UDP/mDNS/UPnP
+**off na fonte**, punch upgrade **off** — e trocar o modo derruba sessões
+diretas vivas na hora. Testado em `tests/privacy_fail_closed.rs` (4 casos
+E2E) e nos unit tests de `netlimit.rs`.
+
 ## Storage (SQLite — schema v8)
 
 `forge-core/src/storage.rs`. Tabelas por versão de migration:

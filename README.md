@@ -48,7 +48,16 @@ nem senha para esquecer.
   (X11/portal) e `getDisplayMedia` no navegador nas outras plataformas.
 - **Arquivos em swarm** — chunks de 256 KB, hash blake3, todos os peers semeiam.
 - **Privacidade com 4 modos reais** — sem segurança / Seguro (E2E) / Seguro +
-  (SOCKS5, desliga announce e discovery) / Tor (7 saltos).
+  (SOCKS5: fail-closed — sem fallback direto, inbound recusado, descoberta
+  off) / Tor (via SOCKS5 do daemon local; circuito padrão do Tor, não "7
+  saltos" — o app não controla o circuito).
+- **Chamadas em modo anônimo, sem mentira** — em proxy/Tor os STUN/TURN
+  públicos saem da lista de ICE (terceiros não veem seu IP) e a UI carimba a
+  chamada como "não anônima" (a mídia WebRTC não passa pelo proxy do app).
+- **Rate limits em TODO caminho de rede** — TCP inbound por IP/global, teto de
+  handshakes e sessões, frames E bytes por sessão (throttle + kill), discovery
+  UDP, Hellos de relay, chunks, sinalização de chamada, dials outbound
+  (`FORGE_LIMIT_*` reconfigura; `net_limits` expõe no diagnóstico).
 - **Estados verdadeiros** — `CONECTADO / CONECTANDO / RECONECTANDO / OFFLINE` e
   `pendente → enviando → enviado → entregue`. Nada de texto fixo ou spinner eterno.
 
@@ -258,9 +267,11 @@ E2E por design nas conversas. Não há senha nem e-mail — pseudonimidade por c
 O que **não** está resolvido, documentado em [`THREAT_MODEL.md`](THREAT_MODEL.md):
 
 - O IP é visível ao peer com quem você conversa.
-- O modo Tor protege o transporte, mas não cobre WebRTC/STUN — uma chamada
-  faz STUN direto para o servidor de STUN, potencialmente associado ao IP real.
-  Para chamada com Tor, é preciso TURN via Tor.
+- O modo Tor protege o transporte (relay + Direct via SOCKS5, fail-closed),
+  mas **não cobre a mídia das chamadas**: o ICE do WebRTC usa UDP direto do
+  browser. O app faz a parte honesta — STUN/TURN públicos fora da lista e
+  aviso "chamada não anônima" na UI — mas anonimato de mídia exige TURN via
+  Tor ou VPN transparente.
 - Sem fallback de áudio pelo túnel P2P: se o ICE não fechar atrás de CGNAT
   simétrico duplo, a chamada **encerra com aviso** em vez de degradar para um
   caminho pior. Dois peers assim só fecham via TURN.

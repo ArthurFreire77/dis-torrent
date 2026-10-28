@@ -26,7 +26,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 /// Serializa o acesso ao env do processo entre os testes deste binário.
-static ENV_LOCK: Mutex<()> = Mutex::new(()());
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn spawn_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -215,7 +215,7 @@ async fn discovery_udp_silencioso_em_modo_anonimo() {
 
     let kp = Arc::new(forge_core::identity::Keypair::generate());
     let limiter = forge_core::net::netlimit::NetLimiter::from_env();
-    let (_tx, rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::unbounded_channel();
 
     // 4a) gate FECHADO (modo anônimo): 8s de silêncio absoluto no spy.
     let allowed_off: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| false);
@@ -223,7 +223,7 @@ async fn discovery_udp_silencioso_em_modo_anonimo() {
         kp.clone(),
         "Silencioso".into(),
         45900,
-        rx.clone(),
+        tx,
         allowed_off,
         limiter.clone(),
     )
@@ -237,12 +237,12 @@ async fn discovery_udp_silencioso_em_modo_anonimo() {
 
     // 4b) mesmo setup, gate ABERTO (modo comum): o anúncio chega < 5s.
     let allowed_on: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| true);
-    let (_tx2, rx2) = mpsc::unbounded_channel();
+    let (tx2, _rx2) = mpsc::unbounded_channel();
     let _d2 = forge_core::net::discovery::Discovery::spawn(
         kp.clone(),
         "Falante".into(),
         45900,
-        rx2,
+        tx2,
         allowed_on,
         limiter,
     )
@@ -252,7 +252,11 @@ async fn discovery_udp_silencioso_em_modo_anonimo() {
         Ok(Ok((n, _))) => {
             let ann: forge_core::net::discovery::Announcement =
                 serde_json::from_slice(&buf[..n]).unwrap();
-            assert_eq!(ann.fp, kp.fingerprint(), "anúncio com fp de outra identidade");
+            assert_eq!(
+                ann.fp,
+                kp.fingerprint(),
+                "anúncio com fp de outra identidade"
+            );
         }
         _ => panic!("gate aberto deveria anunciar (contraste do 4a)"),
     }

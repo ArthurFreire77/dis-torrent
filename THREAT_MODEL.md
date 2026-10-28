@@ -4,9 +4,15 @@
 
 - **PSEUDONIMIDADE** — sua identidade é um par de chaves. Nenhum e-mail, nenhum
   telefone, nenhum cadastro. Mas seu IP é visível a quem você conecta.
-- **Torneamento opcional de rede** — existe um modo **Tor de 7 saltos**
-  (`privacy.mode = full`): todo tráfego Direct **e** o relay saem pelo SOCKS5 do
-  Tor, e announce + descoberta LAN ficam desligados. Isso protege o transporte,
+- **Torneamento opcional de rede** — o modo **Tor** (`privacy.mode = full`) roda
+  o tráfego Direct **e** o relay pelo SOCKS5 do daemon Tor local
+  (`FORGE_TOR_ADDR`, padrão `127.0.0.1:9050`). O **número de saltos do circuito
+  é do daemon Tor** (padrão 3: guard/middle/exit) — o app não controla nem
+  verifica. Announce, descoberta LAN (UDP/mDNS), DHT, PEX e STUN ficam
+  DESLIGADOS; handshakes inbound diretos são RECUSADOS (port-scanner não ganha
+  seu Hello em claro); e ao trocar para o modo, sessões diretas vivas são
+  derrubadas na hora (ver `privacy_fail_closed.rs`). Se o SOCKS5 cai, o dial
+  **falha fechado — NUNCA cai para conexão direta**. Isto protege o transporte,
   **não** cobre WebRTC/STUN — ver "Limitações assumidas" abaixo.
 - **Privacidade de conteúdo** — mensagens DM são cifradas fim-a-fim (X25519 efêmero + HKDF + ChaCha20Poly1305). Observador de rede vê metadados (quem fala com quem, quando, tamanho) — mitigações futuras: padding, transporte variado.
 - **Privacidade local** — chave privada no keyring do SO (Secret Service/Keychain/DPAPI). Fallback SQLite sem cifrar é **documentado e visível** (Linux sem secret service). Backup/export seguro: cofre portátil `.stormvault` v1 (Argon2id + ChaCha20Poly1305) — ver
@@ -61,11 +67,49 @@ Nunca logamos: chave privada, corpos de mensagem, segredos de sessão. Logs cobr
 
 1. **Não é anonimato.** É pseudônimo + E2E de conteúdo. O modo Tor protege o
    transporte e esconde o IP de quem observa a rede, mas não cobre o WebRTC/STUN
-   da chamada — que faz STUN direto para o servidor de STUN, potencialmente
-   associado ao seu IP real. Para chamada com Tor, é preciso TURN via Tor.
-2. **Discovery LAN expõe presença** na rede local.
+   da chamada — o ICE do browser usa sockets UDP próprios, fora do SOCKS5/Tor do
+   app. **O que o app faz nesses modos** (`proxy`/`full`): os SERVIDORES PÚBLICOS
+   de reserva (Google STUN, openrelay TURN) ficam FORA da lista de ICE —
+   terceiros não recebem seu IP — e a UI carimba a chamada como **"não
+   anônima"** enquanto durar. A chamada segue possível na LAN (candidatos host)
+   e com o TURN que VOCÊ configurou. Anonimato real de mídia exige TURN via Tor
+   ou VPN transparente.
+2. **Discovery LAN expõe presença** na rede local — exceto em `proxy`/`full`,
+   onde broadcaster UDP, mDNS e UPnP/NAT-PMP ficam desligados (gate na fonte).
 3. **Fallback de keyring** (sem secret service) guarda a chave em SQLite plano — visível na UI/documentação; mitigue exportando um .stormvault (cifrado) e guardando fora do device.
 4. Cripto é feita **apenas** com primitivas maduras (ed25519-dalek, x25519-dalek, chacha20poly1305, hkdf, blake3). Nenhuma primitiva própria. A **composição** (handshake) é nossa e está documentada aqui e em `protocol.rs`.
+5. **O Tor não é "7 saltos".** O app conecta ao SOCKS5 do daemon Tor local; o
+   comprimento do circuito é configuração do SEU Tor (padrão 3). Qualquer
+   contagem diferente seria marketing, não engenharia.
+
+## Rate limits e tetos de recurso (net/`netlimit.rs`)
+
+Todo caminho de entrada tem limite, em dois andares — **throttle** (excedente
+descartado, sessão preservada; o protocolo reenvia) e **kill** (flooding
+deliberado/bug, sessão encerrada). Taxa e tamanho são independentes: um teto
+de frames/s não substitui teto de bytes por mensagem. Defaults (env
+`FORGE_LIMIT_*` para reconfigurar sem build; snapshot via comando
+`net_limits`/diagnóstico):
+
+| Camada | Throttle (por peer) | Kill (por peer) | Global |
+|---|---|---|---|
+| TCP inbound (accept) | 30/10s, burst 20 (por IP) | — | 120/10s |
+| Handshakes concorrentes | 64 vagas | — | 64 vagas |
+| Sessões online | — | — | 256 |
+| Frames de sessão | 1200/10s, burst 800 | 6000/10s | 6000/10s |
+| Bytes de sessão | 128 MiB/10s, burst 64 MiB | 640 MiB/10s | — |
+| Discovery UDP (datagrama) | 15/10s, burst 10 (por IP) | — | 300/10s |
+| Hello NOVO via relay | 12/10s, burst 8 | — | — |
+| Pedidos de chunk | 200/10s, burst 120 | — | — |
+| Sinalização de chamada (ICE) | 240/10s, burst 160 | — | — |
+| FriendRequest | 20/10s, burst 12 | — | — |
+| Loops de dial outbound | — | — | 64 concorrentes |
+
+Isto É a fronteira anti-DoS do transporte: um par autenticado não consegue
+consumir CPU/RAM/IO indefinidamente (cada accept era uma task de handshake
+criptográfico sem freio; cada Hello novo no relay nascia um respondente).
+Testado em `netlimit.rs` (unit, determinístico) e `privacy_fail_closed.rs`
+(integração).
 
 ## Cofre portátil (.stormvault v1) — modelo de ameaça
 
