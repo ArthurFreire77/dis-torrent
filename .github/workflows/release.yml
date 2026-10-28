@@ -27,8 +27,13 @@ jobs:
       - run: npm run tauri build -- --bundles nsis
       - uses: actions/upload-artifact@v4
         with:
+          # Só instaladores: `bundle/**/*` pegava também pastas de trabalho do
+          # bundler e enchia a release de lixo (o AppImage deixa a árvore
+          # extraída com centenas de .so ao lado do arquivo final).
           name: windows-bundle
-          path: src-tauri/target/release/bundle/**/*
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
 
   build-linux:
     name: Build Linux (.AppImage + .deb)
@@ -60,8 +65,14 @@ jobs:
       - run: npm run tauri build -- --bundles deb,appimage
       - uses: actions/upload-artifact@v4
         with:
+          # Idem Windows: NUNCA subir `bundle/**/*` — em Linux ele inclui o
+          # AppDir inteiro (AppRun, .typelib, libs, data.tar.gz do .deb) e a
+          # release termina com centenas de assets inúteis (foi o que
+          # aconteceu no run 40766045293: 293 assets).
           name: linux-bundle
-          path: src-tauri/target/release/bundle/**/*
+          path: |
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.AppImage
 
   build-android:
     name: Build Android (.apk)
@@ -133,8 +144,13 @@ jobs:
           done
       - uses: actions/upload-artifact@v4
         with:
+          # `!` aqui funciona (picomatch do upload-artifact), ao contrário do
+          # `files:` do action-gh-release — que aceitou o padrão de negação e
+          # mesmo assim anexou o APK sem assinatura.
           name: android-bundle
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+            !src-tauri/gen/android/app/build/outputs/apk/**/*unsigned*
 
   release:
     name: Create GitHub Release
@@ -147,12 +163,16 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          # `!...*unsigned*`: APK sem assinatura não instala em aparelho nenhum;
-          # anexá-lo só gera "erro ao instalar" para quem baixa. O APK assinado
-          # é gerado localmente (build-android.ps1) e anexado à mão.
+          # Lista por extensão (sem glob `**/*` e sem negação): o action-gh-release
+          # não suporta `!padrão` — no run anterior o APK sem assinatura acabou
+          # anexado mesmo assim. O APK assinado é gerado localmente
+          # (build-android.ps1) e enviado a esta release à parte.
           files: |
-            artifacts/**/*
-            !artifacts/**/*unsigned*
+            artifacts/**/*.exe
+            artifacts/**/*.msi
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.apk
           draft: false
           prerelease: true
           body: |
