@@ -59,9 +59,10 @@
         "type": "downloadBootstrapper",
         "silent": true
       },
-      "nsis": {
-        "installerIcon": "icons/icon.ico",
-        "displayLanguageSelector": false,
+    "nsis": {
+      "installerIcon": "icons/icon.ico",
+      "displayLanguageSelector": false,
+      "compression": "zlib",
         "languages": [
           "English",
           "PortugueseBR"

@@ -70,6 +70,24 @@ código do app. Linux (`.deb`/`.AppImage`) passou.
   1.1.6) e gera os arquivos do CLI com `init` **apenas quando faltam** (clone
   limpo), sem sobrescrever o que é versionado.
 
+### Instalador Windows acusado como vírus (falso positivo do Defender)
+
+**Sintoma.** Baixar o `.exe` da 1.1.7 → o Chrome marca o download como "não
+confirmado" e o Windows Defender coloca o arquivo em quarentena
+(`Program:Win32/Contebrew.A!ml`, `DidThreatExecute: False`).
+
+**Diagnóstico.** Não é código malicioso nem assinatura de vírus: é heurística de
+machine learning (`!ml`) sobre o **instalador NSIS**. Os `.exe` das 1.1.5 e 1.1.6
+passam limpos no mesmo Defender (mesma base de assinaturas), e o binário do app
+(`forge.exe`, 24 MB) também passa — o que dispara é o pacote NSIS comprimido com
+LZMA (padrão do Tauri).
+
+**Correção.** `bundle.windows.nsis.compression = "zlib"` no `tauri.conf.json`.
+O instalador muda de estrutura (5,85 MB → 8,13 MB) e passa a ser "found no
+threats" no scan do Defender. A regra que fica: **escanear o `.exe` com
+`MpCmdRun.exe -Scan` antes de publicar** e nunca anexar um binário que o
+Defender acuse, mesmo sendo falso positivo.
+
 ### Binários
 
 - Android: APK **release assinado** (mesma chave `CN=DisTorrent, OU=Dev` das
