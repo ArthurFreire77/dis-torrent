@@ -1009,18 +1009,24 @@ export const browserServices: ForgeServices = {
     })
   },
 
-  proxyAddrGet: () => {
-    const saved = driver.get<string>('privacy_proxy_addr')
+  proxyAddrGet: (mode) => {
+    // Modo-alvo (proxy × full/Tor) decide chave e default — o mesmo default
+    // por modo do motor nativo: Tor=9050, SOCKS5=1080.
+    const target = mode ?? (driver.get<string>('privacy_mode') ?? 'encrypted')
+    const key = target === 'full' ? 'privacy_tor_addr' : 'privacy_proxy_addr'
+    const saved = driver.get<string>(key)
     return Promise.resolve({
-      addr: saved && saved.trim() !== '' ? saved.trim() : (driver.get<string>('privacy_mode') === 'full' ? '127.0.0.1:9050' : '127.0.0.1:1080'),
+      addr: saved && saved.trim() !== '' ? saved.trim() : (target === 'full' ? '127.0.0.1:9050' : '127.0.0.1:1080'),
       is_default: !(saved && saved.trim() !== ''),
     })
   },
 
-  proxyAddrSet: (addr: string) => {
+  proxyAddrSet: (addr, mode) => {
+    const target = mode ?? (driver.get<string>('privacy_mode') ?? 'encrypted')
+    const key = target === 'full' ? 'privacy_tor_addr' : 'privacy_proxy_addr'
     const v = addr.trim()
-    if (v === '') driver.remove('privacy_proxy_addr')
-    else driver.set('privacy_proxy_addr', v)
+    if (v === '') driver.remove(key)
+    else driver.set(key, v)
     return Promise.resolve()
   },
 

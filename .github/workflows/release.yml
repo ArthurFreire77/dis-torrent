@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows (.exe + .msi)
+    name: Build Windows (.exe NSIS)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,8 +93,44 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev pkg-config build-essential cmake clang
       - run: npm ci
-      - run: npm run tauri android init
-      - run: npm run tauri android build
+      # NÃO rodar `tauri android init` aqui: o projeto nativo (gen/android) é
+      # versionado e o init sobrescreve MainActivity.kt/build.gradle.kts — foi
+      # assim que o APK do CI saiu sem a biblioteca nativa.
+      # Só arm64: o runner não tem os targets rust das outras ABIs instalados e
+      # um build "universal" falharia no meio (ou pior: sairia sem as .so de
+      # algumas ABIs). arm64 cobre todos os aparelhos atuais.
+      - run: npm run tauri android build -- --apk --target aarch64
+      - name: Verificar APK (libforge_lib.so presente)
+        working-directory: src-tauri/gen/android/app/build/outputs/apk
+        run: |
+          set -euo pipefail
+          # O CI não tem o keystore do mantenedor, então o release sai
+          # `app-arm64-release-unsigned.apk`. Isso é esperado: aqui verificamos
+          # que o BUILD está certo (Rust + assets dentro). O APK assinado que
+          # vai para o usuário é gerado localmente (AGENTS.md §0) e não é
+          # anexado à release por este workflow (ver step Create release).
+          mapfile -t apks < <(find . -name '*.apk' | sort)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "::error::nenhum APK gerado"; exit 1
+          fi
+          for apk in "${apks[@]}"; do
+            echo "== $apk ($(stat -c%s "$apk") bytes)"
+            case "$apk" in
+              *unsigned*) echo "::warning::$apk não está assinado (sem keystore no CI) — não instala em aparelho";;
+            esac
+            # APK sem a .so instala e morre no boot (UnsatisfiedLinkError):
+            # é o bug publicado na 1.1.6 (APK de 2,49 MB, zero lib/).
+            if [ "$(stat -c%s "$apk")" -lt 10000000 ]; then
+              echo "::error::$apk menor que 10MB — Rust/assets ausentes"
+              unzip -l "$apk"
+              exit 1
+            fi
+            if ! unzip -l "$apk" | grep -Eq 'lib/[^/]+/libforge_lib\.so'; then
+              echo "::error::$apk sem libforge_lib.so — o app morre no boot"
+              unzip -l "$apk"
+              exit 1
+            fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: android-bundle
@@ -111,7 +147,12 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          # `!...*unsigned*`: APK sem assinatura não instala em aparelho nenhum;
+          # anexá-lo só gera "erro ao instalar" para quem baixa. O APK assinado
+          # é gerado localmente (build-android.ps1) e anexado à mão.
+          files: |
+            artifacts/**/*
+            !artifacts/**/*unsigned*
           draft: false
           prerelease: true
           body: |

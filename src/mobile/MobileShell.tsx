@@ -526,12 +526,17 @@ export default function MobileShell() {
     } catch { /* digitando é cosmético: nunca derruba a digitação */ }
   }
 
-  async function refreshPrivacyExtras() {
+  async function refreshPrivacyExtras(mode?: PrivacyMode) {
     try {
-      const pc = await services.proxyAddrGet()
+      // endereço do MODO-ALVO (proxy × Tor): sem isto, escolher Tor trazia o
+      // default do SOCKS5 (1080) e "Ativar" gravava a porta errada.
+      const pc = await services.proxyAddrGet(mode)
       setProxyAddr(pc.addr)
       setProxyIsDefault(pc.is_default)
-    } catch { setProxyAddr('127.0.0.1:9050'); setProxyIsDefault(true) }
+    } catch {
+      setProxyAddr(mode === 'full' ? '127.0.0.1:9050' : '127.0.0.1:1080')
+      setProxyIsDefault(true)
+    }
   }
 
   async function runProxyTest() {
@@ -548,10 +553,15 @@ export default function MobileShell() {
 
   async function saveProxyAndActivate(mode: PrivacyMode) {
     try {
-      await services.proxyAddrSet(proxyAddr.trim())
+      // grava na chave do modo-alvo antes de trocar o modo (ordem inversa
+      // faria o motor re-rotar o relay com o endereço antigo)
+      await services.proxyAddrSet(proxyAddr.trim(), mode)
       const r = await services.privacySet(mode)
       setPrivacyMode(r.mode)
+      setPrivacyProxyEffective(!!r.proxy_effective)
       setProxyPendingMode(null)
+      setProxyTestOk(null)
+      setProxyTestErr(null)
       setError(null)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
@@ -562,11 +572,23 @@ export default function MobileShell() {
     if (pm === 'proxy' || pm === 'full') {
       setProxyPendingMode(pm)
       setProxyTestOk(null); setProxyTestErr(null)
-      void refreshPrivacyExtras()
+      void refreshPrivacyExtras(pm)
       return
     }
     setProxyPendingMode(null)
-    services.privacySet(pm).then(r => { setPrivacyMode(r.mode); setError(null) }).catch((e: any) => setError(String(e?.message ?? e)))
+    services.privacySet(pm).then(r => {
+      setPrivacyMode(r.mode)
+      setPrivacyProxyEffective(!!r.proxy_effective)
+      setError(null)
+    }).catch((e: any) => setError(String(e?.message ?? e)))
+  }
+
+  /** Fecha o painel e descarta o formulário de proxy pendente (sem aplicar). */
+  function closePrivacy() {
+    setShowPrivacy(false)
+    setProxyPendingMode(null)
+    setProxyTestOk(null)
+    setProxyTestErr(null)
   }
   const [version, setVersion] = useState('')
   const [fileList, setFileList] = useState<any[]>([])
@@ -2255,7 +2277,7 @@ export default function MobileShell() {
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 8 }}>
-            <button className="nav-row" onClick={() => { setShowPrivacy(true); services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {}) }}>
+            <button className="nav-row" onClick={() => { services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {}); setProxyPendingMode(null); void refreshPrivacyExtras(privacyMode); setShowPrivacy(true) }}>
               <span style={{ display: 'flex', flexShrink: 0 }}><Icon d={Icons.settings} size={17} /></span>
               Privacidade
               <span style={{ marginLeft: 'auto', fontSize: 11, color: t.muted }}>{privacyLabel}</span>
@@ -2334,7 +2356,7 @@ export default function MobileShell() {
       <ScreenSharePicker open={showScreenPicker} onClose={() => setShowScreenPicker(false)} onError={setError} />
 
       {showPrivacy && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={() => setShowPrivacy(false)}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }} onClick={closePrivacy}>
           <div style={{ width: '100%', maxWidth: 460, maxHeight: '80dvh', overflowY: 'auto', background: t.sidebar, borderTop: `1px solid ${t.border}`, borderRadius: '12px 12px 0 0', padding: '12px 14px calc(16px + env(safe-area-inset-bottom))' }} onClick={e => e.stopPropagation()}>
             <div style={{ width: 36, height: 4, borderRadius: 99, background: t.border, margin: '0 auto 12px' }} />
             <div style={{ fontWeight: 800, fontSize: 15, color: t.heading, marginBottom: 4 }}>Privacidade</div>
@@ -2406,7 +2428,7 @@ export default function MobileShell() {
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => setProxyPendingMode(null)}>Cancelar</button>
+                  <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => { setProxyPendingMode(null); setProxyTestOk(null); setProxyTestErr(null) }}>Cancelar</button>
                   <button onClick={() => saveProxyAndActivate(proxyPendingMode)} disabled={!proxyAddr.trim()}
                     style={{ flex: 1, background: proxyTestOk != null ? t.green : '#3a3a3c', color: '#fff', border: 'none', padding: 10, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 12 }}>
                     {proxyTestOk != null ? 'Ativar proxy' : 'Ativar sem teste'}
@@ -2415,7 +2437,7 @@ export default function MobileShell() {
                 {proxyIsDefault && <div style={{ fontSize: 10, color: t.muted, marginTop: 6 }}>endereço padrão — edite se o seu proxy estiver noutra porta</div>}
               </div>
             )}
-            <button className="m-btn ghost" style={{ width: '100%' }} onClick={() => setShowPrivacy(false)}>Fechar</button>
+            <button className="m-btn ghost" style={{ width: '100%' }} onClick={closePrivacy}>Fechar</button>
           </div>
         </div>
       )}

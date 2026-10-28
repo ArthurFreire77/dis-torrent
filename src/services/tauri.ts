@@ -153,9 +153,9 @@ export const tauriServices: ForgeServices = {
 
   privacySet: (mode: PrivacyMode) => invoke<PrivacySettings>('privacy_set', { mode }),
 
-  proxyAddrGet: () => invoke<import('./models').ProxyConfig>('proxy_addr_get'),
+  proxyAddrGet: (mode) => invoke<import('./models').ProxyConfig>('proxy_addr_get', { mode: mode ?? null }),
 
-  proxyAddrSet: (addr) => invoke<void>('proxy_addr_set', { addr }),
+  proxyAddrSet: (addr, mode) => invoke<void>('proxy_addr_set', { addr, mode: mode ?? null }),
 
   proxyTest: (addr) => invoke<number>('proxy_test', { addr }),
 

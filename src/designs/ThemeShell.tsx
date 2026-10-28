@@ -563,12 +563,25 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [proxyTestOk, setProxyTestOk] = useState<number | null>(null)
   const [proxyTestErr, setProxyTestErr] = useState<string | null>(null)
   const [proxyPendingMode, setProxyPendingMode] = useState<PrivacyMode | null>(null)
-  async function refreshPrivacyExtras() {
+  /** Fecha o painel e descarta o formulário de proxy pendente (sem aplicar). */
+  function closePrivacyModal() {
+    setShowPrivacyModal(false)
+    setProxyPendingMode(null)
+    setProxyTestOk(null)
+    setProxyTestErr(null)
+  }
+  async function refreshPrivacyExtras(mode?: PrivacyMode) {
     try {
-      const pc = await services.proxyAddrGet()
+      // Sempre pede o endereço do MODO-ALVO: escolher "Tor" enquanto o modo
+      // salvo é outro antes trazia o default do SOCKS5 (1080) — e "Ativar"
+      // gravava 1080 no lugar do 9050 do Tor.
+      const pc = await services.proxyAddrGet(mode)
       setProxyAddr(pc.addr)
       setProxyIsDefault(pc.is_default)
-    } catch { setProxyAddr('127.0.0.1:9050'); setProxyIsDefault(true) }
+    } catch {
+      setProxyAddr(mode === 'full' ? '127.0.0.1:9050' : '127.0.0.1:1080')
+      setProxyIsDefault(true)
+    }
   }
 
   async function runProxyTest() {
@@ -585,10 +598,15 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   async function saveProxyAndActivate(mode: PrivacyMode) {
     try {
-      await services.proxyAddrSet(proxyAddr.trim())
+      // grava na chave do modo-alvo e só então troca o modo (o motor
+      // re-rotala o relay na hora; ordem inversa usaria o endereço antigo)
+      await services.proxyAddrSet(proxyAddr.trim(), mode)
       const r = await services.privacySet(mode)
       setPrivacyMode(r.mode)
+      setPrivacyProxyEffective(!!r.proxy_effective)
       setProxyPendingMode(null)
+      setProxyTestOk(null)
+      setProxyTestErr(null)
       setError(null)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
@@ -599,11 +617,16 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (pm === 'proxy' || pm === 'full') {
       setProxyPendingMode(pm)
       setProxyTestOk(null); setProxyTestErr(null)
-      void refreshPrivacyExtras()
+      void refreshPrivacyExtras(pm)
       return
     }
     setProxyPendingMode(null)
-    services.privacySet(pm).then(r => { setPrivacyMode(r.mode); setError(null) }).catch((e: any) => setError(String(e?.message ?? e)))
+    services.privacySet(pm).then(r => {
+      setPrivacyMode(r.mode)
+      // modo não-anônimo: o relay volta a sair direto; reflete o EFETIVO
+      setPrivacyProxyEffective(!!r.proxy_effective)
+      setError(null)
+    }).catch((e: any) => setError(String(e?.message ?? e)))
   }
 
   const [friendFpInput, setFriendFpInput] = useState('')
@@ -3481,10 +3504,10 @@ export default function ThemeShell({ designId }: {designId:string}){
             </details>
 
             <label style={{ display: 'block', fontSize: 11, fontWeight: 700, letterSpacing: 1, marginTop: 16, color: muted }}>PRIVACIDADE</label>
-            <div onClick={() => { services.privacyGet().then(r => setPrivacyMode(r.mode)).catch(() => {}); void refreshPrivacyExtras(); setShowPrivacyModal(true) }}
+            <div onClick={() => { services.privacyGet().then(r => setPrivacyMode(r.mode)).catch(() => {}); setProxyPendingMode(null); void refreshPrivacyExtras(privacyMode); setShowPrivacyModal(true) }}
               style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', cursor: 'pointer' }}>
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: text }}>Modo: {PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode} • {(privacyMode === 'proxy' || privacyMode === 'full') ? 'Proxy: Ativado' : 'Proxy: Desativado'}</div>
+                <div style={{ fontWeight: 700, fontSize: 13, color: text }}>Modo: {PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode} • {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'Proxy: Ativado' : 'Proxy: OFFLINE') : 'Proxy: Desativado'}</div>
                 <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>Escolha como suas mensagens trafegam. Aplicado no motor em tempo real.</div>
               </div>
               <span style={{ color: muted }}>›</span>
@@ -3515,11 +3538,11 @@ export default function ThemeShell({ designId }: {designId:string}){
 
       {/* PRIVACIDADE — mesmo painel do celular */}
       {showPrivacyModal && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 92, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowPrivacyModal(false)}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 92, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={closePrivacyModal}>
           <div style={{ width: 460, maxHeight: '80vh', overflowY: 'auto', background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: '14px 16px 16px' }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <div style={{ fontWeight: 800, fontSize: 15, color: t.heading, flex: 1 }}>Privacidade</div>
-              <button onClick={() => setShowPrivacyModal(false)} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', fontSize: 16 }}>x</button>
+              <button onClick={closePrivacyModal} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', fontSize: 16 }}>x</button>
             </div>
             <div style={{ fontSize: 12, color: muted, marginBottom: 12, lineHeight: 1.5 }}>Escolha como suas mensagens trafegam. Aplicado no motor em tempo real.</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
@@ -3589,7 +3612,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={() => setProxyPendingMode(null)} style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, color: muted, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>Cancelar</button>
+                  <button onClick={() => { setProxyPendingMode(null); setProxyTestOk(null); setProxyTestErr(null) }} style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, color: muted, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>Cancelar</button>
                   <button onClick={() => saveProxyAndActivate(proxyPendingMode)} disabled={!proxyAddr.trim()}
                     style={{ flex: 1, background: proxyTestOk != null ? t.green : '#3a3a3c', color: '#fff', border: 'none', padding: 10, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 12 }}>
                     {proxyTestOk != null ? 'Ativar proxy' : 'Ativar sem teste'}
@@ -3598,7 +3621,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 {proxyIsDefault && <div style={{ fontSize: 10, color: muted, marginTop: 6 }}>endereço padrão — edite se o seu proxy estiver noutra porta</div>}
               </div>
             )}
-            <button onClick={() => setShowPrivacyModal(false)} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: 10, color: muted, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Fechar</button>
+            <button onClick={closePrivacyModal} style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: 10, color: muted, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>Fechar</button>
           </div>
         </div>
       )}

@@ -1,11 +1,6 @@
 package com.forge.app
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
-import android.os.Bundle
-import androidx.activity.enableEdgeToEdge
-import androidx.core.content.ContextCompat
+import android.webkit.WebView
 
 /**
  * Activity do FORGE / DisTorrent.
@@ -50,7 +45,7 @@ class MainActivity : TauriActivity() {
    * /storage/emulated/0/Download. Com este plugin o botão "Baixar" grava onde
    * o usuário realmente procura — a pasta Downloads do sistema.
    */
-  override fun onWebViewCreate(webView: android.webkit.WebView) {
+  override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     try {
       app.tauri.plugin.PluginManager.load(
@@ -64,26 +59,10 @@ class MainActivity : TauriActivity() {
     }
   }
 
-  /**
-   * Consulta (sem pedir) se as permissões de mídia já foram concedidas.
-   * Usado por código nativo/diagnóstico para explicar por que `getUserMedia`
-   * foi negado, sem disparar diálogo nenhum.
-   */
-  fun hasMediaPermissions(): Boolean {
-    val needed: Array<String> = when {
-      Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-        Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_VIDEO,
-        Manifest.permission.READ_MEDIA_AUDIO,
-      )
-      Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> arrayOf(
-        Manifest.permission.READ_EXTERNAL_STORAGE,
-      )
-      else -> return true // < API 23: declarar no Manifest basta
-    }
-    return needed.all {
-      ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-    }
-  }
+  // Nota (removido): existia aqui um `hasMediaPermissions()` que checava
+  // READ_MEDIA_IMAGES/VIDEO/AUDIO e READ_EXTERNAL_STORAGE — permissões que o
+  // manifest NÃO declara mais (foi o que fazia o Play Protect bloquear o APK).
+  // Resultado: a função sempre devolvia `false` e ninguém a chamava. Código
+  // morto que mentia sobre o estado do app — removido em vez de "consertado".
 }
 

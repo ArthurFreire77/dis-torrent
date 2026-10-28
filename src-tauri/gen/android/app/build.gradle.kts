@@ -13,25 +13,37 @@ val tauriProperties = Properties().apply {
     }
 }
 
-// Assinatura de release via env vars (padrão Tauri) — keystore fora do repo
+// Assinatura de release: `keystore.properties` (gitignored) OU variáveis de
+// ambiente. Antes este arquivo — que é VERSIONADO — tinha o caminho absoluto
+// de uma máquina e as senhas em texto puro: segredo no repositório e build de
+// release que só funcionava naquela máquina (no CI o `storeFile` não existia e
+// o gradle falhava no meio do build). Sem nenhuma das fontes, o release sai
+// NÃO ASSINADO em vez de quebrar: é o caso do CI, que precisa só compilar.
 val keystoreProperties = Properties().apply {
-    val env = System.getenv()
-    val path = "E:/Programas/dis-torrent/src-tauri/gen/android/keystore2.jks"
-    if (path != null) {
-        setProperty("storeFile", path)
-        setProperty("storePassword", "pass123")
-        setProperty("keyAlias", "key0")
-        setProperty("keyPassword", "pass123")
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) propFile.inputStream().use { load(it) }
+    fun fromEnv(env: String, prop: String) {
+        System.getenv(env)?.takeIf { it.isNotBlank() }?.let { setProperty(prop, it) }
     }
+    fromEnv("DISTORRENT_KEYSTORE_PATH", "storeFile")
+    fromEnv("DISTORRENT_KEYSTORE_PASSWORD", "storePassword")
+    fromEnv("DISTORRENT_KEY_ALIAS", "keyAlias")
+    fromEnv("DISTORRENT_KEY_PASSWORD", "keyPassword")
 }
+
+// Resolve o caminho ANTES de configurar (relativo à raiz do projeto Android) e
+// só usa se o arquivo existir de verdade — um `storeFile` inexistente falha
+// tarde, na hora de assinar o APK.
+val releaseKeystore: java.io.File? =
+    keystoreProperties.getProperty("storeFile")?.let { rootProject.file(it) }?.takeIf { it.isFile }
 
 android {
     compileSdk = 36
     namespace = "com.forge.app"
     signingConfigs {
-        if (keystoreProperties.getProperty("storeFile") != null) {
+        if (releaseKeystore != null) {
             create("release") {
-                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storeFile = releaseKeystore
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
@@ -59,7 +71,7 @@ android {
             }
         }
         getByName("release") {
-            if (keystoreProperties.getProperty("storeFile") != null) {
+            if (releaseKeystore != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
             isMinifyEnabled = true

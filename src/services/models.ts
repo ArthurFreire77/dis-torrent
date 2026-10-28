@@ -538,8 +538,8 @@ export interface ForgeServices {
   // Privacidade
   privacyGet(): Promise<PrivacySettings>
   privacySet(mode: PrivacyMode): Promise<PrivacySettings>
-  proxyAddrGet(): Promise<ProxyConfig>
-  proxyAddrSet(addr: string): Promise<void>
+  proxyAddrGet(mode?: PrivacyMode): Promise<ProxyConfig>
+  proxyAddrSet(addr: string, mode?: PrivacyMode): Promise<void>
   /** Teste ONLINE do proxy: RTT do 1º circuito que abrir nos brokers do relay */
   proxyTest(addr: string): Promise<number>
 

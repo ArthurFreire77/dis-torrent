@@ -32,18 +32,36 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// detecta Tauri+Android.
 fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("downloads")
-        .setup(|_app, api| {
+        .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
-                // Sem `let _ =`: o handle fica vivo no PluginManager do
-                // WebView; se o registro falhar (classe não encontrada, R8
-                // renomeou) o startup do app inteiro quebra — erro cedo é
-                // melhor que um "não dá pra baixar" só no meio do caminho.
-                let _handle = api.register_android_plugin("com.forge.app", "DownloadsPlugin")?;
+                // Registro NÃO fatal de propósito.
+                //
+                // Antes o `?` derrubava o `setup` inteiro: qualquer problema no
+                // plugin (classe Kotlin ausente no APK, R8 renomeou, mudança de
+                // pacote) fazia o app morrer no boot com "o app parou de
+                // funcionar" — por causa de um recurso secundário (copiar o
+                // arquivo baixado para a pasta Downloads pública). Um app que
+                // abre e diz "não consegui salvar em Downloads" é infinitamente
+                // melhor que um app que não abre.
+                match api.register_android_plugin("com.forge.app", "DownloadsPlugin") {
+                    // O handle TEM que ficar vivo enquanto o app viver (é o que
+                    // o próprio Tauri faz com o AppPlugin). Antes ele era
+                    // descartado no fim do setup — bug latente.
+                    Ok(handle) => {
+                        app.manage(handle);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "plugin downloads NÃO registrado no Android ({e}); \
+                             download fica na área privada do app e a UI avisa"
+                        );
+                    }
+                }
             }
             #[cfg(not(target_os = "android"))]
             {
-                let _ = &api;
+                let _ = (&app, &api);
             }
             Ok(())
         })
@@ -1751,16 +1769,34 @@ struct ProxyConfig {
     is_default: bool,
 }
 
+/// Chave kv do endereço SOCKS5 por modo anônimo (`proxy` × `full`/Tor).
+/// Espelha `Engine::anonymity_addr_key` — endereços separados para o proxy
+/// do usuário e o daemon Tor não se confundirem ao trocar de modo.
+fn proxy_addr_key(mode: &str) -> &'static str {
+    if mode == "full" {
+        "privacy.tor_addr"
+    } else {
+        "privacy.proxy_addr"
+    }
+}
+
+fn valid_privacy_mode(mode: &str) -> bool {
+    matches!(mode, "normal" | "encrypted" | "proxy" | "full")
+}
+
 #[tauri::command]
-fn proxy_addr_get(state: State<AppState>) -> Result<ProxyConfig, String> {
+fn proxy_addr_get(mode: Option<String>, state: State<AppState>) -> Result<ProxyConfig, String> {
     let store = open_store(&state)?;
+    // Modo ALVO (o que a UI está configurando agora: proxy ou Tor), não o
+    // modo salvo. Antes, escolher "Tor" ainda lia o default do modo antigo
+    // (127.0.0.1:1080) e o botão "Ativar" persistia o endereço errado no Tor.
+    let mode = mode
+        .filter(|m| valid_privacy_mode(m))
+        .unwrap_or_else(|| store.kv_get("privacy.mode").unwrap_or_else(|| "encrypted".into()));
     let saved = store
-        .kv_get("privacy.proxy_addr")
+        .kv_get(proxy_addr_key(&mode))
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
-    let mode = store
-        .kv_get("privacy.mode")
-        .unwrap_or_else(|| "encrypted".into());
     match saved {
         Some(addr) => Ok(ProxyConfig {
             addr,
@@ -1784,21 +1820,36 @@ fn proxy_addr_get(state: State<AppState>) -> Result<ProxyConfig, String> {
 
 /// Salva o proxy digitado na UI ("host:porta"); aplica na hora se o motor
 /// estiver em modo proxy/full (o relay re-rotas os túneis sem reiniciar).
+/// `mode` diz A QUAL modo o endereço pertence (a UI salva antes de trocar o
+/// modo — sem ele o valor ia para a chave do modo antigo).
 #[tauri::command]
-fn proxy_addr_set(addr: String, state: State<AppState>) -> Result<(), String> {
+fn proxy_addr_set(
+    addr: String,
+    mode: Option<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
     let engine_opt = state
         .engine
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
+    let mode = mode.filter(|m| valid_privacy_mode(m)).unwrap_or_else(|| {
+        match engine_opt.as_ref() {
+            Some(eng) => eng.privacy_mode(),
+            None => open_store(&state)
+                .ok()
+                .and_then(|s| s.kv_get("privacy.mode"))
+                .unwrap_or_else(|| "encrypted".into()),
+        }
+    });
     match engine_opt {
-        Some(eng) => eng.set_proxy_addr(&addr).map_err(err),
+        Some(eng) => eng.set_anonymity_addr(&mode, &addr).map_err(err),
         None => {
             // sem motor: valida mínimo e persiste para o próximo boot
             let trimmed = addr.trim();
             let store = open_store(&state)?;
             if trimmed.is_empty() {
-                store.kv_delete("privacy.proxy_addr").map_err(err)?;
+                store.kv_delete(proxy_addr_key(&mode)).map_err(err)?;
             } else {
                 // valida formato host:porta antes de persistir
                 let (_, port) = trimmed
@@ -1806,7 +1857,9 @@ fn proxy_addr_set(addr: String, state: State<AppState>) -> Result<(), String> {
                     .ok_or("formato inválido — use host:porta")?;
                 port.parse::<u16>()
                     .map_err(|_| "porta inválida".to_string())?;
-                store.kv_set("privacy.proxy_addr", trimmed).map_err(err)?;
+                store
+                    .kv_set(proxy_addr_key(&mode), trimmed)
+                    .map_err(err)?;
             }
             Ok(())
         }

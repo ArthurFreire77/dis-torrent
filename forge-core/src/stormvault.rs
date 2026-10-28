@@ -46,7 +46,7 @@ const COMPRESS_MIN_GAIN: f64 = 0.15;
 pub const DEFAULT_MAX_MESSAGES: usize = 200_000;
 
 /// Chaves kv que migram entre dispositivos. Segredos NUNCA entram aqui.
-const SETTINGS_WHITELIST: &[&str] = &["privacy.mode", "privacy.proxy_addr"];
+const SETTINGS_WHITELIST: &[&str] = &["privacy.mode", "privacy.proxy_addr", "privacy.tor_addr"];
 
 // ---------------- header (plaintext, versionado) ----------------
 

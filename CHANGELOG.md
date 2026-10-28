@@ -1,5 +1,86 @@
 # CHANGELOG
 
+## [1.1.7-pre-alpha] — 2026-10-28
+
+### Correção crítica: o app Android fechava sozinho ao abrir
+
+**Sintoma.** Instalar o APK da 1.1.6, abrir o app → "o DisTorrent parou de funcionar"
+(às vezes nem chegava a desenhar a tela).
+
+**Causa raiz.** O APK publicado tinha **2,49 MB** e, abrindo o `.apk` como zip, não
+existia **nenhum** `lib/*/libforge_lib.so` e nem os assets do frontend. O
+`System.loadLibrary("forge_lib")` do Tauri falhava com `UnsatisfiedLinkError` na
+criação da Activity → o Android encerra o processo imediatamente. Não era crash de
+Kotlin, nem R8, nem permissão: era um APK sem a biblioteca nativa (e sem a UI).
+Mesma coisa nos releases anteriores: a 1.1.5 e a 1.1.4 tinham 20 MB, a 1.1.6 caiu
+para 2,49 MB — regressão de empacotamento, não de código.
+
+**O que foi corrigido.**
+
+- `build.gradle.kts` (Android) não tem mais caminho absoluto de máquina nem senhas
+  em texto puro: a assinatura de release lê `keystore.properties` (gitignored) ou
+  as variáveis `DISTORRENT_KEYSTORE_PATH` / `DISTORRENT_KEYSTORE_PASSWORD` /
+  `DISTORRENT_KEY_ALIAS` / `DISTORRENT_KEY_PASSWORD`. Sem keystore o release sai
+  **não assinado** em vez de falhar no meio do build.
+- Novo `scripts/verify-apk.ps1`: recusa APK sem `lib/arm64-v8a/libforge_lib.so`,
+  sem assets do frontend, sem assinatura ou com tamanho suspeito. É a trava que
+  impede publicar outro APK oco — roda no build local e no CI.
+- Novo `build-android.ps1`: build completo e verificável (frontend + Rust arm64 +
+  gradle release + verificação), em vez do passo manual de hard link do `.so`.
+- `downloads_plugin()` (Rust) deixou de ser **fatal** no `setup`: se o plugin
+  Kotlin não registrar, o app abre e a UI avisa que não deu para salvar em
+  Downloads. Antes qualquer falha ali matava o boot inteiro.
+- `MainActivity.hasMediaPermissions()` removido: checava `READ_MEDIA_*` que o
+  manifest não declara (sempre `false`, sem chamador).
+
+### Também nesta release (outro trabalho no mesmo diretório)
+
+- Privacidade: o endereço de proxy agora é **por modo** (`privacy.proxy_addr` ×
+  `privacy.tor_addr`) — antes escolher "Tor" trazia e gravava o default do
+  SOCKS5 (1080) no lugar do 9050 do Tor. A UI mostra agora o `proxy_effective`
+  real (relay saindo por proxy/Tor) em vez do modo solicitado.
+
+### Build e CI (por que o release 1.1.7 falhou no GitHub Actions)
+
+O run 40613653917 falhou em duas frentes; as duas eram de empacotamento, não de
+código do app. Linux (`.deb`/`.AppImage`) passou.
+
+- **Windows (`npm ci`):** `@tauri-apps/cli-linux-x64-gnu` estava em `dependencies`
+  (binário Linux-only, sem `optional`). O npm tenta instalar dependência direta
+  que não bate com a plataforma e aborta com `EBADPLATFORM` — no Windows o job
+  morria antes de compilar qualquer coisa. Removido: o binário da CLI continua
+  vindo como dependência **opcional** de `@tauri-apps/cli` em cada plataforma
+  (o lockfile preserva as variantes Linux de `esbuild`/`rollup`/`cli`).
+- **Android (Gradle):** `tauri android init` reescreve o
+  `buildSrc/.../BuildTask.kt` para o template novo (que declara
+  `@Input var projectDir`) mas **não** reescreve o `RustPlugin.kt`, que no repo
+  ainda era o antigo e nunca preenchia esse campo. O Gradle então aborta com
+  `property 'projectDir' doesn't have a configured value` e nenhum APK é gerado.
+  Agora `BuildTask.kt` e `RustPlugin.kt` estão **ambos** no template atual
+  (`register` + `projectDir = project.projectDir.path`) e versionados juntos, e o
+  workflow **não roda mais `android init`** — o `tauri android build` já recria
+  sozinho os arquivos gerados (`tauri.settings.gradle`, `tauri.properties`,
+  `tauri.build.gradle.kts`).
+- `scripts/verify-apk.ps1`: a checagem de assinatura morria com
+  `NativeCommandError` — o `apksigner` imprime um WARNING no stderr e, com
+  `$ErrorActionPreference = "Stop"`, o PowerShell tratava isso como falha antes de
+  ler o exit code. Agora o stderr é capturado e a decisão é pelo exit code.
+- `build-android.ps1`: passou a compilar só `assembleArm64Release` (as outras
+  flavors saíam sem a `.so` = APK que instala e morre no boot; era o defeito da
+  1.1.6) e gera os arquivos do CLI com `init` **apenas quando faltam** (clone
+  limpo), sem sobrescrever o que é versionado.
+
+### Binários
+
+- Android: APK **release assinado** (mesma chave `CN=DisTorrent, OU=Dev` das
+  versões anteriores, instala por cima sem desinstalar), com a `.so` arm64 e os
+  assets dentro — verificado item por item antes de publicar.
+- Windows: `DisTorrent_1.1.7-pre-alpha_x64-setup.exe` (NSIS), gerado localmente.
+- Linux: `.deb` + `.AppImage` gerados no WSL/Ubuntu (`npm run tauri build --
+  --bundles deb,appimage`).
+- O CI não assina APK (não tem o keystore): o job Android valida o conteúdo do
+  `app-arm64-release-unsigned.apk` e a release não anexa APK sem assinatura.
+
 ## [1.1.6-pre-alpha] — 2026-10-27
 
 ### Release de correção (build local)

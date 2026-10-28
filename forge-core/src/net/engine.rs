@@ -1235,20 +1235,47 @@ impl NetworkEngine {
             .unwrap_or_else(|| "encrypted".to_string())
     }
 
+    /// Chave kv do endereço SOCKS5 de cada modo anônimo. São SEPARADAS de
+    /// propósito: um usuário pode ter um SOCKS5 próprio (proxy) e o daemon
+    /// Tor local (full) em portas diferentes — antes havia uma chave só e
+    /// trocar de modo reaproveitava o endereço do outro (Tor tentando falar
+    /// com o proxy HTTP e vice-versa), o que sempre caía em fail-closed.
+    fn anonymity_addr_key(mode: &str) -> &'static str {
+        if mode == "full" {
+            "privacy.tor_addr"
+        } else {
+            "privacy.proxy_addr"
+        }
+    }
+
     /// Endereço SOCKS5 `host:porta` usado no modo anônimo atual, ou `None`
-    /// quando o tráfego é direto. `full` (Tor) usa `FORGE_TOR_ADDR` (9050);
-    /// `proxy` usa o endereço salvo pelo usuário (`privacy.proxy_addr`) ou
-    /// `FORGE_PROXY_ADDR` (1080). É a ÚNICA fonte dessa decisão — relay
+    /// quando o tráfego é direto. `full` (Tor) usa o endereço salvo pelo
+    /// usuário (`privacy.tor_addr`), depois `FORGE_TOR_ADDR`, depois 9050;
+    /// `proxy` usa `privacy.proxy_addr`, depois `FORGE_PROXY_ADDR`, depois
+    /// 1080. É a ÚNICA fonte dessa decisão — relay
     /// (`refresh_relay_for_privacy`) e diagnóstico (`relay_diagnostics`)
     /// leem daqui para nunca divergirem (ex.: um vazar IP e o outro não).
     pub fn anonymity_proxy(&self) -> Option<String> {
-        match self.privacy_mode().as_str() {
-            "full" => Some(
-                std::env::var("FORGE_TOR_ADDR").unwrap_or_else(|_| "127.0.0.1:9050".to_string()),
-            ),
+        let mode = self.privacy_mode();
+        match mode.as_str() {
+            "full" => {
+                // 1) endereço digitado pelo usuário na UI (privacidade → Tor)
+                // — antes era IGNORADO e o campo aparecia editável: editar a
+                // porta do Tor na tela não mudava nada no motor.
+                if let Some(addr) = self.store.kv_get(Self::anonymity_addr_key(&mode)) {
+                    if !addr.trim().is_empty() {
+                        return Some(addr);
+                    }
+                }
+                // 2) env (self-host/CI); 3) default do daemon Tor
+                Some(
+                    std::env::var("FORGE_TOR_ADDR")
+                        .unwrap_or_else(|_| "127.0.0.1:9050".to_string()),
+                )
+            }
             "proxy" => {
                 // 1) endereço digitado pelo usuário na UI (privacidade → proxy)
-                if let Some(addr) = self.store.kv_get("privacy.proxy_addr") {
+                if let Some(addr) = self.store.kv_get(Self::anonymity_addr_key(&mode)) {
                     if !addr.trim().is_empty() {
                         return Some(addr);
                     }
@@ -1263,22 +1290,32 @@ impl NetworkEngine {
         }
     }
 
-    /// Salva o endereço do proxy SOCKS5 digitado pelo usuário e aplica na
-    /// hora (se já estiver em modo proxy, o relay re-rotas os túneis; se
-    /// não, fica guardado para quando ativar). Formato `host:porta`.
-    pub fn set_proxy_addr(&self, addr: &str) -> Result<()> {
+    /// Salva o endereço SOCKS5 digitado pelo usuário PARA O MODO informado
+    /// (`proxy` ou `full`) e aplica na hora (se o modo já estiver ativo, o
+    /// relay re-rotas os túneis; se não, fica guardado para quando ativar).
+    /// Formato `host:porta`. Recebe o modo explícito porque a UI salva o
+    /// endereço ANTES de trocar o modo — ler `privacy_mode()` aqui gravaria
+    /// no modo errado e o valor nunca valeria.
+    pub fn set_anonymity_addr(&self, mode: &str, addr: &str) -> Result<()> {
+        let key = Self::anonymity_addr_key(mode);
         let addr = addr.trim();
         if addr.is_empty() {
-            self.store.kv_delete("privacy.proxy_addr")?;
+            self.store.kv_delete(key)?;
         } else {
             // valida ANTES de persistir — sem porta/env tudo vira "inválido"
             let _ = crate::net::socks5::split_host_port(addr)?;
-            self.store.kv_set("privacy.proxy_addr", addr)?;
+            self.store.kv_set(key, addr)?;
         }
-        // em modo proxy o backend troca de túnel AGORA (mesma semântica do
+        // em modo anônimo o backend troca de túnel AGORA (mesma semântica do
         // privacy_set_mode — nunca exige reboot para valer).
         self.refresh_relay_for_privacy();
         Ok(())
+    }
+
+    /// Compat: salva o endereço do modo `proxy`. Mantido porque host/CLI já
+    /// chamam por este nome; delega para `set_anonymity_addr`.
+    pub fn set_proxy_addr(&self, addr: &str) -> Result<()> {
+        self.set_anonymity_addr("proxy", addr)
     }
 
     /// Existe um SOCKS5 configurado? `FORGE_PROXY_ADDR` não-vazio OU um
