@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows (.msi)
+    name: Build Windows (.exe portátil)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,38 +24,29 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      # MSI e não NSIS: o instalador NSIS cai num falso positivo do Defender
-      # (`Program:Win32/Contebrew.A!ml`) — o navegador bloqueia o download e o
-      # arquivo vai para a quarentena. O MSI tem o mesmo conteúdo e passa limpo
-      # (testado baixando o arquivo e aplicando Mark-of-the-Web).
-      # O MSI não aceita pre-release textual, então a versão vira `1.1.7-1`
-      # (numérico) só para o bundle — mesma lógica do job desktop-windows do CI.
-      - name: Versão numérica para o MSI
+      # EXECUTÁVEL PORTÁTIL, sem instalador — de propósito.
+      # O instalador NSIS (`--bundles nsis`) cai num falso positivo do Defender
+      # (`Program:Win32/Contebrew.A!ml`): o navegador bloqueia o download e o
+      # arquivo vai para a quarentena. Trocar compressão (LZMA→zlib) não resolve.
+      # O binário puro passa limpo até baixado com Mark-of-the-Web.
+      # `--no-bundle` compila o app (frontend + Rust) sem gerar instalador.
+      - run: npm run tauri build -- --no-bundle
+      - name: Renomear executável portátil
+        shell: bash
         run: |
-          node -e "
-            const fs=require('fs');
-            const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
-            const parts=pkg.version.split('-');
-            const base=parts.shift();
-            if(!/^\d+\.\d+\.\d+$/.test(base)){console.error('versao nao parseavel: '+pkg.version);process.exit(1)}
-            const suffix=parts.join('-').match(/(?:^|\.)(\d+)$/);
-            const v=base+'-'+(suffix?.[1]||'1');
-            for (const f of ['package.json','src-tauri/tauri.conf.json']) {
-              const d=JSON.parse(fs.readFileSync(f,'utf8'));
-              d.version=v;
-              fs.writeFileSync(f, JSON.stringify(d,null,2));
-            }
-            console.log('MSI version: '+v);
-          "
-      - run: npm run tauri build -- --bundles msi
+          set -euo pipefail
+          V=$(node -p "require('./package.json').version")
+          mkdir -p src-tauri/target/release/bundle/portable
+          cp src-tauri/target/release/forge.exe \
+             "src-tauri/target/release/bundle/portable/DisTorrent_${V}_x64.exe"
+          ls -la src-tauri/target/release/bundle/portable
       - uses: actions/upload-artifact@v4
         with:
-          # Só instaladores: `bundle/**/*` pegava também pastas de trabalho do
-          # bundler e enchia a release de lixo (o AppImage deixa a árvore
-          # extraída com centenas de .so ao lado do arquivo final).
+          # Só o executável: subir `bundle/**/*` enchia a release de lixo (o
+          # AppImage deixa a árvore extraída com centenas de .so ao lado do
+          # arquivo final).
           name: windows-bundle
-          path: |
-            src-tauri/target/release/bundle/**/*.msi
+          path: src-tauri/target/release/bundle/portable/*.exe
 
   build-linux:
     name: Build Linux (.AppImage + .deb)
@@ -209,9 +200,10 @@ jobs:
           body: |
             Instaladores da versão `${{ steps.ver.outputs.version }}`.
 
-            - **Windows:** instalador **MSI** (`*_x64_en-US.msi`). O NSIS cai num
-              falso positivo do Windows Defender (`Program:Win32/Contebrew.A!ml`)
-              e o navegador bloqueia o download; o MSI passa limpo.
+            - **Windows:** executável **portátil** (`*_x64.exe`) — baixe e rode
+              direto, sem instalar. O instalador NSIS cai num falso positivo do
+              Defender (`Program:Win32/Contebrew.A!ml`) e o navegador bloqueia o
+              download; o binário puro não é acusado.
             - **Linux:** pacote `.deb` e `.AppImage`
             - **Android:** APK arm64 assinado — gerado no build local
               (`build-android.ps1`) e anexado a esta release; o CI só valida a

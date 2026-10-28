@@ -84,15 +84,17 @@ não resolveu: o scan local dizia "no threats", porém o download (com MOTW) e a
 proteção em tempo real continuavam detectando — o problema é o formato NSIS em
 si, não a compressão.
 
-**Correção.** O instalador Windows passa a ser **MSI**
-(`DisTorrent_1.1.7_x64_en-US.msi`, 8,29 MB). O MSI tem o mesmo conteúdo do app e
-passa limpo no teste completo: baixado pela URL pública, com `Zone.Identifier`
-(MOTW) aplicado, `MpCmdRun -Scan` → "found no threats".
+**Correção.** O Windows passa a receber o **executável portátil**
+(`DisTorrent_1.1.7-pre-alpha_x64.exe`, 22,79 MB) — o próprio binário do app
+renomeado, sem instalador. Ele passa limpo no teste completo: baixado pela URL
+pública, com `Zone.Identifier` (MOTW) aplicado, continua no disco e
+`MpCmdRun -Scan` → "found no threats".
 
-A regra que fica: **testar o instalador como usuário** (baixar de verdade +
-aplicar MOTW + escanear) antes de anexar, e nunca publicar binário que o
-Defender acuse, mesmo sendo falso positivo. Assinar o instalador continua sendo
-o único jeito de acabar de vez com os avisos semânticos de reputação.
+A regra que fica: **testar como usuário** (baixar de verdade + aplicar MOTW +
+escanear) antes de anexar, e nunca publicar binário que o Defender acuse, mesmo
+sendo falso positivo. O instalador MSI também passa limpo, mas não foi o
+escolhido para a release; assinar continua sendo o único jeito de acabar de vez
+com os avisos de reputação do SmartScreen.
 
 ### Binários
 
