@@ -6,12 +6,12 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { getIceServers } from '../src/services/callIce.ts'
 import {
-  getIceServers,
   setCallPrivacyForIce,
   getCallPrivacyForIce,
   isIcePublicFallbackSuppressed,
-} from '../src/services/callManager.ts'
+} from '../src/services/callIcePrivacy.ts'
 
 // helper: todas as URLs de uma lista de ICE como string única (comparações)
 function allUrls(list: ReturnType<typeof getIceServers>): string {
