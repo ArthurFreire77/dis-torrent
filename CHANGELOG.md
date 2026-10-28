@@ -33,6 +33,37 @@ para 2,49 MB — regressão de empacotamento, não de código.
 - `MainActivity.hasMediaPermissions()` removido: checava `READ_MEDIA_*` que o
   manifest não declara (sempre `false`, sem chamador).
 
+### Instalador Windows: Inno Setup no lugar do NSIS
+
+**Sintoma.** O `.exe` publicado era bloqueado no download: o Edge marcava como
+"não confirmado" e o Defender colocava o arquivo em quarentena com
+`Program:Win32/Contebrew.A!ml` (heurística `!ml`, não é vírus).
+
+**Causa raiz.** O gatilho era o **stub do instalador NSIS** do Tauri, não o app:
+
+- o binário puro (`forge.exe`, 24 MB) passa limpo **até** baixado com
+  Mark-of-the-Web;
+- trocar a compressão do NSIS (LZMA → zlib) **não resolveu** — o arquivo novo
+  (8,13 MB) foi detectado do mesmo jeito, inclusive depois de baixado;
+- o scan local do arquivo recém-buildado dava "no threats" porque ele ainda não
+  tinha a marca de "veio da internet" — foi por isso que a checagem anterior
+  aprovou um instalador que todo mundo recebia bloqueado.
+
+**Correção.** O instalador Windows agora é gerado em **Inno Setup**
+([`installer/distorent.iss`](installer/distorent.iss) por
+[`scripts/build-installer.ps1`](scripts/build-installer.ps1)): motor de setup
+diferente, com atalhos no Menu Iniciar e na Área de Trabalho, entrada em
+Aplicativos, desinstalador e instalação por usuário sem UAC. O script avisa e
+oferece o download quando o WebView2 não está presente (sem ele a janela abre em
+branco).
+
+**Verificação (arquivo publicado, não o local):** baixado pela URL da release →
+7.578.486 bytes, `sha256 7388723c…` → `Zone.Identifier` aplicado →
+`MpCmdRun -Scan`: **"found no threats"**, arquivo preservado e hash inalterado.
+Instalação silenciosa testada em diretório temporário: instalou
+`forge.exe` (versão `1.1.7-pre-alpha`), criou desinstalador e removeu tudo no
+uninstall.
+
 ### Também nesta release (outro trabalho no mesmo diretório)
 
 - Privacidade: o endereço de proxy agora é **por modo** (`privacy.proxy_addr` ×
@@ -101,7 +132,8 @@ com os avisos de reputação do SmartScreen.
 - Android: APK **release assinado** (mesma chave `CN=DisTorrent, OU=Dev` das
   versões anteriores, instala por cima sem desinstalar), com a `.so` arm64 e os
   assets dentro — verificado item por item antes de publicar.
-- Windows: `DisTorrent_1.1.7-pre-alpha_x64-setup.exe` (NSIS), gerado localmente.
+- Windows: `DisTorrent_1.1.7-pre-alpha_x64_setup.exe` (**Inno Setup**), gerado
+  localmente — NSIS foi abandonado por causa do falso positivo do Defender.
 - Linux: `.deb` + `.AppImage` gerados no WSL/Ubuntu (`npm run tauri build --
   --bundles deb,appimage`).
 - O CI não assina APK (não tem o keystore): o job Android valida o conteúdo do

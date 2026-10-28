@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows (.exe portátil)
+    name: Build Windows (instalador .exe)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,29 +24,29 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
-      # EXECUTÁVEL PORTÁTIL, sem instalador — de propósito.
-      # O instalador NSIS (`--bundles nsis`) cai num falso positivo do Defender
-      # (`Program:Win32/Contebrew.A!ml`): o navegador bloqueia o download e o
-      # arquivo vai para a quarentena. Trocar compressão (LZMA→zlib) não resolve.
-      # O binário puro passa limpo até baixado com Mark-of-the-Web.
-      # `--no-bundle` compila o app (frontend + Rust) sem gerar instalador.
+      # INSTALADOR EM INNO SETUP — não trocar por NSIS.
+      # O instalador NSIS do Tauri (`--bundles nsis`) cai no falso positivo
+      # `Program:Win32/Contebrew.A!ml`: baixado pelo navegador (com
+      # Mark-of-the-Web) o Edge marca como perigoso e o Defender coloca o
+      # arquivo em quarentena. Trocar a compressão do NSIS (LZMA→zlib) NÃO
+      # resolveu — o gatilho é o stub do NSIS, não o conteúdo.
+      # O Inno Setup usa outro motor e passou no teste completo (download real +
+      # MOTW + MpCmdRun: "found no threats"), com instalador de verdade:
+      # atalhos, entrada em Aplicativos e desinstalador.
+      # `--no-bundle` compila só o app; o instalador é gerado pelo nosso .iss.
+      - name: Instalar Inno Setup
+        run: choco install innosetup --no-progress -y
       - run: npm run tauri build -- --no-bundle
-      - name: Renomear executável portátil
-        shell: bash
-        run: |
-          set -euo pipefail
-          V=$(node -p "require('./package.json').version")
-          mkdir -p src-tauri/target/release/bundle/portable
-          cp src-tauri/target/release/forge.exe \
-             "src-tauri/target/release/bundle/portable/DisTorrent_${V}_x64.exe"
-          ls -la src-tauri/target/release/bundle/portable
+      - name: Gerar instalador (Inno Setup)
+        shell: pwsh
+        run: ./scripts/build-installer.ps1 -SkipBuild
       - uses: actions/upload-artifact@v4
         with:
-          # Só o executável: subir `bundle/**/*` enchia a release de lixo (o
+          # Só o instalador: subir `bundle/**/*` enchia a release de lixo (o
           # AppImage deixa a árvore extraída com centenas de .so ao lado do
           # arquivo final).
           name: windows-bundle
-          path: src-tauri/target/release/bundle/portable/*.exe
+          path: src-tauri/target/release/bundle/inno/*.exe
 
   build-linux:
     name: Build Linux (.AppImage + .deb)
@@ -192,7 +192,6 @@ jobs:
           # (build-android.ps1) e enviado a esta release à parte.
           files: |
             artifacts/**/*.exe
-            artifacts/**/*.msi
             artifacts/**/*.deb
             artifacts/**/*.AppImage
             artifacts/**/*.apk
@@ -200,10 +199,11 @@ jobs:
           body: |
             Instaladores da versão `${{ steps.ver.outputs.version }}`.
 
-            - **Windows:** executável **portátil** (`*_x64.exe`) — baixe e rode
-              direto, sem instalar. O instalador NSIS cai num falso positivo do
-              Defender (`Program:Win32/Contebrew.A!ml`) e o navegador bloqueia o
-              download; o binário puro não é acusado.
+            - **Windows:** instalador `*_x64_setup.exe` (Inno Setup) — atalhos,
+              entrada em Aplicativos e desinstalador, instalação por usuário sem
+              pedir admin. Feito em Inno e não em NSIS porque o NSIS cai num
+              falso positivo do Defender (`Program:Win32/Contebrew.A!ml`) que
+              faz o navegador bloquear o download.
             - **Linux:** pacote `.deb` e `.AppImage`
             - **Android:** APK arm64 assinado — gerado no build local
               (`build-android.ps1`) e anexado a esta release; o CI só valida a
