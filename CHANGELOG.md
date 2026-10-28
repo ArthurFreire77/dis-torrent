@@ -78,15 +78,21 @@ confirmado" e o Windows Defender coloca o arquivo em quarentena
 
 **Diagnóstico.** Não é código malicioso nem assinatura de vírus: é heurística de
 machine learning (`!ml`) sobre o **instalador NSIS**. Os `.exe` das 1.1.5 e 1.1.6
-passam limpos no mesmo Defender (mesma base de assinaturas), e o binário do app
-(`forge.exe`, 24 MB) também passa — o que dispara é o pacote NSIS comprimido com
-LZMA (padrão do Tauri).
+passam limpos, o binário do app (`forge.exe`, 24 MB) passa limpo **até com
+Mark-of-the-Web**, mas o pacote NSIS é acusado. Trocar a compressão para `zlib`
+não resolveu: o scan local dizia "no threats", porém o download (com MOTW) e a
+proteção em tempo real continuavam detectando — o problema é o formato NSIS em
+si, não a compressão.
 
-**Correção.** `bundle.windows.nsis.compression = "zlib"` no `tauri.conf.json`.
-O instalador muda de estrutura (5,85 MB → 8,13 MB) e passa a ser "found no
-threats" no scan do Defender. A regra que fica: **escanear o `.exe` com
-`MpCmdRun.exe -Scan` antes de publicar** e nunca anexar um binário que o
-Defender acuse, mesmo sendo falso positivo.
+**Correção.** O instalador Windows passa a ser **MSI**
+(`DisTorrent_1.1.7_x64_en-US.msi`, 8,29 MB). O MSI tem o mesmo conteúdo do app e
+passa limpo no teste completo: baixado pela URL pública, com `Zone.Identifier`
+(MOTW) aplicado, `MpCmdRun -Scan` → "found no threats".
+
+A regra que fica: **testar o instalador como usuário** (baixar de verdade +
+aplicar MOTW + escanear) antes de anexar, e nunca publicar binário que o
+Defender acuse, mesmo sendo falso positivo. Assinar o instalador continua sendo
+o único jeito de acabar de vez com os avisos semânticos de reputação.
 
 ### Binários
 
