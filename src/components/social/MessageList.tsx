@@ -354,8 +354,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 })}
               </div>
 
-              {/* barra de ações no hover — estilo Discord */}
-              <div className="msg-tools" style={{ position: 'absolute', top: -14, right: 12, display: 'none', gap: 2, background: T_MAIN, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 2, boxShadow: '0 4px 12px rgba(0,0,0,.4)', zIndex: 5 }}>
+              {/* Ações sempre tabuláveis; hover-only escondia reação de teclado e touch. */}
+              <div className="msg-tools" style={{ position: 'absolute', top: -14, right: 12, display: 'flex', gap: 2, background: T_MAIN, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 2, boxShadow: '0 4px 12px rgba(0,0,0,.4)', zIndex: 5 }}>
                 {QUICK.slice(0, 4).map(e => (
                   <button key={e} title={`Reagir ${e}`} onClick={e2 => { e2.stopPropagation(); toggleReact(m.id, e) }}
                     style={TOOL_BTN}>{e}</button>

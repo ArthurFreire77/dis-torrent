@@ -601,8 +601,10 @@ export default function CreateServerWizard({
           })),
         },
       )
-      const me = await services.identityGet()
-      const token = await services.makeInvite(id, me?.fingerprint ?? '000000000000')
+      // Convite público do wizard: o link precisa valer para qualquer pessoa,
+      // não ficar preso ao fingerprint do aparelho que criou o servidor.
+      // O wildcard é o formato já aceito pelo Rust e pelo modo navegador.
+      const token = await services.makeInvite(id, '000000000000')
       setCreatedId(id)
       setInviteUrl(`${window.location.origin}/invite/${token}`)
       setStep(PASSO_CONCLUIDO)

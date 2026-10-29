@@ -753,7 +753,19 @@ export const browserServices: DisTorrentServices = {
   },
 
   makeInvite: (cid) => Promise.resolve(`local-invite:${cid}:${btoa(cid).slice(0, 8)}`),
-  joinCommunity: (token) => {
+  joinCommunity: (rawToken) => {
+    let token = rawToken.trim()
+    try {
+      // Aceita tanto o token cru quanto o link copiado da interface.
+      if (token.includes('://') || token.startsWith('/')) {
+        const u = new URL(token.startsWith('/') ? `${window.location.origin}${token}` : token)
+        token = u.searchParams.get('invite') || u.searchParams.get('token') ||
+          (u.pathname.split('/').filter(Boolean).pop() ?? '')
+      }
+      token = decodeURIComponent(token)
+    } catch {
+      return Promise.reject(new Error('link de convite inválido'))
+    }
     const m = token.match(/^local-invite:([^:]+):/)
     if (!m) return Promise.reject(new Error('token inválido'))
     const cid = m[1]

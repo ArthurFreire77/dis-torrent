@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { services } from '../services'
 import { diagnoseCallsSupport } from '../services/callManager'
+import { buildDiagReport, shortFp, stateLabel } from '../services/connectionDiagnostics'
 import type { NetworkState, PeerView, RelayLegStatus, NetDiag } from '../services/models'
 
 const t = {
@@ -11,81 +12,8 @@ const t = {
   red: '#f23f42', text: '#dbdee1', heading: '#f2f3f5', muted: '#949ba4',
 }
 
-const stateLabel: Record<NetworkState, string> = {
-  CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
-}
-
-export function shortFp(fp: string): string {
-  const clean = (fp ?? '').trim()
-  if (clean.length <= 12) return clean
-  return `${clean.slice(0, 6)}…${clean.slice(-4)}`
-}
-
-export function buildDiagReport(args: {
-  version: string
-  fp: string
-  nickname: string
-  state: NetworkState | null
-  onlinePeers: number
-  listenPort: number
-  peers: PeerView[]
-  legs: RelayLegStatus[]
-  legsError: string | null
-  netDiag: NetDiag | null
-  kind: string
-}): string {
-  const lines: string[] = []
-  lines.push('DisTorrent — relatório de conexão (colar no suporte)')
-  lines.push(`versão: ${args.version || '?'}`)
-  lines.push(`fingerprint: ${args.fp || '?'}`)
-  lines.push(`apelido: ${args.nickname || '?'}`)
-  lines.push(`modo: ${args.kind}`)
-  lines.push(`estado: ${args.state ? stateLabel[args.state] : '?' } (${args.onlinePeers} online, porta :${args.listenPort})`)
-  const nd = args.netDiag
-  if (nd) {
-    if (nd.stun_ok === null) lines.push('STUN: ainda não testado')
-    else if (nd.stun_ok) lines.push(`STUN: ok (${nd.stun_addr ?? '?'})`)
-    else lines.push('STUN: falhou (sem binding NAT — direto impossível, relay resolve)')
-    if (nd.dht_ok === null) lines.push('DHT BitTorrent: desligada (DISTORRENT_NO_DHT ou modo proxy/Tor)')
-    else if (nd.dht_ok) lines.push('DHT BitTorrent: ok — nó anunciando na rede BitTorrent')
-    else lines.push('DHT BitTorrent: falhou (UDP bloqueado?)')
-    if (nd.announce_addr) lines.push(`anúncio: ${nd.announce_addr}${nd.nat_source ? ` (via ${nd.nat_source === 'upnp' ? 'UPnP/NAT-PMP local, sem servidor' : nd.nat_source === 'public-ip' ? 'IP público direto' : 'STUN público'})` : ''}`)
-    else lines.push('anúncio: não anunciado (STUN é UDP e não abre a porta TCP; sem UPnP o par não chega — relay/túnel cobrem)')
-  }
-  lines.push(`peers (${args.peers.length}):`)
-  if (args.peers.length === 0) {
-    lines.push('- (nenhum peer conhecido)')
-  } else {
-    for (const p of args.peers) {
-      const via = p.via_relay ? 'via relay' : 'direta'
-      // Honestidade: peer preso em CONNECTING com várias tentativas diretas
-      // não está "conectando" — está INALCANÇÁVEL por rota direta (CGNAT/NAT
-      // simétrico). Dizer "CONECTANDO" para sempre era mentira de status.
-      const stuck = p.state === 'CONNECTING' && (p.direct_attempts ?? 0) >= 6
-      const state = stuck ? 'SEM ROTA DIRETA' : (p.state ? stateLabel[p.state] : '?')
-      lines.push(`- ${shortFp(p.fp)} (${p.nickname || '?'}, ${state}, ${via})`)
-      if (p.last_direct_error) lines.push(`  direto: ${p.last_direct_error} (${p.direct_attempts ?? 0} tentativas)`)
-      if (stuck) lines.push('  → sem porta aberta dos dois lados; caminho real é relay/túnel')
-      if (p.last_relay_error) lines.push(`  relay: ${p.last_relay_error} (${p.relay_attempts ?? 0} tentativas)`)
-      if (p.announce_seen_ms && Date.now() - p.announce_seen_ms < 10 * 60 * 1000) lines.push('  announce do peer visto há pouco')
-    }
-  }
-  lines.push(`relay (${args.legs.length}):`)
-  if (args.legsError) {
-    lines.push(`- indisponível: ${args.legsError}`)
-  } else if (args.legs.length === 0) {
-    lines.push('- (sem pernas)')
-  } else {
-    for (const l of args.legs) {
-      if (l.ok) lines.push(`- ${l.name}: ok (${l.latency_ms ?? '?'} ms)`)
-      else lines.push(`- ${l.name}: falha (${l.last_error ?? 'erro desconhecido'})`)
-    }
-  }
-  lines.push(`gerado em: ${new Date().toISOString()}`)
-  return lines.join('\n')
-}
-
 export default function ConnectionDiagnostics({ onClose }: { onClose?: () => void }) {
+  const [redactSensitive, setRedactSensitive] = useState(true)
   const [version, setVersion] = useState('')
   const [fp, setFp] = useState('')
   const [nickname, setNickname] = useState('')
@@ -149,8 +77,8 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
   }, [])
 
   const report = useMemo(
-    () => buildDiagReport({ version, fp, nickname, state, onlinePeers, listenPort, peers, legs, legsError, netDiag, kind: services.kind }),
-    [version, fp, nickname, state, onlinePeers, listenPort, peers, legs, legsError, netDiag],
+    () => buildDiagReport({ version, fp, nickname, state, onlinePeers, listenPort, peers, legs, legsError, netDiag, kind: services.kind, redactSensitive }),
+    [version, fp, nickname, state, onlinePeers, listenPort, peers, legs, legsError, netDiag, redactSensitive],
   )
 
   // Capacidade de chamada deste aparelho (WebView antigo = sem WebRTC).
@@ -247,14 +175,16 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
               {netDiag?.stun_ok === false && <span>STUN: <span style={{ color: t.yellow, fontWeight: 800 }}>falhou</span> — sem binding NAT; conexão direta só se o par puder receber</span>}
               {netDiag?.announce_addr
                 ? <div>anúncio: {netDiag.announce_addr}{netDiag.nat_source ? ` (via ${netDiag.nat_source === 'upnp' ? 'UPnP/NAT-PMP local, sem servidor' : netDiag.nat_source === 'public-ip' ? 'IP público direto' : 'STUN público'})` : ''}</div>
-                : netDiag != null && <div>anúncio: não anunciado — STUN é UDP e não abre porta TCP; sem UPnP o par não chega. Relay e túnel cobrem isso (e é por isso que o overlay não fica mais preso em “Conectando…”).</div>}
+                : netDiag != null && <div>anúncio: não anunciado — STUN é UDP e não comprova que a porta TCP aceita conexões. Relay ou túnel só ficam confirmados após o handshake real com outro peer.</div>}
               {netDiag?.dht_ok === true && <div>DHT BitTorrent: <span style={{ color: t.green, fontWeight: 800 }}>ok</span> — descoberta descentralizada ativa</div>}
+              {netDiag != null && netDiag.dht_ok === null && <div>DHT BitTorrent: estado ainda não informado</div>}
               {netDiag?.dht_ok === false && <div>DHT BitTorrent: <span style={{ color: t.yellow, fontWeight: 800 }}>off/falhou</span> — (DISTORRENT_NO_DHT, UDP bloqueado ou modo proxy/Tor)</div>}
             </div>
           </div>
 
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted, marginBottom: 6 }}>RELAY ({legs.length || (legsError ? 0 : 0)})</div>
           <div data-testid="diag-relay" style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: t.muted }}>“Broker alcançável” verifica o endpoint MQTT. Só uma sessão peer a peer estabelecida confirma encaminhamento real.</div>
             {legsError && <div style={{ fontSize: 12, color: t.yellow, background: '#2a1f0a', border: `1px solid ${t.yellow}55`, borderRadius: 8, padding: '8px 12px' }}>{legsError}</div>}
             {!legsError && legs.map((l) => (
               <div key={l.name} style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '8px 10px' }}>
@@ -285,6 +215,10 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted, marginBottom: 6 }}>RELATÓRIO P/ SUPORTE</div>
           <pre data-testid="diag-report-text" style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '10px 12px', fontSize: 11, lineHeight: 1.6, color: t.text, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 180, overflowY: 'auto', margin: 0, fontFamily: "'JetBrains Mono', monospace" }}>{report}</pre>
 
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: t.text, marginTop: 10, cursor: 'pointer' }}>
+            <input type="checkbox" checked={redactSensitive} onChange={(event) => setRedactSensitive(event.target.checked)} />
+            Ocultar IPs, fingerprints, apelidos e portas no relatório
+          </label>
           <button onClick={copyReport} style={{ width: '100%', marginTop: 10, background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 14 }}>Copiar relatório</button>
           {copied && <div style={{ marginTop: 8, fontSize: 12, color: '#8cf5b8', background: '#1a3329', border: `1px solid ${t.green}55`, borderRadius: 8, padding: '8px 12px' }}>Relatório copiado!</div>}
           {copyError && <div style={{ marginTop: 8, fontSize: 12, color: '#ff9c9c' }}>{copyError}</div>}
