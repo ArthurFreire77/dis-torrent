@@ -901,7 +901,9 @@ impl RelayBackend for PeerRelayBackend {
                 self.posts.fetch_add(1, Ordering::Relaxed);
             }
             let Some(engine) = self.engine.upgrade() else {
-                return Err(DistorrentError::Protocol("peer-relay: engine encerrado".into()));
+                return Err(DistorrentError::Protocol(
+                    "peer-relay: engine encerrado".into(),
+                ));
             };
             engine.send_to_peer(
                 self.relay_fp.clone(),

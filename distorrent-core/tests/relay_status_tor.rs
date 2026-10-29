@@ -66,7 +66,8 @@ async fn ip_via_socks(proxy: &str) -> Option<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requer SOCKS5/Tor local (ex.: Tor em 127.0.0.1:9050) — rode com --ignored"]
 async fn relay_diagnostics_via_tor_nao_vaza_ip() {
-    let proxy = std::env::var("DISTORRENT_TOR_ADDR").unwrap_or_else(|_| "127.0.0.1:9050".to_string());
+    let proxy =
+        std::env::var("DISTORRENT_TOR_ADDR").unwrap_or_else(|_| "127.0.0.1:9050".to_string());
 
     // 0) O proxy está no ar?
     if TcpStream::connect(proxy.as_str()).await.is_err() {

@@ -23,7 +23,10 @@ const ATYP_IPV6: u8 = 4;
 
 /// Conecta via proxy SOCKS5 ao alvo. Autenticação none (padrão do Tor).
 /// Retorna o TcpStream pronto para o protocolo da aplicação.
-pub async fn socks5_connect(proxy: &str, target: &SocksTarget) -> Result<TcpStream, DistorrentError> {
+pub async fn socks5_connect(
+    proxy: &str,
+    target: &SocksTarget,
+) -> Result<TcpStream, DistorrentError> {
     let mut stream = TcpStream::connect(proxy)
         .await
         .map_err(|e| DistorrentError::Protocol(format!("proxy {proxy} inacessível: {e}")))?;
@@ -60,7 +63,9 @@ pub async fn socks5_connect(proxy: &str, target: &SocksTarget) -> Result<TcpStre
         SocksTarget::Host(host, port) => {
             let host = host.trim();
             if host.is_empty() || host.len() > 255 {
-                return Err(DistorrentError::Protocol("hostname inválido para proxy".into()));
+                return Err(DistorrentError::Protocol(
+                    "hostname inválido para proxy".into(),
+                ));
             }
             req.push(ATYP_DOMAIN);
             req.push(host.len() as u8);
@@ -74,7 +79,9 @@ pub async fn socks5_connect(proxy: &str, target: &SocksTarget) -> Result<TcpStre
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await.map_err(io)?;
     if head[0] != VER {
-        return Err(DistorrentError::Protocol("resposta do proxy inválida".into()));
+        return Err(DistorrentError::Protocol(
+            "resposta do proxy inválida".into(),
+        ));
     }
     if head[1] != 0x00 {
         // 0x01 falha geral, 0x02 permitido, 0x03 rede, 0x04 host inalcançável,
@@ -103,7 +110,11 @@ pub async fn socks5_connect(proxy: &str, target: &SocksTarget) -> Result<TcpStre
             stream.read_exact(&mut len).await.map_err(io)?;
             len[0] as usize + 2
         }
-        _ => return Err(DistorrentError::Protocol("ATYP desconhecido na resposta".into())),
+        _ => {
+            return Err(DistorrentError::Protocol(
+                "ATYP desconhecido na resposta".into(),
+            ))
+        }
     };
     let mut discard = vec![0u8; skip];
     stream.read_exact(&mut discard).await.map_err(io)?;
@@ -156,7 +167,9 @@ pub fn socks5_connect_sync(
         SocksTarget::Host(host, port) => {
             let host = host.trim();
             if host.is_empty() || host.len() > 255 {
-                return Err(DistorrentError::Protocol("hostname inválido para proxy".into()));
+                return Err(DistorrentError::Protocol(
+                    "hostname inválido para proxy".into(),
+                ));
             }
             req.push(ATYP_DOMAIN);
             req.push(host.len() as u8);
@@ -168,7 +181,9 @@ pub fn socks5_connect_sync(
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).map_err(io)?;
     if head[0] != VER {
-        return Err(DistorrentError::Protocol("resposta do proxy inválida".into()));
+        return Err(DistorrentError::Protocol(
+            "resposta do proxy inválida".into(),
+        ));
     }
     if head[1] != 0x00 {
         return Err(DistorrentError::Protocol(
@@ -194,7 +209,11 @@ pub fn socks5_connect_sync(
             stream.read_exact(&mut len).map_err(io)?;
             len[0] as usize + 2
         }
-        _ => return Err(DistorrentError::Protocol("ATYP desconhecido na resposta".into())),
+        _ => {
+            return Err(DistorrentError::Protocol(
+                "ATYP desconhecido na resposta".into(),
+            ))
+        }
     };
     let mut discard = vec![0u8; skip];
     stream.read_exact(&mut discard).map_err(io)?;
@@ -270,7 +289,10 @@ mod tests {
 /// Conecta via SOCKS5 a um alvo "host:porta" (aceita IP, domínio ou .onion).
 /// Útil para o modo Tor: o hostname NUNCA é resolvido localmente — vai
 /// criptografado ao proxy, que resolve dentro da rede.
-pub async fn socks5_connect_host(proxy: &str, host_port: &str) -> Result<TcpStream, DistorrentError> {
+pub async fn socks5_connect_host(
+    proxy: &str,
+    host_port: &str,
+) -> Result<TcpStream, DistorrentError> {
     let (host, port) = split_host_port(host_port)?;
     socks5_connect(proxy, &SocksTarget::Host(host, port)).await
 }

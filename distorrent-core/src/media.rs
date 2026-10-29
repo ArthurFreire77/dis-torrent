@@ -176,7 +176,9 @@ pub fn strip_jpeg_metadata(jpeg: &[u8]) -> Result<Vec<u8>> {
     }
     // sobra de bytes que não forma segmento completo = truncado
     if i != jpeg.len() {
-        return Err(DistorrentError::Protocol("JPEG corrompido (truncado)".into()));
+        return Err(DistorrentError::Protocol(
+            "JPEG corrompido (truncado)".into(),
+        ));
     }
     Ok(out)
 }

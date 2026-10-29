@@ -24,8 +24,9 @@ async fn punch_upgrade_relay_para_direta() {
     let hub = MemRelay::new();
     let mk = |nick: &str| {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(distorrent_core::storage::Store::open(&dir.path().join("distorrent.db")).unwrap());
+        let store = Arc::new(
+            distorrent_core::storage::Store::open(&dir.path().join("distorrent.db")).unwrap(),
+        );
         let kp = distorrent_core::identity::Keypair::generate();
         let e = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
         e.set_relay_backend(Arc::new(MultiRelay::of(vec![Arc::new(hub.clone())])));

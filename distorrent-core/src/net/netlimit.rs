@@ -160,7 +160,10 @@ impl Limits {
     pub fn from_env() -> Self {
         let d = Self::default();
         Self {
-            tcp_accept_per_ip_10s: env_num("DISTORRENT_LIMIT_TCP_ACCEPT_10S", d.tcp_accept_per_ip_10s),
+            tcp_accept_per_ip_10s: env_num(
+                "DISTORRENT_LIMIT_TCP_ACCEPT_10S",
+                d.tcp_accept_per_ip_10s,
+            ),
             tcp_accept_burst: env_num("DISTORRENT_LIMIT_TCP_ACCEPT_BURST", d.tcp_accept_burst),
             tcp_accept_global_10s: env_num(
                 "DISTORRENT_LIMIT_TCP_ACCEPT_GLOBAL_10S",
@@ -174,7 +177,10 @@ impl Limits {
             sessions_max: env_num("DISTORRENT_LIMIT_SESSIONS_MAX", d.sessions_max),
             disc_udp_per_ip_10s: env_num("DISTORRENT_LIMIT_DISC_UDP_10S", d.disc_udp_per_ip_10s),
             disc_udp_burst: env_num("DISTORRENT_LIMIT_DISC_UDP_BURST", d.disc_udp_burst),
-            disc_udp_global_10s: env_num("DISTORRENT_LIMIT_DISC_UDP_GLOBAL_10S", d.disc_udp_global_10s),
+            disc_udp_global_10s: env_num(
+                "DISTORRENT_LIMIT_DISC_UDP_GLOBAL_10S",
+                d.disc_udp_global_10s,
+            ),
             disc_udp_global_burst: env_num(
                 "DISTORRENT_LIMIT_DISC_UDP_GLOBAL_BURST",
                 d.disc_udp_global_burst,
@@ -185,7 +191,10 @@ impl Limits {
             ),
             relay_hello_burst: env_num("DISTORRENT_LIMIT_RELAY_HELLO_BURST", d.relay_hello_burst),
             frames_per_peer_10s: env_num("DISTORRENT_LIMIT_FRAMES_10S", d.frames_per_peer_10s),
-            frames_per_peer_burst: env_num("DISTORRENT_LIMIT_FRAMES_BURST", d.frames_per_peer_burst),
+            frames_per_peer_burst: env_num(
+                "DISTORRENT_LIMIT_FRAMES_BURST",
+                d.frames_per_peer_burst,
+            ),
             bytes_per_peer_10s: env_num("DISTORRENT_LIMIT_BYTES_10S", d.bytes_per_peer_10s),
             bytes_per_peer_burst: env_num("DISTORRENT_LIMIT_BYTES_BURST", d.bytes_per_peer_burst),
             frames_kill_per_peer_10s: env_num(
@@ -197,11 +206,20 @@ impl Limits {
                 d.bytes_kill_per_peer_10s,
             ),
             frames_global_10s: env_num("DISTORRENT_LIMIT_FRAMES_GLOBAL_10S", d.frames_global_10s),
-            frames_global_burst: env_num("DISTORRENT_LIMIT_FRAMES_GLOBAL_BURST", d.frames_global_burst),
+            frames_global_burst: env_num(
+                "DISTORRENT_LIMIT_FRAMES_GLOBAL_BURST",
+                d.frames_global_burst,
+            ),
             dial_conc: env_num("DISTORRENT_LIMIT_DIAL_CONC", d.dial_conc),
-            chunk_req_per_peer_10s: env_num("DISTORRENT_LIMIT_CHUNK_REQ_10S", d.chunk_req_per_peer_10s),
+            chunk_req_per_peer_10s: env_num(
+                "DISTORRENT_LIMIT_CHUNK_REQ_10S",
+                d.chunk_req_per_peer_10s,
+            ),
             chunk_req_burst: env_num("DISTORRENT_LIMIT_CHUNK_REQ_BURST", d.chunk_req_burst),
-            call_sig_per_peer_10s: env_num("DISTORRENT_LIMIT_CALL_SIG_10S", d.call_sig_per_peer_10s),
+            call_sig_per_peer_10s: env_num(
+                "DISTORRENT_LIMIT_CALL_SIG_10S",
+                d.call_sig_per_peer_10s,
+            ),
             call_sig_burst: env_num("DISTORRENT_LIMIT_CALL_SIG_BURST", d.call_sig_burst),
             friend_req_per_peer_10s: env_num(
                 "DISTORRENT_LIMIT_FRIEND_REQ_10S",

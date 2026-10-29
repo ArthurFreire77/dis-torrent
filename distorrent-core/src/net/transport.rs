@@ -69,8 +69,8 @@ pub const SESSION_REORDER_WINDOW: u64 = 256;
 pub const SESSION_GAP_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn write_frame(w: &mut (dyn AsyncWrite + Unpin + Send), bytes: &[u8]) -> Result<()> {
-    let len =
-        u32::try_from(bytes.len()).map_err(|_| DistorrentError::Protocol("frame gigante".into()))?;
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| DistorrentError::Protocol("frame gigante".into()))?;
     w.write_all(&len.to_be_bytes()).await?;
     w.write_all(bytes).await?;
     w.flush().await?;
@@ -103,7 +103,8 @@ async fn send_json<T: Serialize>(w: &mut (dyn AsyncWrite + Unpin + Send), v: &T)
 
 async fn read_json<T: DeserializeOwned>(r: &mut (dyn AsyncRead + Unpin + Send)) -> Result<T> {
     let bytes = read_frame(r).await?;
-    serde_json::from_slice(&bytes).map_err(|e| DistorrentError::Protocol(format!("json inválido: {e}")))
+    serde_json::from_slice(&bytes)
+        .map_err(|e| DistorrentError::Protocol(format!("json inválido: {e}")))
 }
 
 async fn read_frame_with(
@@ -113,7 +114,9 @@ async fn read_frame_with(
     let mut len_buf = [0u8; 4];
     tokio::time::timeout(per_read, r.read_exact(&mut len_buf))
         .await
-        .map_err(|_| DistorrentError::Protocol("timeout lendo tamanho do frame (relay)".into()))??;
+        .map_err(|_| {
+            DistorrentError::Protocol("timeout lendo tamanho do frame (relay)".into())
+        })??;
     let len = u32::from_be_bytes(len_buf);
     if len > MAX_FRAME {
         return Err(DistorrentError::Protocol(format!("frame {len} > limite")));
@@ -280,7 +283,8 @@ impl SessionWriter {
     }
 
     pub async fn send<T: Serialize>(&mut self, v: &T) -> Result<()> {
-        let plaintext = serde_json::to_vec(v).map_err(|e| DistorrentError::Protocol(e.to_string()))?;
+        let plaintext =
+            serde_json::to_vec(v).map_err(|e| DistorrentError::Protocol(e.to_string()))?;
         let nonce = self.nonce();
         let ct = self
             .cipher
@@ -413,8 +417,9 @@ impl SessionReader {
                         self.counter += 1;
                         self.gap_since = None;
                         let size = pt.len();
-                        let v = serde_json::from_slice(&pt)
-                            .map_err(|e| DistorrentError::Protocol(format!("json inválido: {e}")))?;
+                        let v = serde_json::from_slice(&pt).map_err(|e| {
+                            DistorrentError::Protocol(format!("json inválido: {e}"))
+                        })?;
                         return Ok((v, size));
                     }
                     // fora de ordem: guarda e volta ao passo 1 (entrega em ordem)

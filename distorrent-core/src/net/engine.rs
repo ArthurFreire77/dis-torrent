@@ -2854,7 +2854,9 @@ impl NetworkEngine {
         self.require_owner(community_id)?;
         let category = category.trim();
         if category.is_empty() {
-            return Err(DistorrentError::Protocol("categoria não pode ser vazia".into()));
+            return Err(DistorrentError::Protocol(
+                "categoria não pode ser vazia".into(),
+            ));
         }
         if self
             .store
@@ -3029,7 +3031,9 @@ impl NetworkEngine {
             .get_community(community_id)?
             .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
         if fp == comm.2 {
-            return Err(DistorrentError::Protocol("o dono não pode ser expulso".into()));
+            return Err(DistorrentError::Protocol(
+                "o dono não pode ser expulso".into(),
+            ));
         }
         if self
             .store
@@ -3157,7 +3161,9 @@ impl NetworkEngine {
         }
         // dono não pode ser moderado; ninguém modera a si mesmo
         if target == comm.2 || target == me {
-            return Err(DistorrentError::Protocol("alvo inválido para moderação".into()));
+            return Err(DistorrentError::Protocol(
+                "alvo inválido para moderação".into(),
+            ));
         }
         let need = match action {
             "ban" | "unban" | "shadow_ban" | "unshadow" => crate::moderation::PERM_BAN,
@@ -3166,7 +3172,9 @@ impl NetworkEngine {
             _ => return Err(DistorrentError::Protocol("ação inválida".into())),
         };
         if !crate::moderation::can_moderate(is_owner, is_mod, role_perms, need) {
-            return Err(DistorrentError::Protocol("sem permissão de moderação".into()));
+            return Err(DistorrentError::Protocol(
+                "sem permissão de moderação".into(),
+            ));
         }
         match action {
             "ban" => {
@@ -3240,7 +3248,9 @@ impl NetworkEngine {
                     DistorrentError::Protocol("mensagem fora deste servidor".into())
                 })?;
                 if owner_cid != community_id {
-                    return Err(DistorrentError::Protocol("mensagem fora deste servidor".into()));
+                    return Err(DistorrentError::Protocol(
+                        "mensagem fora deste servidor".into(),
+                    ));
                 }
                 self.store.delete_message_by_id(target)?;
             }
@@ -3792,7 +3802,9 @@ impl NetworkEngine {
             .get_community(community_id)?
             .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
         if comm.2 != self.identity.fingerprint {
-            return Err(DistorrentError::Protocol("apenas o dono gera convites".into()));
+            return Err(DistorrentError::Protocol(
+                "apenas o dono gera convites".into(),
+            ));
         }
         let fp = member_fp.trim().to_lowercase();
         if fp != WILDCARD && (fp.len() != 12 || !fp.chars().all(|c| c.is_ascii_hexdigit())) {
@@ -4015,7 +4027,10 @@ impl NetworkEngine {
                     reason: format!("slowmode: aguarde {}s", secs),
                     until_ms: crate::identity::now_ms() + wait,
                 });
-                return Err(DistorrentError::Protocol(format!("slowmode: aguarde {}s", secs)));
+                return Err(DistorrentError::Protocol(format!(
+                    "slowmode: aguarde {}s",
+                    secs
+                )));
             }
         }
         Ok(())
@@ -4146,7 +4161,9 @@ impl NetworkEngine {
             .ok_or_else(|| DistorrentError::Protocol("mensagem inexistente".into()))?;
         let is_author = orig.author_fp == me;
         if !is_author && !self.is_moderator(conv_id, &me) {
-            return Err(DistorrentError::Protocol("sem permissão para apagar".into()));
+            return Err(DistorrentError::Protocol(
+                "sem permissão para apagar".into(),
+            ));
         }
         self.store.msg_delete(msg_id, conv_id)?;
         self.events
@@ -4408,10 +4425,14 @@ impl NetworkEngine {
             .get_community(community_id)?
             .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
         if comm.2 != me && !self.is_moderator(community_id, &me) {
-            return Err(DistorrentError::Protocol("sem permissão de moderação".into()));
+            return Err(DistorrentError::Protocol(
+                "sem permissão de moderação".into(),
+            ));
         }
         if target == comm.2 {
-            return Err(DistorrentError::Protocol("o dono não pode ser banido".into()));
+            return Err(DistorrentError::Protocol(
+                "o dono não pode ser banido".into(),
+            ));
         }
         self.store
             .ban_set(community_id, target, &cap_str(reason, 300), &me, until_ms)?;
@@ -4440,7 +4461,9 @@ impl NetworkEngine {
     pub fn social_unban(&self, community_id: &str, target: &str) -> Result<()> {
         let me = self.identity.fingerprint.clone();
         if !self.is_moderator(community_id, &me) {
-            return Err(DistorrentError::Protocol("sem permissão de moderação".into()));
+            return Err(DistorrentError::Protocol(
+                "sem permissão de moderação".into(),
+            ));
         }
         self.store.ban_remove(community_id, target)?;
         Ok(())
@@ -4455,7 +4478,9 @@ impl NetworkEngine {
     ) -> Result<()> {
         let me = self.identity.fingerprint.clone();
         if !self.is_moderator(community_id, &me) {
-            return Err(DistorrentError::Protocol("sem permissão de moderação".into()));
+            return Err(DistorrentError::Protocol(
+                "sem permissão de moderação".into(),
+            ));
         }
         self.store
             .timeout_set(community_id, target, until_ms, &cap_str(reason, 300), &me)?;
@@ -4493,7 +4518,9 @@ impl NetworkEngine {
             .get_community(community_id)?
             .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
         if comm.2 != me {
-            return Err(DistorrentError::Protocol("só o dono configura o canal".into()));
+            return Err(DistorrentError::Protocol(
+                "só o dono configura o canal".into(),
+            ));
         }
         self.store
             .channel_cfg_set(channel_id, slowmode_secs.clamp(0, 21_600), nsfw, false)?;
@@ -4526,7 +4553,9 @@ impl NetworkEngine {
         }
         let opts: Vec<String> = options.iter().take(10).map(|o| cap_str(o, 80)).collect();
         if opts.len() < 2 {
-            return Err(DistorrentError::Protocol("enquete precisa de 2+ opções".into()));
+            return Err(DistorrentError::Protocol(
+                "enquete precisa de 2+ opções".into(),
+            ));
         }
         let id = format!(
             "pl_{}",
@@ -4740,7 +4769,9 @@ impl NetworkEngine {
             .map(|(_, _, owner)| owner == *me)
             .unwrap_or(false);
         if !is_owner && !self.is_moderator(community_id, me) {
-            return Err(DistorrentError::Protocol("sem permissão para reordenar".into()));
+            return Err(DistorrentError::Protocol(
+                "sem permissão para reordenar".into(),
+            ));
         }
         self.store.channels_reorder(community_id, ids)?;
         self.broadcast_community_state(community_id);
@@ -4930,7 +4961,9 @@ impl NetworkEngine {
     // ---------- grupos DM ----------
     pub fn create_group(&self, title: &str, members: Vec<String>) -> Result<Conversation> {
         if members.is_empty() {
-            return Err(DistorrentError::Protocol("selecione ao menos 1 amigo".into()));
+            return Err(DistorrentError::Protocol(
+                "selecione ao menos 1 amigo".into(),
+            ));
         }
         if members.len() > 9 {
             return Err(DistorrentError::Protocol(
@@ -7270,7 +7303,8 @@ async fn connect_and_maintain(
             };
             let stream: TcpStream = if use_proxy {
                 let proxy_addr = if use_tor {
-                    std::env::var("DISTORRENT_TOR_ADDR").unwrap_or_else(|_| "127.0.0.1:9050".to_string())
+                    std::env::var("DISTORRENT_TOR_ADDR")
+                        .unwrap_or_else(|_| "127.0.0.1:9050".to_string())
                 } else {
                     std::env::var("DISTORRENT_PROXY_ADDR")
                         .unwrap_or_else(|_| "127.0.0.1:1080".to_string())
@@ -9392,7 +9426,9 @@ async fn handle_frame(
             }
             // identidade vinculada: autor DEVE ser o peer da conexão
             if env.author_fp != peer_fp {
-                return Err(DistorrentError::Protocol("author != peer da conexão".into()));
+                return Err(DistorrentError::Protocol(
+                    "author != peer da conexão".into(),
+                ));
             }
             if !env.verify_with_pubkey(peer_pubkey) {
                 return Err(DistorrentError::Protocol(
@@ -9438,7 +9474,9 @@ async fn handle_frame(
                     .iter()
                     .any(|(fp, _)| fp == &env.author_fp);
                 if !is_member {
-                    return Err(DistorrentError::Protocol("autor não é membro do grupo".into()));
+                    return Err(DistorrentError::Protocol(
+                        "autor não é membro do grupo".into(),
+                    ));
                 }
                 engine.store.insert_message(&env, "in", "ok")?;
                 crate::metrics::metrics().message_in();
@@ -9518,7 +9556,9 @@ async fn handle_frame(
                     .map(|(_, s)| s == "accepted")
                     .unwrap_or(false);
                 if !is_friend {
-                    return Err(DistorrentError::Protocol("DM apenas de amigo aceito".into()));
+                    return Err(DistorrentError::Protocol(
+                        "DM apenas de amigo aceito".into(),
+                    ));
                 }
                 let conv = engine.open_dm(peer_fp, peer_nick)?;
                 if env.conv_id != conv.id {
@@ -9573,7 +9613,9 @@ async fn handle_frame(
                         _ => false,
                     };
                     if !ack_ok {
-                        return Err(DistorrentError::Protocol("Ack de peer não autorizado".into()));
+                        return Err(DistorrentError::Protocol(
+                            "Ack de peer não autorizado".into(),
+                        ));
                     }
                     engine.store.set_message_status(&msg_id, "delivered")?;
                     // grupo não usa outbox por peer — nada a remover da fila
@@ -9810,9 +9852,9 @@ async fn handle_frame(
                             .store
                             .list_members(&community_id)
                             .map(|members| {
-                                members
-                                    .iter()
-                                    .any(|(fp, _, _)| fp == &peer_fp && fp != &engine.identity.fingerprint)
+                                members.iter().any(|(fp, _, _)| {
+                                    fp == &peer_fp && fp != &engine.identity.fingerprint
+                                })
                             })
                             .unwrap_or(false)
                     }
@@ -9858,7 +9900,9 @@ async fn handle_frame(
                 }
             };
             if !allowed {
-                return Err(DistorrentError::Protocol("CommunityState fora do host".into()));
+                return Err(DistorrentError::Protocol(
+                    "CommunityState fora do host".into(),
+                ));
             }
             // sync completo em uma transação: canais (removidos no host somem
             // aqui), cargos, bots, assignments e membros + meta do wizard (v6)
@@ -9891,7 +9935,9 @@ async fn handle_frame(
                 .map(|(_, n, owner)| (owner == peer_fp, n))
                 .unwrap_or((false, community_id.clone()));
             if !is_host {
-                return Err(DistorrentError::Protocol("CommunityKicked fora do host".into()));
+                return Err(DistorrentError::Protocol(
+                    "CommunityKicked fora do host".into(),
+                ));
             }
             engine.store.community_remove_local(&community_id)?;
             engine
@@ -9969,7 +10015,9 @@ async fn handle_frame(
                 String::new()
             } else {
                 if !is_host {
-                    return Err(DistorrentError::Protocol("mensagem de bot fora do host".into()));
+                    return Err(DistorrentError::Protocol(
+                        "mensagem de bot fora do host".into(),
+                    ));
                 }
                 if !engine
                     .store
@@ -10006,7 +10054,9 @@ async fn handle_frame(
                     return Err(DistorrentError::Protocol("assinatura inválida".into()));
                 }
                 if env.author_fp != peer_fp {
-                    return Err(DistorrentError::Protocol("author != peer da conexão".into()));
+                    return Err(DistorrentError::Protocol(
+                        "author != peer da conexão".into(),
+                    ));
                 }
                 // anti-spam + regras do servidor (shadow-ban, palavras, domínios)
                 engine.spam_gate(peer_fp, &env.body)?;
@@ -10300,7 +10350,9 @@ async fn handle_frame(
             // isso qualquer peer conectado injeta "usuários fantasma" em
             // qualquer canal de voz de qualquer servidor.
             if engine.store.member_role(&community_id, peer_fp).is_none() {
-                return Err(DistorrentError::Protocol("não é membro da comunidade".into()));
+                return Err(DistorrentError::Protocol(
+                    "não é membro da comunidade".into(),
+                ));
             }
             engine
                 .store
@@ -10351,7 +10403,9 @@ async fn handle_frame(
             channel_id,
         } => {
             if engine.store.member_role(&community_id, peer_fp).is_none() {
-                return Err(DistorrentError::Protocol("não é membro da comunidade".into()));
+                return Err(DistorrentError::Protocol(
+                    "não é membro da comunidade".into(),
+                ));
             }
             engine
                 .store
@@ -10381,7 +10435,9 @@ async fn handle_frame(
             speaking: _,
         } => {
             if engine.store.member_role(&community_id, peer_fp).is_none() {
-                return Err(DistorrentError::Protocol("não é membro da comunidade".into()));
+                return Err(DistorrentError::Protocol(
+                    "não é membro da comunidade".into(),
+                ));
             }
             engine
                 .store
@@ -10619,7 +10675,9 @@ async fn handle_frame(
             }
             let target = engine.store.message_by_id(&reply_to).ok().flatten();
             if target.as_ref().map(|t| &t.conv_id) != Some(&conv_id) {
-                return Err(DistorrentError::Protocol("alvo de citação inexistente".into()));
+                return Err(DistorrentError::Protocol(
+                    "alvo de citação inexistente".into(),
+                ));
             }
             engine.store.msg_set_reply(&msg_id, &conv_id, &reply_to)?;
             let _ = engine.events.send(EngineEvent::MessageReply {
@@ -10697,7 +10755,9 @@ async fn handle_frame(
             }
             let is_author = orig.author_fp == peer_fp;
             if !is_author && !engine.can_moderate_conv(&conv_id, peer_fp) {
-                return Err(DistorrentError::Protocol("sem permissão para apagar".into()));
+                return Err(DistorrentError::Protocol(
+                    "sem permissão para apagar".into(),
+                ));
             }
             let _ = engine.store.msg_delete(&msg_id, &conv_id);
             let _ = engine.events.send(EngineEvent::MessageDeleted {
@@ -10731,10 +10791,14 @@ async fn handle_frame(
                 return Err(DistorrentError::Protocol("sem permissão para fixar".into()));
             }
             let Some(orig) = engine.store.message_by_id(&msg_id).ok().flatten() else {
-                return Err(DistorrentError::Protocol("pin de mensagem inexistente".into()));
+                return Err(DistorrentError::Protocol(
+                    "pin de mensagem inexistente".into(),
+                ));
             };
             if orig.conv_id != conv_id {
-                return Err(DistorrentError::Protocol("pin de conversa divergente".into()));
+                return Err(DistorrentError::Protocol(
+                    "pin de conversa divergente".into(),
+                ));
             }
             engine.store.msg_pin(&msg_id, &conv_id, pinned, peer_fp)?;
             let _ = engine.events.send(EngineEvent::MessagePinned {
@@ -10871,7 +10935,9 @@ async fn handle_frame(
                 .map(|(_, _, owner)| owner == peer_fp)
                 .unwrap_or(false);
             if !is_owner && !engine.is_moderator(&community_id, peer_fp) {
-                return Err(DistorrentError::Protocol("sem permissão para reordenar".into()));
+                return Err(DistorrentError::Protocol(
+                    "sem permissão para reordenar".into(),
+                ));
             }
             engine.reorder_channels(&community_id, &ids)?;
             engine.broadcast_community_state(&community_id);
@@ -10956,7 +11022,9 @@ async fn handle_frame(
             env,
         } => {
             if env.author_fp != peer_fp || !env.verify_with_pubkey(peer_pubkey) {
-                return Err(DistorrentError::Protocol("mensagem de thread inválida".into()));
+                return Err(DistorrentError::Protocol(
+                    "mensagem de thread inválida".into(),
+                ));
             }
             if engine.store.member_role(&community_id, peer_fp).is_none() {
                 return Err(DistorrentError::Protocol("thread só para membro".into()));
@@ -11031,7 +11099,9 @@ async fn handle_frame(
             reason,
         } => {
             if !engine.is_moderator(&community_id, peer_fp) {
-                return Err(DistorrentError::Protocol("sem permissão de moderação".into()));
+                return Err(DistorrentError::Protocol(
+                    "sem permissão de moderação".into(),
+                ));
             }
             let _ = engine.store.timeout_set(
                 &community_id,
@@ -11103,7 +11173,9 @@ async fn handle_frame(
             }
             let opts: Vec<String> = options.iter().take(10).map(|o| cap_str(o, 80)).collect();
             if opts.len() < 2 {
-                return Err(DistorrentError::Protocol("enquete precisa de 2+ opções".into()));
+                return Err(DistorrentError::Protocol(
+                    "enquete precisa de 2+ opções".into(),
+                ));
             }
             let p = crate::social::PollRow {
                 id: cap_str(&poll_id, 64),
@@ -11525,7 +11597,11 @@ mod tests {
 
         let stored = e.store.reactions_for_msg(&msg_ids[0]).unwrap();
         assert_eq!(stored[0].reactors, vec![peer.to_string()]);
-        assert!(e.store.reactions_for_msg("msg-inexistente").unwrap().is_empty());
+        assert!(e
+            .store
+            .reactions_for_msg("msg-inexistente")
+            .unwrap()
+            .is_empty());
         assert!(e.store.reactions_for_msg(&msg_ids[5]).unwrap().is_empty());
 
         let mut emitted = 0;
@@ -11595,7 +11671,10 @@ mod tests {
         // Default: furo ligado (opt-out só via DISTORRENT_PUNCH=0).
         assert!(e.punch_enabled());
         e.set_punch_enabled(false);
-        assert!(!e.punch_enabled(), "DISTORRENT_PUNCH=0 deve desligar o furo");
+        assert!(
+            !e.punch_enabled(),
+            "DISTORRENT_PUNCH=0 deve desligar o furo"
+        );
         e.set_punch_enabled(true);
         assert!(e.punch_enabled(), "deve religar");
     }

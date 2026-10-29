@@ -2545,9 +2545,9 @@ impl Store {
         max_messages: Option<usize>,
         settings_whitelist: &[&str],
     ) -> Result<crate::stormvault::StormVaultData> {
-        let identity = self
-            .load_identity()
-            .ok_or_else(|| crate::DistorrentError::Protocol("sem identidade para exportar".into()))?;
+        let identity = self.load_identity().ok_or_else(|| {
+            crate::DistorrentError::Protocol("sem identidade para exportar".into())
+        })?;
 
         let conversations = self.list_conversations()?;
         let total_msgs = self.count_messages().unwrap_or(0);

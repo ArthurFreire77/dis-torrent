@@ -550,7 +550,9 @@ pub fn session_key(
     let peer_arr: [u8; 32] = *peer_eph;
     let shared = eph_secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_arr));
     if !shared.was_contributory() {
-        return Err(crate::DistorrentError::Crypto("X25519 all-zero shared".into()));
+        return Err(crate::DistorrentError::Crypto(
+            "X25519 all-zero shared".into(),
+        ));
     }
     let mut salt = [0u8; 32];
     salt[..16].copy_from_slice(nonce_initiator);
@@ -692,7 +694,9 @@ pub fn parse_invite_token(
         )));
     }
     let exp = parts[3].parse().map_err(|_| {
-        crate::DistorrentError::Protocol("token de convite com data inválida — regene o convite".into())
+        crate::DistorrentError::Protocol(
+            "token de convite com data inválida — regene o convite".into(),
+        )
     })?;
     Ok((
         parts[0].to_string(),

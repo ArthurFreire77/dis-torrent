@@ -303,7 +303,9 @@ pub fn read_header(bytes: &[u8]) -> Result<StormVaultHeader> {
 
 fn split_container(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
     if bytes.len() < 4 + 2 + 4 || bytes[..4] != MAGIC {
-        return Err(DistorrentError::Protocol("não é um cofre .stormvault".into()));
+        return Err(DistorrentError::Protocol(
+            "não é um cofre .stormvault".into(),
+        ));
     }
     let version = u16::from_be_bytes([bytes[4], bytes[5]]);
     if version > FORMAT_VERSION {
@@ -316,7 +318,9 @@ fn split_container(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
         .checked_add(hdr_len)
         .ok_or_else(|| DistorrentError::Protocol("cofre corrompido (header gigante)".into()))?;
     if bytes.len() < hdr_end + SALT_LEN + NONCE_LEN + 16 {
-        return Err(DistorrentError::Protocol("cofre corrompido (truncado)".into()));
+        return Err(DistorrentError::Protocol(
+            "cofre corrompido (truncado)".into(),
+        ));
     }
     Ok((&bytes[10..hdr_end], &bytes[hdr_end..]))
 }

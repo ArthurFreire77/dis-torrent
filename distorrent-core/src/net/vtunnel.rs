@@ -82,7 +82,9 @@ pub fn tunnel_key(
     use sha2::Sha256;
     let shared = own_secret.diffie_hellman(&x25519_dalek::PublicKey::from(*peer_eph));
     if !shared.was_contributory() {
-        return Err(DistorrentError::Crypto("tunel: X25519 all-zero shared".into()));
+        return Err(DistorrentError::Crypto(
+            "tunel: X25519 all-zero shared".into(),
+        ));
     }
     let mut salt = [0u8; 32];
     salt[..16].copy_from_slice(nonce_a);
@@ -204,7 +206,9 @@ impl TunnelSession {
         {
             let mut w = self.recv.lock().unwrap_or_else(|e| e.into_inner());
             if !w.accept(nonce) {
-                return Err(DistorrentError::Crypto("tunel: replay ou nonce velho".into()));
+                return Err(DistorrentError::Crypto(
+                    "tunel: replay ou nonce velho".into(),
+                ));
             }
         }
         let mut nonce_bytes = [0u8; 12];

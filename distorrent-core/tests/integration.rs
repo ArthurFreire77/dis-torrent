@@ -19,7 +19,11 @@ fn tmp_store() -> (Arc<Store>, TempDir) {
 fn spawn_engine(
     nick: &str,
     discovery: bool,
-) -> (Arc<NetworkEngine>, distorrent_core::identity::Keypair, TempDir) {
+) -> (
+    Arc<NetworkEngine>,
+    distorrent_core::identity::Keypair,
+    TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = distorrent_core::identity::Keypair::generate();

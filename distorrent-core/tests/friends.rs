@@ -7,7 +7,13 @@ use distorrent_core::net::engine::{EngineEvent, NetworkEngine};
 use distorrent_core::storage::Store;
 use tempfile::TempDir;
 
-fn spawn_engine(nick: &str) -> (Arc<NetworkEngine>, distorrent_core::identity::Keypair, TempDir) {
+fn spawn_engine(
+    nick: &str,
+) -> (
+    Arc<NetworkEngine>,
+    distorrent_core::identity::Keypair,
+    TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = distorrent_core::identity::Keypair::generate();

@@ -10,7 +10,13 @@ use tempfile::TempDir;
 
 /// Engine SEM start(): os métodos de servidor tocam apenas store e canais
 /// internos — nada de sockets, testes ficam determinísticos.
-fn engine_for(nick: &str) -> (Arc<NetworkEngine>, distorrent_core::identity::Keypair, TempDir) {
+fn engine_for(
+    nick: &str,
+) -> (
+    Arc<NetworkEngine>,
+    distorrent_core::identity::Keypair,
+    TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = distorrent_core::identity::Keypair::generate();

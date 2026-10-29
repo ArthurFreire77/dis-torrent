@@ -166,7 +166,11 @@ fn auto_proxy_desligado_nao_troca() {
         for _ in 0..(AUTO_PROXY_FAILURE_THRESHOLD + 4) {
             e.note_dial_failure("peerX");
         }
-        assert_eq!(e.privacy_mode(), "encrypted", "DISTORRENT_AUTO_PROXY=0 desliga");
+        assert_eq!(
+            e.privacy_mode(),
+            "encrypted",
+            "DISTORRENT_AUTO_PROXY=0 desliga"
+        );
     });
 }
 
