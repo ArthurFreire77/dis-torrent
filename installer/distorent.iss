@@ -55,7 +55,16 @@ OutputDir={#OutputDir}
 OutputBaseFilename=DisTorrent_{#AppVersion}_x64_setup
 SetupIconFile=..\src-tauri\icons\icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
-Compression=lzma2/max
+; `lzma2/fast`, NÃO `max`. Medido em 29/10/2026 com o MESMO payload e o mesmo
+; Inno, só mudando esta diretiva:
+;   lzma2/max  -> Defender acusa `Program:Win32/Contebrew.A!ml`
+;   lzma2/fast -> limpo
+;   none       -> limpo
+; O gatilho é o bloco de altíssima entropia + a rotina de descompressão embutida
+; (padrão de packer), não o código do app: `distorrent.exe` sozinho passa limpo.
+; Custa ~1 MB no instalador final e evita o navegador bloquear o download.
+; Não voltar para `max` sem repetir o teste de MOTW (scripts/build-installer.ps1 -Scan).
+Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
