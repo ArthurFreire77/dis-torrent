@@ -293,6 +293,14 @@ function touchPresence() {
   const payload = { fp: me.fingerprint, nickname: me.nickname, pubkey_hex: me.pubkey_hex, ts: Date.now() }
   try { localStorage.setItem(presenceKey(me.fingerprint), JSON.stringify(payload)) } catch { /* ignore */ }
   try { localStorage.setItem('distorrent:presence:heartbeat', String(Date.now())) } catch { /* ignore */ }
+  try {
+    const all = loadAll<PresenceView>(PRESENCE_BASE)
+    const current = all[me.fingerprint]
+    if (current) {
+      all[me.fingerprint] = { ...current, updated_at: Date.now() }
+      saveAll(PRESENCE_BASE, all)
+    }
+  } catch { /* ignore: presença continua melhor esforço */ }
 }
 
 function getPresenceMap(): Map<string, { fp: string; nickname: string; pubkey_hex: string; ts: number }> {
@@ -1529,9 +1537,21 @@ export const browserServices: DisTorrentServices = {
     saveAll(PRESENCE_BASE, all)
     emit({ type: 'presence_changed', fp: meFp(), status, custom, custom_emoji: customEmoji })
   },
-  presenceList: async () => Object.values(loadAll<PresenceView>(PRESENCE_BASE)),
-  presenceGet: async (fp) => loadAll<PresenceView>(PRESENCE_BASE)[fp] ?? {
-    fp, status: 'offline' as PresenceStatus, custom: '', custom_emoji: '', updated_at: 0,
+  presenceList: async () => Object.values(loadAll<PresenceView>(PRESENCE_BASE)).map((presence) => {
+    if (presence.status !== 'offline' && presence.updated_at < Date.now() - PRESENCE_TTL_MS) {
+      return { ...presence, status: 'offline' as PresenceStatus, custom: '', custom_emoji: '' }
+    }
+    return presence
+  }),
+  presenceGet: async (fp) => {
+    const presence = loadAll<PresenceView>(PRESENCE_BASE)[fp]
+    if (!presence) return {
+      fp, status: 'offline' as PresenceStatus, custom: '', custom_emoji: '', updated_at: 0,
+    }
+    if (presence.status !== 'offline' && presence.updated_at < Date.now() - PRESENCE_TTL_MS) {
+      return { ...presence, status: 'offline' as PresenceStatus, custom: '', custom_emoji: '' }
+    }
+    return presence
   },
   profileSet: async (patch) => {
     const all = loadAll<ProfileView>(PROFILE_BASE)

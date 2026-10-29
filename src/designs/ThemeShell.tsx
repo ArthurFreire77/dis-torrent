@@ -1113,7 +1113,13 @@ export default function ThemeShell({ designId }: {designId:string}){
   const selConvObj = conversations.find(c => c.id === selConv) ?? null
   const peerTitle = selConvObj?.title || selPeer?.nickname || selPeer?.fp || ''
   // link público de convite — abre o app direto no fluxo "Entrar com convite"
-  const inviteLink = inviteToken ? `${window.location.origin}/invite/${inviteToken}` : ''
+  const inviteLink = inviteToken
+    ? (((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+      || (window as unknown as Record<string, unknown>).__TAURI__
+      || (window as unknown as Record<string, unknown>).__TAURI_IPC__)
+      ? `distorrent://invite/${encodeURIComponent(inviteToken)}`
+      : `${window.location.origin}/invite/${encodeURIComponent(inviteToken)}`)
+    : ''
   // PRESENÇA HONESTA: "online" é SÓ sessão estabelecida (verde). CONECTANDO/
   // RECONECTANDO são bolinha amarela e NÃO aparecem em "AMIGOS ONLINE" —
   // era o bug de "aparecia online sem estar" (amarelo listado como online).
@@ -2891,8 +2897,19 @@ export default function ThemeShell({ designId }: {designId:string}){
                   </div>
                 </div>
                 <div style={{ background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: t.accent, fontWeight: 700, flex: 1, wordBreak: 'break-all' }}>{createdServerToken ? `${window.location.origin}/invite/${createdServerToken}` : createdServerId}</span>
-                  <button onClick={async () => { await navigator.clipboard?.writeText?.(createdServerToken ? `${window.location.origin}/invite/${createdServerToken}` : createdServerId).catch(() => {}) }}
+                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: t.accent, fontWeight: 700, flex: 1, wordBreak: 'break-all' }}>{createdServerToken ? (
+                    '__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window
+                      ? `distorrent://invite/${encodeURIComponent(createdServerToken)}`
+                      : `${window.location.origin}/invite/${encodeURIComponent(createdServerToken)}`
+                  ) : createdServerId}</span>
+                  <button onClick={async () => {
+                    const link = createdServerToken
+                      ? ('__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window
+                        ? `distorrent://invite/${encodeURIComponent(createdServerToken)}`
+                        : `${window.location.origin}/invite/${encodeURIComponent(createdServerToken)}`)
+                      : createdServerId
+                    await navigator.clipboard?.writeText?.(link).catch(() => {})
+                  }}
                     style={{ background: t.accent, color: '#fff', border: 'none', padding: '6px 14px', borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }}>
                     Copiar link
                   </button>

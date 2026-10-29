@@ -1,5 +1,5 @@
 import React from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation, useNavigate } from 'react-router-dom'
 import ThemeShell from './designs/ThemeShell'
 import MobileShell from './mobile/MobileShell'
 
@@ -46,17 +46,61 @@ function InviteRoute({ token }: { token: string }){
   return <Navigate to={`${target}?invite=${encodeURIComponent(token)}`} replace />
 }
 
+function AppRoutes(){
+  const navigate = useNavigate()
+
+  React.useEffect(() => {
+    const w = window as unknown as Record<string, unknown>
+    if (!('__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w)) return
+
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    const openInvite = (urls: string[]) => {
+      for (const raw of urls) {
+        try {
+          const url = new URL(raw)
+          const invite = url.searchParams.get('invite') || url.searchParams.get('token')
+            || url.pathname.split('/').filter(Boolean).pop()
+          if (!invite) continue
+          const target = window.innerWidth <= MOBILE_MAX_WIDTH ? '/m' : '/d/distorrent'
+          navigate(`${target}?invite=${encodeURIComponent(invite)}`, { replace: false })
+          break
+        } catch { /* URL inválida: ignorar sem derrubar o shell */ }
+      }
+    }
+
+    void import('@tauri-apps/plugin-deep-link')
+      .then(async (deepLink) => {
+        if (disposed) return
+        const current = await deepLink.getCurrent()
+        if (current?.length) openInvite(current)
+        unlisten = await deepLink.onOpenUrl(openInvite)
+      })
+      .catch(() => { /* Deep-link indisponível em builds antigas */ })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [navigate])
+
+  return (
+    <Routes>
+      <Route path="/" element={<AutoRoute />} />
+      <Route path="/d/distorrent" element={<DesktopRoute />} />
+      <Route path="/m" element={<MobileShell />} />
+      <Route path="/mobile" element={<MobileShell />} />
+      <Route path="/invite/:token" element={<InviteRouteWrapper />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}
+
 export default function App(){
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<AutoRoute />} />
-        <Route path="/d/distorrent" element={<DesktopRoute />} />
-        <Route path="/m" element={<MobileShell />} />
-        <Route path="/mobile" element={<MobileShell />} />
-        <Route path="/invite/:token" element={<InviteRouteWrapper />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <AppRoutes />
     </BrowserRouter>
   )
 }

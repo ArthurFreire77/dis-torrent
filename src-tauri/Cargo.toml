@@ -23,6 +23,7 @@ distorrent-core = { path = "../distorrent-core" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tauri-plugin-deep-link = "2"
 
 # LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,
 # `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do

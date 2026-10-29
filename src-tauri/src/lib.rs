@@ -577,7 +577,11 @@ fn boot_engine_if_needed(app: &AppHandle, state: &State<AppState>) -> Result<(),
 /// abria o MESMO arquivo de novo. Cada `Store::open` pega lock e faz parse do
 /// header; na primeira execução do app (disco frio) isso dobrava a espera
 /// antes da UI sair da tela de carregamento.
-fn boot_engine_with_store(app: &AppHandle, state: &State<AppState>, store: Store) -> Result<(), String> {
+fn boot_engine_with_store(
+    app: &AppHandle,
+    state: &State<AppState>,
+    store: Store,
+) -> Result<(), String> {
     if state
         .engine
         .lock()
@@ -1750,7 +1754,9 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
 /// diagnóstico: mostra os tetos vigentes e quantas ações cada classe já
 /// rejeitou. Nada de conteúdo, só contadores.
 #[tauri::command]
-fn net_limits(state: State<AppState>) -> Result<distorrent_core::net::netlimit::LimitsSnapshot, String> {
+fn net_limits(
+    state: State<AppState>,
+) -> Result<distorrent_core::net::netlimit::LimitsSnapshot, String> {
     let engine = state
         .engine
         .lock()
@@ -1790,9 +1796,11 @@ fn proxy_addr_get(mode: Option<String>, state: State<AppState>) -> Result<ProxyC
     // Modo ALVO (o que a UI está configurando agora: proxy ou Tor), não o
     // modo salvo. Antes, escolher "Tor" ainda lia o default do modo antigo
     // (127.0.0.1:1080) e o botão "Ativar" persistia o endereço errado no Tor.
-    let mode = mode
-        .filter(|m| valid_privacy_mode(m))
-        .unwrap_or_else(|| store.kv_get("privacy.mode").unwrap_or_else(|| "encrypted".into()));
+    let mode = mode.filter(|m| valid_privacy_mode(m)).unwrap_or_else(|| {
+        store
+            .kv_get("privacy.mode")
+            .unwrap_or_else(|| "encrypted".into())
+    });
     let saved = store
         .kv_get(proxy_addr_key(&mode))
         .map(|v| v.trim().to_string())
@@ -1833,15 +1841,15 @@ fn proxy_addr_set(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let mode = mode.filter(|m| valid_privacy_mode(m)).unwrap_or_else(|| {
-        match engine_opt.as_ref() {
-            Some(eng) => eng.privacy_mode(),
-            None => open_store(&state)
-                .ok()
-                .and_then(|s| s.kv_get("privacy.mode"))
-                .unwrap_or_else(|| "encrypted".into()),
-        }
-    });
+    let mode =
+        mode.filter(|m| valid_privacy_mode(m))
+            .unwrap_or_else(|| match engine_opt.as_ref() {
+                Some(eng) => eng.privacy_mode(),
+                None => open_store(&state)
+                    .ok()
+                    .and_then(|s| s.kv_get("privacy.mode"))
+                    .unwrap_or_else(|| "encrypted".into()),
+            });
     match engine_opt {
         Some(eng) => eng.set_anonymity_addr(&mode, &addr).map_err(err),
         None => {
@@ -1857,9 +1865,7 @@ fn proxy_addr_set(
                     .ok_or("formato inválido — use host:porta")?;
                 port.parse::<u16>()
                     .map_err(|_| "porta inválida".to_string())?;
-                store
-                    .kv_set(proxy_addr_key(&mode), trimmed)
-                    .map_err(err)?;
+                store.kv_set(proxy_addr_key(&mode), trimmed).map_err(err)?;
             }
             Ok(())
         }
@@ -2128,7 +2134,6 @@ fn account_remove_imported(fingerprint: String, state: State<AppState>) -> Resul
     Err("conta não encontrada".into())
 }
 
-
 // =====================================================================
 // CAMADA SOCIAL v3 — paridade Discord (relações, pins, busca, perfis,
 // presença, threads, moderação, enquetes, eventos, emojis)
@@ -2136,57 +2141,102 @@ fn account_remove_imported(fingerprint: String, state: State<AppState>) -> Resul
 // =====================================================================
 
 #[tauri::command]
-fn social_react(conv_id: String, msg_id: String, emoji: String, state: State<AppState>) -> Result<bool, String> {
-    engine(&state)?.social_react(&conv_id, &msg_id, &emoji).map_err(err)
+fn social_react(
+    conv_id: String,
+    msg_id: String,
+    emoji: String,
+    state: State<AppState>,
+) -> Result<bool, String> {
+    engine(&state)?
+        .social_react(&conv_id, &msg_id, &emoji)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn social_reactions(msg_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
+fn social_reactions(
+    msg_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
     let store = open_store(&state)?;
     let rows = store.reactions_for_msg(&msg_id).map_err(err)?;
     Ok(store.mark_reactions_mine(rows, &identity_fp(&state)))
 }
 
 #[tauri::command]
-fn social_reactions_bulk(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
+fn social_reactions_bulk(
+    msg_ids: Vec<String>,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
     let store = open_store(&state)?;
     let rows = store.reactions_for_msgs(&msg_ids).map_err(err)?;
     Ok(store.mark_reactions_mine(rows, &identity_fp(&state)))
 }
 
 #[tauri::command]
-fn social_reply(conv_id: String, msg_id: String, reply_to: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_reply(&conv_id, &msg_id, &reply_to).map_err(err)
+fn social_reply(
+    conv_id: String,
+    msg_id: String,
+    reply_to: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_reply(&conv_id, &msg_id, &reply_to)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn social_edit(conv_id: String, msg_id: String, body: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_edit(&conv_id, &msg_id, &body).map_err(err)
+fn social_edit(
+    conv_id: String,
+    msg_id: String,
+    body: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_edit(&conv_id, &msg_id, &body)
+        .map_err(err)
 }
 
 #[tauri::command]
 fn social_delete(conv_id: String, msg_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_delete(&conv_id, &msg_id).map_err(err)
+    engine(&state)?
+        .social_delete(&conv_id, &msg_id)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn social_pin(conv_id: String, msg_id: String, pinned: bool, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_pin(&conv_id, &msg_id, pinned).map_err(err)
+fn social_pin(
+    conv_id: String,
+    msg_id: String,
+    pinned: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_pin(&conv_id, &msg_id, pinned)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn social_pins(conv_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
+fn social_pins(
+    conv_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
     open_store(&state)?.pins_list(&conv_id).map_err(err)
 }
 
 #[tauri::command]
-fn social_meta_bulk(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
+fn social_meta_bulk(
+    msg_ids: Vec<String>,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
     open_store(&state)?.msg_meta_bulk(&msg_ids).map_err(err)
 }
 
 /// Corpo efetivo de um lote de mensagens (edição aplicada / apagada).
 #[tauri::command]
-fn social_bodies(msg_ids: Vec<String>, state: State<AppState>) -> Result<Vec<(String, String)>, String> {
+fn social_bodies(
+    msg_ids: Vec<String>,
+    state: State<AppState>,
+) -> Result<Vec<(String, String)>, String> {
     let store = open_store(&state)?;
     let mut out = Vec::new();
     for id in msg_ids {
@@ -2237,17 +2287,29 @@ fn unread_mentions(state: State<AppState>) -> Result<i64, String> {
 // ---------- presença / perfil ----------
 
 #[tauri::command]
-fn presence_set(status: String, custom: String, custom_emoji: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_presence_set(&status, &custom, &custom_emoji).map_err(err)
+fn presence_set(
+    status: String,
+    custom: String,
+    custom_emoji: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_presence_set(&status, &custom, &custom_emoji)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn presence_list(state: State<AppState>) -> Result<Vec<distorrent_core::social::PresenceView>, String> {
+fn presence_list(
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::PresenceView>, String> {
     open_store(&state)?.presence_list().map_err(err)
 }
 
 #[tauri::command]
-fn presence_get(fp: String, state: State<AppState>) -> Result<distorrent_core::social::PresenceView, String> {
+fn presence_get(
+    fp: String,
+    state: State<AppState>,
+) -> Result<distorrent_core::social::PresenceView, String> {
     open_store(&state)?.presence_get(&fp).map_err(err)
 }
 
@@ -2270,35 +2332,63 @@ fn profile_set(
 }
 
 #[tauri::command]
-fn profile_get(fp: String, state: State<AppState>) -> Result<distorrent_core::social::ProfileView, String> {
+fn profile_get(
+    fp: String,
+    state: State<AppState>,
+) -> Result<distorrent_core::social::ProfileView, String> {
     open_store(&state)?.profile_get(&fp).map_err(err)
 }
 
 #[tauri::command]
-fn profile_list(state: State<AppState>) -> Result<Vec<distorrent_core::social::ProfileView>, String> {
+fn profile_list(
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::ProfileView>, String> {
     open_store(&state)?.profile_list().map_err(err)
 }
 
 #[tauri::command]
-fn nickname_set(community_id: String, fp: String, nickname: String, state: State<AppState>) -> Result<(), String> {
-    open_store(&state)?.nickname_set(&community_id, &fp, &nickname).map_err(err)
+fn nickname_set(
+    community_id: String,
+    fp: String,
+    nickname: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    open_store(&state)?
+        .nickname_set(&community_id, &fp, &nickname)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn nickname_get(community_id: String, fp: String, state: State<AppState>) -> Result<String, String> {
-    open_store(&state)?.nickname_get(&community_id, &fp).map_err(err)
+fn nickname_get(
+    community_id: String,
+    fp: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    open_store(&state)?
+        .nickname_get(&community_id, &fp)
+        .map_err(err)
 }
 
 // ---------- busca / histórico ----------
 
 #[tauri::command]
-fn message_search(q: distorrent_core::social::SearchQuery, state: State<AppState>) -> Result<Vec<distorrent_core::social::SearchHit>, String> {
+fn message_search(
+    q: distorrent_core::social::SearchQuery,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::SearchHit>, String> {
     open_store(&state)?.message_search(&q).map_err(err)
 }
 
 #[tauri::command]
-fn messages_around(conv_id: String, ts: i64, limit: i64, state: State<AppState>) -> Result<Vec<StoredMessage>, String> {
-    open_store(&state)?.messages_around(&conv_id, ts, limit).map_err(err)
+fn messages_around(
+    conv_id: String,
+    ts: i64,
+    limit: i64,
+    state: State<AppState>,
+) -> Result<Vec<StoredMessage>, String> {
+    open_store(&state)?
+        .messages_around(&conv_id, ts, limit)
+        .map_err(err)
 }
 
 // ---------- threads ----------
@@ -2318,60 +2408,115 @@ fn thread_create(
 }
 
 #[tauri::command]
-fn thread_list(community_id: String, parent: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::ThreadRow>, String> {
-    open_store(&state)?.threads_list(&community_id, &parent).map_err(err)
+fn thread_list(
+    community_id: String,
+    parent: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::ThreadRow>, String> {
+    open_store(&state)?
+        .threads_list(&community_id, &parent)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn thread_messages(thread_id: String, limit: i64, state: State<AppState>) -> Result<Vec<StoredMessage>, String> {
-    open_store(&state)?.list_messages_thread(&thread_id, limit).map_err(err)
+fn thread_messages(
+    thread_id: String,
+    limit: i64,
+    state: State<AppState>,
+) -> Result<Vec<StoredMessage>, String> {
+    open_store(&state)?
+        .list_messages_thread(&thread_id, limit)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn thread_send(community_id: String, thread_id: String, body: String, state: State<AppState>) -> Result<StoredMessage, String> {
-    engine(&state)?.social_thread_send(&community_id, &thread_id, &body).map_err(err)
+fn thread_send(
+    community_id: String,
+    thread_id: String,
+    body: String,
+    state: State<AppState>,
+) -> Result<StoredMessage, String> {
+    engine(&state)?
+        .social_thread_send(&community_id, &thread_id, &body)
+        .map_err(err)
 }
 
 #[tauri::command]
 fn thread_archive(thread_id: String, archived: bool, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_thread_archive(&thread_id, archived).map_err(err)
+    engine(&state)?
+        .social_thread_archive(&thread_id, archived)
+        .map_err(err)
 }
 
 // ---------- moderação ----------
 
 #[tauri::command]
-fn member_ban(community_id: String, fp: String, until_ms: i64, reason: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_ban(&community_id, &fp, until_ms, &reason).map_err(err)
+fn member_ban(
+    community_id: String,
+    fp: String,
+    until_ms: i64,
+    reason: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_ban(&community_id, &fp, until_ms, &reason)
+        .map_err(err)
 }
 
 #[tauri::command]
 fn member_unban(community_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_unban(&community_id, &fp).map_err(err)
+    engine(&state)?
+        .social_unban(&community_id, &fp)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn member_timeout(community_id: String, fp: String, until_ms: i64, reason: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_timeout(&community_id, &fp, until_ms, &reason).map_err(err)
+fn member_timeout(
+    community_id: String,
+    fp: String,
+    until_ms: i64,
+    reason: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_timeout(&community_id, &fp, until_ms, &reason)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn ban_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::BanRow>, String> {
+fn ban_list(
+    community_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::BanRow>, String> {
     open_store(&state)?.ban_list(&community_id).map_err(err)
 }
 
 #[tauri::command]
-fn timeout_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::BanRow>, String> {
+fn timeout_list(
+    community_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::BanRow>, String> {
     open_store(&state)?.timeout_list(&community_id).map_err(err)
 }
 
 #[tauri::command]
-fn channel_cfg_set(community_id: String, channel_id: String, slowmode_secs: i64, nsfw: bool, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_channel_cfg(&community_id, &channel_id, slowmode_secs, nsfw).map_err(err)
+fn channel_cfg_set(
+    community_id: String,
+    channel_id: String,
+    slowmode_secs: i64,
+    nsfw: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_channel_cfg(&community_id, &channel_id, slowmode_secs, nsfw)
+        .map_err(err)
 }
 
 #[tauri::command]
 fn channel_cfg_get(channel_id: String, state: State<AppState>) -> Result<i64, String> {
-    open_store(&state)?.channel_cfg_slowmode(&channel_id).map_err(err)
+    open_store(&state)?
+        .channel_cfg_slowmode(&channel_id)
+        .map_err(err)
 }
 
 // ---------- enquetes / eventos / emojis ----------
@@ -2387,69 +2532,128 @@ fn poll_create(
     state: State<AppState>,
 ) -> Result<distorrent_core::social::PollRow, String> {
     engine(&state)?
-        .social_poll_create(&community_id, &channel_id, &question, options, multi, ends_at)
+        .social_poll_create(
+            &community_id,
+            &channel_id,
+            &question,
+            options,
+            multi,
+            ends_at,
+        )
         .map_err(err)
 }
 
 #[tauri::command]
-fn poll_list(community_id: String, channel_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::PollRow>, String> {
-    open_store(&state)?.poll_list(&community_id, &channel_id).map_err(err)
+fn poll_list(
+    community_id: String,
+    channel_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::PollRow>, String> {
+    open_store(&state)?
+        .poll_list(&community_id, &channel_id)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn poll_vote(community_id: String, channel_id: String, poll_id: String, option_idx: i64, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_poll_vote(&community_id, &channel_id, &poll_id, option_idx).map_err(err)
+fn poll_vote(
+    community_id: String,
+    channel_id: String,
+    poll_id: String,
+    option_idx: i64,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_poll_vote(&community_id, &channel_id, &poll_id, option_idx)
+        .map_err(err)
 }
 
 /// (contagens, total de votos, meus votos)
 #[tauri::command]
-fn poll_tally(poll_id: String, state: State<AppState>) -> Result<(Vec<i64>, i64, Vec<i64>), String> {
+fn poll_tally(
+    poll_id: String,
+    state: State<AppState>,
+) -> Result<(Vec<i64>, i64, Vec<i64>), String> {
     let store = open_store(&state)?;
     let (counts, total) = store.poll_tally(&poll_id).map_err(err)?;
-    let mine = store.poll_my_votes(&poll_id, &identity_fp(&state)).map_err(err)?;
+    let mine = store
+        .poll_my_votes(&poll_id, &identity_fp(&state))
+        .map_err(err)?;
     Ok((counts, total, mine))
 }
 
 #[tauri::command]
-fn event_upsert(ev: distorrent_core::social::EventRow, state: State<AppState>) -> Result<(), String> {
+fn event_upsert(
+    ev: distorrent_core::social::EventRow,
+    state: State<AppState>,
+) -> Result<(), String> {
     engine(&state)?.social_event_upsert(ev).map_err(err)
 }
 
 #[tauri::command]
-fn event_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::EventRow>, String> {
+fn event_list(
+    community_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::EventRow>, String> {
     open_store(&state)?.event_list(&community_id).map_err(err)
 }
 
 #[tauri::command]
-fn event_interest(community_id: String, event_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_event_interest(&community_id, &event_id).map_err(err)
+fn event_interest(
+    community_id: String,
+    event_id: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_event_interest(&community_id, &event_id)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn event_delete(community_id: String, event_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_event_delete(&community_id, &event_id).map_err(err)
+fn event_delete(
+    community_id: String,
+    event_id: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .social_event_delete(&community_id, &event_id)
+        .map_err(err)
 }
 
 #[tauri::command]
-fn emoji_upsert(e: distorrent_core::social::EmojiRow, state: State<AppState>) -> Result<(), String> {
+fn emoji_upsert(
+    e: distorrent_core::social::EmojiRow,
+    state: State<AppState>,
+) -> Result<(), String> {
     engine(&state)?.social_emoji_upsert(e).map_err(err)
 }
 
 #[tauri::command]
-fn emoji_list(community_id: String, state: State<AppState>) -> Result<Vec<distorrent_core::social::EmojiRow>, String> {
+fn emoji_list(
+    community_id: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::EmojiRow>, String> {
     open_store(&state)?.emoji_list(&community_id).map_err(err)
 }
 
 #[tauri::command]
 fn emoji_delete(community_id: String, id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_emoji_delete(&community_id, &id).map_err(err)
+    engine(&state)?
+        .social_emoji_delete(&community_id, &id)
+        .map_err(err)
 }
 
 // ---------- bookmarks ----------
 
 #[tauri::command]
-fn bookmark_set(conv_id: String, name: String, payload: String, state: State<AppState>) -> Result<(), String> {
-    open_store(&state)?.bookmark_set(&conv_id, &name, &payload).map_err(err)
+fn bookmark_set(
+    conv_id: String,
+    name: String,
+    payload: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    open_store(&state)?
+        .bookmark_set(&conv_id, &name, &payload)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2473,7 +2677,6 @@ fn engine(state: &State<AppState>) -> Result<Arc<NetworkEngine>, String> {
         .clone()
         .ok_or_else(|| "motor não iniciado (sem identidade)".to_string())
 }
-
 
 // ---------------- keyring genérico (reservado para backups futuros) ----------------
 
@@ -2700,7 +2903,11 @@ fn voice_hangup(call_id: String, state: State<AppState>) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 #[tauri::command]
-fn voice_set_deafened(call_id: String, deafened: bool, state: State<AppState>) -> Result<(), String> {
+fn voice_set_deafened(
+    call_id: String,
+    deafened: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
     engine(&state)?.voice_set_deafened(&call_id, deafened);
     Ok(())
 }
@@ -2734,7 +2941,11 @@ fn voice_video_start(
 /// Desliga o envio de vídeo nativo para um par (o recebimento continua).
 #[cfg(target_os = "linux")]
 #[tauri::command]
-fn voice_video_stop(call_id: String, peer_fp: String, state: State<AppState>) -> Result<(), String> {
+fn voice_video_stop(
+    call_id: String,
+    peer_fp: String,
+    state: State<AppState>,
+) -> Result<(), String> {
     let e = engine(&state)?;
     if let Some(v) = e.voice() {
         v.video_stop(&call_id, &peer_fp);
@@ -2787,7 +2998,10 @@ fn voice_media_available(_state: State<AppState>) -> Result<bool, String> {
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-fn voice_media_stats(_call_id: String, _state: State<AppState>) -> Result<serde_json::Value, String> {
+fn voice_media_stats(
+    _call_id: String,
+    _state: State<AppState>,
+) -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Null)
 }
 
@@ -2805,7 +3019,11 @@ fn voice_hangup(_call_id: String, _state: State<AppState>) -> Result<(), String>
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-fn voice_set_deafened(_call_id: String, _deafened: bool, _state: State<AppState>) -> Result<(), String> {
+fn voice_set_deafened(
+    _call_id: String,
+    _deafened: bool,
+    _state: State<AppState>,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -2826,7 +3044,11 @@ fn voice_video_start(
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
-fn voice_video_stop(_call_id: String, _peer_fp: String, _state: State<AppState>) -> Result<(), String> {
+fn voice_video_stop(
+    _call_id: String,
+    _peer_fp: String,
+    _state: State<AppState>,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -3202,9 +3424,9 @@ fn save_file_stream(
     total_bytes: u64,
     state: State<AppState>,
 ) -> Result<String, String> {
+    use base64::{engine::general_purpose, Engine as _};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use base64::{engine::general_purpose, Engine as _};
 
     // `job_id` também entra no nome do temporário. Antes ia CRU: um renderer
     // comprometido mandava `../../algo` e escrevia fora de Downloads (o sufixo
@@ -3284,8 +3506,7 @@ fn save_file_stream(
             resolve_downloads_dir()?
         }
     };
-    fs::create_dir_all(&downloads)
-        .map_err(|e| format!("save_file_stream travou em mkdir: {e}"))?;
+    fs::create_dir_all(&downloads).map_err(|e| format!("save_file_stream travou em mkdir: {e}"))?;
 
     let tmp = downloads.join(format!(".{safe}.{job_id}.distorrent-part"));
 
@@ -3616,11 +3837,11 @@ async fn stormvault_import(
         // local continua valendo — o arquivo sozinho não injeta nada)
         engine(&state)?;
     }
-    let report =
-        match distorrent_core::stormvault::import_with_password(&store, &bytes, &password) {
-            Ok(r) => r,
-            Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
-        };
+    let report = match distorrent_core::stormvault::import_with_password(&store, &bytes, &password)
+    {
+        Ok(r) => r,
+        Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
+    };
     auth_ok(&state, &key);
     distorrent_core::metrics::metrics().vault_op();
     drop(password);
@@ -3652,7 +3873,8 @@ async fn stormvault_backup_now(state: State<'_, AppState>) -> Result<BackupView,
     let eng = engine(&state)?;
     let secret = eng.secret_hex();
     let store = open_store(&state)?;
-    let data = distorrent_core::stormvault::collect(&store, Some(secret.clone()), None).map_err(err)?;
+    let data =
+        distorrent_core::stormvault::collect(&store, Some(secret.clone()), None).map_err(err)?;
     let key = distorrent_core::stormvault::backup_key_for(&secret);
     let sealed = distorrent_core::stormvault::seal_with_key(&data, &key).map_err(err)?;
     let dir = backups_dir(&state);
@@ -3951,6 +4173,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(downloads_plugin())
+        .plugin(tauri_plugin_deep_link::init())
         // PERMISSÕES DE MÍDIA DO WEBVIEW — a correção do "não consegue enviar
         // tela/câmera/mic" no Windows (WebView2) e o pré-requisito do
         // getDisplayMedia no WebKitGTK.
@@ -4178,9 +4401,11 @@ fn main() {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(256)
                 .clamp(16, 4096);
-            let cache =
-                distorrent_core::cache::DiskLru::open(dir.join("cache"), Some(cap_mb * 1024 * 1024))
-                    .map_err(|e| format!("cache: {e}"))?;
+            let cache = distorrent_core::cache::DiskLru::open(
+                dir.join("cache"),
+                Some(cap_mb * 1024 * 1024),
+            )
+            .map_err(|e| format!("cache: {e}"))?;
             app.manage(AppState {
                 engine: Mutex::new(None),
                 data_dir: dir.clone(),
@@ -4228,7 +4453,12 @@ fn main() {
 /// Aqui ligamos direto no `WebKitSettings` da webview, pela trait pública
 /// `WebViewExt` do `webkit2gtk` (mesma versão 2.0.2 que o wry usa, senão o
 /// trait não se aplica ao tipo dele).
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
 fn enable_webrtc(app: &tauri::AppHandle) {
     use tauri::Manager;
     use webkit2gtk::{SettingsExt, WebViewExt};
@@ -4239,24 +4469,28 @@ fn enable_webrtc(app: &tauri::AppHandle) {
         // `PlatformWebview` é wrapper; no Linux o `inner()` devolve o
         // `webkit2gtk::WebView` (type alias direto, sem cast).
         let inner = wv.inner();
-    match inner.settings() {
-        Some(settings) => {
-            settings.set_enable_webrtc(true);
-            // Console do JS -> stdout/stderr do processo. Sem isto, qualquer
-            // erro de CSP, de carregamento de asset ou exceção na UI fica
-            // INVISÍVEL: o app só mostra uma janela cinza sem explicação.
-            settings.set_enable_write_console_messages_to_stdout(true);
-            eprintln!("[distorrent] WebKitGTK: enable_webrtc = LIGADO");
+        match inner.settings() {
+            Some(settings) => {
+                settings.set_enable_webrtc(true);
+                // Console do JS -> stdout/stderr do processo. Sem isto, qualquer
+                // erro de CSP, de carregamento de asset ou exceção na UI fica
+                // INVISÍVEL: o app só mostra uma janela cinza sem explicação.
+                settings.set_enable_write_console_messages_to_stdout(true);
+                eprintln!("[distorrent] WebKitGTK: enable_webrtc = LIGADO");
+            }
+            None => eprintln!("[distorrent] WebKitGTK: settings() = None — WebRTC NÃO ligado"),
         }
-        None => eprintln!("[distorrent] WebKitGTK: settings() = None — WebRTC NÃO ligado"),
-    }
     });
-
 }
 
 /// No Android o WebRTC já vem ligado no WebView (é o Chromium de fábrica) e no
 /// macOS/Windows o WebView do sistema já expõe WebRTC. Nada a fazer.
-#[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+)))]
 fn enable_webrtc(_app: &tauri::AppHandle) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4319,15 +4553,20 @@ fn isolate_fontconfig_cache_managed(data_dir: &std::path::Path) {
 fn isolate_fontconfig_cache(data_dir: &std::path::Path) {
     const CONF: &str = include_str!("../fontconfig/distorrent-fonts.conf");
     let target = data_dir.join("distorrent-fonts.conf");
-    let fresh = std::fs::read_to_string(&target).map(|c| c == CONF).unwrap_or(false);
+    let fresh = std::fs::read_to_string(&target)
+        .map(|c| c == CONF)
+        .unwrap_or(false);
     if !fresh {
-        if let Err(e) = std::fs::create_dir_all(data_dir)
-            .and_then(|_| std::fs::write(&target, CONF))
+        if let Err(e) =
+            std::fs::create_dir_all(data_dir).and_then(|_| std::fs::write(&target, CONF))
         {
             tracing::warn!("fontconfig privado indisponível ({e}) — seguindo com o compartilhado");
             return;
         }
     }
     std::env::set_var("FONTCONFIG_FILE", &target);
-    eprintln!("[distorrent] fontconfig: cache privado em {}", target.display());
+    eprintln!(
+        "[distorrent] fontconfig: cache privado em {}",
+        target.display()
+    );
 }

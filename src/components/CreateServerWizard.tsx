@@ -606,7 +606,11 @@ export default function CreateServerWizard({
       // O wildcard é o formato já aceito pelo Rust e pelo modo navegador.
       const token = await services.makeInvite(id, '000000000000')
       setCreatedId(id)
-      setInviteUrl(`${window.location.origin}/invite/${token}`)
+      const w = window as unknown as Record<string, unknown>
+      const isTauri = '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
+      setInviteUrl(isTauri
+        ? `distorrent://invite/${encodeURIComponent(token)}`
+        : `${window.location.origin}/invite/${encodeURIComponent(token)}`)
       setStep(PASSO_CONCLUIDO)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'não foi possível criar o servidor')

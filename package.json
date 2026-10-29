@@ -1,6 +1,6 @@
 {
   "name": "distorent",
-  "description": "DisTorrent — Comunicação descentralizada P2P",
+  "description": "DisTorrent — comunicacao P2P descentralizada, local-first e cifrada fim-a-fim",
   "private": true,
   "version": "1.1.7-pre-alpha",
   "type": "module",
@@ -24,6 +24,7 @@
     "@noble/ed25519": "^3.2.0",
     "@noble/hashes": "^2.4.0",
     "@tauri-apps/api": "^2.12.1",
+    "@tauri-apps/plugin-deep-link": "^2.6.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.4"
@@ -44,7 +45,6 @@
   "engines": {
     "node": ">=22.6"
   },
-  "description": "DisTorrent — comunicacao P2P descentralizada, local-first e cifrada fim-a-fim",
   "license": "MIT",
   "allowScripts": {
     "esbuild@0.25.12": true
