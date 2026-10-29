@@ -59,24 +59,28 @@ const css = `
 
 /* passo 1 — modelos e categorias de ícone */
 .csw-models{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:${ui.sm}px }
-.csw-model{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; color:${ui.text}; display:flex; flex-direction:column; gap:4px; transition:background .15s, border-color .15s }
+.csw-model{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; color:${ui.text}; display:flex; flex-direction:column; gap:5px; min-width:0; transition:background .15s, border-color .15s }
 .csw-model:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
 .csw-model:active:not(:disabled){ background:${ui.elevated} }
 .csw-model:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
 .csw-model[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-model-t{ font-size:13px; font-weight:800; color:${ui.heading} }
-.csw-model-d{ font-size:11px; color:${ui.muted}; line-height:1.4 }
+.csw-model-t{ font-size:13px; font-weight:800; color:${ui.heading}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.csw-model-d{ font-size:11px; color:${ui.muted}; line-height:1.4; min-width:0 }
 
-.csw-cats{ display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:${ui.sm}px }
-.csw-cat{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px; color:${ui.text}; display:flex; gap:9px; align-items:flex-start; transition:background .15s, border-color .15s }
+/* Categorias de ícone: o título e a descrição eram spans INLINE dentro do
+   flex item e saíam grudados numa linha só ("ServidorSem tema definido…").
+   display:block é o que separa as duas linhas; min-width:0 deixa o
+   text-overflow funcionar em card estreito. */
+.csw-cats{ display:grid; grid-template-columns:repeat(auto-fill,minmax(168px,1fr)); gap:${ui.sm}px }
+.csw-cat{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px; color:${ui.text}; display:flex; gap:9px; align-items:flex-start; min-width:0; transition:background .15s, border-color .15s }
 .csw-cat:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
 .csw-cat:active:not(:disabled){ background:${ui.elevated} }
 .csw-cat:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
 .csw-cat[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
 .csw-cat-ic{ width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; background:${ui.input}; color:${ui.muted}; flex-shrink:0 }
 .csw-cat[aria-pressed="true"] .csw-cat-ic{ background:rgba(88,101,242,.24); color:#fff }
-.csw-cat-t{ font-size:12px; font-weight:800; color:${ui.heading}; line-height:1.3 }
-.csw-cat-d{ font-size:11px; color:${ui.muted}; line-height:1.4; margin-top:2px }
+.csw-cat-t{ display:block; font-size:12px; font-weight:800; color:${ui.heading}; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.csw-cat-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.4; margin-top:2px }
 
 /* passo 2 — canais */
 .csw-chan{ display:grid; grid-template-columns:22px minmax(0,1fr) 116px 148px 32px; gap:${ui.sm}px; align-items:start; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:9px 10px }
@@ -765,7 +769,7 @@ export default function CreateServerWizard({
                 <span className="csw-cat-ic">
                   <Ic name={c.id} size={16} />
                 </span>
-                <span style={{ minWidth: 0 }}>
+                <span style={{ minWidth: 0, flex: 1 }}>
                   <span className="csw-cat-t">{c.label}</span>
                   <span className="csw-cat-d">{c.desc}</span>
                 </span>

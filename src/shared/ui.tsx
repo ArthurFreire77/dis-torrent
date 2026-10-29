@@ -605,7 +605,11 @@ export function Modal({
           width: '100%',
           maxWidth: width,
           maxHeight: MODAL_MAX_H,
-          overflowY: 'auto',
+          // `hidden` no diálogo: a rolagem é do CORPO (abaixo). Rolar o diálogo
+          // inteiro fazia o conteúdo alto passar POR BAIXO do rodapé — medido no
+          // wizard de servidor: cards terminavam em y=852 com o rodapé em y=735.
+          // Com o corpo rolando, título e rodapé ficam parados e nada se sobrepõe.
+          overflow: 'hidden',
           boxSizing: 'border-box',
           display: 'flex',
           flexDirection: 'column',
@@ -634,7 +638,7 @@ export function Modal({
           <IconButton icon="x" label="Fechar" onClick={onClose} size={30} />
         </div>
 
-        <div style={{ flex: 1, minHeight: 0 }}>{children}</div>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}>{children}</div>
 
         {footer && (
           <div
