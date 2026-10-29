@@ -127,6 +127,19 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
             });
             continue;
         }
+        // Nó ATIVO: a DHT funciona (bind UDP + bootstrap). Isto é o sinal que o
+        // diagnóstico precisa — antes `dht_ok` só virava `true` quando o
+        // `announce_peer` dava certo, o que exige porta externa confirmada.
+        // Sob CGNAT nunca há porta externa, então o relatório ficava em
+        // "não informado (estado ainda desconhecido)" para sempre, mesmo com a
+        // DHT viva e os lookups funcionando. O anúncio tem estado próprio
+        // (`announce_addr`).
+        engine.diag_record_net(|d| {
+            if d.dht_ok.is_none() {
+                d.dht_ok = Some(true);
+                d.dht_ms = crate::identity::now_ms();
+            }
+        });
 
         let now = crate::identity::now_ms();
         // ANÚNCIO próprio: no boot e a cada 60s (announce_peer no infohash).

@@ -39,6 +39,7 @@ import { LocalDriver } from '../core/storage/localDriver'
 // e a tela Sobre mentia sobre a build. Rollup tree-shakeia o JSON: só `version`
 // entra no bundle.
 import { version as APP_VERSION } from '../../package.json'
+import { profileContentHash } from './profileRevision'
 import { SessionDriver } from '../core/storage/sessionDriver'
 import { IdentityStore } from '../core/storage/identityStore'
 import * as LX from './localExtras'
@@ -708,6 +709,7 @@ export const browserServices: DisTorrentServices = {
       id: cid, name, owner_fp: me?.fingerprint ?? 'local', channels: chanTuples,
       members: me ? [[me.fingerprint, me.nickname, 'owner']] : [],
       description: opts?.description ?? '', category: opts?.category ?? '', icon: opts?.icon ?? '',
+      is_owner: true,
     }
     list.push(cv)
     localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
@@ -761,6 +763,37 @@ export const browserServices: DisTorrentServices = {
   },
 
   makeInvite: (cid) => Promise.resolve(`local-invite:${cid}:${btoa(cid).slice(0, 8)}`),
+
+  makeInviteLink: (cid) => {
+    const token = `local-invite:${cid}:${btoa(cid).slice(0, 8)}`
+    return Promise.resolve({
+      token,
+      link: `distorrent://invite?invite=${token}`,
+      expires_at_ms: Date.now() + 7 * 24 * 3600 * 1000,
+      scope: 'open' as const,
+    })
+  },
+
+  // Modo navegador: não há rede, então o único estado honesto é "eu conectado"
+  // e os demais membros offline. Inventar "relay" aqui seria mentira.
+  communityMembers: (cid) => {
+    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
+    let list: import('./models').CommunityView[] = []
+    try { list = JSON.parse(raw) } catch { /* browser mode */ }
+    const me = store.load()
+    const cv = list.find(c => c.id === cid)
+    if (!cv) return Promise.resolve([])
+    const out: import('./models').MemberPairing[] = (cv.members ?? []).map(([fp, nick, role]) => ({
+      fp,
+      nickname: nick,
+      role,
+      state: me && fp === me.fingerprint ? 'connected' : 'offline',
+      via_relay: false,
+      is_owner: fp === cv.owner_fp,
+      is_self: !!me && fp === me.fingerprint,
+    }))
+    return Promise.resolve(out)
+  },
   joinCommunity: (rawToken) => {
     let token = rawToken.trim()
     try {
@@ -1583,11 +1616,14 @@ export const browserServices: DisTorrentServices = {
       fp: me,
       display_name: patch.display_name,
       about: patch.about,
-      avatar_b64: patch.avatar_b64 || cur.avatar_b64,
-      banner_b64: patch.banner_b64 || cur.banner_b64,
+      // Mesma semântica do core: '' mantém a foto, `remove_*` apaga.
+      avatar_b64: patch.remove_avatar ? '' : (patch.avatar_b64 || cur.avatar_b64),
+      banner_b64: patch.remove_banner ? '' : (patch.banner_b64 || cur.banner_b64),
       accent: patch.accent,
       updated_at: Date.now(),
+      rev: (cur.rev ?? 0) + 1,
     }
+    next.content_hash = profileContentHash(next)
     all[me] = next
     saveAll(PROFILE_BASE, all)
     emit({ type: 'profile_changed', fp: me, profile: next })
@@ -1597,6 +1633,9 @@ export const browserServices: DisTorrentServices = {
     fp, display_name: '', about: '', avatar_b64: '', banner_b64: '', accent: '', updated_at: 0,
   },
   profileList: async () => Object.values(loadAll<ProfileView>(PROFILE_BASE)),
+  // No navegador não existe rede P2P: isto é um no-op honesto, não uma
+  // sincronização fingida.
+  profileSyncNow: async () => { /* sem peers no modo navegador */ },
   nicknameSet: async (communityId, fp, nickname) => {
     const all = loadAll<string>('social:nicknames')
     all[`${communityId}:${fp}`] = nickname

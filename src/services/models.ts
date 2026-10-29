@@ -245,6 +245,41 @@ export interface CommunityView {
   description?: string
   category?: string
   icon?: string
+  /** Sou o dono? Convite só pode ser assinado pelo dono. */
+  is_owner?: boolean
+}
+
+/**
+ * Estado REAL de pareamento de um membro do servidor.
+ *
+ * `pending_join` só aparece quando o convite foi aceito localmente mas o host
+ * ainda não confirmou (não é "membro": é "pedido em andamento"). A UI não pode
+ * pintar isto como conectado.
+ */
+export type MemberPairingState =
+  | 'connected'
+  | 'relay'
+  | 'connecting'
+  | 'reconnecting'
+  | 'pending_join'
+  | 'offline'
+
+export interface MemberPairing {
+  fp: string
+  nickname: string
+  role: string
+  state: MemberPairingState
+  via_relay: boolean
+  is_owner: boolean
+  is_self: boolean
+}
+
+/** Convite pronto: token cru (fallback universal) + link do esquema. */
+export interface InviteView {
+  token: string
+  link: string
+  expires_at_ms: number
+  scope: 'open' | 'fp'
 }
 
 // --- Sistema de Canais / Cargos / Bots (estilo Discord) ---
@@ -392,6 +427,27 @@ export interface ProfileView {
   banner_b64: string
   accent: string
   updated_at: number
+  /** Revisão monotônica do AUTOR (0 = perfil legado, sem revisão). */
+  rev?: number
+  /** blake3 do conteúdo público, calculado pelo autor. */
+  content_hash?: string
+}
+
+/**
+ * Campos editáveis do perfil.
+ *
+ * `remove_avatar`/`remove_banner` são necessários porque `avatar_b64: ''`
+ * sempre significou "mantenha a foto atual" (no store e no core). Sem uma flag
+ * explícita não existia como APAGAR a foto pela interface.
+ */
+export interface ProfilePatch {
+  display_name: string
+  about: string
+  avatar_b64: string
+  banner_b64: string
+  accent: string
+  remove_avatar?: boolean
+  remove_banner?: boolean
 }
 
 export interface ThreadView {
@@ -531,8 +587,17 @@ export interface DisTorrentServices {
   friendUnblock(peerFp: string): Promise<void>
   vaultChange(oldPass: string, newPass: string): Promise<void>
   communitiesList(): Promise<CommunityView[]>
+  /** Pareamento por membro (evidência real: online/relay/reconectando/offline). */
+  communityMembers(communityId: string): Promise<MemberPairing[]>
   createCommunity(name: string, channels: string[], opts?: CreateCommunityOptions): Promise<string>
-  makeInvite(communityId: string, memberFp: string): Promise<string>
+  /**
+   * Token de convite. `memberFp` é OPCIONAL: sem ele o convite é ABERTO
+   * (qualquer portador entra). Passar o próprio fingerprint gera um token
+   * inútil para terceiros — era o bug do fluxo antigo.
+   */
+  makeInvite(communityId: string, memberFp?: string): Promise<string>
+  /** Convite com token + link já montados no core (sem `tauri.localhost`). */
+  makeInviteLink(communityId: string, memberFp?: string): Promise<InviteView>
   joinCommunity(token: string): Promise<string>
   communityRename(communityId: string, name: string): Promise<void>
   /** Atualiza descrição/categoria/ícone (dono) — espelha o wizard. */
@@ -724,9 +789,11 @@ export interface DisTorrentServices {
   appQuit(): Promise<void>
   backgroundSetConnection(state: string, onlinePeers: number, unread?: number): Promise<void>
   presenceGet(fp: string): Promise<PresenceView>
-  profileSet(patch: { display_name: string; about: string; avatar_b64: string; banner_b64: string; accent: string }): Promise<ProfileView>
+  profileSet(patch: ProfilePatch): Promise<ProfileView>
   profileGet(fp: string): Promise<ProfileView>
   profileList(): Promise<ProfileView[]>
+  /** Força a reconciliação de perfis agora (o motor já faz no boot/reconexão/10 min). */
+  profileSyncNow(): Promise<void>
   nicknameSet(communityId: string, fp: string, nickname: string): Promise<void>
   nicknameGet(communityId: string, fp: string): Promise<string>
 

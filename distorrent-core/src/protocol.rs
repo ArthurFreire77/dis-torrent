@@ -217,6 +217,18 @@ pub enum SecureFrame {
         community_id: String,
         token: String,
     },
+    /// Membro → Host/outro membro: "me manda o estado atual do servidor".
+    ///
+    /// Existe porque o `CommunityState` só era enviado no momento do join. Um
+    /// membro que reiniciava o app (ou reconectava depois de uma queda) ficava
+    /// com o estado congelado até alguém mudar algo no servidor — canais,
+    /// cargos e novos membros não apareciam. O pedido é autenticado pela
+    /// própria sessão: o receptor só responde se o solicitante constar no
+    /// roster local (ou for o dono). Não carrega token, então re-sincronizar
+    /// depois do convite expirar continua funcionando.
+    CommunitySyncRequest {
+        community_id: String,
+    },
     /// Host → Membro: estado completo da comunidade (canais, cargos, bots,
     /// assignments e membros). Campos novos com #[serde(default)] para
     /// tolerar hosts legados sem essas seções.
@@ -345,6 +357,21 @@ pub enum SecureFrame {
         file_id: String,
         indices: Vec<u32>,
     },
+    // ---------- sincronização de perfil ----------
+    //
+    // `ProfileSet` carrega o perfil inteiro (avatar/banner em base64): é
+    // caro e só deve ir quando o autor REALMENTE mudou algo. Por isso existe
+    // a via barata de revisão abaixo — cabeçalho de 3 campos que responde
+    // "você está na versão N?". A reconciliação periódica usa só ela; o
+    // `ProfileSet` só trafega quando o `rev` remoto é maior.
+    //
+    // `ProfileQuery` é o pedido explícito: o receptor devolve `ProfileSet` se
+    // tiver uma revisão maior que a informada. É o que recupera a alteração de
+    // um autor que ficou offline enquanto o outro estava desconectado.
+    ProfileQuery {
+        /// Revisão que o solicitante já conhece (0 = não conhece nada).
+        known_rev: i64,
+    },
     ScreenShareOffer {
         call_id: String,
         sdp: String,
@@ -438,12 +465,22 @@ pub enum SecureFrame {
         custom_emoji: String,
     },
     /// Perfil público: display name, bio, avatar, banner, cor de destaque.
+    ///
+    /// `rev`/`content_hash` são a identidade da versão (ver `social::ProfileView`).
+    /// `chunk_hashes` NÃO fica aqui de propósito: quem recebe `ProfileSet` já
+    /// tem os bytes nos campos `*_b64`, então não há arquivo a buscar.
     ProfileSet {
         display_name: String,
         about: String,
         avatar_b64: String,
         banner_b64: String,
         accent: String,
+        /// Revisão do autor. 0 = formato antigo (peer sem este campo).
+        #[serde(default)]
+        rev: i64,
+        /// blake3 do conteúdo público, calculado pelo AUTOR.
+        #[serde(default)]
+        content_hash: String,
     },
     /// Thread criada a partir de uma mensagem (ou post de fórum).
     ThreadCreate {

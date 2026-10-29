@@ -25,7 +25,13 @@ use crate::protocol::{
 };
 use crate::{DistorrentError, Result};
 
-const MAX_FRAME: u32 = 1 << 20; // 1 MiB
+/// Teto de UM frame do transporte (sessão e handshake).
+///
+/// Público de propósito: qualquer frame cujo tamanho depende de dado do usuário
+/// (perfil com foto/capa, bloco de arquivo) precisa respeitá-lo ANTES de
+/// enviar — estourar aqui faz o RECEPTOR derrubar a sessão inteira, o que
+/// aparece na UI como "o peer caiu" sem causa aparente.
+pub const MAX_FRAME: u32 = 1 << 20; // 1 MiB
 /// TCP direto: falha rápido em LAN (8s por perna, 16s total). NÃO MEXER para
 /// cobrir 4G — o caminho só-relay abaixo tem seus próprios timeouts maiores.
 /// Justificativa: aumentar o global atrasaria detecção de peer morto no TCP

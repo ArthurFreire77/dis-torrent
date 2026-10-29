@@ -100,6 +100,19 @@ pub enum NetworkState {
     Reconnecting,
 }
 
+/// Estado de pareamento de UM membro de servidor (evidência real do link).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MemberPairing {
+    pub fp: String,
+    pub nickname: String,
+    pub role: String,
+    /// "connected" | "relay" | "connecting" | "reconnecting" | "pending_join" | "offline"
+    pub state: String,
+    pub via_relay: bool,
+    pub is_owner: bool,
+    pub is_self: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FriendOutcome {
@@ -239,6 +252,12 @@ pub enum EngineEvent {
         chunks: u32,
         hash: String,
         from_fp: String,
+        /// Hashes blake3 por bloco (autoridade para validar cada chunk).
+        /// Antes ficavam só no kv do core e a UI NUNCA os lia: no app nativo
+        /// a verificação por bloco era um no-op e qualquer peer podia injetar
+        /// bytes num `file_id` alheio.
+        #[serde(default)]
+        chunk_hashes: Vec<String>,
     },
     FileChunkRequestEv {
         file_id: String,
@@ -445,6 +464,7 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | FriendRemove
         | Punch { .. }
         | JoinCommunity { .. }
+        | CommunitySyncRequest { .. }
         | CommunityKicked { .. }
         | GroupCreated { .. }
         | GroupMemberAdded { .. }
@@ -463,6 +483,7 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | PresenceSet { .. }
         | PresencePing
         | ProfileSet { .. }
+        | ProfileQuery { .. }
         | ThreadCreate { .. }
         | ThreadMsg { .. }
         | MemberBan { .. }
@@ -572,6 +593,18 @@ pub struct NetworkEngine {
     /// pode ser chamado fora de um runtime tokio (ex.: commands síncronos do Tauri).
     cmd_rx: StdMutex<Option<mpsc::UnboundedReceiver<EngineCmd>>>,
     pending_joins: StdMutex<HashMap<String, String>>,
+    /// Backoff dos reenvios de `JoinCommunity` por comunidade: `(último_ms, tentativas)`.
+    ///
+    /// Sem isto, um convite colado com o dono offline ficava só na RAM e o
+    /// pedido morria no primeiro erro; e um join confirmado nunca era
+    /// re-sincronizado depois de reiniciar. O backoff é exponencial e limitado
+    /// para não virar enxurrada de dials (que o `netlimiter` bloquearia).
+    join_retry: StdMutex<HashMap<String, (i64, u32)>>,
+    /// Último `CommunitySyncRequest` por servidor (epoch ms) — evita pedir o
+    /// estado a cada tique de 5s.
+    community_sync_at: StdMutex<HashMap<String, i64>>,
+    /// Último dial de MEMBRO de servidor por fingerprint (epoch ms).
+    member_dial_at: StdMutex<HashMap<String, i64>>,
     listen_port: AtomicU16,
     started: StdMutex<bool>,
     shutdown: Arc<Notify>,
@@ -907,6 +940,9 @@ impl NetworkEngine {
             cmd_tx,
             cmd_rx: StdMutex::new(Some(cmd_rx)),
             pending_joins: StdMutex::new(HashMap::new()),
+            join_retry: StdMutex::new(HashMap::new()),
+            community_sync_at: StdMutex::new(HashMap::new()),
+            member_dial_at: StdMutex::new(HashMap::new()),
             listen_port: AtomicU16::new(0),
             started: StdMutex::new(false),
             shutdown: Arc::new(Notify::new()),
@@ -990,6 +1026,9 @@ impl NetworkEngine {
             cmd_tx,
             cmd_rx: StdMutex::new(Some(cmd_rx)),
             pending_joins: StdMutex::new(HashMap::new()),
+            join_retry: StdMutex::new(HashMap::new()),
+            community_sync_at: StdMutex::new(HashMap::new()),
+            member_dial_at: StdMutex::new(HashMap::new()),
             listen_port: AtomicU16::new(0),
             started: StdMutex::new(false),
             shutdown: Arc::new(Notify::new()),
@@ -2396,6 +2435,68 @@ impl NetworkEngine {
     }
     pub fn store_list_members(&self, cid: &str) -> Vec<(String, String, String)> {
         self.store.list_members(cid).unwrap_or_default()
+    }
+
+    /// Estado de pareamento POR MEMBRO de um servidor — a evidência real que a
+    /// UI precisa para não mostrar "pareado" só porque o nome está na lista.
+    ///
+    /// `state`: `connected` direto, `relay`, `connecting`, `reconnecting`,
+    /// `pending_join` (convite enviado, host ainda não confirmou) ou
+    /// `offline`. `owner` marca o dono. Nunca inventa: tudo vem do link vivo,
+    /// da fila de joins persistida ou do peerbook.
+    pub fn community_member_states(&self, community_id: &str) -> Vec<MemberPairing> {
+        let owner = self
+            .store
+            .get_community(community_id)
+            .ok()
+            .flatten()
+            .map(|(_, _, o)| o)
+            .unwrap_or_default();
+        let pending_join = self
+            .pending_joins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(community_id);
+        let me = &self.identity.fingerprint;
+        let mut out = Vec::new();
+        for (fp, nick, role) in self.store.list_members(community_id).unwrap_or_default() {
+            let (state, via_relay) = if fp == *me {
+                ("connected".to_string(), false)
+            } else {
+                let link = self
+                    .links
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&fp)
+                    .map(|l| (l.get_state(), l.via_relay));
+                match link {
+                    Some((PeerLinkState::Online, relay)) => {
+                        (if relay { "relay" } else { "connected" }.to_string(), relay)
+                    }
+                    Some((PeerLinkState::Reconnecting, relay)) => {
+                        ("reconnecting".to_string(), relay)
+                    }
+                    Some((PeerLinkState::Connecting, relay)) => ("connecting".to_string(), relay),
+                    None => {
+                        if fp == owner && pending_join {
+                            ("pending_join".to_string(), false)
+                        } else {
+                            ("offline".to_string(), false)
+                        }
+                    }
+                }
+            };
+            out.push(MemberPairing {
+                is_owner: fp == owner,
+                is_self: fp == *me,
+                fp,
+                nickname: nick,
+                role,
+                state,
+                via_relay,
+            });
+        }
+        out
     }
 
     pub fn conversations(&self) -> Vec<Conversation> {
@@ -3820,10 +3921,22 @@ impl NetworkEngine {
     }
 
     /// Entra numa comunidade via token do dono. Conecta ao host e envia JoinCommunity.
+    ///
+    /// Contrato: o `Ok(cid)` significa "pedido VÁLIDO e em andamento", não
+    /// "membro confirmado". A associação só existe quando o host responde com
+    /// `CommunityState` (que grava membros/canais/cargos no SQLite). A UI
+    /// acompanha pelo evento `community_joined`.
+    ///
+    /// O pedido é persistido em `kv` (`join.pending.<cid>`): se o host estiver
+    /// offline, fechar o app não perde o convite — no próximo boot ele é
+    /// reenviado com a mesma assinatura, até o host confirmar ou o token
+    /// expirar.
     pub fn join_community(&self, token: &str) -> Result<String> {
         // O usuário cola o link inteiro, não apenas o payload base64url.
         // Normalizar aqui evita o bug que ficava invisível só na UI desktop.
         let normalized = crate::protocol::extract_invite_token(token);
+        // Guarda o token NORMALIZADO: se o usuário colou uma URL, é o payload
+        // que precisa ir no frame (o host não sabe decodificar link).
         let (host_fp, cid, member_fp, exp, sig) = crate::protocol::parse_invite_token(&normalized)?;
         if crate::identity::now_ms() > exp {
             return Err(DistorrentError::Protocol("convite expirado".into()));
@@ -3850,28 +3963,219 @@ impl NetworkEngine {
                 ));
             }
         }
+        // Reentrada no MESMO servidor (já sou membro): não reenvia join nem
+        // apaga estado. Só re-sincroniza, que é o que faltava para o servidor
+        // "aparecer vazio" depois de reiniciar.
+        if self
+            .store
+            .member_role(&cid, &self.identity.fingerprint)
+            .is_some()
+        {
+            self.persist_pending_join(&cid, &normalized);
+            self.connect_to_community_peer(&host_fp);
+            self.request_community_sync(&cid);
+            return Ok(cid);
+        }
         self.pending_joins
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(cid.clone(), token.to_string());
-        self.cmd_tx
-            .send(EngineCmd::SendToPeer(
-                host_fp.clone(),
-                SecureFrame::JoinCommunity {
-                    community_id: cid.clone(),
-                    token: token.to_string(),
-                },
-            ))
-            .ok();
+            .insert(cid.clone(), normalized.clone());
+        self.persist_pending_join(&cid, &normalized);
+        self.send_join_to_host(&host_fp, &cid, &normalized);
         // Inicia conexao e busca direta/relay agora, em vez de esperar o
         // ticker geral. O pedido fica pendente e sera repetido ao conectar.
-        self.cmd_tx
-            .send(EngineCmd::ConnectRelay(host_fp.clone()))
-            .ok();
-        self.cmd_tx
-            .send(EngineCmd::LookupAnnounce(host_fp.clone()))
-            .ok();
+        self.connect_to_community_peer(&host_fp);
         Ok(cid)
+    }
+
+    /// Grava/atualiza o convite pendente no SQLite (namespace `join.pending.`).
+    ///
+    /// Guarda o token NORMALIZADO — o mesmo que vai no frame. Persistir o
+    /// token cru (URL inteira) obrigava o `flush_joins` a re-normalizar e
+    /// deixava dois formatos circulando no banco.
+    fn persist_pending_join(&self, community_id: &str, token: &str) {
+        let key = format!("join.pending.{community_id}");
+        if let Err(e) = self.store.kv_set(&key, token) {
+            tracing::warn!(%community_id, "não consegui persistir o convite pendente: {e}");
+        }
+    }
+
+    fn clear_pending_join(&self, community_id: &str) {
+        self.pending_joins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(community_id);
+        self.join_retry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(community_id);
+        let _ = self
+            .store
+            .kv_delete(&format!("join.pending.{community_id}"));
+    }
+
+    /// Envia o `JoinCommunity` ao host (se houver sessão viva).
+    fn send_join_to_host(&self, host_fp: &str, cid: &str, token: &str) {
+        if self.link_tx(host_fp).is_some() {
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    host_fp.to_string(),
+                    SecureFrame::JoinCommunity {
+                        community_id: cid.to_string(),
+                        token: token.to_string(),
+                    },
+                ))
+                .ok();
+        }
+    }
+
+    /// Dial imediato (relay + announce) para um peer que participa de servidor.
+    fn connect_to_community_peer(&self, fp: &str) {
+        if fp == self.identity.fingerprint {
+            return;
+        }
+        self.member_dial_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(fp.to_string(), crate::identity::now_ms());
+        self.cmd_tx
+            .send(EngineCmd::ConnectRelay(fp.to_string()))
+            .ok();
+        self.cmd_tx
+            .send(EngineCmd::LookupAnnounce(fp.to_string()))
+            .ok();
+        self.dht_probe(fp);
+    }
+
+    /// Pede o estado atual de um servidor a quem estiver online (host ou seed).
+    ///
+    /// É idempotente e barato (frame de controle). O pedido é rate-limited por
+    /// servidor para o tique de manutenção poder chamar sem floodar.
+    pub fn request_community_sync(&self, community_id: &str) {
+        if self
+            .store
+            .member_role(community_id, &self.identity.fingerprint)
+            .is_none()
+        {
+            return; // não sou membro: não há o que sincronizar
+        }
+        let now = crate::identity::now_ms();
+        {
+            let mut seen = self
+                .community_sync_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(prev) = seen.get(community_id) {
+                if now.saturating_sub(*prev) < 45_000 {
+                    return;
+                }
+            }
+            seen.insert(community_id.to_string(), now);
+        }
+        let mut targets: Vec<String> = Vec::new();
+        if let Ok(Some((_, _, owner))) = self.store.get_community(community_id) {
+            if owner != self.identity.fingerprint {
+                targets.push(owner);
+            }
+        }
+        // Seeds: outros membros que já têm sessão. O pedido não expõe nada
+        // além do id (que o peer já conhece por ser membro).
+        let mut seen: std::collections::HashSet<String> = targets.iter().cloned().collect();
+        for fp in self.online_peer_fps() {
+            if fp == self.identity.fingerprint || !seen.insert(fp.clone()) {
+                continue;
+            }
+            if self.store.member_role(community_id, &fp).is_some() {
+                targets.push(fp);
+            }
+        }
+        for fp in targets {
+            if self.link_tx(&fp).is_none() {
+                continue;
+            }
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    fp,
+                    SecureFrame::CommunitySyncRequest {
+                        community_id: community_id.to_string(),
+                    },
+                ))
+                .ok();
+        }
+    }
+
+    /// Tique de manutenção dos SERVIDORES. Roda no motor, a cada 15s.
+    ///
+    /// Antes disto o pareamento de membros de servidor simplesmente não
+    /// existia: o tique só discava para `friends` (accepted/pending). O
+    /// resultado era o sintoma relatado — "só o criador conecta; quem entra
+    /// pelo token nunca aparece online". Aqui:
+    ///
+    /// 1. cada membro conhecido (exceto eu) é discado se não há sessão;
+    /// 2. o host é discado sempre que a sessão dele cair;
+    /// 3. o estado do servidor é re-sincronizado (rate-limited em
+    ///    `request_community_sync`), o que recupera canais/roster após
+    ///    reinício e após um kick/rejoin;
+    /// 4. convites pendentes são reenviados com backoff.
+    ///
+    /// Limites: o dedup/backoff de `ConnectRelay` já mora em `command_loop` e
+    /// no `relay_maintains`, então chamar aqui é idempotente. Ainda assim
+    /// espaçamos o dial direto por membro (`member_dial_at`, 90s) para não
+    /// reengatilhar lookup/announce a cada tique.
+    pub fn maintain_communities(&self) {
+        let now = crate::identity::now_ms();
+        let communities = self.store.list_communities().unwrap_or_default();
+        for (cid, _name, owner) in communities {
+            // Sou membro? Se não (saí/kick), não disca nem sincroniza.
+            if self
+                .store
+                .member_role(&cid, &self.identity.fingerprint)
+                .is_none()
+            {
+                continue;
+            }
+            // Host: sessão é o caminho para mensagens/estado. Disca sempre que
+            // faltar (o laço eterno do relay mantém o redial com backoff).
+            if owner != self.identity.fingerprint && self.link_tx(&owner).is_none() {
+                self.connect_to_community_peer_throttled(&owner, now, 30_000);
+            }
+            // Demais membros: pareamento P2P entre TODOS (não só com o dono).
+            // Sem isto o mesh de voz e a entrega direta de arquivos ficavam
+            // limitados a quem o criador conhecia.
+            for (fp, _nick, _role) in self.store.list_members(&cid).unwrap_or_default() {
+                if fp == self.identity.fingerprint || fp == owner {
+                    continue;
+                }
+                if self.link_tx(&fp).is_some() {
+                    continue;
+                }
+                self.connect_to_community_peer_throttled(&fp, now, 120_000);
+            }
+            self.request_community_sync(&cid);
+        }
+        self.retry_pending_joins();
+    }
+
+    /// Dial de membro com throttle por fingerprint. O `connect_to_community_peer`
+    /// cru é para ações explícitas (join, sync); no tique precisamos de
+    /// intervalo maior para não repetir announce/DHT de 15 em 15s.
+    fn connect_to_community_peer_throttled(&self, fp: &str, now: i64, min_ms: i64) {
+        {
+            let mut seen = self
+                .member_dial_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(prev) = seen.get(fp) {
+                if now.saturating_sub(*prev) < min_ms {
+                    return;
+                }
+            }
+            if seen.len() > 4096 {
+                seen.clear(); // anti-crescimento (fp de servidores antigos)
+            }
+            seen.insert(fp.to_string(), now);
+        }
+        self.connect_to_community_peer(fp);
     }
 
     /// Mensagem de canal: dono relay para membros; membro envia ao dono (host).
@@ -4271,39 +4575,121 @@ impl NetworkEngine {
         banner_b64: &str,
         accent: &str,
     ) -> Result<crate::social::ProfileView> {
+        self.social_profile_set_full(
+            display_name,
+            about,
+            avatar_b64,
+            banner_b64,
+            accent,
+            false,
+            false,
+        )
+    }
+
+    /// Edição de perfil com controle de remoção de foto/capa.
+    pub fn social_profile_set_full(
+        &self,
+        display_name: &str,
+        about: &str,
+        avatar_b64: &str,
+        banner_b64: &str,
+        accent: &str,
+        clear_avatar: bool,
+        clear_banner: bool,
+    ) -> Result<crate::social::ProfileView> {
         let me = self.identity.fingerprint.clone();
         let dn = cap_str(display_name, 48);
         let ab = cap_str(about, 400);
-        self.store.profile_set(
+        let ac = normalize_accent(accent);
+        // Teto derivado de MAX_FRAME — antes o `ProfileSet` de 2,1 MB estourava
+        // o frame de 1 MiB e derrubava a sessão (foto/capa nunca chegavam).
+        let av = cap_b64(avatar_b64, PROFILE_IMG_B64_MAX);
+        let bn = cap_b64(banner_b64, PROFILE_BANNER_B64_MAX);
+
+        // Grava e devolve a revisão nova. `None` = nada mudou de verdade.
+        let changed = self.store.profile_set_local(
             &me,
             &dn,
             &ab,
-            &cap_b64(avatar_b64, 700_000),
-            &cap_b64(banner_b64, 1_400_000),
-            if accent.starts_with('#') && accent.len() == 7 {
-                accent
-            } else {
-                ""
-            },
+            &av,
+            &bn,
+            &ac,
+            clear_avatar,
+            clear_banner,
         )?;
         if !dn.is_empty() {
             let _ = self.store.set_friend(&me, &dn, "accepted");
         }
-        let frame = SecureFrame::ProfileSet {
-            display_name: dn.clone(),
-            about: ab.clone(),
-            avatar_b64: cap_b64(avatar_b64, 700_000),
-            banner_b64: cap_b64(banner_b64, 1_400_000),
-            accent: accent.into(),
-        };
-        for peer in self.store.list_peers().unwrap_or_default() {
-            if self.link_tx(&peer.fp).is_some() {
+        // A UI local recebe o perfil EFETIVAMENTE PERSISTIDO (com a revisão e
+        // sem campos que o store recusou), não o patch que o usuário mandou.
+        // Era essa a causa do avatar velho no canto inferior esquerdo: o
+        // `profile_set` local não emitia evento nenhum, então só o poll de 15 s
+        // dos shells descobria a mudança — e se o poll falhasse, nunca.
+        let profile = self.store.profile_get(&me)?;
+        self.events
+            .send(EngineEvent::ProfileChanged {
+                fp: me.clone(),
+                profile: profile.clone(),
+            })
+            .ok();
+
+        // Só difunde quando houve edição efetiva: reconciliação periódica não
+        // pode gerar tráfego nem revisão nova (idempotência).
+        if changed.is_some() {
+            self.broadcast_profile(&profile);
+        }
+        Ok(profile)
+    }
+
+    /// Difunde o NOSSO perfil para todos os peers conectados.
+    ///
+    /// Antes isto era um `for` inline dentro de `social_profile_set` que não
+    /// filtrava o próprio fingerprint — o peer mandava `ProfileSet` para si
+    /// mesmo (e o handler regravava/emitia de volta).
+    pub fn broadcast_profile(&self, profile: &crate::social::ProfileView) {
+        let me = self.identity.fingerprint.clone();
+        let frame = profile_frame(profile);
+        // União de duas fontes: a tabela `peers` (quem já conhecíamos) e os
+        // links vivos (um peer recém-conectado pode ainda não estar na tabela).
+        // Sem a segunda, um amigo que conecta no mesmo instante em que editamos
+        // o perfil só descobriria a mudança na próxima reconciliação.
+        let mut alvos: std::collections::HashSet<String> = self
+            .store
+            .list_peers()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.fp)
+            .collect();
+        alvos.extend(self.online_peer_fps());
+        alvos.remove(&me);
+        for fp in alvos {
+            if self.link_tx(&fp).is_some() {
                 self.cmd_tx
-                    .send(EngineCmd::SendToPeer(peer.fp, frame.clone()))
+                    .send(EngineCmd::SendToPeer(fp, frame.clone()))
                     .ok();
             }
         }
-        Ok(self.store.profile_get(&me)?)
+    }
+
+    /// Reconciliação de perfis: pede a revisão atual a todos os peers online.
+    ///
+    /// É a via BARATA: `ProfileQuery` tem 3 campos, o peer só responde com o
+    /// `ProfileSet` (que carrega avatar/banner) se tiver revisão maior que a
+    /// nossa. Chamada no boot, na reconexão e a cada `PROFILE_SYNC_INTERVAL_SECS`.
+    pub fn sync_profiles_with_peers(&self) {
+        let me = self.identity.fingerprint.clone();
+        let known_rev = self.store.profile_get(&me).map(|p| p.rev).unwrap_or(0);
+        for fp in self.online_peer_fps() {
+            if fp == me {
+                continue;
+            }
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    fp,
+                    SecureFrame::ProfileQuery { known_rev },
+                ))
+                .ok();
+        }
     }
 
     // ---------- threads ----------
@@ -4825,20 +5211,35 @@ impl NetworkEngine {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        let now = crate::identity::now_ms();
         for (cid, token) in joins {
             // O pedido pertence ao host do token e só deve sair depois que o
             // handshake autenticado permitir validar a assinatura do convite.
             let Some((host_fp, token_cid, member_fp, exp, sig)) =
                 crate::protocol::parse_invite_token(&token).ok()
             else {
+                self.clear_pending_join(&cid);
                 continue;
             };
             const WILDCARD: &str = "000000000000";
-            if host_fp != peer_fp
-                || token_cid != cid
-                || (member_fp != WILDCARD && member_fp != self.identity.fingerprint)
-                || crate::identity::now_ms() > exp
+            if token_cid != cid || (member_fp != WILDCARD && member_fp != self.identity.fingerprint)
             {
+                self.clear_pending_join(&cid);
+                continue;
+            }
+            // Convite expirado: descarta a pendência e avisa uma única vez.
+            // Antes o pedido ficava para sempre na fila e o `join_community`
+            // devolvia sucesso otimista — a UI fechava o modal sem servidor.
+            if now > exp {
+                self.clear_pending_join(&cid);
+                let _ = self.events.send(EngineEvent::Error {
+                    context: format!(
+                        "o convite do servidor expirou antes de o dono responder — peça um novo token"
+                    ),
+                });
+                continue;
+            }
+            if host_fp != peer_fp {
                 continue;
             }
             let Some(host) = self.store.get_peer(peer_fp).ok().flatten() else {
@@ -4852,6 +5253,10 @@ impl NetworkEngine {
             .unwrap_or(false);
             if !valid_signature {
                 debug!(%peer_fp, %cid, "convite pendente descartado: assinatura inválida");
+                self.clear_pending_join(&cid);
+                let _ = self.events.send(EngineEvent::Error {
+                    context: "o convite guardado não corresponde à chave do dono do servidor — peça um novo token".into(),
+                });
                 continue;
             }
             self.cmd_tx
@@ -4863,6 +5268,56 @@ impl NetworkEngine {
                     },
                 ))
                 .ok();
+        }
+    }
+
+    /// Reenvia convites pendentes com backoff (chamado pelo tique de manutenção).
+    ///
+    /// Separação deliberada do `flush_joins` (que é por sessão recém-criada):
+    /// aqui lidamos com host que está ONLINE mas nunca respondeu, cujo frame
+    /// pode ter se perdido no relay. Backoff 15s→2min, jitter embutido pelo
+    /// tique de 15s. Sem isto, uma perda de frame deixava o servidor
+    /// permanentemente fora da lista até reabrir o app.
+    fn retry_pending_joins(&self) {
+        let now = crate::identity::now_ms();
+        let pending: Vec<(String, String)> = self
+            .pending_joins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (cid, token) in pending {
+            let Ok((host_fp, _token_cid, _member_fp, exp, _sig)) =
+                crate::protocol::parse_invite_token(&token)
+            else {
+                self.clear_pending_join(&cid);
+                continue;
+            };
+            if now > exp {
+                self.clear_pending_join(&cid);
+                continue;
+            }
+            if self.link_tx(&host_fp).is_none() {
+                // Host ainda offline: o laço de dial é quem cuida da conexão.
+                // Aqui só garantimos que ele continue sendo tentado.
+                self.connect_to_community_peer(&host_fp);
+                continue;
+            }
+            let should_send = {
+                let mut retry = self.join_retry.lock().unwrap_or_else(|e| e.into_inner());
+                let (last, tries) = retry.get(&cid).copied().unwrap_or((0, 0));
+                let wait = 15_000i64.saturating_mul(1 << tries.min(3)); // 15s,30s,60s,120s
+                if now.saturating_sub(last) >= wait {
+                    retry.insert(cid.clone(), (now, tries.saturating_add(1)));
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_send {
+                self.send_join_to_host(&host_fp, &cid, &token);
+            }
         }
     }
 
@@ -6014,6 +6469,14 @@ impl NetworkEngine {
         index: u32,
         data_b64: &str,
     ) -> Result<()> {
+        // Recusa ANTES de enfileirar: um bloco acima do teto faria o RECEPTOR
+        // derrubar a sessão inteira (`read_frame` rejeita > MAX_FRAME), o que
+        // parece "peer caiu" e queima as tentativas do chunk do outro lado.
+        if data_b64.len() > MAX_CHUNK_BYTES * 4 / 3 + 8 {
+            return Err(DistorrentError::Protocol(
+                "file_send_chunk: bloco acima do tamanho máximo".into(),
+            ));
+        }
         if self.link_tx(target_fp).is_some() {
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
@@ -6328,6 +6791,39 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     .ok();
             }
         }
+        // Convites de servidor que ficaram pendentes no SQLite: o usuário
+        // colou o token, o dono estava offline e o app fechou. Sem esta
+        // restauração o pedido morria junto com o processo e o servidor nunca
+        // aparecia — "tive de colar o token de novo" era exatamente isto.
+        for (key, token) in engine
+            .store
+            .kv_list_prefix("join.pending.")
+            .unwrap_or_default()
+        {
+            let Some(cid) = key.strip_prefix("join.pending.") else {
+                continue;
+            };
+            let Ok((host_fp, token_cid, member_fp, exp, _sig)) =
+                crate::protocol::parse_invite_token(&token)
+            else {
+                let _ = engine.store.kv_delete(&key);
+                continue;
+            };
+            const WILDCARD: &str = "000000000000";
+            if token_cid != cid
+                || (member_fp != WILDCARD && member_fp != engine.identity.fingerprint)
+                || crate::identity::now_ms() > exp
+            {
+                let _ = engine.store.kv_delete(&key);
+                continue;
+            }
+            engine
+                .pending_joins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(cid.to_string(), token);
+            engine.connect_to_community_peer(&host_fp);
+        }
     }
 
     // 1) Listener TCP em porta FIXA estilo torrent (default 51413,
@@ -6455,6 +6951,10 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             // o 1º tick é imediato (anuncia no boot) e o relay cobre o resto.
             let mut cancel = engine_clone.cancel_tx.subscribe();
             let mut tick = interval(Duration::from_secs(30));
+            // Última publicação do nosso anúncio (epoch ms). O loop roda a cada
+            // 30s para o lookup dos amigos, mas republicar o NOSSO anúncio nesse
+            // ritmo seria abuso dos brokers públicos — ver ANNOUNCE_REPUBLISH_MS.
+            let last_announce = StdMutex::new(0i64);
             loop {
                 if cancelled(&cancel) {
                     break;
@@ -6578,6 +7078,50 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         }
                     });
                 });
+                // ANÚNCIO MQTT — fora do bloco de alcançabilidade e PERIÓDICO.
+                //
+                // BUG REAL (o "0 peers" do relatório de conexão): este anúncio
+                // morava DENTRO de `if let Some((addr, port)) = announced`, que
+                // exige uma porta TCP pública comprovada (UPnP/NAT-PMP). Sob
+                // CGNAT — o caso mais comum em 4G, internet de operadora e
+                // muitos roteadores — `announced` é `None`, então o peer não
+                // publicava NADA: nem o próprio `lan`, nem a existência no
+                // tópico. O outro lado não tinha como descobrir que ele estava
+                // vivo, mesmo com o relay funcionando.
+                //
+                // Agora o anúncio sai sempre (relay permitido). Quando não há
+                // endpoint público, `addr` vai nulo — os pares leem `lan` e
+                // caem no relay; nunca discam um endereço que não existe (era
+                // o dial condenado que motivou o gate antigo).
+                //
+                // O tópico `distorrent_a_<fp>` não é retido pelo broker, então
+                // um peer que entra DEPOIS do nosso anúncio de boot nunca nos
+                // encontrava. O tick do loop é de 30s; republicamos a cada
+                // 5min (barato: 1 frame pequeno em 1 tópico) para continuar
+                // descobrível sem spammar a infra pública.
+                if relay_allowed(&engine_clone) {
+                    let agora = crate::identity::now_ms();
+                    if agora - *last_announce.lock().unwrap_or_else(|e| e.into_inner())
+                        >= ANNOUNCE_REPUBLISH_MS
+                    {
+                        *last_announce.lock().unwrap_or_else(|e| e.into_inner()) = agora;
+                        let lan = local_lan_ip().map(|ip| format!("{ip}:{port_clone}"));
+                        let (pub_addr, pub_port) = announced
+                            .as_ref()
+                            .map(|(a, p)| (Some(a.clone()), Some(*p)))
+                            .unwrap_or((None, None));
+                        let ann = serde_json::json!({
+                            "fp": fp, "addr": pub_addr, "lan": lan,
+                            "nickname": nickname, "port": pub_port,
+                        })
+                        .to_string();
+                        let ann_topic = crate::net::relay::announce_topic(&fp);
+                        let abackend = active_relay_backend(&engine_clone);
+                        tokio::spawn(async move {
+                            abackend.post(&ann_topic, &ann).await.ok();
+                        });
+                    }
+                }
                 if let Some((addr, announced_port)) = announced {
                     // Trackers HTTP self-hosted (opcionais) — não-bloqueante,
                     // NUNCA no caminho crítico: falha de tracker não atrasa o
@@ -6619,24 +7163,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         addr: addr.clone(),
                         source: nat_source.into(),
                     });
-                    // ANÚNCIO multi-estrada (direto P2P): publica o endpoint
-                    // também nas pernas MQTT — quem alcançar qualquer perna
-                    // disca DIRETO (baixa latência); relay fica de fallback.
-                    // Kill-switch: sem relay, NÃO publica no tópico de anúncio do
-                    // backend (o anúncio por tracker self-hosted via reqwest segue,
-                    // pois é o que descobre o endpoint DIRETO).
-                    if relay_allowed(&engine_clone) {
-                        // `addr` = endpoint público (hairpin NAT costuma falhar
-                        // na MESMA LAN); `lan` = IP local:porta (direto garantido
-                        // na mesma rede). Quem recebe tenta o LAN primeiro.
-                        let lan = local_lan_ip().map(|ip| format!("{ip}:{port_clone}"));
-                        let ann = serde_json::json!({ "fp": fp, "addr": addr, "lan": lan, "nickname": nickname, "port": announced_port }).to_string();
-                        let ann_topic = crate::net::relay::announce_topic(&fp);
-                        let abackend = active_relay_backend(&engine_clone);
-                        tokio::spawn(async move {
-                            abackend.post(&ann_topic, &ann).await.ok();
-                        });
-                    }
                 }
                 if let Ok(pending) = engine_clone.store.list_friends(Some("pending_out")) {
                     for peer in pending {
@@ -6653,10 +7179,19 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                                         let f = v.get("fp").and_then(|x| x.as_str()).unwrap_or("");
                                         if f == peer.fp {
                                             // LAN primeiro (mesma rede = direto garantido),
-                                            // depois o endpoint público.
+                                            // depois o endpoint público. `addr` pode vir
+                                            // null (peer sob CGNAT, sem porta TCP pública):
+                                            // nesse caso o dial direto é impossível e quem
+                                            // resolve é o relay — não discamos nada.
                                             let lan = v.get("lan").and_then(|x| x.as_str());
                                             let pubip = v.get("addr").and_then(|x| x.as_str());
                                             for cand in [lan, pubip].into_iter().flatten() {
+                                                // `addr` explícito no JSON vira `null`, que
+                                                // `as_str()` já descarta; a checagem extra é
+                                                // para o caso de string "null" de serialização.
+                                                if cand.is_empty() || cand == "null" {
+                                                    continue;
+                                                }
                                                 if let Ok(sock) = cand.parse::<SocketAddr>() {
                                                     info!(fp=%peer.fp, %sock, "direta: endpoint via anúncio — sem relay");
                                                     engine_clone
@@ -6923,10 +7458,20 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     // se um frame de amizade se perdeu no relay). 5s = recupera rápido sem
     // floodar (1 frame pequeno por peer pendente).
     let mut friend_tick = interval(Duration::from_secs(5));
+    // Manutenção de SERVIDORES: re-sincroniza estado e redispara joins
+    // pendentes. Roda no motor (não na UI), então continua valendo com a janela
+    // minimizada, o shell desmontado ou a tela de servidores fechada — que era
+    // exatamente a dependência escondida que o pareamento tinha.
+    let mut community_tick = interval(Duration::from_secs(15));
     // Heartbeat da presença a cada 30s. Ele renova o updated_at local e
     // anuncia nosso estado aos peers, permitindo que amigos antigos sejam
     // marcados offline sem depender de um pedido manual da UI.
     let mut presence_tick = interval(Duration::from_secs(30));
+    // Reconciliação de perfis. Intervalo em UM lugar só
+    // (`PROFILE_SYNC_INTERVAL_SECS`), rodando no motor — não num `setInterval`
+    // do React, que morre quando a interface é desmontada/suspensa.
+    // O primeiro tique do `interval` é imediato: isso cobre o boot.
+    let mut profile_tick = interval(Duration::from_secs(PROFILE_SYNC_INTERVAL_SECS));
     loop {
         tokio::select! {
             Some(peer) = disc_rx.recv() => {
@@ -6992,6 +7537,16 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     engine.retry_pending_friend_request(&fp);
                 }
             }
+            _ = community_tick.tick() => {
+                // PAREAmento CONTÍNUO entre membros de servidor:
+                //  1) disca para todo membro conhecido que ainda não tem sessão
+                //     (antes só amigos eram discados — um servidor criado no PC
+                //     e usado no celular ficava sem rota entre os membros);
+                //  2) pede o estado atual (host/seeds) para recuperar canais e
+                //     roster depois de reiniciar;
+                //  3) reenvia o `JoinCommunity` que não foi confirmado.
+                engine.maintain_communities();
+            }
             _ = presence_tick.tick() => {
                 let me = engine.identity.fingerprint.clone();
                 if let Ok(mut presence) = engine.store.presence_get_live(&me) {
@@ -7010,6 +7565,13 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         engine.announce_presence();
                     }
                 }
+            }
+            _ = profile_tick.tick() => {
+                // "Meu perfil está atualizado aí?" — 1 frame pequeno por peer.
+                // O peer só devolve o perfil inteiro se a revisão dele for
+                // maior, então o tique sem mudança não transfere imagem
+                // nenhuma (é o critério do teste F).
+                engine.sync_profiles_with_peers();
             }
         }
     }
@@ -8172,6 +8734,24 @@ async fn register_and_run(
     });
     engine.emit_state();
 
+    // Reconciliação de perfil na reconexão: um peer que ficou offline enquanto
+    // editávamos o perfil nunca recebeu o `ProfileSet`. Perguntar a revisão
+    // agora custa um frame e resolve o caso "B abre o app depois de A trocar a
+    // foto" sem esperar o tique de 10 minutos.
+    engine
+        .cmd_tx
+        .send(EngineCmd::SendToPeer(
+            peer_fp.to_string(),
+            SecureFrame::ProfileQuery {
+                known_rev: engine
+                    .store
+                    .profile_get(&engine.identity.fingerprint)
+                    .map(|p| p.rev)
+                    .unwrap_or(0),
+            },
+        ))
+        .ok();
+
     // HOLE PUNCH (estilo torrent/Radmin): sessão relay viva + peer com
     // proto_v>=1 → pede furo TCP simultâneo para meu endpoint público. Não
     // é só 1x: um loop com backoff curto REENVIA o Punch enquanto a sessão
@@ -8442,9 +9022,14 @@ fn announce_lookup_once(engine: Arc<NetworkEngine>, peer_fp: String) {
                     let f = v.get("fp").and_then(|x| x.as_str()).unwrap_or("");
                     if f == peer_fp {
                         // LAN primeiro (mesma rede = direto garantido), depois público.
+                        // `addr` pode ser null (peer sob CGNAT): nesse caso não há
+                        // dial direto possível e o relay resolve — não discamos.
                         let lan = v.get("lan").and_then(|x| x.as_str());
                         let pubip = v.get("addr").and_then(|x| x.as_str());
                         for cand in [lan, pubip].into_iter().flatten() {
+                            if cand.is_empty() || cand == "null" {
+                                continue;
+                            }
                             if let Ok(sock) = cand.parse::<SocketAddr>() {
                                 info!(fp=%peer_fp, %sock, "direta imediata: endpoint via anúncio");
                                 engine.diag_record_announce_seen(&peer_fp);
@@ -8455,6 +9040,10 @@ fn announce_lookup_once(engine: Arc<NetworkEngine>, peer_fp: String) {
                                 return;
                             }
                         }
+                        // Anúncio VISTO mas sem endpoint direto utilizável: o
+                        // peer está vivo e descobrível, só não é alcançável
+                        // direto. Registrar evita a UI dizer "nunca anunciou".
+                        engine.diag_record_announce_seen(&peer_fp);
                     }
                 }
             }
@@ -8741,6 +9330,76 @@ fn cap_b64(s: &str, max: usize) -> String {
         .take(max)
         .collect()
 }
+
+/// Cor de destaque: só `#rrggbb`. O valor CRU ia no frame enquanto o store
+/// gravava o validado — os dois lados podiam discordar sobre o mesmo perfil.
+fn normalize_accent(accent: &str) -> String {
+    if accent.starts_with('#')
+        && accent.len() == 7
+        && accent[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        accent.to_ascii_lowercase()
+    } else {
+        String::new()
+    }
+}
+
+/// `ProfileSet` a partir do que está PERSISTIDO (nunca do patch da UI).
+fn profile_frame(p: &crate::social::ProfileView) -> SecureFrame {
+    SecureFrame::ProfileSet {
+        display_name: p.display_name.clone(),
+        about: p.about.clone(),
+        avatar_b64: p.avatar_b64.clone(),
+        banner_b64: p.banner_b64.clone(),
+        accent: p.accent.clone(),
+        rev: p.rev,
+        content_hash: p.content_hash.clone(),
+    }
+}
+
+/// Intervalo da reconciliação de perfis. ÚNICO lugar: o boot, a reconexão e o
+/// tique periódico leem daqui (nada de temporizador espalhado na UI).
+pub const PROFILE_SYNC_INTERVAL_SECS: u64 = 600; // 10 minutos
+
+/// Teto do `avatar_b64`/`banner_b64` para o `ProfileSet` caber no PIOR
+/// transporte real, não no melhor.
+///
+/// Dois limites encadeados faziam a foto nunca chegar:
+///  1. `MAX_FRAME` da sessão = 1 MiB. O teto antigo (700 KB + 1,4 MB) gerava um
+///     `ProfileSet` de ~2,1 MB: o receptor derrubava a SESSÃO inteira.
+///  2. `peer_relay::MAX_TOPIC_BYTES` = 384 KiB por tópico. Sob CGNAT (o caso
+///     comum) o perfil viaja fatiado em pedaços de 3 KB e os pedaços mais
+///     antigos são EVICTADOS antes de o par ler — o perfil chegava truncado e
+///     era descartado.
+///
+/// Como 384 KiB é o mais apertado, o frame inteiro precisa ficar bem abaixo
+/// dele. ~190 KB de frame ⇒ ~250 KB de base64 ⇒ ~85 pedaços, com folga nos dois
+/// limites. A compressão do frontend (shared/avatar.ts) mira os mesmos números.
+const PROFILE_IMG_B64_MAX: usize = 80_000; // avatar ~60 KB de imagem
+const PROFILE_BANNER_B64_MAX: usize = 110_000; // capa ~82 KB de imagem
+
+/// Maior imagem (em bytes decodificados) que o frame de perfil comporta.
+pub const PROFILE_IMAGE_MAX_BYTES: usize = PROFILE_IMG_B64_MAX * 3 / 4;
+pub const PROFILE_BANNER_MAX_BYTES: usize = PROFILE_BANNER_B64_MAX * 3 / 4;
+
+/// De quanto em quanto tempo republicamos o próprio anúncio de presença no MQTT.
+///
+/// O tópico `distorrent_a_<fp>` NÃO é retido pelo broker: reaparecer só no boot
+/// fazia um peer que entrasse depois nunca descobrir quem já estava rodando
+/// (sintoma "0 peers conhecidos" com o app aberto há horas). 5 min é o
+/// equilíbrio entre ser descobrível e não abusar da infra pública — o loop de
+/// descoberta roda a cada 30 s e essa guarda limita a publicação.
+const ANNOUNCE_REPUBLISH_MS: i64 = 5 * 60 * 1000;
+
+/// Teto do `FileAnnounce` (2 GB) — espelha `MAX_STREAM_FILE_BYTES` da casca e
+/// o `VITE_DISTORRENT_MAX_FILE_MB` do frontend. Sem ele, "size: 500 GB" num
+/// frame de 200 bytes fazia o receptor tentar alocar.
+const MAX_ANNOUNCED_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Tamanho máximo de UM bloco aceito do fio. O bloco canônico é 256 KB; a folga
+/// cobre base64 e versões futuras, mas impede que um frame de ~1 MiB (o teto do
+/// transporte) chegue com lixo colado no fim do bloco.
+const MAX_CHUNK_BYTES: usize = 512 * 1024;
 
 const MAX_REACTION_ID_CHARS: usize = 128;
 const MAX_REACTION_EMOJI_CHARS: usize = 16;
@@ -9813,6 +10472,9 @@ async fn handle_frame(
             engine
                 .store
                 .upsert_member(&community_id, peer_fp, peer_nick, "member")?;
+            // Convite usado: some da fila persistida e do backoff. Sem isto o
+            // pedido ficava eterno na tabela `kv` e era reenviado a cada boot.
+            engine.clear_pending_join(&community_id);
             // resposta direta ao joiner + sincroniza os demais membros online
             let frame = engine.community_state_payload(&community_id, Some(peer_fp))?;
             engine
@@ -9917,11 +10579,10 @@ async fn handle_frame(
                 &members,
                 &(description, category, icon),
             )?;
-            engine
-                .pending_joins
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&community_id);
+            // Confirmação real da associação: limpa o convite persistido e o
+            // backoff. A partir daqui a comunidade vive no SQLite e sobrevive
+            // a reinício sem precisar do token.
+            engine.clear_pending_join(&community_id);
             let _ = engine
                 .events
                 .send(EngineEvent::CommunityJoined { community_id, name });
@@ -9940,11 +10601,7 @@ async fn handle_frame(
                 ));
             }
             engine.store.community_remove_local(&community_id)?;
-            engine
-                .pending_joins
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&community_id);
+            engine.clear_pending_join(&community_id);
             let _ = engine.events.send(EngineEvent::CommunityRemoved {
                 community_id: community_id.clone(),
             });
@@ -10476,6 +11133,37 @@ async fn handle_frame(
                     "FileAnnounce com chunks excessivos".into(),
                 ));
             }
+            // Coerência anunciada × real. O frontend já valida, mas o core é
+            // quem sofre a consequência (array gigante, buffer de 500 GB
+            // anunciado em 200 bytes de frame): um peer malicioso não passa
+            // pelo `validateAnnounce` do outro lado.
+            const CHUNK_BYTES: u64 = 256 * 1024;
+            let expected_chunks = std::cmp::max(1, size.div_ceil(CHUNK_BYTES));
+            if chunks as u64 != expected_chunks && size > 0 {
+                return Err(DistorrentError::Protocol(
+                    "FileAnnounce com chunks incompatíveis com o tamanho".into(),
+                ));
+            }
+            if size > MAX_ANNOUNCED_FILE_BYTES {
+                return Err(DistorrentError::Protocol(
+                    "FileAnnounce com tamanho acima do teto".into(),
+                ));
+            }
+            // `chunk_hashes` é a base da verificação por bloco: aceitar uma
+            // lista de tamanho errado permitiria a um peer escolher QUAIS
+            // chunks ficam sem validar (o `chunkHashes[i]` sai undefined).
+            if let Some(hs) = &chunk_hashes {
+                if hs.len() != chunks as usize {
+                    return Err(DistorrentError::Protocol(
+                        "FileAnnounce com chunk_hashes fora de cardinalidade".into(),
+                    ));
+                }
+                if hs.iter().any(|h| h.is_empty() || h.len() > 128) {
+                    return Err(DistorrentError::Protocol(
+                        "FileAnnounce com chunk_hash inválido".into(),
+                    ));
+                }
+            }
             let name = cap_str(&name, 255);
             let _ = engine.store.announce_file(
                 &file_id,
@@ -10499,8 +11187,8 @@ async fn handle_frame(
                 chunks,
                 hash: hash.clone(),
                 from_fp: peer_fp.into(),
+                chunk_hashes: chunk_hashes.clone().unwrap_or_default(),
             });
-            // também envia evento estendido com chunk_hashes via kv (UI lê ao receber FileAnnounceEv)
         }
         SecureFrame::FileChunkRequest { file_id, index } => {
             // RATE LIMIT: cada pedido vira leitura de disco + frame de 256 KB
@@ -10522,6 +11210,20 @@ async fn handle_frame(
             index,
             data_b64,
         } => {
+            // Teto por bloco: sem isto um peer manda lixo de 900 KB num bloco de
+            // 256 KB e o receptor grava o arquivo com tamanho errado (o hash
+            // final só acusaria no fim, depois de baixar tudo de novo).
+            // base64 infla ~4/3: 384 KB de bloco ≈ 512 KB de string.
+            if data_b64.len() > MAX_CHUNK_BYTES * 4 / 3 + 8 {
+                return Err(DistorrentError::Protocol(
+                    "FileChunkData acima do tamanho de bloco".into(),
+                ));
+            }
+            if index > 16_777_216 {
+                return Err(DistorrentError::Protocol(
+                    "FileChunkData com índice absurdo".into(),
+                ));
+            }
             let _ = engine.events.send(EngineEvent::FileChunkDataEv {
                 file_id,
                 index,
@@ -10948,20 +11650,44 @@ async fn handle_frame(
             avatar_b64,
             banner_b64,
             accent,
+            rev,
+            content_hash,
         } => {
             if engine.is_blocked(peer_fp) {
                 return Ok(());
             }
             let dn = cap_str(&display_name, 48);
             let ab = cap_str(&about, 400);
-            let av = cap_b64(&avatar_b64, 700_000);
-            let bn = cap_b64(&banner_b64, 1_400_000);
-            let ac = if accent.starts_with('#') && accent.len() == 7 {
-                accent
-            } else {
-                String::new()
-            };
-            let _ = engine.store.profile_set(peer_fp, &dn, &ab, &av, &bn, &ac);
+            let av = cap_b64(&avatar_b64, PROFILE_IMG_B64_MAX);
+            let bn = cap_b64(&banner_b64, PROFILE_BANNER_B64_MAX);
+            let ac = normalize_accent(&accent);
+
+            // `content_hash` do fio é só um atalho do autor: recalculamos dos
+            // bytes que de fato vamos gravar. Campo adulterado (ou peer antigo
+            // sem o campo) não consegue "carimbar" um hash que não corresponde
+            // ao conteúdo — o que impediria a detecção de mudança e o desempate.
+            let calculado = crate::social::profile_content_hash(&dn, &ab, &av, &bn, &ac);
+            if !content_hash.is_empty() && content_hash != calculado {
+                return Err(DistorrentError::Protocol(
+                    "ProfileSet com content_hash divergente do conteúdo".into(),
+                ));
+            }
+
+            // Resolução de conflito: revisão maior vence, revisão antiga é
+            // descartada. `rev` negativo é inválido (só o autor incrementa).
+            if rev < 0 {
+                return Err(DistorrentError::Protocol(
+                    "ProfileSet com rev negativo".into(),
+                ));
+            }
+            let applied = engine
+                .store
+                .profile_apply_remote(peer_fp, &dn, &ab, &av, &bn, &ac, rev)?;
+            if !applied {
+                // Nada mudou (ou chegou versão velha): não regrava, não emite,
+                // não promove amizade. É o caso comum do tique de 10 min.
+                return Ok(());
+            }
             // display name vira o nome de exibição da amizade
             if !dn.is_empty() {
                 let _ = engine.store.set_friend(peer_fp, &dn, "accepted");
@@ -10971,6 +11697,27 @@ async fn handle_frame(
                 fp: peer_fp.to_string(),
                 profile: p,
             });
+        }
+        // Reconciliação: o peer pergunta "qual é a sua revisão?". Respondemos
+        // com o perfil COMPLETO só se tivermos algo mais novo que o dele —
+        // sem isso, cada tique de 10 min retransmitiria avatar e capa.
+        SecureFrame::ProfileQuery { known_rev } => {
+            if engine.is_blocked(peer_fp) {
+                return Ok(());
+            }
+            let me = engine.identity.fingerprint.clone();
+            let Ok(p) = engine.store.profile_get(&me) else {
+                return Ok(());
+            };
+            if p.rev > known_rev {
+                engine
+                    .cmd_tx
+                    .send(EngineCmd::SendToPeer(
+                        peer_fp.to_string(),
+                        profile_frame(&p),
+                    ))
+                    .ok();
+            }
         }
         SecureFrame::ThreadCreate {
             community_id,
@@ -11397,6 +12144,34 @@ async fn handle_frame(
         }
         SecureFrame::TunnelData { nonce, ct_b64 } => {
             handle_tunnel_data(engine, peer_fp, nonce, &ct_b64);
+        }
+        // Um membro pediu o estado do servidor (após reiniciar/reconectar).
+        //
+        // AUTORIZAÇÃO: só respondemos se o solicitante constar no roster local
+        // (ou for o dono). Sem isso, qualquer peer conectado poderia pedir a
+        // lista de canais/cargos/membros de um servidor que não participa — o
+        // payload por membro mascara tokens, mas ainda vaza estrutura.
+        SecureFrame::CommunitySyncRequest { community_id } => {
+            let is_member = engine.store.member_role(&community_id, peer_fp).is_some();
+            let is_owner = engine
+                .store
+                .get_community(&community_id)
+                .ok()
+                .flatten()
+                .map(|(_, _, owner)| owner == peer_fp)
+                .unwrap_or(false);
+            if !is_member && !is_owner {
+                return Err(DistorrentError::Protocol(
+                    "CommunitySyncRequest de quem não é membro".into(),
+                ));
+            }
+            // O payload é POR MEMBRO (tokens mascarados para quem não é dono).
+            if let Ok(frame) = engine.community_state_payload(&community_id, Some(peer_fp)) {
+                engine
+                    .cmd_tx
+                    .send(EngineCmd::SendToPeer(peer_fp.to_string(), frame))
+                    .ok();
+            }
         }
     }
     Ok(())
@@ -12247,6 +13022,248 @@ mod tests {
             !peer_relay_optin_value(Some("1"), Some("1"), true),
             "no_relay desliga"
         );
+    }
+
+    // ---------------- PERFIL: sincronização entre peers ----------------
+    //
+    // Estes testes usam `handle_frame` (o MESMO ponto de entrada dos frames
+    // vindos da rede), não o store direto. É o que prova que a reconciliacão
+    // passa por validação de remetente, aplica a revisão certa e só emite
+    // evento quando algo mudou de verdade.
+
+    /// `block_on` local: o helper do módulo é `#[cfg(target_os = "linux")]` e
+    /// estas garantias de perfil valem em todas as plataformas.
+    fn perfil_block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    #[test]
+    fn profile_set_remoto_emite_evento_quando_muda() {
+        let (e, _d) = mk_engine("perfil-remoto");
+        let autor = "fp-autor";
+        let mut rx = e.subscribe();
+        let r = perfil_block_on(handle_frame(
+            &e,
+            autor,
+            "pubkey",
+            "Autor",
+            SecureFrame::ProfileSet {
+                display_name: "Autor Novo".into(),
+                about: "bio".into(),
+                avatar_b64: "QUJD".into(),
+                banner_b64: String::new(),
+                accent: "#ff0000".into(),
+                rev: 1,
+                content_hash: crate::social::profile_content_hash(
+                    "Autor Novo",
+                    "bio",
+                    "QUJD",
+                    "",
+                    "#ff0000",
+                ),
+            },
+        ));
+        assert!(r.is_ok(), "frame rejeitado: {r:?}");
+        let p = e.store.profile_get(autor).unwrap();
+        assert_eq!(p.display_name, "Autor Novo");
+        assert_eq!(p.rev, 1);
+        assert_eq!(p.accent, "#ff0000");
+        let ev = rx
+            .try_recv()
+            .ok()
+            .map(|e| format!("{e:?}"))
+            .unwrap_or_default();
+        assert!(ev.contains("ProfileChanged"), "evento esperado, veio: {ev}");
+    }
+
+    #[test]
+    fn profile_set_remoto_revisao_antiga_nao_emite_nem_sobrescreve() {
+        let (e, _d) = mk_engine("perfil-antigo");
+        let autor = "fp-autor2";
+        for (rev, nome) in [(2i64, "Versão 2"), (1i64, "Versão 1 atrasada")] {
+            let _ = perfil_block_on(handle_frame(
+                &e,
+                autor,
+                "pubkey",
+                "Autor",
+                SecureFrame::ProfileSet {
+                    display_name: nome.into(),
+                    about: String::new(),
+                    avatar_b64: String::new(),
+                    banner_b64: String::new(),
+                    accent: String::new(),
+                    rev,
+                    content_hash: String::new(),
+                },
+            ));
+        }
+        let p = e.store.profile_get(autor).unwrap();
+        assert_eq!(p.display_name, "Versão 2", "rev antiga não pode vencer");
+        assert_eq!(p.rev, 2);
+    }
+
+    #[test]
+    fn profile_set_com_hash_divergente_e_rejeitado() {
+        let (e, _d) = mk_engine("perfil-hash");
+        let autor = "fp-autor3";
+        let r = perfil_block_on(handle_frame(
+            &e,
+            autor,
+            "pubkey",
+            "Autor",
+            SecureFrame::ProfileSet {
+                display_name: "Nome".into(),
+                about: String::new(),
+                avatar_b64: String::new(),
+                banner_b64: String::new(),
+                accent: String::new(),
+                rev: 1,
+                // hash de outro conteúdo: peer tentando carimbar versão
+                content_hash: "0".repeat(32),
+            },
+        ));
+        assert!(r.is_err(), "hash divergente tem que ser rejeitado");
+        assert_eq!(
+            e.store.profile_get(autor).unwrap().display_name,
+            "",
+            "perfil armazenado não pode ser corrompido"
+        );
+    }
+
+    #[test]
+    fn profile_set_de_peer_bloqueado_e_ignorado() {
+        let (e, _d) = mk_engine("perfil-bloqueio");
+        let autor = "fp-bloqueado";
+        e.friend_block(autor).unwrap();
+        let r = perfil_block_on(handle_frame(
+            &e,
+            autor,
+            "pubkey",
+            "Bloqueado",
+            SecureFrame::ProfileSet {
+                display_name: "Invasor".into(),
+                about: String::new(),
+                avatar_b64: String::new(),
+                banner_b64: String::new(),
+                accent: String::new(),
+                rev: 99,
+                content_hash: String::new(),
+            },
+        ));
+        assert!(r.is_ok(), "frame de bloqueado não derruba a sessão");
+        assert_eq!(
+            e.store.profile_get(autor).unwrap().display_name,
+            "",
+            "peer bloqueado não pode gravar perfil"
+        );
+    }
+
+    /// O `ProfileSet` no PIOR caso (avatar e capa no teto) precisa caber no
+    /// frame da sessão E no orçamento do relay por tópico.
+    ///
+    /// Era aqui que a foto se perdia sem erro visível: o frame de ~2,1 MB
+    /// estourava `MAX_FRAME` (1 MiB) e o receptor derrubava a sessão; e mesmo
+    /// cabendo ali, sob CGNAT o relay fatia em pedaços de 3 KB e evicta acima
+    /// de `MAX_TOPIC_BYTES` (384 KiB) — o perfil chegava truncado.
+    #[test]
+    fn profile_set_no_teto_cabe_no_frame_e_no_relay() {
+        let (e, _d) = mk_engine("perfil-frame");
+        let avatar = "A".repeat(PROFILE_IMG_B64_MAX);
+        let banner = "B".repeat(PROFILE_BANNER_B64_MAX);
+        e.social_profile_set(
+            "Nome de exibição",
+            &"bio".repeat(100),
+            &avatar,
+            &banner,
+            "#5865f2",
+        )
+        .unwrap();
+        let p = e.store.profile_get(&e.identity.fingerprint).unwrap();
+        let frame = profile_frame(&p);
+        let json = serde_json::to_string(&frame).unwrap();
+
+        assert!(
+            json.len() < crate::net::transport::MAX_FRAME as usize,
+            "ProfileSet de {} bytes estoura MAX_FRAME ({}): a sessão cai",
+            json.len(),
+            crate::net::transport::MAX_FRAME,
+        );
+        // Folga para o relay fatiar sem evicção no caminho.
+        assert!(
+            json.len() < crate::net::peer_relay::MAX_TOPIC_BYTES,
+            "ProfileSet de {} bytes passa do orçamento por tópico do relay ({})",
+            json.len(),
+            crate::net::peer_relay::MAX_TOPIC_BYTES,
+        );
+        // E o conteúdo realmente persistido não foi cortado.
+        assert_eq!(p.avatar_b64.len(), PROFILE_IMG_B64_MAX);
+        assert_eq!(p.banner_b64.len(), PROFILE_BANNER_B64_MAX);
+    }
+
+    #[test]
+    fn profile_query_responde_so_quando_temos_revisao_maior() {
+        let (e, _d) = mk_engine("perfil-query");
+        let me = e.identity.fingerprint.clone();
+        e.social_profile_set("Meu Nome", "bio", "", "", "").unwrap();
+        let minha_rev = e.store.profile_get(&me).unwrap().rev;
+        assert!(minha_rev >= 1);
+
+        let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
+        // Peer pergunta com a NOSSA revisão: nada a enviar (evita retransmitir
+        // avatar/capa a cada tique de 10 min).
+        let _ = perfil_block_on(handle_frame(
+            &e,
+            "peer-query",
+            "pubkey",
+            "Peer",
+            SecureFrame::ProfileQuery {
+                known_rev: minha_rev,
+            },
+        ));
+        assert!(
+            commands.try_recv().is_err(),
+            "sem mudança não pode haver ProfileSet na fila"
+        );
+
+        // Peer atrasado: recebe o perfil completo.
+        let _ = perfil_block_on(handle_frame(
+            &e,
+            "peer-query",
+            "pubkey",
+            "Peer",
+            SecureFrame::ProfileQuery { known_rev: 0 },
+        ));
+        let mut enviou = false;
+        while let Ok(cmd) = commands.try_recv() {
+            if let EngineCmd::SendToPeer(_, SecureFrame::ProfileSet { .. }) = cmd {
+                enviou = true;
+            }
+        }
+        assert!(enviou, "peer desatualizado precisa receber o ProfileSet");
+    }
+
+    #[test]
+    fn social_profile_set_local_emite_evento_e_incrementa_revisao() {
+        let (e, _d) = mk_engine("perfil-local");
+        let mut rx = e.subscribe();
+        let p = e.social_profile_set("Eu Mesmo", "bio", "", "", "").unwrap();
+        assert_eq!(p.rev, 1);
+        let ev = rx
+            .try_recv()
+            .ok()
+            .map(|e| format!("{e:?}"))
+            .unwrap_or_default();
+        assert!(
+            ev.contains("ProfileChanged"),
+            "o próprio usuário precisa ser notificado (causa do avatar velho): {ev}"
+        );
+        // Salvar de novo o mesmo conteúdo não cria revisão nova.
+        let p2 = e.social_profile_set("Eu Mesmo", "bio", "", "", "").unwrap();
+        assert_eq!(p2.rev, 1);
     }
 }
 

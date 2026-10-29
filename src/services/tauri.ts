@@ -91,6 +91,9 @@ export const tauriServices: DisTorrentServices = {
 
   communitiesList: () => invoke<import('./models').CommunityView[]>('communities_list'),
 
+  communityMembers: (communityId) =>
+    invoke<import('./models').MemberPairing[]>('community_members', { communityId }),
+
   createCommunity: (name, channels, opts) => invoke<string>('create_community', {
     name,
     channels: channels.length ? channels : null,
@@ -104,7 +107,14 @@ export const tauriServices: DisTorrentServices = {
     icon: patch.icon ?? null,
   }),
 
-  makeInvite: (communityId, memberFp) => invoke<string>('make_invite', { communityId, memberFp }),
+  makeInvite: (communityId, memberFp) =>
+    invoke<string>('make_invite', { communityId, memberFp: memberFp ?? null }),
+
+  makeInviteLink: (communityId, memberFp) =>
+    invoke<import('./models').InviteView>('make_invite_link', {
+      communityId,
+      memberFp: memberFp ?? null,
+    }),
 
   joinCommunity: (token) => invoke<string>('join_community', { token }),
 
@@ -372,9 +382,10 @@ export const tauriServices: DisTorrentServices = {
     invoke<void>('background_set_connection', { stateLabel: state, onlinePeers, unread: unread ?? null }),
   presenceList: () => invoke<PresenceView[]>('presence_list'),
   presenceGet: (fp) => invoke<PresenceView>('presence_get', { fp }),
-  profileSet: (p) => invoke<ProfileView>('profile_set', p),
+  profileSet: (p) => invoke<ProfileView>('profile_set', { ...p }),
   profileGet: (fp) => invoke<ProfileView>('profile_get', { fp }),
   profileList: () => invoke<ProfileView[]>('profile_list'),
+  profileSyncNow: () => invoke<void>('profile_sync_now'),
   nicknameSet: (communityId, fp, nickname) => invoke<void>('nickname_set', { communityId, fp, nickname }),
   nicknameGet: (communityId, fp) => invoke<string>('nickname_get', { communityId, fp }),
 

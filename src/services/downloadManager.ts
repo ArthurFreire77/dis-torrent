@@ -17,6 +17,8 @@ const LS_KEY = 'distorrent:downloads:v1'
 const SPEED_WINDOW_MS = 2000
 /** Sem seeder e sem progresso por este tempo → failed honesto (retry manual). */
 const NO_SEEDER_FAIL_MS = 30_000
+/** Espera máxima pelo anúncio do arquivo antes de falhar (boot tardio). */
+const ANNOUNCE_WAIT_MS = 30_000
 /** Persistir progresso no máximo 1x/s (evita churn de localStorage). */
 const PERSIST_INTERVAL_MS = 1000
 
@@ -55,7 +57,19 @@ class DownloadManager {
     for (const it of deserializeQueue(raw)) {
       const status = rehydrateStatus(it.status)
       this.items.set(it.file_id, { ...it, status, speedBps: 0 })
-      if (status === 'queued') this.kick(it.file_id)
+    }
+    // Re-kick SÓ depois de a fila inteira estar montada e num tick seguinte:
+    // antes o `kick` rodava no meio do `for` e o `runLoop` encontrava
+    // `fileSwarm.files` vazio (o anúncio/mensagem chega depois do boot) e
+    // marcava `failed` por "anúncio ainda não chegou". O laço agora ESPERA o
+    // anúncio em vez de desistir (ver `runLoop`).
+    const pendentes = [...this.items.values()].filter((i) => i.status === 'queued')
+    if (pendentes.length > 0) {
+      setTimeout(() => {
+        for (const it of pendentes) {
+          if (this.items.get(it.file_id)?.status === 'queued') this.kick(it.file_id)
+        }
+      }, 1500)
     }
     this.emit()
     return this.list()
@@ -263,6 +277,7 @@ class DownloadManager {
     let lastHave = -1
     let lastProgressAt = now()
     let noSeederSince: number | null = null
+    const waitStartedAt = now()
     try {
       for (;;) {
         if (this.pausedFps.has(fileId) || this.cancelled.has(fileId)) return
@@ -270,8 +285,16 @@ class DownloadManager {
         if (!it) return
         const sf = fileSwarm.files.get(fileId)
         if (!sf) {
-          this.setStatus(it, 'fail', 'anúncio do arquivo ainda não chegou — tente de novo em instantes')
-          return
+          // O anúncio chega por mensagem/evento DEPOIS do boot. Antes isto era
+          // `fail` imediato ("anúncio ainda não chegou") e o item morria sem
+          // retry. Agora espera até ANNOUNCE_WAIT_MS e só então falha —
+          // honesto, com a causa certa.
+          if (now() - waitStartedAt > ANNOUNCE_WAIT_MS) {
+            this.setStatus(it, 'fail', 'o anúncio deste arquivo não chegou — o remetente pode estar offline; toque em retomar')
+            return
+          }
+          await sleep(400)
+          continue
         }
         if (it.status === 'completed' || it.status === 'cancelled' || it.status === 'failed' || it.status === 'paused') return
 
@@ -306,16 +329,22 @@ class DownloadManager {
           this.emit()
         }
 
-        // sem seeder + sem progresso por muito tempo → failed honesto
+        // sem seeder + sem progresso por muito tempo → failed honesto.
+        // A poda roda antes: `seeders` agora ENCOLHE quando um peer para de se
+        // manifestar, então esta condição é alcançável (antes só crescia e o
+        // item ficava "baixando 0%" para sempre).
+        fileSwarm.pruneSeeders(sf)
         if (sf.seeders.size === 0 && have < sf.chunks) {
           if (noSeederSince === null) noSeederSince = now()
           else if (now() - noSeederSince > NO_SEEDER_FAIL_MS && now() - lastProgressAt > NO_SEEDER_FAIL_MS) {
             const it3 = this.items.get(fileId)
-            if (it3 && it3.status === 'downloading') {
+            if (it3 && (it3.status === 'downloading' || it3.status === 'queued')) {
               this.setStatus(it3, 'fail', 'sem peers com o arquivo no swarm — toque em retomar quando um seeder conectar')
             }
             return
           }
+        } else {
+          noSeederSince = null
         }
 
         await sleep(400)
@@ -357,10 +386,12 @@ class DownloadManager {
       this.persist()
       this.emit()
       this.notifyDone(cur)
-      // Arquivo já está em disco: os chunks em RAM não servem mais para nada.
-      // Sem isto, `files` guardava o `Map<data>` inteiro (200 MB por arquivo)
-      // pelo resto da sessão, e `restoreLocalFiles` o re-registrava a cada boot.
-      try { fileSwarm.releaseChunks(fileId) } catch { /* best-effort */ }
+      // Arquivo já está em disco. Os bytes da RAM não servem mais, mas o
+      // BITFIELD fica: o card continua mostrando "100%/Baixado" (antes voltava
+      // a 0%) e o peer segue sendo um seeder de verdade (os bytes voltam do
+      // spool quando alguém pedir). `releaseChunks` aqui era o bug: apagava o
+      // spool e deixava o anúncio mentindo.
+      try { fileSwarm.markDownloaded(fileId) } catch { /* best-effort */ }
     } catch (e: any) {
       const cur = this.items.get(fileId)
       if (cur) this.setStatus(cur, 'save-fail', String(e?.message ?? e))

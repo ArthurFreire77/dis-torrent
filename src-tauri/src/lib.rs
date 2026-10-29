@@ -784,17 +784,52 @@ struct CommunityView {
     description: String,
     category: String,
     icon: String,
+    /// Sou o dono? A UI usa isto para decidir se mostra "gerar convite"
+    /// (só o dono assina) em vez de deixar o botão falhar em runtime.
+    is_owner: bool,
+}
+
+/// Pareamento real de UM membro, exposto à UI.
+#[derive(Debug, Serialize)]
+struct MemberPairingView {
+    fp: String,
+    nickname: String,
+    role: String,
+    /// connected | relay | connecting | reconnecting | pending_join | offline
+    state: String,
+    via_relay: bool,
+    is_owner: bool,
+    is_self: bool,
+}
+
+/// Convidado de servidor como a UI precisa: o token e (quando dá) o link.
+#[derive(Debug, Serialize)]
+struct InviteView {
+    /// Token CRU, base64url, sem truncação. É o mecanismo principal: funciona
+    /// por qualquer app de mensagem e não depende de esquema registrado.
+    token: String,
+    /// Deep link `distorrent://invite?invite=...`. Pode não abrir em
+    /// plataformas onde o esquema não foi registrado — por isso a UI sempre
+    /// oferece o token ao lado.
+    link: String,
+    /// Expiração (epoch ms). A UI mostra quando o convite vence em vez de
+    /// prometer "revogar" (não há revogação: o token é stateless).
+    expires_at_ms: i64,
+    /// Escopo: `open` = qualquer portador; `fp` = só o fingerprint indicado.
+    scope: String,
 }
 
 #[tauri::command]
 fn communities_list(state: State<AppState>) -> Result<Vec<CommunityView>, String> {
     let engine = engine(&state)?;
+    let me = engine.identity().fingerprint.clone();
     let mut out = Vec::new();
     for (id, name, owner) in engine.store_list_communities() {
         let (description, category, icon) = engine.community_meta(&id).unwrap_or_default();
         out.push(CommunityView {
             channels: engine.store_list_channels(&id),
             members: engine.store_list_members(&id),
+            is_owner: owner == me,
             id,
             name,
             owner_fp: owner,
@@ -804,6 +839,28 @@ fn communities_list(state: State<AppState>) -> Result<Vec<CommunityView>, String
         });
     }
     Ok(out)
+}
+
+/// Estado de pareamento por membro — a EVIDÊNCIA que a UI precisa para não
+/// pintar "online" só porque o nome está no roster.
+#[tauri::command]
+fn community_members(
+    community_id: String,
+    state: State<AppState>,
+) -> Result<Vec<MemberPairingView>, String> {
+    Ok(engine(&state)?
+        .community_member_states(&community_id)
+        .into_iter()
+        .map(|m| MemberPairingView {
+            fp: m.fp,
+            nickname: m.nickname,
+            role: m.role,
+            state: m.state,
+            via_relay: m.via_relay,
+            is_owner: m.is_owner,
+            is_self: m.is_self,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -842,28 +899,106 @@ fn community_set_meta(
         .map_err(err)
 }
 
+/// Gera o token de convite do servidor.
+///
+/// `member_fp` é OPCIONAL e existe só para convite direcionado. O padrão é o
+/// convite ABERTO (wildcard `000000000000`), que é o único que faz sentido no
+/// botão "Convidar pessoas": um token amarrado ao fingerprint de QUEM GEROU é
+/// inútil para terceiros — o `join_community` do outro lado recusa com
+/// "convite é para outro fingerprint". Esse era o bug central do fluxo de
+/// convite.
+///
+/// A UI antiga passava `identity.fingerprint` em três telas diferentes e o
+/// convite nunca funcionava fora do próprio criador. Agora o parâmetro é
+/// opcional e o chamador que quiser prender o convite a alguém passa o fp
+/// explicitamente.
 #[tauri::command]
 fn make_invite(
     community_id: String,
-    member_fp: String,
+    member_fp: Option<String>,
     state: State<AppState>,
 ) -> Result<String, String> {
-    let member_fp = member_fp.trim().to_lowercase();
-    if member_fp != "000000000000"
+    const WILDCARD: &str = "000000000000";
+    let raw = member_fp.unwrap_or_default();
+    let member_fp = if raw.trim().is_empty() {
+        WILDCARD.to_string()
+    } else {
+        raw.trim().to_lowercase()
+    };
+    if member_fp != WILDCARD
         && (member_fp.len() != 12 || !member_fp.chars().all(|c| c.is_ascii_hexdigit()))
     {
         return Err(
-            "fingerprint do convidado deve ter 12 hex (ou use 000000000000 p/ link aberto)".into(),
+            "fingerprint do convidado deve ter 12 hex (ou vazio para convite aberto)".into(),
         );
     }
     engine(&state)?
         .make_invite(&community_id, &member_fp, 7 * 24 * 3600 * 1000)
-        .map_err(err)
+        .map_err(presentation_error)
+}
+
+/// Erro do motor → texto para a pessoa.
+///
+/// `DistorrentError::Protocol` formata como `protocol: <msg>`. Esse prefixo
+/// vazava para a tela ("protocol: convite expirado") e fazia o erro parecer
+/// falha de sistema, não uma orientação. Aqui só removemos o rótulo interno;
+/// nenhuma mensagem é inventada.
+fn presentation_error(e: impl std::fmt::Display) -> String {
+    let raw = e.to_string();
+    raw.strip_prefix("protocol: ")
+        .or_else(|| raw.strip_prefix("crypto: "))
+        .or_else(|| raw.strip_prefix("storage: "))
+        .unwrap_or(&raw)
+        .to_string()
 }
 
 #[tauri::command]
 fn join_community(token: String, state: State<AppState>) -> Result<String, String> {
-    engine(&state)?.join_community(token.trim()).map_err(err)
+    engine(&state)?
+        .join_community(token.trim())
+        .map_err(presentation_error)
+}
+
+/// Gera convite com token E link no MESMO passo.
+///
+/// Antes cada tela montava o link por conta própria e duas delas usavam
+/// `window.location.origin` — no Tauri isso é `http://tauri.localhost`, um
+/// endereço que não existe fora do WebView. Aqui o link é montado no Rust com
+/// o esquema real (`distorrent://`), e o token vai separado para o fallback
+/// por mensagem.
+#[tauri::command]
+fn make_invite_link(
+    community_id: String,
+    member_fp: Option<String>,
+    state: State<AppState>,
+) -> Result<InviteView, String> {
+    const WILDCARD: &str = "000000000000";
+    const TTL_MS: i64 = 7 * 24 * 3600 * 1000;
+    let raw = member_fp.unwrap_or_default();
+    let fp = if raw.trim().is_empty() {
+        WILDCARD.to_string()
+    } else {
+        raw.trim().to_lowercase()
+    };
+    if fp != WILDCARD && (fp.len() != 12 || !fp.chars().all(|c| c.is_ascii_hexdigit())) {
+        return Err("fingerprint do convidado deve ter 12 hex".into());
+    }
+    let token = engine(&state)?
+        .make_invite(&community_id, &fp, TTL_MS)
+        .map_err(presentation_error)?;
+    // `urlencode` suficiente para query string: o token é base64url (sem
+    // `+`/`/`/`=`), mas percent-encodar é o contrato do esquema.
+    let link = format!("distorrent://invite?invite={token}");
+    Ok(InviteView {
+        token,
+        link,
+        expires_at_ms: distorrent_core::identity::now_ms() + TTL_MS,
+        scope: if fp == WILDCARD {
+            "open".into()
+        } else {
+            "fp".into()
+        },
+    })
 }
 
 #[tauri::command]
@@ -2330,6 +2465,10 @@ fn presence_get(
 // `display_name`/`avatar_b64`/`banner_b64`. Sem isto o Tauri 2 converte os
 // argumentos para camelCase e o invoke falha com "missing required key
 // displayName" — salvar perfil simplesmente não funcionava.
+//
+// `remove_avatar`/`remove_banner` existem porque string vazia sempre significou
+// "mantenha a foto atual": sem uma flag explícita era impossível APAGAR avatar
+// ou capa pela interface.
 #[tauri::command(rename_all = "snake_case")]
 fn profile_set(
     display_name: String,
@@ -2337,11 +2476,29 @@ fn profile_set(
     avatar_b64: String,
     banner_b64: String,
     accent: String,
+    remove_avatar: Option<bool>,
+    remove_banner: Option<bool>,
     state: State<AppState>,
 ) -> Result<distorrent_core::social::ProfileView, String> {
     engine(&state)?
-        .social_profile_set(&display_name, &about, &avatar_b64, &banner_b64, &accent)
+        .social_profile_set_full(
+            &display_name,
+            &about,
+            &avatar_b64,
+            &banner_b64,
+            &accent,
+            remove_avatar.unwrap_or(false),
+            remove_banner.unwrap_or(false),
+        )
         .map_err(err)
+}
+
+/// Força a reconciliação de perfis agora (botão "sincronizar" e boot da UI).
+/// O motor também faz isso sozinho no boot, na reconexão e a cada 10 min.
+#[tauri::command]
+fn profile_sync_now(state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.sync_profiles_with_peers();
+    Ok(())
 }
 
 #[tauri::command]
@@ -3437,7 +3594,6 @@ fn save_file_stream(
     total_bytes: u64,
     state: State<AppState>,
 ) -> Result<String, String> {
-    use base64::{engine::general_purpose, Engine as _};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
 
@@ -3470,9 +3626,17 @@ fn save_file_stream(
         return Err("save_file_stream: nome de arquivo inválido (traversal bloqueado)".into());
     }
 
-    let bytes = general_purpose::STANDARD
-        .decode(&data_b64)
-        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(&data_b64))
+    // Decodifica cada pedaço ANTES do join.
+    //
+    // BUG REAL (progresso eterno em 0% / "save travou em decode base64"): o
+    // frontend manda um lote de 16 chunks e monta `parts.join('')`. Cada bloco
+    // tem 262144 bytes — 262144 % 3 == 1 —, então o base64 de CADA bloco
+    // termina em `==`. Concatenar põe `==` no MEIO da string, e tanto STANDARD
+    // quanto STANDARD_NO_PAD rejeitam padding não-terminal com
+    // `InvalidByte(61, offset)`. Resultado: nenhum byte era gravado e o
+    // download "concluía" sem arquivo. Agora a string é fatiada nos limites de
+    // base64 e cada pedaço é decodificado separadamente.
+    let bytes = decode_b64_batches(&data_b64)
         .map_err(|e| format!("save_file_stream travou em decode base64: {e}"))?;
 
     // Teto anti-OOM por LOTE e por TOTAL. Sem teto, um peer malicioso manda
@@ -3611,6 +3775,68 @@ fn save_file_stream(
     }
 
     Ok(tmp.to_string_lossy().to_string())
+}
+
+/// Decodifica uma sequência de lotes base64 CONCATENADOS (cada um com padding
+/// próprio) num único buffer.
+///
+/// Por que não decodificar a string inteira: o frontend envia 16 blocos de
+/// 256 KiB por chamada de `save_file_stream` e os junta com `join('')`. Como
+/// 262144 % 3 == 1, o base64 de cada bloco termina em `==`, e a string
+/// resultante tem padding no meio — rejeitada por qualquer engine base64
+/// canônica. Aqui os pedaços são separados nos limites válidos (múltiplos de 4
+/// caracteres) e decodificados um a um, o que também valida cada pedaço
+/// individualmente em vez de aceitar lixo no meio.
+fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
+    use base64::{engine::general_purpose, Engine as _};
+    let s: &[u8] = data.as_bytes();
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    if s.len() % 4 != 0 {
+        return Err(format!(
+            "comprimento base64 inválido ({} bytes, não múltiplo de 4)",
+            s.len()
+        ));
+    }
+    // Cada `==` ou `=` terminal fecha um pedaço; o próximo começa logo depois.
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < s.len() {
+        // Um pedaço é um múltiplo de 4 caracteres que termina em padding OU o
+        // fim da string. Percorremos de 4 em 4 para não confundir `=` de dados
+        // (que não existe em base64 padrão) com padding real.
+        let end = i + 4;
+        let pad = if end >= 4 && s[end - 1] == b'=' {
+            if end >= 2 && s[end - 2] == b'=' {
+                2
+            } else {
+                1
+            }
+        } else {
+            0
+        };
+        if pad > 0 {
+            let piece = &s[start..end];
+            let decoded = general_purpose::STANDARD
+                .decode(piece)
+                .map_err(|e| format!("lote inválido em offset {start}: {e}"))?;
+            out.extend_from_slice(&decoded);
+            start = end;
+        }
+        i = end;
+    }
+    if start < s.len() {
+        // Último pedaço sem padding (arquivo cujo fim não caiu em `=`).
+        let piece = &s[start..];
+        let decoded = general_purpose::STANDARD
+            .decode(piece)
+            .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(piece))
+            .map_err(|e| format!("último lote inválido em offset {start}: {e}"))?;
+        out.extend_from_slice(&decoded);
+    }
+    Ok(out)
 }
 
 /// Teto do fluxo em lotes. Espelha a validacao do frontend (VITE_DISTORRENT_MAX_FILE_MB,
@@ -4187,7 +4413,29 @@ fn main() {
     // `mut` só é usado no desktop (o autostart é reatribuído); no Android o
     // bloco `#[cfg(desktop)]` some e o compilador reclamaria de `unused_mut`.
     #[cfg_attr(mobile, allow(unused_mut))]
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // SINGLE INSTANCE PRIMEIRO (desktop): o plugin de single-instance precisa
+    // ser o PRIMEIRO registrado para capturar a URL antes do resto do setup.
+    // Com a feature `deep-link`, ele entrega os argumentos da 2ª instância ao
+    // `DeepLink` da 1ª, que emite `deep-link://new-url` — é assim que um
+    // convite aberto com o app JÁ ABERTO chega ao frontend no Windows/Linux,
+    // sem subir um segundo motor P2P sobre o mesmo SQLite.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Traz a janela existente para a frente: quem clicou num convite
+            // espera VER o app, não só um efeito silencioso.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            // O `handle_cli_arguments` do plugin de deep-link é chamado pelo
+            // próprio single-instance (feature `deep-link`); nenhum parsing
+            // manual de argv aqui — duplicar o parser criaria dois caminhos.
+        }));
+    }
+    builder = builder
         .plugin(downloads_plugin())
         .plugin(tauri_plugin_deep_link::init())
         // Notificações nativas (toast do Windows via WinRT, NotificationManager
@@ -4237,8 +4485,10 @@ fn main() {
             vault_change,
             local_addresses,
             communities_list,
+            community_members,
             create_community,
             make_invite,
+            make_invite_link,
             join_community,
             send_channel_message,
             network_status,
@@ -4381,6 +4631,7 @@ fn main() {
             profile_set,
             profile_get,
             profile_list,
+            profile_sync_now,
             nickname_set,
             nickname_get,
             message_search,
@@ -4505,6 +4756,25 @@ fn main() {
                 std::thread::spawn(move || {
                     let _ = Store::open(&warm);
                 });
+            }
+            // REGISTRO DO ESQUEMA DE CONVITE (desktop).
+            //
+            // O bundler do Tauri normalmente grava a associação
+            // `distorrent://` no sistema. Este app NÃO usa o bundler no
+            // Windows (o instalador é Inno Setup) e o `.desktop` do Linux
+            // também não declara o MimeType — sem um registro explícito,
+            // clicar num convite mostra "nenhum aplicativo associado".
+            //
+            // `register_all()` é idempotente e grava HKCU\Software\Classes
+            // (Windows) / xdg-mime (Linux) para os schemes do tauri.conf.json.
+            // Falha aqui NÃO derruba o boot: o convite por token continua
+            // funcionando, que é o fallback obrigatório.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register_all() {
+                    eprintln!("deep-link: não consegui registrar o esquema distorrent:// ({e}) — o convite por token continua funcionando");
+                }
             }
             // Liga o WebRTC no WebKitGTK (Linux). TEM que estar NESTE closure:
             // um segundo `.setup()` SOBRESCREVE o anterior no Tauri, e aí o
@@ -4650,4 +4920,49 @@ fn isolate_fontconfig_cache(data_dir: &std::path::Path) {
         "[distorrent] fontconfig: cache privado em {}",
         target.display()
     );
+}
+
+// ============================== TESTES ==============================
+#[cfg(test)]
+mod tests {
+    use super::decode_b64_batches;
+    use base64::{engine::general_purpose, Engine as _};
+
+    /// Regressão do bug que deixava TODO download preso em 0%: o frontend
+    /// concatena lotes de base64 e cada bloco de 256 KiB termina em `==`.
+    #[test]
+    fn decodifica_lotes_concatenados_com_padding_no_meio() {
+        // 262144 % 3 == 1 -> base64 de cada bloco termina em "=="
+        let bloco = vec![0xA5u8; 262_144];
+        let um = general_purpose::STANDARD.encode(&bloco);
+        assert!(
+            um.ends_with("=="),
+            "premissa do bug: bloco termina em padding"
+        );
+        let concatenado = format!("{um}{um}{um}");
+        // A decodificação direta falha — é exatamente o que acontecia.
+        assert!(general_purpose::STANDARD.decode(&concatenado).is_err());
+
+        let out = decode_b64_batches(&concatenado).expect("lote concatenado deve decodificar");
+        assert_eq!(out.len(), 3 * 262_144);
+        assert!(out.iter().all(|b| *b == 0xA5));
+    }
+
+    #[test]
+    fn decodifica_base64_simples_e_vazio() {
+        assert!(decode_b64_batches("").unwrap().is_empty());
+        let out = decode_b64_batches("aGVsbG8=").unwrap();
+        assert_eq!(out, b"hello");
+    }
+
+    /// Um lote corrompido precisa virar erro, não bytes truncados.
+    #[test]
+    fn rejeita_lote_corrompido() {
+        assert!(decode_b64_batches("aGVsbG8=".to_string().as_str()).is_ok());
+        assert!(
+            decode_b64_batches("aGVsbG8").is_err(),
+            "comprimento não múltiplo de 4"
+        );
+        assert!(decode_b64_batches("!!!!!!!!").is_err(), "alfabeto inválido");
+    }
 }

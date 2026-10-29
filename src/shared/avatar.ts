@@ -1,10 +1,16 @@
-// Avatar/banner: comprime no aparelho antes do P2P (avatar ≤128px/100KB,
-// banner ≤512px/300KB). Compressão 100% local, sem rede.
+// Avatar/banner: comprime no aparelho antes do P2P.
+//
+// Os limites NÃO são estéticos — são o que faz a foto chegar no outro lado.
+// O `ProfileSet` viaja dentro de um frame da sessão (1 MiB) e, sob CGNAT, é
+// fatiado pelo relay em pedaços de 3 KB com evicção a 384 KiB por tópico. Um
+// avatar de 100 KB + capa de 300 KB (os limites antigos, em base64) passavam de
+// 500 KB e o perfil chegava truncado — a foto "nunca era compartilhada".
+// Estes números espelham `PROFILE_IMG_B64_MAX`/`PROFILE_BANNER_B64_MAX` do core.
 
 export const AVATAR_MAX_PX = 128
-export const AVATAR_MAX_BYTES = 100_000
+export const AVATAR_MAX_BYTES = 55_000
 export const BANNER_MAX_PX = 512
-export const BANNER_MAX_BYTES = 300_000
+export const BANNER_MAX_BYTES = 80_000
 
 function loadImage(dataUrl: string): Promise<HTMLImageElement> {
   return new Promise((res, rej) => {
@@ -40,16 +46,18 @@ export async function compressImage(
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('canvas indisponível')
   ctx.drawImage(img, 0, 0, w, h)
-  // Tenta JPEG primeiro (menor); se estourar, reduz qualidade em 2 passos.
-  for (const q of [quality, 0.7, 0.55]) {
+  // Tenta JPEG do melhor para o pior. Mais degraus que antes: com o teto
+  // menor (exigido pelo frame do P2P) uma foto de celular precisa de 1-2
+  // passos extras em vez de ser recusada.
+  for (const q of [quality, 0.72, 0.6, 0.45, 0.35]) {
     const url = canvas.toDataURL('image/jpeg', q)
     const b64 = url.slice(url.indexOf(',') + 1)
     if (b64.length * 0.75 <= maxBytes) return b64
   }
   throw new Error(
     maxPx === AVATAR_MAX_PX
-      ? 'avatar ainda passa de 100 KB após compressão — use uma imagem menor'
-      : 'banner ainda passa de 300 KB após compressão — use uma imagem menor',
+      ? `avatar ainda passa de ${Math.round(AVATAR_MAX_BYTES / 1000)} KB após compressão — use uma imagem menor`
+      : `capa ainda passa de ${Math.round(BANNER_MAX_BYTES / 1000)} KB após compressão — use uma imagem menor`,
   )
 }
 

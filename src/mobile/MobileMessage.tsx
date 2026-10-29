@@ -44,7 +44,8 @@ function Avatar({ name, fp, size = 36, avatarB64, accent }: {
   // Avatar salvo pelo usuário tem precedência sobre a cor gerada por fp.
   if (avatarB64 && !err) {
     return (
-      <img src={`data:image/png;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
+      // JPEG: é o formato que `compressImage` produz (shared/avatar.ts).
+      <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
         style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring }} />
     )
   }

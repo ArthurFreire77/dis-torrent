@@ -6,7 +6,7 @@ import { EmojiPicker } from '../shared/EmojiPicker'
 import MessageList, { type MessageListHandle } from '../components/social/MessageList'
 import { BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel, PinsPanel, ProfileModal, SearchPanel, ThreadList, ThreadViewModal, useShortcuts, type Command, type InboxTab } from '../components/social/Social'
 import { services } from '../services'
-import type { Identity, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage } from '../services/models'
+import type { Identity, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage, MemberPairing } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 import {
   useConversations,
@@ -23,6 +23,17 @@ import DownloadsPanel from '../components/DownloadsPanel'
 import CreateServerWizard from '../components/CreateServerWizard'
 import BotConfigPanel from '../components/BotConfigPanel'
 import ServerSettings from '../components/server/ServerSettings'
+import {
+  JoinServerForm,
+  ServerDetails,
+  ServerList,
+  ServerHubModal,
+  InvitePanel,
+  summarize,
+  type ServerSummary,
+} from '../components/server/ServerHub'
+import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
+import { Modal, Notice } from '../shared/ui'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
@@ -684,36 +695,79 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [serverMenuOpen, setServerMenuOpen] = useState(false)
   const [createdServerToken, setCreatedServerToken] = useState('')
   const [createdServerId, setCreatedServerId] = useState<string | null>(null)
+  /** Erro próprio do modal de convite. Antes caía no `error` global, que fica
+   * atrás do modal — o usuário via o botão falhar sem explicação. */
+  const [inviteTokenError, setInviteTokenError] = useState<string | null>(null)
   const [joinToken, setJoinToken] = useState('')
   const [joinBusy, setJoinBusy] = useState(false)
+  /** Token recebido por deep link, aguardando o shell estar pronto. */
+  const [inviteFromLink, setInviteFromLink] = useState<string | null>(null)
+  /** Pareamento REAL por servidor selecionado (não derivado de lista). */
+  const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
+
+  // Convite recebido por deep link: abre o fluxo de entrada assim que a
+  // identidade está destravada. Antes o convite com o app aberto era perdido
+  // porque os efeitos liam a URL uma única vez na montagem.
   useEffect(() => {
-    // Link de convite público: /d/distorrent?invite=TOKEN (vindo da rota /invite/:token)
-    try {
-      const q = new URLSearchParams(window.location.search)
-      const invite = q.get('invite')
-      if (invite) {
-        setJoinToken(invite)
-        setServerFlow('join')
-        setShowCreateServer(true)
-        history.replaceState(null, '', window.location.pathname)
-      }
-    } catch { /* ignore */ }
-  }, [])
+    if (phase !== 'app') return
+    const token = consumeInvite() ?? peekInvite()
+    if (!token) return
+    setJoinToken(token)
+    setInviteFromLink(token)
+    setServerFlow('join')
+    setShowCreateServer(true)
+  }, [phase])
 
   useEffect(() => {
-    // abre o fluxo de convite também para quem acabou de criar conta/desbloquear
-    if (phase !== 'app') return
-    try {
-      const q = new URLSearchParams(window.location.search)
-      const invite = q.get('invite')
-      if (invite) {
-        setJoinToken(invite)
-        setServerFlow('join')
-        setShowCreateServer(true)
-        history.replaceState(null, '', window.location.pathname)
+    return subscribeInvite((token) => {
+      setJoinToken(token)
+      setInviteFromLink(token)
+      setServerFlow('join')
+      setShowCreateServer(true)
+    })
+  }, [])
+
+  // Estado de pareamento do servidor selecionado — a evidência real usada pelo
+  // painel e pelo modal. Reconsulta a cada 5s (barato: leitura de links em
+  // memória no Rust) e em eventos de rede.
+  useEffect(() => {
+    setMemberPairing([])
+    if (!selCommunity) return
+    let alive = true
+    const load = () => {
+      services
+        .communityMembers(selCommunity)
+        .then((m) => {
+          if (alive) setMemberPairing(m ?? [])
+        })
+        .catch(() => {
+          /* engine ainda subindo: mantém o último estado real */
+        })
+    }
+    load()
+    const t = window.setInterval(load, 5000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [selCommunity, communities.length])
+
+  /** Resumo por servidor para a lista (online/total/pendente). */
+  const serverSummaries = useMemo<ServerSummary[]>(() => {
+    return communities.map((c) => {
+      const st = c.id === selCommunity ? memberPairing : []
+      const s = summarize(st)
+      return {
+        community: c,
+        online: s.online,
+        total: s.total > 0 ? s.total : c.members.length,
+        pending: s.pending,
       }
-    } catch { /* ignore */ }
-  }, [phase])
+    })
+  }, [communities, selCommunity, memberPairing])
+  // A leitura de `?invite=` foi centralizada em `App.tsx` (services/deepLink):
+  // dois efeitos lendo a URL em momentos diferentes era o que fazia o convite
+  // ser processado duas vezes no boot e ZERO vezes com o app já aberto.
 
   const [oldPass, setOldPass] = useState('')
   const [newPass, setNewPass] = useState('')
@@ -1671,9 +1725,21 @@ export default function ThemeShell({ designId }: {designId:string}){
     })
   }
 
+  /**
+   * Token de convite ABERTO do servidor selecionado.
+   *
+   * Antes esta função passava `identity.fingerprint` como `member_fp` e, no
+   * `catch`, devolvia o ID do servidor como se fosse token. Os dois erros
+   * juntos explicam o sintoma "o token nunca funciona": o convite ficava
+   * preso ao fingerprint de quem gerou (o convidado recebia "convite é para
+   * outro fingerprint") e, quando a geração falhava, a UI copiava um id que
+   * nem base64 é.
+   *
+   * Agora: sem `memberFp` = convite aberto, e erro é erro (sem fallback
+   * mentiroso). Quem não é dono recebe a mensagem do core.
+   */
   async function generateToken(communityId: string): Promise<string> {
-    try { return await services.makeInvite(communityId, identity?.fingerprint ?? '000000000000') }
-    catch { return communityId }
+    return services.makeInvite(communityId)
   }
 
   async function openInviteModal() {
@@ -1681,9 +1747,10 @@ export default function ThemeShell({ designId }: {designId:string}){
     setServerMenuOpen(false)
     setShowInvite(true)
     setInviteToken('')
+    setInviteTokenError(null)
     setInviteBusy(true)
     try { setInviteToken(await generateToken(selCommunity)) }
-    catch (e: any) { setError(String(e?.message ?? e)) }
+    catch (e: any) { setInviteTokenError(String(e?.message ?? e)) }
     finally { setInviteBusy(false) }
   }
 
@@ -1692,7 +1759,13 @@ export default function ThemeShell({ designId }: {designId:string}){
     setServerMenuOpen(false)
     try {
       const tok = await generateToken(selCommunity)
-      await navigator.clipboard?.writeText?.(tok).catch(() => {})
+      const ok = await (
+        navigator.clipboard?.writeText
+          ? navigator.clipboard.writeText(tok).then(() => true).catch(() => false)
+          : Promise.resolve(false)
+      )
+      if (ok) setNotice('Token copiado — envie por qualquer mensageiro')
+      else { setInviteToken(tok); setShowInvite(true); setError('não foi possível copiar automaticamente — copie o token do painel') }
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
@@ -2869,127 +2942,56 @@ export default function ThemeShell({ designId }: {designId:string}){
         )}
       </div>
 
-      {showInvite && selCommunity && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 80 }} onClick={() => setShowInvite(false)}>
-          <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 12, padding: 22, width: 480 }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <h3 style={{ fontWeight: 800, color: t.heading, margin: 0, flex: 1, fontSize: 18 }}>Convidar pessoas para {communities.find(c => c.id === selCommunity)?.name ?? 'servidor'}</h3>
-              <button onClick={() => setShowInvite(false)} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', fontSize: 16 }}>x</button>
-            </div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 6, lineHeight: 1.5 }}>
-              Envie o token abaixo para quem quiser entrar. O convidado clica no <b>+</b> → <b>"Entrar com convite"</b> e cola o token.
-            </div>
-            <div style={{ marginTop: 12, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: t.accent, fontWeight: 700, flex: 1, wordBreak: 'break-all' }}>
-                {inviteBusy ? 'gerando token…' : inviteLink}
-              </span>
-              <button
-                onClick={async () => { await navigator.clipboard?.writeText?.(inviteLink).catch(() => {}) }}
-                disabled={!inviteToken}
-                style={{ background: t.accent, color: '#fff', border: 'none', padding: '6px 14px', borderRadius: 8, fontWeight: 700, cursor: inviteToken ? 'pointer' : 'not-allowed', fontSize: 13, whiteSpace: 'nowrap' }}
-              >
-                Copiar link
-              </button>
-            </div>
-            <div style={{ fontSize: 11, color: muted, marginTop: 10, lineHeight: 1.5 }}>
-              Envie este LINK público — quem abrir entra direto no servidor (assine com o token embutido). Também funciona colando só o token em <b>+</b> → <b>"Entrar com convite"</b>.
-            </div>
-          </div>
-        </div>
-      )}
+      {/* PAINEL DE SERVIDORES — um único fluxo para criar/entrar/convidar.
+          Substitui três modais (convite inline, choose/create legado e o
+          "serverFlow" espalhado) que montavam o link cada um do seu jeito.
+          O hub usa `ui.Modal` e o token/link reais do core. */}
+      <ServerHubModal
+        open={showCreateServer && serverFlow !== 'create'}
+        onClose={closeServerModal}
+        mode="desktop"
+        servers={serverSummaries}
+        selectedId={selCommunity}
+        onSelect={(id) => {
+          setSelCommunity(id)
+          const c = communities.find((x) => x.id === id)
+          setSelConv(c?.channels[0]?.[0] ?? null)
+          setView('servidores')
+        }}
+        members={memberPairing}
+        onCreate={() => setServerFlow('create')}
+        onJoined={async (id) => {
+          await refreshCommunities()
+          setSelCommunity(id)
+          setView('servidores')
+          const list = await services.communitiesList().catch(() => [] as CommunityView[])
+          const c = (list ?? []).find((x) => x.id === id)
+          setSelConv(c?.channels[0]?.[0] ?? null)
+          closeServerModal()
+        }}
+        autoToken={inviteFromLink}
+        onError={(msg) => setError(msg)}
+      />
 
-      {/* modal legado: choose/join/invite. O passo 'create' virou o assistente v6 (abaixo). */}
-      {showCreateServer && serverFlow !== 'create' && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 80 }} onClick={closeServerModal}>
-          <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 16, padding: 28, width: 500, position: 'relative' }} onClick={e => e.stopPropagation()}>
-            <button onClick={closeServerModal} style={{ position: 'absolute', top: 14, right: 14, background: 'transparent', border: 'none', color: muted, cursor: 'pointer', fontSize: 18 }}>x</button>
-
-            {serverFlow === 'choose' && (
-              <>
-                <div style={{ textAlign: 'center', marginBottom: 18 }}>
-                  <div style={{ fontSize: 22, fontWeight: 900, color: t.heading }}>Crie seu próprio servidor</div>
-                  <div style={{ fontSize: 13, color: muted, marginTop: 6, lineHeight: 1.5 }}>
-                    Seu servidor é onde você e seus amigos se reúnem. Faça um e comece a conversar.
-                  </div>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                  {SERVER_TEMPLATES.map(tpl => (
-                    <button key={tpl.id} className="tpl-card" onClick={() => pickTemplate(tpl.id)}>
-                      <span style={{ display: 'flex', lineHeight: 1, color: '#fff' }}><Icon d={tpl.icon} size={32} /></span>
-                      <span style={{ fontSize: 14, fontWeight: 800, color: t.heading }}>{tpl.label}</span>
-                      <span style={{ fontSize: 11, color: muted, lineHeight: 1.4 }}>{tpl.desc}</span>
-                    </button>
-                  ))}
-                </div>
-                <div style={{ textAlign: 'center', marginTop: 18, fontSize: 13, color: muted }}>
-                  Já tem um convite?{' '}
-                  <button onClick={() => setServerFlow('join')} className="link-btn" style={{ fontSize: 13 }}>Entrar com convite</button>
-                </div>
-              </>
-            )}
-
-            {/* v6: o passo 'create' virou o CreateServerWizard (renderizado na raiz, abaixo). */}
-
-            {serverFlow === 'invite' && createdServerId && (
-              <>
-                <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 14 }}>
-                  <div style={{ width: 72, height: 72, borderRadius: '50%', background: avatarColor(createdServerId), display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30, fontWeight: 900, color: '#fff' }}>
-                    {(serverName || '?').charAt(0).toUpperCase()}
-                  </div>
-                </div>
-                <div style={{ textAlign: 'center', marginBottom: 16 }}>
-                  <div style={{ fontSize: 20, fontWeight: 900, color: t.heading }}>Convide seus amigos</div>
-                  <div style={{ fontSize: 13, color: muted, marginTop: 6, lineHeight: 1.5 }}>
-                    O servidor <b style={{ color: text }}>{serverName}</b> já aparece na sua barra à esquerda. Envie o token abaixo para quem quiser entrar.
-                  </div>
-                </div>
-                <div style={{ background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: t.accent, fontWeight: 700, flex: 1, wordBreak: 'break-all' }}>{createdServerToken ? (
-                    '__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window
-                      ? `distorrent://invite?invite=${encodeURIComponent(createdServerToken)}`
-                      : `${window.location.origin}/invite/${encodeURIComponent(createdServerToken)}`
-                  ) : createdServerId}</span>
-                  <button onClick={async () => {
-                    const link = createdServerToken
-                      ? ('__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window
-                        ? `distorrent://invite?invite=${encodeURIComponent(createdServerToken)}`
-                        : `${window.location.origin}/invite/${encodeURIComponent(createdServerToken)}`)
-                      : createdServerId
-                    await navigator.clipboard?.writeText?.(link).catch(() => {})
-                  }}
-                    style={{ background: t.accent, color: '#fff', border: 'none', padding: '6px 14px', borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }}>
-                    Copiar link
-                  </button>
-                </div>
-                <div style={{ fontSize: 11, color: muted, marginTop: 10, lineHeight: 1.5 }}>
-                  Envie o LINK público — quem abrir entra direto. O token também fica salvo: menu do servidor (setinha ao lado do nome) → <b>Convidar pessoas</b> a qualquer momento.
-                </div>
-                <button onClick={closeServerModal} style={{ width: '100%', background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 14, marginTop: 16 }}>
-                  Fechar
-                </button>
-              </>
-            )}
-
-            {serverFlow === 'join' && (
-              <>
-                <div style={{ textAlign: 'center', marginBottom: 16 }}>
-                  <div style={{ fontSize: 20, fontWeight: 900, color: t.heading }}>Entrar com convite</div>
-                  <div style={{ fontSize: 13, color: muted, marginTop: 6, lineHeight: 1.5 }}>Cole o token/ID do servidor que recebeu do dono.</div>
-                </div>
-                <input value={joinToken} onChange={e => setJoinToken(e.target.value)} placeholder="Cole o token aqui" autoFocus
-                  onKeyDown={e => { if (e.key === 'Enter') void submitJoinInvite() }}
-                  style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '12px 14px', color: text, fontSize: 15, fontFamily: 'JetBrains Mono', outline: 'none', boxSizing: 'border-box' }} />
-                <button onClick={() => void submitJoinInvite()} disabled={!joinToken.trim() || joinBusy} style={{ width: '100%', background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: joinToken.trim() && !joinBusy ? 'pointer' : 'not-allowed', opacity: joinToken.trim() && !joinBusy ? 1 : 0.5, fontSize: 14, marginTop: 12 }}>
-                  {joinBusy ? 'Conectando...' : 'Entrar'}
-                </button>
-                <div style={{ textAlign: 'center', marginTop: 8 }}>
-                  <button onClick={() => setServerFlow('choose')} className="link-btn" style={{ fontSize: 13 }}>← Voltar</button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
+      {/* Convite de um servidor JÁ aberto (menu do servidor → Convidar). */}
+      <Modal
+        open={showInvite}
+        onClose={() => setShowInvite(false)}
+        title={`Convidar para ${activeComm?.name ?? 'servidor'}`}
+        subtitle="Envie o token — ele funciona em qualquer aparelho, sem depender de link."
+        width={560}
+        dialogLabel="Convidar pessoas"
+      >
+        {inviteTokenError ? (
+          <Notice tone="danger" icon="warn">{inviteTokenError}</Notice>
+        ) : selCommunity ? (
+          <InvitePanel
+            communityId={selCommunity}
+            canCreateInvite={activeComm?.is_owner === true}
+            onError={(msg) => setError(msg)}
+          />
+        ) : null}
+      </Modal>
 
       {/* v6 — assistente de criação (4 passos + convite). O próprio wizard
           cria via services.createCommunity(name, canais, opts do wizard). */}
@@ -3768,85 +3770,13 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
+      {/* Estilos da área de servidores/mensagens.
+          A maior parte do que vivia aqui DUPLICAVA global.css (rail, server-head,
+          dd-menu, chan-row, nav-row, member-row, tpl-card, cat-head...) e, por
+          vir depois no documento, vencia as regras da folha — o mobile e o
+          desktop divergiam na mesma classe. Ficaram só as regras que NÃO têm
+          equivalente na folha e que são específicas deste shell. */}
       <style>{`
-        @media(max-width:900px){ .hide-mobile{display:none !important} .panel-desktop{position:fixed; right:0; top:0; bottom:0; z-index:40} }
-        @media(min-width:901px){ .hide-desktop{display:none !important} }
-        /* rail estilo Discord */
-        .rail-item{position:relative;display:flex;justify-content:center;width:100%}
-        .rail-pill{position:absolute;left:0;top:50%;transform:translateY(-50%);width:4px;height:0;background:#fff;border-radius:0 4px 4px 0;transition:height .15s}
-        .rail-pill.on{height:40px}
-        .rail-pill.dot{height:8px}
-        .rail-btn{width:48px;height:48px;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;border-radius:24px;transition:border-radius .15s,background .15s,color:#fff;font-weight:800;font-size:15px;flex-shrink:0}
-        .rail-btn:hover{border-radius:16px}
-        .rail-btn.active{border-radius:16px}
-        .rail-badge{position:absolute;bottom:-2px;right:-2px;min-width:18px;height:18px;border-radius:10px;background:#f23f42;color:#fff;font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;padding:0 4px;border:3px solid #1e1f22;pointer-events:none}
-        /* cabeçalho do servidor + menu */
-        .server-head{display:flex;align-items:center;gap:6px;width:100%;height:48px;padding:0 14px;border:none;border-bottom:1px solid #26272b;background:transparent;color:#f2f3f5;font-weight:800;font-size:14px;cursor:pointer}
-        .server-head:hover{background:#35373c}
-        .dd-overlay{position:fixed;inset:0;z-index:60}
-        .dd-menu{position:absolute;top:50px;left:8px;width:220px;background:#111214;border-radius:8px;padding:6px;box-shadow:0 8px 16px rgba(0,0,0,.24);z-index:61}
-        .dd-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;background:transparent;border-radius:4px;color:#b5bac1;cursor:pointer;font-size:13px;font-weight:600;text-align:left}
-        .dd-item:hover{background:#5865f2;color:#fff}
-        /* canais */
-        .chan-row{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:4px;border:none;background:transparent;color:#949ba4;cursor:pointer;font-size:14px;font-weight:600;text-align:left}
-        .chan-row:hover{background:#35373c;color:#dbdee1}
-        .chan-row.active{background:#404249;color:#f2f3f5}
-        /* navegação amigos/dms */
-        .find-btn{display:flex;align-items:center;justify-content:center;width:100%;padding:8px;border:none;border-radius:4px;background:#1e1f22;color:#949ba4;cursor:pointer;font-size:12px;font-weight:600}
-        .find-btn:hover{color:#dbdee1}
-        .nav-row{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:4px;border:none;background:transparent;color:#949ba4;cursor:pointer;font-size:14px;font-weight:600;text-align:left}
-        .nav-row:hover{background:#35373c;color:#dbdee1}
-        .nav-row.active{background:#404249;color:#f2f3f5}
-        .nav-badge{margin-left:auto;min-width:16px;height:16px;border-radius:8px;background:#f23f42;color:#fff;font-size:10px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}
-        .req-row{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border-radius:4px;background:#1e1f22}
-        .req-btn{width:24px;height:24px;border-radius:50%;border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
-        .req-btn.ok{background:#23a559}
-        .req-btn.no{background:#f23f42}
-        /* página de amigos */
-        .tab-btn{display:flex;align-items:center;gap:5px;background:transparent;border:none;color:#949ba4;cursor:pointer;font-size:14px;font-weight:600;padding:4px 8px;border-radius:4px}
-        .tab-btn:hover{color:#dbdee1;background:#3f4147}
-        .tab-btn.active{color:#f2f3f5;background:#4e5058}
-        .tab-btn.add{background:transparent;color:#23a559}
-        .tab-btn.add.active{background:#23a559;color:#fff}
-        .tab-btn.add.active:hover{background:#1f8b4c;color:#fff}
-        .tab-btn.add:hover{background:rgba(35,165,89,.12)}
-        .tab-btn.add.active{color:#fff;background:#23a559}
-        .tab-badge{min-width:16px;height:16px;border-radius:8px;background:#f23f42;color:#fff;font-size:10px;font-weight:800;display:inline-flex;align-items:center;justify-content:center;padding:0 5px}
-        .friend-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer}
-        .friend-row:hover{background:#393c41;border-radius:8px;border-color:transparent}
-        .friend-row.active{background:#404249;border-radius:8px;border-color:transparent}
-        .row-icon{width:34px;height:34px;border-radius:50%;border:none;background:#2b2d31;color:#b5bac1;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0}
-        .row-icon:hover{background:#4e5058;color:#f2f3f5}
-        .row-icon.ok{background:#23a559;color:#fff}
-        .row-icon.ok:hover{background:#1a7f43}
-        .row-icon.no{background:#f23f42;color:#fff}
-        .row-icon.no:hover{background:#c62f32}
-        .fp-copy{background:transparent;border:none;color:#00a8fc;cursor:pointer;font-family:'JetBrains Mono';font-size:12px;padding:0;word-break:break-all;text-align:left}
-        .fp-copy:hover{text-decoration:underline}
-        .add-btn{background:#23a559;color:#fff;border:none;padding:10px 18px;border-radius:6px;font-weight:800;font-size:13px;white-space:nowrap}
-        .link-btn{background:transparent;border:none;color:#00a8fc;cursor:pointer;font-weight:700;padding:0}
-        .link-btn:hover{text-decoration:underline}
-        /* compositor */
-        .composer-icon{background:transparent;border:none;color:#b5bac1;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:2px}
-        .composer-icon:hover{color:#fff}
-        .composer-icon.send{color:#5865f2}
-        /* modal de criação */
-        .tpl-card{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:16px;border-radius:10px;background:#2b2d31;border:2px solid #26272b;cursor:pointer;text-align:left}
-        .tpl-card:hover{border-color:#5865f2;background:#35373c}
-        /* layout de canais com gerenciamento */
-        .cat-head{display:flex;align-items:center;gap:4px;width:100%;padding:6px 6px 2px;border:none;background:transparent;color:#949ba4;font-size:11px;font-weight:700;letter-spacing:0.5}
-        .cat-plus{width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;color:#949ba4;border:none;background:transparent;cursor:pointer;flex-shrink:0}
-        .cat-plus:hover{background:#404249;color:#fff}
-        .chan-row-wrap{display:flex;align-items:center;gap:2px}
-        .chan-row-wrap.active .chan-row{background:#404249;color:#f2f3f5}
-        .chan-gear{width:18px;height:18px;border:none;background:transparent;color:#949ba4;cursor:pointer;display:none;align-items:center;justify-content:center;flex-shrink:0;border-radius:4px}
-        .chan-row-wrap:hover .chan-gear{display:flex}
-        .chan-gear:hover{background:#4e5058;color:#fff}
-        .type-card{display:flex;align-items:center;gap:8px;flex:1;padding:12px;border-radius:8px;background:#2b2d31;border:2px solid #26272b;cursor:pointer;color:#949ba4;font-weight:700}
-        .type-card.on{border-color:#5865f2;background:#35373c;color:#f2f3f5}
-        .member-group-head{font-size:11px;font-weight:700;letter-spacing:0.6px;color:#949ba4;padding:14px 6px 4px}
-        .member-row{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:4px;cursor:pointer}
-        .member-row:hover{background:#35373c}
         .msg-row:hover .msg-tools{display:flex !important}
         mark{background:#f0b232;color:#1e1f22;border-radius:2px}
       `}</style>
@@ -3859,6 +3789,11 @@ export default function ThemeShell({ designId }: {designId:string}){
           myFp={identity?.fingerprint ?? ''}
           onClose={() => setProfileFp(null)}
           onMessage={fp => { setProfileFp(null); void openDm({ fp }) }}
+          // Atualização IMEDIATA de todos os consumidores (avatar da barra
+          // inferior, cabeçalho, mensagens já renderizadas). O evento
+          // `profile_changed` do core também chega — aplicar os dois é
+          // idempotente porque o objeto é o persistido, não um patch.
+          onSaved={p => setSocialProfiles(prev => ({ ...prev, [p.fp]: p }))}
         />
       )}
       {showCmdK && <CommandPalette commands={commands} onClose={() => setShowCmdK(false)} />}

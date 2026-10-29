@@ -8,6 +8,7 @@ import { Markdown } from '../../shared/markdown'
 import { compressAvatar, compressBanner } from '../../shared/avatar'
 import { Ic, type IconName } from '../../shared/icons'
 import { getNote, setNote } from '../../shared/prefs'
+import { EmojiPicker } from '../../shared/EmojiPicker'
 
 const STATUS_ICONS: { id: string; icon: IconName; label: string }[] = [
   { id: 'game', icon: 'grid', label: 'Jogando' },
@@ -58,8 +59,6 @@ const T = {
   pink: '#eb459e',
   blurple: '#5865f2',
 }
-
-const QUICK_REACTIONS = ['👍', '❤️', '🔥', '😂', '🎉', '👀', '🚀', '🙏']
 
 export const PRESENCE_COLOR: Record<PresenceStatus, string> = {
   online: '#23a55a',
@@ -231,7 +230,10 @@ export function Avatar({ name, fp, size = 40, avatarB64, ring }: {
 }) {
   const [err, setErr] = useState(false)
   if (avatarB64 && !err) {
-    return <img src={`data:image/png;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
+    // `compressImage` (shared/avatar.ts) SEMPRE produz JPEG. Declarar PNG
+    // aqui funcionava só porque o navegador fareja os bytes — contrato errado
+    // que quebra em engines estritos (Android) e confunde o cache.
+    return <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
       style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring ? `2px solid ${ring}` : 'none' }} />
   }
   const h = Array.from(fp || name).reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7)
@@ -345,66 +347,40 @@ export function ReactionBar({ reactions, onToggle, onHoverList, resolveName, onA
   )
 }
 
+/**
+ * Seletor de reações do DESKTOP.
+ *
+ * Antes era um painel próprio do desktop: 8 "reações rápidas" + uma parede de
+ * emojis Unicode sem busca e sem categorias, em 250px fixos. O Android já usava
+ * o `EmojiPicker` compartilhado (busca, abas, recentes, emojis do servidor), e a
+ * diferença entre as duas plataformas era exatamente o que o usuário via como
+ * "a reação do PC é uma merda".
+ *
+ * Agora as duas usam o MESMO componente. `ReactionPicker` continua existindo
+ * como fachada para não mexer em quem já o importa (`MessageList`).
+ */
 export function ReactionPicker({ onPick, customEmojis, onClose, placement = 'up' }: {
   onPick: (e: string) => void
   customEmojis?: EmojiView[]
   onClose: () => void
-  /**
-   * Onde o painel abre em relação ao ponto de ancoragem.
-   *
-   * `up` é o padrão (mensagem no fim da lista, como o menu de contexto). Em
-   * conversas, abrir sempre para cima fazia o painel cobrir o cabeçalho do canal
-   * quando a mensagem estava no topo da tela — o usuário via o seletor solto no
-   * alto, longe da mensagem. A lista de mensagens passa `down`.
-   */
+  /** Onde o painel abre em relação ao ponto de ancoragem. */
   placement?: 'up' | 'down'
 }) {
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose() }
-    document.addEventListener('mousedown', h)
-    return () => document.removeEventListener('mousedown', h)
-  }, [onClose])
   return (
-    <div ref={ref} style={{
-      position: 'absolute', zIndex: 40,
-      // Para baixo, alinha pela ESQUERDA (embaixo da mensagem, como o mobile);
-      // para cima, pela direita, porque ali o ponto de ancoragem é a barra de
-      // ações, colada na borda direita do canal.
-      ...(placement === 'down'
-        ? { top: '100%', left: 0, marginTop: 6 }
-        : { bottom: '100%', right: 0, marginBottom: 6 }),
-      background: T.sidebar, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10,
-      boxShadow: '0 8px 24px rgba(0,0,0,.45)', width: 250,
-    }}>
-      {customEmojis && customEmojis.length > 0 && (
-        <>
-          <div style={pickerHead}>{customEmojis[0].community_id ? 'Emojis do servidor' : ''}</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-            {customEmojis.map((e) => (
-              <button key={e.id} onClick={() => { onPick(e.char); onClose() }} title={`:${e.name}:`}
-                style={{ background: T.input, border: 'none', borderRadius: 6, fontSize: 17, cursor: 'pointer', width: 28, height: 28 }}>{e.char}</button>
-            ))}
-          </div>
-        </>
-      )}
-      <div style={pickerHead}>Reações rápidas</div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-        {QUICK_REACTIONS.map((e) => (
-          <button key={e} onClick={() => { onPick(e); onClose() }}
-            style={{ background: T.input, border: 'none', borderRadius: 6, fontSize: 17, cursor: 'pointer', width: 28, height: 28 }}>{e}</button>
-        ))}
-      </div>
-      <div style={{ ...pickerHead, marginTop: 10 }}>Unicode</div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-        {Object.values(EMOJI_SHORT).map((e) => (
-          <button key={e} onClick={() => { onPick(e); onClose() }}
-            style={{ background: T.input, border: 'none', borderRadius: 6, fontSize: 17, cursor: 'pointer', width: 28, height: 28 }}>{e}</button>
-        ))}
-      </div>
+    <div className="reaction-picker" data-popover>
+      <EmojiPicker
+        open
+        onClose={onClose}
+        onPick={(e) => { onPick(e); onClose() }}
+        serverEmojis={customEmojis}
+        anchor={placement}
+        title="reações rápidas"
+      />
     </div>
   )
 }
+
+/** Cabeçalho de seção dos painéis de emoji (formulário de emoji do servidor). */
 const pickerHead: React.CSSProperties = { fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }
 
 // ============================== MODAL ==============================
@@ -491,7 +467,7 @@ export const btnDanger: React.CSSProperties = {
 
 // ============================== PERFIL ==============================
 
-export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, communityId, communityName, onRenamed }: {
+export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, communityId, communityName, onRenamed, onSaved }: {
   fp: string
   nickname: string
   myFp: string
@@ -500,6 +476,13 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   communityId?: string
   communityName?: string
   onRenamed?: () => void
+  /**
+   * Chamado com o perfil EFETIVAMENTE PERSISTIDO assim que o salvamento dá
+   * certo. Sem isto o modal era uma ilha de estado: gravava no SQLite, mas o
+   * avatar do canto inferior esquerdo (e o nome em toda a UI) só mudavam no
+   * próximo poll de 15 s — e nunca, se esse poll falhasse.
+   */
+  onSaved?: (p: ProfileView) => void
 }) {
   const [profile, setProfile] = useState<ProfileView | null>(null)
   const [presence, setPresence] = useState<PresenceView | null>(null)
@@ -561,9 +544,22 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
     setBusy(true); setErr(null)
     try {
       const p = await services.profileSet({ display_name: displayName, about, avatar_b64: avatar, banner_b64: banner, accent })
+      // Estado local = o que o core PERSISTIU (com rev/content_hash), não o
+      // patch digitado. É o mesmo objeto que os outros componentes recebem.
       setProfile(p)
-      await services.presenceSet(status, custom, customEmoji)
-      setPresence({ fp, status, custom, custom_emoji: customEmoji, updated_at: Date.now() })
+      setAvatar(p.avatar_b64)
+      setBanner(p.banner_b64)
+      onSaved?.(p)
+      // Presença é independente: se falhar, o perfil JÁ foi salvo — o erro
+      // precisa dizer isso em vez de parecer que nada foi gravado.
+      try {
+        await services.presenceSet(status, custom, customEmoji)
+        setPresence({ fp, status, custom, custom_emoji: customEmoji, updated_at: Date.now() })
+      } catch (pe: any) {
+        setErr(`perfil salvo, mas o status não foi publicado: ${String(pe?.message ?? pe)}`)
+        setEditing(false)
+        return
+      }
       setEditing(false)
     } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy(false) }
   }

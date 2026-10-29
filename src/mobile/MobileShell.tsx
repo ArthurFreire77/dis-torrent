@@ -15,6 +15,15 @@ import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { attachStream } from '../shared/mediaAttach'
 import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
+import {
+  InvitePanel,
+  JoinServerForm,
+  MemberPairingList,
+  ServerList,
+  summarize,
+  type ServerSummary,
+} from '../components/server/ServerHub'
+import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
 import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import MobileMessage from './MobileMessage'
@@ -35,7 +44,7 @@ import {
 import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
-import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage } from '../services/models'
+import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage, MemberPairing } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 
 // DisTorrent mobile — top design mobile-first (não clone do PC antigo)
@@ -639,11 +648,13 @@ export default function MobileShell() {
   const swarmNotifyRef = useRef<() => void>(() => {})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   // link de convite público (?invite=TOKEN)
-  const [pendingInvite, setPendingInvite] = useState<string | null>(null)
   const [showInvite, setShowInvite] = useState(false)
   const [inviteInput, setInviteInput] = useState('')
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteError, setInviteError] = useState<string | null>(null)
+  /** Pareamento REAL dos membros do servidor selecionado. */
+  const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
+  const [showServerDetails, setShowServerDetails] = useState(false)
   const endRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -661,26 +672,47 @@ export default function MobileShell() {
     }).catch(() => setPhase('create'))
   }, [])
 
-  // link de convite público: /m?invite=TOKEN (o App redireciona /invite/:token para cá).
-  // lê na montagem, limpa a URL e guarda o token — o modal abre ao entrar no app.
+  // link de convite público: a URL de boot foi centralizada em App.tsx
+  // (services/deepLink). Aqui só consumimos o que estiver pendente quando o
+  // app está destravado — inclusive convite que chega com o app JÁ aberto.
   useEffect(() => {
-    try {
-      const tok = new URLSearchParams(window.location.search).get('invite')
-      if (tok && tok.trim()) {
-        setPendingInvite(tok.trim())
-        window.history.replaceState(null, '', window.location.pathname + window.location.hash)
-      }
-    } catch { /* ignore */ }
-  }, [])
+    if (phase !== 'app') return
+    const token = consumeInvite() ?? peekInvite()
+    if (!token) return
+    setInviteInput(token)
+    setInviteError(null)
+    setShowInvite(true)
+  }, [phase])
 
   useEffect(() => {
-    if (phase === 'app' && pendingInvite) {
-      setInviteInput(pendingInvite)
+    return subscribeInvite((token) => {
+      setInviteInput(token)
       setInviteError(null)
       setShowInvite(true)
-      setPendingInvite(null)
+      setTab('servers')
+    })
+  }, [])
+
+  // Pareamento do servidor aberto (evidência real: direto/relay/offline).
+  useEffect(() => {
+    setMemberPairing([])
+    if (!selCommunity) return
+    let alive = true
+    const load = () => {
+      services
+        .communityMembers(selCommunity)
+        .then((m) => {
+          if (alive) setMemberPairing(m ?? [])
+        })
+        .catch(() => { /* motor subindo */ })
     }
-  }, [phase, pendingInvite])
+    load()
+    const t = window.setInterval(load, 5000)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [selCommunity, communities.length])
 
   // identidade real no CallManager (sem isso chamadas falham "sem identidade")
   useEffect(() => {
@@ -1203,12 +1235,26 @@ export default function MobileShell() {
     setInviteBusy(true); setInviteError(null)
     try {
       const id = await services.joinCommunity(tok)
-      setShowInvite(false); setInviteInput(''); setInviteError(null)
+      // "Validado" ≠ "membro": o dono ainda precisa confirmar. Fechar o modal
+      // e dizer "entrou" era o que fazia o usuário acreditar que o servidor
+      // existia quando o host estava offline. O pedido fica persistido no
+      // core e o `community_joined` abre o servidor quando chegar.
       await refreshCommunities()
-      setSelCommunity(id || null); setSelConv(null); setSelPeerFp(null)
+      setShowInvite(false)
+      setInviteInput('')
       setTab('servers')
+      if (id) {
+        const list = await services.communitiesList().catch(() => [] as CommunityView[])
+        const joined = (list ?? []).some((c) => c.id === id)
+        if (joined) {
+          setSelCommunity(id); setSelConv(null); setSelPeerFp(null)
+        } else {
+          setNotice('Convite validado. Assim que o dono confirmar, o servidor aparece aqui — o pedido continua mesmo se você fechar o app.')
+          window.setTimeout(() => setNotice(null), 8000)
+        }
+      }
     } catch (e: any) {
-      setInviteError(String(e?.message ?? e).replace(/"/g, ''))
+      setInviteError(String(e?.message ?? e).replace(/^protocol:\s*/, ''))
     } finally {
       setInviteBusy(false)
     }
@@ -2220,38 +2266,97 @@ export default function MobileShell() {
             : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
         </>}
 
-        {tab === 'servers' && <>
-          <div className="m-sec">SERVIDORES — {filteredComms.length}</div>
-          {/* Mobile é invite-only. */}
-          <button
-            onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}
-            aria-label="Entrar em servidor com convite"
-            style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: t.input, border: `1px solid ${t.border}`, color: t.text, borderRadius: 8, padding: '9px 12px', marginBottom: 6, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}
-          >
-            <span style={{ width: 22, height: 22, borderRadius: '50%', background: t.accent, color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, flexShrink: 0 }}>+</span>
-            Entrar com convite
-          </button>
-          <div style={{ fontSize: 11, color: t.muted, marginBottom: 8, lineHeight: 1.5 }}>
-            No celular você entra por convite. Para criar um servidor, use o app no PC.
-          </div>
-          {filteredComms.length === 0
-            ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button></span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
-          {activeComm && (() => {
-            const c = activeComm
-            return <>
-              <div className="m-sec">CANAIS</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                {c.channels.map(([id, name]) => (
-                  <button key={id} className={'chan-row' + (selConv === id ? ' active' : '')} onClick={() => setSelConv(id)}>
-                    <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
+        {tab === 'servers' && (() => {
+          // RESUMO por servidor com base no pareamento REAL (não em
+          // `c.members.length`, que é o roster sincronizado e não diz quem
+          // está online). Só o servidor aberto tem `memberPairing` carregado;
+          // os demais mostram o roster como total e 0 pareados até serem
+          // abertos — o que é honesto.
+          const summaries: ServerSummary[] = filteredComms.map((c) => {
+            const st = c.id === selCommunity ? memberPairing : []
+            const s = summarize(st)
+            return {
+              community: c,
+              online: s.online,
+              total: s.total > 0 ? s.total : c.members.length,
+              pending: s.pending,
+            }
+          })
+          return (
+            <>
+              {/* MOBILE É INVITE-ONLY. Criar servidor exige o assistente
+                  completo (canais/cargos/regras), que só existe no desktop —
+                  esconder o botão sem esconder a rota era o bug anterior. */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                <button
+                  onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}
+                  aria-label="Entrar em servidor com convite"
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, background: t.accent, border: 'none', color: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 800 }}
+                >
+                  <span style={{ display: 'inline-flex', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></span>
+                  Entrar com convite
+                </button>
+                {activeComm && (
+                  <button
+                    onClick={() => setShowServerDetails((v) => !v)}
+                    aria-label="Detalhes e membros do servidor"
+                    aria-expanded={showServerDetails}
+                    style={{ width: 42, flexShrink: 0, background: showServerDetails ? t.hover : t.input, border: `1px solid ${t.border}`, color: t.text, borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  >
+                    <Icon d={Icons.users} size={17} />
                   </button>
-                ))}
+                )}
               </div>
+              <div style={{ fontSize: 11, color: t.muted, marginBottom: 10, lineHeight: 1.5 }}>
+                No celular você entra por convite. Para criar um servidor, use o app no PC.
+              </div>
+
+              {summaries.length === 0
+                ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button></span>} />
+                : (
+                  <ServerList
+                    servers={summaries}
+                    selectedId={selCommunity}
+                    onSelect={(id) => { setSelCommunity(id); setShowServerDetails(false) }}
+                    emptyHint="Nenhum servidor ainda."
+                  />
+                )}
+
+              {activeComm && showServerDetails && (
+                <div style={{ marginTop: 12, padding: 12, background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 10 }}>
+                  <div className="m-sec" style={{ marginTop: 0 }}>MEMBROS — pareamento</div>
+                  <MemberPairingList
+                    members={memberPairing}
+                    emptyHint="Nenhum membro sincronizado. Se você acabou de entrar, aguarde a confirmação do dono."
+                  />
+                  <div style={{ marginTop: 14 }}>
+                    <div className="m-sec" style={{ marginTop: 0 }}>CONVITE</div>
+                    <InvitePanel
+                      communityId={activeComm.id}
+                      canCreateInvite={activeComm.is_owner === true}
+                      onError={(msg) => setError(msg)}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {activeComm && (() => {
+                const c = activeComm
+                return <>
+                  <div className="m-sec">CANAIS</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    {c.channels.map(([id, name]) => (
+                      <button key={id} className={'chan-row' + (selConv === id ? ' active' : '')} onClick={() => setSelConv(id)}>
+                        <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              })()}
             </>
-          })()}
-        </>}
+          )
+        })()}
 
         {tab === 'chats' && <>
           <div className="m-sec">CONVERSAS DIRETAS — {filteredConvs.length}</div>
@@ -2560,13 +2665,25 @@ export default function MobileShell() {
               <h3 style={{ fontWeight: 800, color: t.heading, margin: 0, flex: 1, fontSize: 18 }}>Entrar com convite</h3>
               <button aria-label="Fechar" onClick={() => setShowInvite(false)} style={{ background: 'transparent', border: 'none', color: t.muted, cursor: 'pointer', fontSize: 16 }}>x</button>
             </div>
-            <div style={{ fontSize: 12, color: t.muted, lineHeight: 1.5 }}>Você recebeu um link de convite público. O token já foi preenchido — confirme para entrar no servidor.</div>
-            <input className="m-input mono" style={{ marginTop: 14 }} value={inviteInput} onChange={e => { setInviteInput(e.target.value); setInviteError(null) }} onKeyDown={e => e.key === 'Enter' && joinInvite()} placeholder="Cole o token aqui" autoFocus autoCapitalize="none" spellCheck={false} />
-            {inviteError && <div className="m-err" style={{ marginTop: 10 }}>{inviteError}</div>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-              <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => setShowInvite(false)}>Cancelar</button>
-              <button className="m-btn" style={{ flex: 1, opacity: !inviteInput.trim() || inviteBusy ? 0.5 : 1 }} disabled={!inviteInput.trim() || inviteBusy} onClick={joinInvite}>{inviteBusy ? 'entrando…' : 'Entrar'}</button>
+            <div style={{ fontSize: 12, color: t.muted, lineHeight: 1.5, marginBottom: 4 }}>
+              Cole o token que você recebeu. Ele funciona em qualquer aparelho — o link é só um atalho.
             </div>
+            {/* O campo/colar/validação vêm do MESMO componente do desktop: um
+                caminho só, com botão de colar de verdade e mensagens claras. */}
+            <JoinServerForm
+              autoToken={inviteInput || null}
+              compact
+              onJoined={async (id) => {
+                setShowInvite(false)
+                setInviteInput('')
+                await refreshCommunities()
+                setSelCommunity(id)
+                setSelConv(null)
+                setSelPeerFp(null)
+                setTab('servers')
+              }}
+            />
+            <button className="m-btn ghost" style={{ width: '100%', marginTop: 12 }} onClick={() => setShowInvite(false)}>Cancelar</button>
           </div>
         </div>
       )}

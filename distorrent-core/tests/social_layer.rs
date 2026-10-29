@@ -767,6 +767,104 @@ fn perfil_limpa_campos_vazios() {
 }
 
 #[test]
+fn perfil_edicao_efetiva_incrementa_revisao_e_repeticao_nao() {
+    let (e, _d) = engine("ana");
+    let p1 = e.social_profile_set("Ana", "bio", "", "", "").unwrap();
+    assert_eq!(p1.rev, 1, "primeira edição começa em rev 1");
+    assert!(!p1.content_hash.is_empty());
+
+    // Salvar os MESMOS dados não pode criar revisão nova: é o que impede a
+    // reconciliação de 10 min de inventar versão a cada tique.
+    let p2 = e.social_profile_set("Ana", "bio", "", "", "").unwrap();
+    assert_eq!(p2.rev, 1);
+    assert_eq!(p2.content_hash, p1.content_hash);
+
+    let p3 = e
+        .social_profile_set("Ana Maria", "bio", "", "", "")
+        .unwrap();
+    assert_eq!(p3.rev, 2);
+    assert_ne!(p3.content_hash, p1.content_hash);
+}
+
+#[test]
+fn perfil_revisao_antiga_nao_sobrescreve_a_nova() {
+    let s = Store::open_in_memory().unwrap();
+    let a = Keypair::generate().fingerprint();
+    // Autor publica rev 2...
+    let applied = s
+        .profile_apply_remote(&a, "Ana v2", "", "", "", "", 2)
+        .unwrap();
+    assert!(applied);
+    // ...e um frame atrasado de rev 1 chega depois.
+    let applied_old = s
+        .profile_apply_remote(&a, "Ana v1", "", "", "", "", 1)
+        .unwrap();
+    assert!(!applied_old, "rev menor NÃO pode sobrescrever");
+    assert_eq!(s.profile_get(&a).unwrap().display_name, "Ana v2");
+    assert_eq!(s.profile_get(&a).unwrap().rev, 2);
+}
+
+#[test]
+fn perfil_mesma_revisao_com_conteudo_igual_nao_reescreve() {
+    let s = Store::open_in_memory().unwrap();
+    let a = Keypair::generate().fingerprint();
+    assert!(s
+        .profile_apply_remote(&a, "Ana", "bio", "", "", "#ff0000", 3)
+        .unwrap());
+    // Mesmo rev, mesmo conteúdo: nada muda e a UI não é incomodada.
+    assert!(!s
+        .profile_apply_remote(&a, "Ana", "bio", "", "", "#ff0000", 3)
+        .unwrap());
+}
+
+#[test]
+fn perfil_conflito_na_mesma_revisao_converge() {
+    let s = Store::open_in_memory().unwrap();
+    let a = Keypair::generate().fingerprint();
+    // Dois dispositivos da MESMA identidade editaram a partir da rev 1.
+    let x = "Dispositivo X";
+    let y = "Outro nome Y";
+    let hx = distorrent_core::social::profile_content_hash(x, "", "", "", "");
+    let hy = distorrent_core::social::profile_content_hash(y, "", "", "", "");
+    let primeiro = if hx > hy { x } else { y };
+    let segundo = if hx > hy { y } else { x };
+    assert!(s
+        .profile_apply_remote(&a, primeiro, "", "", "", "", 2)
+        .unwrap());
+    let aplicou_segundo = s
+        .profile_apply_remote(&a, segundo, "", "", "", "", 2)
+        .unwrap();
+    // Quem tem o maior hash vence, venha em que ordem vier: os peers convergem
+    // em vez de ficar trocando de estado um com o outro.
+    assert_eq!(aplicou_segundo, false);
+    let final_name = s.profile_get(&a).unwrap().display_name;
+    assert_eq!(
+        final_name, primeiro,
+        "o vencedor é determinístico pelo hash"
+    );
+}
+
+#[test]
+fn perfil_remove_avatar_com_flag_explicita() {
+    let (e, _d) = engine("ana");
+    let eu = e.identity().fingerprint.clone();
+    e.social_profile_set("Ana", "", "QUJD", "", "").unwrap();
+    assert_eq!(e.store_ref().profile_get(&eu).unwrap().avatar_b64, "QUJD");
+    // Sem a flag, string vazia continua significando "mantenha".
+    e.social_profile_set("Ana", "", "", "", "").unwrap();
+    assert_eq!(e.store_ref().profile_get(&eu).unwrap().avatar_b64, "QUJD");
+    // Com a flag, apaga.
+    e.social_profile_set_full("Ana", "", "", "", "", true, false)
+        .unwrap();
+    assert!(e
+        .store_ref()
+        .profile_get(&eu)
+        .unwrap()
+        .avatar_b64
+        .is_empty());
+}
+
+#[test]
 fn perfil_de_outro_peer_e_visivel() {
     let (e, _d) = engine("ana");
     let outro = Keypair::generate().fingerprint();

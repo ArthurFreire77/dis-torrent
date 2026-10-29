@@ -20,10 +20,11 @@ button{font:inherit}
   .msg-tools{opacity:1;pointer-events:auto}
 }
 
-/* Seletor de reação: no desktop o painel abre por clique e fica ancorado na
-   mensagem. Em telas pequenas (mesma largura do shell mobile) ele precisa caber
-   sem estourar a borda — largura em `min()` com o viewport. */
-.reaction-picker{width:min(250px, calc(100vw - 32px))}
+/* Seletor de reação: usa o MESMO `EmojiPicker` do mobile (busca, abas,
+   recentes, emojis do servidor) — antes o desktop tinha um painel próprio,
+   pior e sem busca. Em telas pequenas ele precisa caber sem estourar a borda. */
+.reaction-picker{position:relative}
+.reaction-picker > div{max-width:min(330px, calc(100vw - 32px))}
 
 /* mobile polish */
 @media (max-width: 768px){
@@ -39,7 +40,6 @@ input, select, textarea{ font-size:16px }
 * { scrollbar-width: thin; scrollbar-color: #3a3a3a transparent }
 * { -webkit-tap-highlight-color: transparent }
 button{ touch-action:manipulation; user-select:none }
-*:focus-visible{ outline:none; box-shadow:0 0 0 3px rgba(88,101,242,.35) }
 .hide-scrollbar{ scrollbar-width:none }
 .hide-scrollbar::-webkit-scrollbar{ display:none }
 .m-full{ height:100vh; height:100dvh; height:100svh }
@@ -47,17 +47,19 @@ button{ touch-action:manipulation; user-select:none }
 
 /* existing desktop helpers (kept for ThemeShell) */
 .rail-item{ position:relative; display:flex; align-items:center; justify-content:center }
-.rail-pill{ position:absolute; left:-8px; width:4px; height:0; background:#fff; border-radius:0 4px 4px 0; transition: height .2s, opacity .2s; opacity:0 }
+.rail-pill{ position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:0; background:#fff; border-radius:0 4px 4px 0; transition: height .2s, opacity .2s; opacity:0 }
 .rail-pill.on{ height:40px; opacity:1 }
 .rail-pill.dot{ height:10px; opacity:1 }
-.rail-btn{ width:48px; height:48px; border-radius: 16px; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: border-radius .2s, background .15s; overflow:hidden }
-.rail-btn.active{ border-radius: 14px }
-.rail-btn:hover{ border-radius:14px }
-.rail-badge{ position:absolute; right:6px; bottom:2px; min-width:14px; height:14px; padding:0 4px; background:#f23f42; color:#fff; font-size:10px; font-weight:800; border-radius:99px; display:flex; align-items:center; justify-content:center; border:2px solid #1e1f22 }
-.server-head{ width:100%; display:flex; align-items:center; gap:8px; padding:14px 14px; background:transparent; border:none; border-bottom:1px solid var(--sidebar-border, #26272b); color:#f2f3f5; font-weight:800; cursor:pointer; font-size:14 }
+/* Círculo por padrão, "squircle" no hover/ativo — o padrão do Discord e o que
+   o desktop já mostrava antes desta regra ir para a folha única. */
+.rail-btn{ width:48px; height:48px; border-radius:24px; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: border-radius .15s, background .15s; overflow:hidden; flex-shrink:0; font-weight:800; font-size:15px; color:#fff }
+.rail-btn.active, .rail-btn:hover{ border-radius:16px }
+.rail-badge{ position:absolute; right:6px; bottom:2px; min-width:14px; height:14px; padding:0 4px; background:#f23f42; color:#fff; font-size:10px; font-weight:800; border-radius:99px; display:flex; align-items:center; justify-content:center; border:2px solid #1e1f22; pointer-events:none }
+.server-head{ width:100%; display:flex; align-items:center; gap:6px; height:48px; padding:0 14px; background:transparent; border:none; border-bottom:1px solid var(--sidebar-border, #26272b); color:#f2f3f5; font-weight:800; cursor:pointer; font-size:14px }
+.server-head:hover{ background:#35373c }
 .dd-overlay{ position:fixed; inset:0; z-index:40 }
 .dd-menu{ position:absolute; top:48px; left:8px; right:8px; background:#111214; border:1px solid #26272b; border-radius:8px; padding:6px; box-shadow:0 8px 24px rgba(0,0,0,.5); z-index:50 }
-.dd-item{ width:100%; display:flex; align-items:center; gap:8px; padding:8px 10px; background:transparent; border:none; color:#dbdee1; font-size:13; font-weight:600; border-radius:4px; cursor:pointer; text-align:left }
+.dd-item{ width:100%; display:flex; align-items:center; gap:8px; padding:8px 10px; background:transparent; border:none; color:#dbdee1; font-size:13px; font-weight:600; border-radius:4px; cursor:pointer; text-align:left }
 .dd-item:hover{ background:#35373c; color:#fff }
 .dd-item.invite{ color:#23a559 }
 .cat-head{ display:flex; align-items:center; gap:4px; font-size:11px; font-weight:700; letter-spacing:.5px; color:#949ba4; padding:4px 2px }
@@ -65,7 +67,7 @@ button{ touch-action:manipulation; user-select:none }
 .cat-plus:hover{ color:#fff; background:#35373c }
 .chan-row-wrap{ display:flex; align-items:center; gap:2px; border-radius:4px }
 .chan-row-wrap.active{ background:#35373c }
-.chan-row{ flex:1; display:flex; align-items:center; gap:6px; padding:6px 8px; background:transparent; border:none; color:#949ba4; font-size:14; font-weight:500; border-radius:4px; cursor:pointer; min-width:0 }
+.chan-row{ flex:1; display:flex; align-items:center; gap:6px; padding:6px 8px; background:transparent; border:none; color:#949ba4; font-size:14px; font-weight:500; border-radius:4px; cursor:pointer; min-width:0 }
 .chan-row.active{ color:#f2f3f5 }
 .chan-row:hover{ background:#35373c; color:#dbdee1 }
 .chan-row-wrap.voice-active{ background:#1a3329; border:1px solid #23a55944 }
@@ -74,35 +76,41 @@ button{ touch-action:manipulation; user-select:none }
 .chan-gear:hover{ color:#fff; background:#35373c }
 .type-card{ flex:1; display:flex; align-items:center; justify-content:center; gap:8px; padding:12px; background:#1e1f22; border:1px solid #26272b; border-radius:8px; color:#949ba4; font-weight:700; cursor:pointer }
 .type-card.on{ background:#404249; color:#fff; border-color:#5865f2 }
-.nav-row{ width:100%; display:flex; align-items:center; gap:10px; padding:8px 8px; background:transparent; border:none; color:#949ba4; font-size:14; font-weight:500; border-radius:4px; cursor:pointer; text-align:left }
+.nav-row{ width:100%; display:flex; align-items:center; gap:10px; padding:8px 8px; background:transparent; border:none; color:#949ba4; font-size:14px; font-weight:500; border-radius:4px; cursor:pointer; text-align:left }
 .nav-row.active{ background:#404249; color:#fff }
 .nav-row:hover{ background:#35373c; color:#dbdee1 }
 .nav-badge{ margin-left:auto; background:#f23f42; color:#fff; font-size:11px; font-weight:800; padding:2px 6px; border-radius:99px }
-.find-btn{ width:100%; background:#1e1f22; border:1px solid #26272b; border-radius:4px; padding:8px 10px; color:#949ba4; font-size:12; text-align:left; cursor:pointer }
-.tab-btn{ background:transparent; border:none; color:#949ba4; font-size:14; font-weight:600; padding:6px 10px; border-radius:4px; cursor:pointer; display:flex; align-items:center; gap:6px }
-.tab-btn.active{ background:#404249; color:#fff }
+.find-btn{ width:100%; background:#1e1f22; border:1px solid #26272b; border-radius:4px; padding:8px 10px; color:#949ba4; font-size:12px; text-align:center; cursor:pointer }
+.find-btn:hover{ color:#dbdee1 }
+.tab-btn{ background:transparent; border:none; color:#949ba4; font-size:14px; font-weight:600; padding:6px 10px; border-radius:4px; cursor:pointer; display:flex; align-items:center; gap:6px }
+.tab-btn:hover{ color:#dbdee1; background:#3f4147 }
+.tab-btn.active{ background:#4e5058; color:#fff }
 .tab-btn.add{ background:transparent; color:#23a559 }
+.tab-btn.add:hover{ background:rgba(35,165,89,.12) }
+.tab-btn.add.active{ background:#23a559; color:#fff }
 .tab-badge{ background:#f23f42; color:#fff; font-size:10px; font-weight:800; padding:1px 5px; border-radius:99px }
-.fp-copy{ background:transparent; border:none; color:#00a8fc; font-family:JetBrains Mono; font-size:12; cursor:pointer; text-decoration:underline }
-.add-btn{ background:#5865f2; color:#fff; border:none; padding:8px 14px; border-radius:4px; font-weight:700; cursor:pointer }
+.fp-copy{ background:transparent; border:none; color:#00a8fc; font-family:'JetBrains Mono',monospace; font-size:12px; cursor:pointer; text-decoration:underline; padding:0; word-break:break-all; text-align:left }
+.add-btn{ background:#23a559; color:#fff; border:none; padding:10px 18px; border-radius:6px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap }
 .friend-row{ display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid #2b2d31; cursor:pointer }
-.friend-row:hover{ background:#2b2d31 }
-.friend-row.active{ background:#404249 }
+.friend-row:hover{ background:#393c41; border-radius:8px }
+.friend-row.active{ background:#404249; border-radius:8px }
 .req-row{ display:flex; align-items:center; gap:8px; padding:6px 8px; background:#2b2d31; border-radius:6px }
-.req-btn{ width:28px; height:28px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center }
+.req-btn{ width:24px; height:24px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
 .req-btn.ok{ background:#23a559 }
 .req-btn.no{ background:#f23f42 }
-.row-icon{ width:32px; height:32px; border-radius:50%; background:#2b2d31; border:none; color:#949ba4; cursor:pointer; display:flex; align-items:center; justify-content:center }
+.row-icon{ width:34px; height:34px; border-radius:50%; background:#2b2d31; border:none; color:#b5bac1; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
+.row-icon:hover{ background:#4e5058; color:#f2f3f5 }
 .row-icon.ok{ background:#23a559; color:#fff }
-.row-icon.no{ background:#2b2d31; color:#f23f42; border:1px solid #f23f42 }
-.row-icon:hover{ background:#404249 }
-.link-btn{ background:transparent; border:none; color:#00a8fc; cursor:pointer; font-weight:600 }
-.member-row{ display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:4px }
+.row-icon.no{ background:#f23f42; color:#fff }
+.link-btn{ background:transparent; border:none; color:#00a8fc; cursor:pointer; font-weight:700; padding:0 }
+.link-btn:hover{ text-decoration:underline }
+.member-row{ display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:4px; cursor:pointer }
 .member-row:hover{ background:#35373c }
-.member-group-head{ font-size:11px; font-weight:700; letter-spacing:.5px; color:#949ba4; padding:6px 8px }
-.tpl-card{ display:flex; flex-direction:column; align-items:center; gap:6px; padding:14px 10px; background:#2b2d31; border:1px solid #26272b; border-radius:8px; cursor:pointer; text-align:center }
+.member-group-head{ font-size:11px; font-weight:700; letter-spacing:.6px; color:#949ba4; padding:14px 6px 4px }
+.tpl-card{ display:flex; flex-direction:column; align-items:center; gap:6px; padding:14px 10px; background:#2b2d31; border:2px solid #26272b; border-radius:10px; cursor:pointer; text-align:center }
 .tpl-card:hover{ background:#35373c; border-color:#5865f2 }
-.composer-icon{ background:transparent; border:none; color:#949ba4; cursor:pointer; display:flex; align-items:center; justify-content:center }
+.composer-icon{ background:transparent; border:none; color:#b5bac1; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; padding:2px }
+.composer-icon:hover{ color:#fff }
 .composer-icon.send{ background:#5865f2 }
 
 /* arquivo swarm */
@@ -122,7 +130,9 @@ button{ touch-action:manipulation; user-select:none }
 }
 
 /* Foco visível só para quem navega por teclado — o clique não deve deixar
-   anel de foco sujando a tela, mas teclado precisa de retorno visível. */
+   anel de foco sujando a tela, mas teclado precisa de retorno visível.
+   UMA regra só: a antiga `*:focus-visible{ box-shadow }` somava anel + sombra
+   em todo elemento focado (inclusive container genérico). */
 :focus-visible { outline: 2px solid #00a8fc; outline-offset: 2px; }
 
 /* ==========================================================================

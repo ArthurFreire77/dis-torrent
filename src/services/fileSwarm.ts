@@ -6,6 +6,36 @@
 import { services } from './index'
 import { blake3 } from '@noble/hashes/blake3.js'
 import { invoke as tauriInvoke } from '@tauri-apps/api/core'
+import {
+  CHUNK, MAX_CHUNKS, FILE_MARKER, FILE_PREFIX,
+  validateAnnounce, chunkCountFor, expectedChunkSize, formatFileSize,
+  mimeFor, isImageName, isVideoName, isMediaName, mediaAutoFetchCap,
+  spoolKey, chunkKey, swarmProgress, safeFileName, type FileMsgMeta,
+} from './fileRules'
+import { encodeFileMeta, parseFileBody } from './fileBody'
+
+// Regras puras (validação, tamanho de bloco, MIME, chaves) moram em
+// `fileRules.ts` para poderem ser testadas sem DOM/IPC. Reexportadas aqui
+// porque o resto do app já importa deste módulo.
+export {
+  CHUNK, MAX_CHUNKS, FILE_MARKER, FILE_PREFIX,
+  validateAnnounce, chunkCountFor, expectedChunkSize, formatFileSize,
+  mimeFor, isImageName, isVideoName, isMediaName, mediaAutoFetchCap,
+  spoolKey, chunkKey, swarmProgress, safeFileName,
+}
+export type { FileMsgMeta }
+
+export const MAX_FILE_SIZE = (() => {
+  // derivado de MAX_CHUNKS para não haver duas verdades: o teto real é
+  // `ceil(MAX_FILE_SIZE / CHUNK) + 1` blocos.
+  const meta = import.meta as unknown as { env?: Record<string, string> }
+  const n = Number(meta.env?.VITE_DISTORRENT_MAX_FILE_MB)
+  const mb = Number.isFinite(n) && n > 0 ? n : 2048
+  return mb * 1024 * 1024
+})()
+export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_SIZE / (1024 * 1024)) >= 1024
+  ? `${(MAX_FILE_SIZE / (1024 * 1024 * 1024)).toFixed(MAX_FILE_SIZE % (1024 * 1024 * 1024) === 0 ? 0 : 1)} GB`
+  : `${Math.round(MAX_FILE_SIZE / (1024 * 1024))} MB`
 
 
 /**
@@ -15,38 +45,11 @@ import { invoke as tauriInvoke } from '@tauri-apps/api/core'
  * PADRAO: 2 GB. O teto nao e' arbitrario — e' a validacao anti-DoS: sem ele, um
  * peer anuncia "size: 500 GB" num frame de 200 bytes e o motor tenta alocar o
  * buffer inteiro. `validateAnnounce` roda no envio local E no anuncio remoto,
- * entao o teto protege dos dois lados. Quem controla o proprio swarm pode subir
- * o valor; quem so recebe, fica com o que o remetente respeitou.
+ * entao o teto protege dos dois lados.
  */
-const MAX_FILE_MB = (() => {
-  const raw = (() => {
-    try {
-      const meta = import.meta as unknown as { env?: Record<string, string> }
-      return meta.env?.VITE_DISTORRENT_MAX_FILE_MB
-    } catch { return undefined }
-  })()
-  const n = Number(raw)
-  return Number.isFinite(n) && n > 0 ? n : 2048
-})()
-
-export const MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
-const CHUNK = 256 * 1024
-
-export const MAX_CHUNKS = Math.ceil(MAX_FILE_SIZE / CHUNK) + 1 // folga de 1 chunk
-export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_MB) >= 1024
-  ? `${(MAX_FILE_MB / 1024).toFixed(MAX_FILE_MB % 1024 === 0 ? 0 : 1)} GB`
-  : `${Math.round(MAX_FILE_MB)} MB`
-export const FILE_MARKER = '__DISTORRENT_FILE__'
-
-/**
- * Prefixo do corpo de mensagem de arquivo, como gerado por `encodeFileBody`:
- *   "<emoji clipe> <nome> (<tamanho>) __DISTORRENT_FILE__:<base64>"
- * A UI usa isto para decidir se a mensagem e' um arquivo (e renderizar o card)
- * em vez de passar o texto pelo markdown. Importar daqui evita divergencia.
- */
-export const FILE_PREFIX = '\u{1F4CE} '
 
 // Swarm: não inundar o peer. Teto de chunks em voo por arquivo (relay-friendly),
+
 // com concorrência ADAPTATIVA em fetchSwarm (8 por seeder, máx. este teto) e
 // timeout por chunk para re-pedir de outro seeder.
 const MAX_IN_FLIGHT = 24
@@ -58,56 +61,18 @@ const MAX_CHUNK_ATTEMPTS = 8
 // Teto de ciclos de retry por arquivo (cada ciclo = 8 tentativas por chunk).
 // Evita re-agendar para sempre quando nao ha seeder vivo algum.
 const MAX_RETRY_CYCLES = 6
+// Seeder que não se manifesta por este tempo sai do swarm (anúncio/chunk).
+// 90s = cobre 2 ciclos de handshake/relay ruins sem descartar peer só lento.
+const SEEDER_IDLE_MS = 90_000
 
 // Validação anti-DoS compartilhada (envio local e anúncio remoto).
 // Retorna a mensagem de erro ou null se válido.
-export function validateAnnounce(size: number, chunks: number): string | null {
-  if (!Number.isFinite(size) || size < 0) return 'tamanho de arquivo inválido'
-  if (size > MAX_FILE_SIZE) return `arquivo muito grande (limite ${MAX_FILE_MB_LABEL})`
-  if (!Number.isFinite(chunks) || chunks <= 0) return 'anúncio de arquivo inválido (chunks)'
-  if (chunks > MAX_CHUNKS) return `arquivo rejeitado: ${chunks} chunks acima do limite de ${MAX_FILE_MB_LABEL}`
-  const expected = Math.max(1, Math.ceil(size / CHUNK))
-  if (chunks !== expected) return 'arquivo rejeitado: chunks incompatíveis com o tamanho'
-  return null
-}
-
-export function formatFileSize(size: number): string {
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / 1024 / 1024).toFixed(2)} MB`
-}
-
-export interface FileMsgMeta {
-  file_id: string
-  name: string
-  size: number
-  chunks: number
-  hash: string
-}
 
 // Corpo de mensagem que carrega um arquivo: legível por humanos + metadados
 // embutidos para renderizar o cartão com botão Baixar em qualquer shell.
-export function encodeFileBody(sf: SwarmFile): string {
-  const meta: FileMsgMeta = { file_id: sf.file_id, name: sf.name, size: sf.size, chunks: sf.chunks, hash: sf.hash }
-  const b64meta = b64(new TextEncoder().encode(JSON.stringify(meta)))
-  return `\u{1F4CE} ${sf.name} (${formatFileSize(sf.size)}) ${FILE_MARKER}:${b64meta}`
-}
-
-export function parseFileBody(body: string): FileMsgMeta | null {
-  if (!body || typeof body !== 'string') return null
-  const i = body.indexOf(FILE_MARKER + ':')
-  if (i < 0) return null
-  const token = body.slice(i + FILE_MARKER.length + 1).split(/\s/)[0]
-  if (!token) return null
-  try {
-    const json = new TextDecoder().decode(fromB64(token))
-    const o = JSON.parse(json) as Partial<FileMsgMeta>
-    if (typeof o.file_id !== 'string' || !o.file_id) return null
-    if (typeof o.name !== 'string' || !o.name) return null
-    if (typeof o.size !== 'number' || typeof o.chunks !== 'number' || typeof o.hash !== 'string') return null
-    return { file_id: o.file_id, name: o.name, size: o.size, chunks: o.chunks, hash: o.hash }
-  } catch { return null }
-}
+// Implementado em `fileBody.ts` (puro, testável sem IPC); reexportado aqui
+// porque o resto do app importa deste módulo.
+export { encodeFileMeta as encodeFileBody, parseFileBody }
 
 function toHexBlake3(b: Uint8Array): string {
   return Array.from(blake3(b)).map(x=>x.toString(16).padStart(2,'0')).join('')
@@ -124,6 +89,17 @@ export interface SwarmFile {
   data: Map<number, Uint8Array>
   seeders: Set<string>
   owner_fp: string
+  /**
+   * Última vez que cada seeder se manifestou (anúncio ou chunk entregue).
+   *
+   * Antes `seeders` só crescia: um peer que fechava o app continuava na lista
+   * para sempre, era escolhido em round-robin e queimava as 8 tentativas de
+   * cada chunk — o download ficava em 0% sem nunca virar erro. Agora a lista é
+   * podada por inatividade (ver `pruneSeeders`).
+   */
+  lastSeen: Map<string, number>
+  /** Já recebemos o arquivo inteiro de alguma sessão anterior? (persistido) */
+  completed?: boolean
 }
 
 function b64(bytes: Uint8Array): string {
@@ -154,44 +130,6 @@ function describeError(e: unknown): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
-}
-
-/** Chave do spool em disco de um chunk (cache LRU nativo). */
-export function spoolKey(file_id: string, index: number): string {
-  return `swarm:${file_id}:${index}`
-}
-
-const MIME_BY_EXT: Record<string, string> = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-  webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', avif: 'image/avif',
-  ico: 'image/x-icon', pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
-  json: 'application/json', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg',
-  ogg: 'audio/ogg', wav: 'audio/wav', zip: 'application/zip',
-}
-
-/** MIME pelo nome — melhora a prévia de imagem (Blob com type correto). */
-function mimeFor(name: string): string {
-  const ext = (name.split('.').pop() ?? '').toLowerCase()
-  return MIME_BY_EXT[ext] ?? 'application/octet-stream'
-}
-
-/** Render inline no chat: imagens (prévia leve) e vídeos (player). */
-export function isImageName(name: string): boolean {
-  return /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(name.trim())
-}
-
-export function isVideoName(name: string): boolean {
-  return /\.(mp4|webm|mov|m4v|mkv|ogv)$/i.test(name.trim())
-}
-
-export function isMediaName(name: string): boolean {
-  return isImageName(name) || isVideoName(name)
-}
-
-/** Auto-prévia sem sustos: imagem ≤ 12MB, vídeo ≤ 40MB — acima disso o
- * usuário clica (evita baixar 500MB sem querer no 4G). Unificado com o mobile. */
-export function mediaAutoFetchCap(name: string): number {
-  return isVideoName(name) ? 40 * 1024 * 1024 : 12 * 1024 * 1024
 }
 
 function isTauri(): boolean {
@@ -322,6 +260,7 @@ export class FileSwarm {
       data: new Map(),
       seeders: new Set(),
       owner_fp: 'me',
+      lastSeen: new Map(),
     }
     for (let i = 0; i < chunks; i++) {
       sf.data.set(i, buf.slice(i * CHUNK, (i + 1) * CHUNK))
@@ -353,7 +292,16 @@ export class FileSwarm {
     }
     const existing = this.files.get(file_id)
     if (existing) {
+      // Um peer só entra como seeder se o anúncio dele for COERENTE com o que
+      // já conhecemos. Antes era `existing.seeders.add(from_fp)` cego: qualquer
+      // peer que reenviasse o mesmo `file_id` com outro tamanho virava seeder
+      // de um arquivo que não tem.
+      if (existing.size !== size || existing.chunks !== chunks) {
+        this.lastError = 'anúncio divergente para o mesmo file_id — ignorado'
+        return false
+      }
       existing.seeders.add(from_fp)
+      existing.lastSeen.set(from_fp, Date.now())
       // preenche chunkHashes se o primeiro anúncio não tinha e agora chegou
       if (!existing.chunkHashes && this.validChunkHashes(chunkHashes, chunks)) existing.chunkHashes = chunkHashes
       this.onChange?.()
@@ -380,7 +328,7 @@ export class FileSwarm {
         if (j) { const o = JSON.parse(j); if (this.validChunkHashes(o?.chunkHashes, chunks)) ch = o.chunkHashes }
       } catch { /* ignore */ }
     }
-    const sf: SwarmFile = { file_id, name: safeName, size, chunks, hash, chunkHashes: ch, have: new Set(), data: new Map(), seeders: new Set([from_fp]), owner_fp: from_fp }
+    const sf: SwarmFile = { file_id, name: safeName, size, chunks, hash, chunkHashes: ch, have: new Set(), data: new Map(), seeders: new Set([from_fp]), owner_fp: from_fp, lastSeen: new Map([[from_fp, Date.now()]]) }
     this.files.set(file_id, sf)
     try { localStorage.setItem(`distorrent:filemeta:${file_id}`, JSON.stringify({ name: safeName, size, chunks, hash, chunkHashes: ch })) } catch { /* silent */ }
     this.onChange?.()
@@ -396,6 +344,13 @@ export class FileSwarm {
   onChunkData(file_id: string, index: number, b64data: string, from_fp: string) {
     const sf = this.files.get(file_id)
     if (!sf) return
+    // ÍNDICE fora da faixa: antes ia direto para `have`, e `have.size` passava
+    // de `chunks` — o progresso mostrava >100% e `assembleAndDownload` estourava
+    // no fim do download. Um peer responde um índice que o arquivo não tem.
+    if (!Number.isInteger(index) || index < 0 || index >= sf.chunks) {
+      this.failChunk(sf, index, from_fp, `chunk ${index} fora da faixa (0..${sf.chunks - 1}) — descartado`)
+      return
+    }
     const k = this.key(file_id, index)
     // já temos este chunk (retransmissão/duplicado): só limpa a requisição pendente
     if (sf.have.has(index)) { this.clearChunkReq(k); return }
@@ -407,6 +362,14 @@ export class FileSwarm {
     }
     if (bytes.length === 0 && sf.size > 0) {
       this.failChunk(sf, index, from_fp, `chunk ${index} chegou vazio — pedindo a outro peer`)
+      return
+    }
+    // TAMANHO do bloco: todo bloco é CHUNK, exceto o último (o resto). Sem esta
+    // checagem um peer manda 3 bytes no índice 5 e o arquivo final sai com o
+    // tamanho errado — o hash só acusaria depois de baixar tudo de novo.
+    const esperado = index === sf.chunks - 1 ? sf.size - index * CHUNK : CHUNK
+    if (esperado > 0 && bytes.length !== esperado) {
+      this.failChunk(sf, index, from_fp, `chunk ${index} com tamanho ${bytes.length} (esperado ${esperado}) — pedindo a outro peer`)
       return
     }
     // verifica integridade blake3 se tivermos hash do chunk
@@ -421,6 +384,7 @@ export class FileSwarm {
     sf.data.set(index, bytes)
     sf.have.add(index)
     sf.seeders.add(from_fp)
+    sf.lastSeen.set(from_fp, Date.now())
     // SPOOL EM DISCO (5.4): chunk validado vai ao cache LRU — se o app cair
     // ou a página recarregar, o progresso é reidratado sem rebaixar do swarm.
     // Só no nativo (localStorage do browser não aguenta arquivos grandes).
@@ -541,6 +505,9 @@ export class FileSwarm {
     const missing = Array.from({ length: sf.chunks }, (_, i) => i).filter(i => !sf.have.has(i))
     if (missing.length === 0) { this.clearRetry(file_id); return }
 
+    // Poda ANTES de decidir: se todos os seeders conhecidos sumiram, o correto
+    // é "sem peers" (estado honesto, acionável), não uma tempestade de timeouts.
+    this.pruneSeeders(sf)
     const seeders = [...sf.seeders]
     if (seeders.length === 0) {
       this.lastError = 'sem peers com o arquivo no swarm — aguardando um seeder ficar online'
@@ -600,6 +567,33 @@ export class FileSwarm {
     const cur = this.rr.get(sf.file_id) ?? 0
     this.rr.set(sf.file_id, cur + 1)
     return pool[cur % pool.length]
+  }
+
+  /**
+   * Remove do swarm quem não se manifesta há `SEEDER_IDLE_MS`.
+   *
+   * `seeders` só crescia: um peer que fechou o app continuava sendo escolhido,
+   * estourava os 5 s de timeout e queimava tentativa de chunk. Como o
+   * `downloadManager` nunca via `seeders.size === 0`, o download ficava em 0%
+   * para sempre em vez de virar "sem peers" — um estado honesto que o usuário
+   * pode resolver (pedir para o outro lado abrir o app / retomar).
+   *
+   * Chamado antes de cada decisão de "sem seeder" e no tique periódico.
+   * Retorna quantos foram podados.
+   */
+  pruneSeeders(sf: SwarmFile, idleMs = SEEDER_IDLE_MS): number {
+    const now = Date.now()
+    let removed = 0
+    for (const fp of [...sf.seeders]) {
+      // O próprio autor do arquivo (owner) não é podado por tempo: ele pode
+      // estar apenas sem mandar chunk, e o pedido é justamente para ele.
+      if (sf.have.size === sf.chunks) continue
+      const seen = sf.lastSeen.get(fp) ?? 0
+      if (seen === 0) { sf.lastSeen.set(fp, now); continue }
+      if (now - seen > idleMs) { sf.seeders.delete(fp); sf.lastSeen.delete(fp); removed++ }
+    }
+    if (removed > 0) this.onChange?.()
+    return removed
   }
 
   /** Dispara o pedido de 1 chunk com timeout; libera o slot ao resolver/falhar. */
@@ -717,9 +711,20 @@ export class FileSwarm {
     const sf = this.files.get(file_id)
     if (!sf || !sf.have.has(index)) return
     const data = sf.data.get(index)
-    if (!data) return
+    if (!data) {
+      // Temos no bitfield mas não na RAM (arquivo já salvo, bytes no spool).
+      // Recarrega e responde — antes este `return` silencioso fazia o peer
+      // parecer online-e-seeder enquanto o pedinte esperava 5 s por chunk.
+      void this.ensureDataLoaded(sf)
+        .then(() => {
+          const d = sf.data.get(index)
+          if (d) services.fileSendChunk(from_fp, file_id, index, b64(d)).catch(() => { /* ignore */ })
+        })
+        .catch(() => { /* ignore */ })
+      return
+    }
+    sf.lastSeen.set(from_fp, Date.now())
     services.fileSendChunk(from_fp, file_id, index, b64(data)).catch(() => { /* ignore */ })
-    // este peer agora é seeder para aquele chunk (swarm)
   }
 
   assembleAndDownload(sf: SwarmFile): Blob {
@@ -727,9 +732,11 @@ export class FileSwarm {
     const ordered = Array.from({ length: sf.chunks }, (_, i) => sf.data.get(i))
     if (ordered.some(c => !c)) throw new Error('chunk faltando na montagem')
     const total = ordered.reduce((a, b) => a + (b as Uint8Array).length, 0)
-    if (total !== sf.size && sf.size !== 0) {
-      // tolera último chunk menor, mas valida aproximadamente
-      if (Math.abs(total - sf.size) > CHUNK) throw new Error('tamanho montado diverge do anunciado')
+    if (sf.size !== 0 && total !== sf.size) {
+      // Antes tolerava até um chunk de diferença — o que deixava passar um
+      // arquivo truncado. O tamanho tem que bater EXATO (o último bloco é
+      // `size - (chunks-1)*CHUNK`).
+      throw new Error(`tamanho montado (${total}) diverge do anunciado (${sf.size})`)
     }
     const out = new Uint8Array(total)
     let off = 0
@@ -741,11 +748,27 @@ export class FileSwarm {
     return sf.chunks === 0 ? 0 : Math.round((sf.have.size / sf.chunks) * 100)
   }
 
-  /** Blob montado (só leitura, NÃO salva) — null enquanto o arquivo não estiver completo. */
+  /**
+   * Blob montado (só leitura, NÃO salva) — null enquanto o arquivo não estiver
+   * completo OU os bytes não estiverem acessíveis (nem RAM nem spool).
+   * Use `ensureBlobFor` quando puder esperar o spool.
+   */
   blobFor(file_id: string): Blob | null {
     const sf = this.files.get(file_id)
     if (!sf || sf.chunks === 0 || sf.have.size !== sf.chunks) return null
     try { return this.assembleAndDownload(sf) } catch { return null }
+  }
+
+  /**
+   * Igual a `blobFor`, mas reidrata do spool quando o bitfield diz "completo" e
+   * a RAM foi liberada (`markDownloaded`). É o que mantém a pré-visualização
+   * funcionando depois de salvar o arquivo, sem baixar tudo de novo.
+   */
+  async ensureBlobFor(file_id: string): Promise<Blob | null> {
+    const sf = this.files.get(file_id)
+    if (!sf || sf.chunks === 0 || sf.have.size !== sf.chunks) return null
+    await this.ensureDataLoaded(sf)
+    return this.blobFor(file_id)
   }
 
   /**
@@ -785,6 +808,63 @@ export class FileSwarm {
    * caminho é o "depois de salvar/falhar, o arquivo não precisa mais estar na
    * RAM": o metadado continua, então um re-download funciona normal.
    */
+  /**
+   * Marca o arquivo como JÁ SALVO, sem "desmarcar" o download.
+   *
+   * `releaseChunks` (usado antes aqui) limpava `have`/`data` e apagava o spool:
+   * o card do desktop recalcula `done`/`pct` de `sf.have.size`, então depois de
+   * salvar com sucesso ele VOLTAVA para "Baixar (0%)" e um segundo save
+   * lançava "ainda faltam N chunks". Além disso o peer continuava anunciado
+   * como seeder mas respondia `return` silencioso a todo pedido de chunk.
+   *
+   * Agora: mantém o bitfield (o arquivo ESTÁ completo e continua sendo servido),
+   * solta só os bytes da RAM e PRESERVA o spool em disco. Se precisar dos bytes
+   * de novo (servir um peer, montar a prévia), `ensureHydrated` os traz do
+   * spool sem rede.
+   */
+  markDownloaded(file_id: string): void {
+    const sf = this.files.get(file_id)
+    if (!sf) return
+    this.clearRetry(file_id)
+    this.clearFileTimers(file_id)
+    sf.completed = true
+    // RAM liberada; o bitfield fica (progresso 100%, seeding continua válido).
+    sf.data.clear()
+    // garante que `ensureHydrated` possa repor os bytes a partir do spool
+    this.hydratedFiles.delete(file_id)
+    this.onChange?.()
+  }
+
+  /**
+   * Traz do spool em disco os chunks cujo BITFIELD já diz "temos" mas que não
+   * estão na RAM (caso do arquivo já salvo: `markDownloaded` solta os bytes).
+   *
+   * Sem isto, depois de salvar o peer continuava anunciado no swarm mas
+   * respondia `return` silencioso a todo `FileChunkRequest` — e quem baixava
+   * dele queimava 5 s de timeout por chunk.
+   */
+  async ensureDataLoaded(sf: SwarmFile): Promise<number> {
+    if (services.kind !== 'native') return 0
+    const faltando = [...sf.have].filter((i) => !sf.data.has(i))
+    if (faltando.length === 0) return 0
+    let back = 0
+    for (let w = 0; w < faltando.length; w += 8) {
+      const wave = faltando.slice(w, w + 8)
+      const results = await Promise.all(wave.map(async (i) => {
+        try {
+          const hit = await services.cacheGet(spoolKey(sf.file_id, i))
+          if (!hit) return false
+          const bytes = fromB64(hit)
+          if (sf.chunkHashes?.[i] && toHexBlake3(bytes).slice(0, 32) !== sf.chunkHashes[i]) return false
+          sf.data.set(i, bytes)
+          return true
+        } catch { return false }
+      }))
+      back += results.filter(Boolean).length
+    }
+    return back
+  }
+
   releaseChunks(file_id: string): void {
     const sf = this.files.get(file_id)
     if (!sf) return
@@ -869,6 +949,9 @@ export class FileSwarm {
   async download(sf: SwarmFile): Promise<string | null> {
     if (sf.have.size !== sf.chunks) throw new Error(`ainda faltam ${sf.chunks - sf.have.size} chunks — não dá para salvar`)
     if (this.saving.has(sf.file_id)) throw new Error('salvamento já em andamento para este arquivo')
+    // Arquivo já salvo/semeado: os bytes podem estar só no spool em disco.
+    // Recarrega antes de montar (sem rede — `ensureDataLoaded` lê o cache).
+    await this.ensureDataLoaded(sf)
     const blob = this.assembleAndDownload(sf)
     // nome seguro: basename apenas (evita path traversal no backend)
     const safeName = baseNameOf(sf.name) || 'arquivo'
@@ -877,32 +960,26 @@ export class FileSwarm {
       // Tauri nativo: salva em Downloads via backend (não depende de gesto de download)
       if (isTauri()) {
         try {
-          // Monta o base64 a partir dos CHUNKS já em memória, sem `blob` nem
-          // `arrayBuffer()` intermediários. Antes: blob (N) + arrayBuffer (N)
-          // + Uint8Array (N) + string base64 (1.33N) ficavam vivos ao mesmo
-          // tempo — ~4.3x o arquivo. Num arquivo de 200 MB isso é ~860 MB
-          // vivos e o WebView morria ("save_file travou em decode") ou o
-          // desktop engasgava. Agora o pico é ~1.33x.
-          // Lotes de 16 chunks (4 MB). O frontend segura no maximo um lote; o
-          // Rust acrescenta no .tmp. Antes era a string base64 do arquivo
-          // inteiro — pico de ~8.7x o tamanho (Uint8Array + arrayBuffer +
-          // base64 + JSON do IPC + Vec no Rust, todos vivos ao mesmo tempo).
-          const LOTE = 16
+          // UM chunk por chamada, e NÃO um lote concatenado.
+          //
+          // BUG REAL (todo download "concluía" sem arquivo, no Windows e no
+          // Android): antes isto juntava 16 chunks com `parts.join('')`. Cada
+          // bloco tem 262144 bytes (262144 % 3 == 1), então o base64 de cada um
+          // termina em `==`; concatenar põe padding NO MEIO da string e o
+          // `save_file_stream` recusava tudo com `InvalidByte(61, offset)`.
+          // Um chunk por chamada mantém a string sempre bem formada.
+          //
+          // Continua com memória limitada: o frontend segura no máximo 1 bloco
+          // em base64 (~341 KB) por vez, e o Rust faz append no .part.
           const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
           let savedPath = safeName
-          let parts: string[] = []
           for (let i = 0; i < sf.chunks; i++) {
             const c = sf.data.get(i)
             if (!c) throw new Error(`chunk ${i} sumiu antes do salvamento`)
-            parts.push(b64(c))
             const ultimo = i === sf.chunks - 1
-            if (parts.length >= LOTE || ultimo) {
-              const lote = parts.join('')
-              parts = []
-              savedPath = await tauriInvoke<string>('save_file_stream', {
-                jobId, name: safeName, dataB64: lote, flush: ultimo, totalBytes: sf.size,
-              })
-            }
+            savedPath = await tauriInvoke<string>('save_file_stream', {
+              jobId, name: safeName, dataB64: b64(c), flush: ultimo, totalBytes: sf.size,
+            })
           }
           if (typeof savedPath !== 'string' || !savedPath.trim()) savedPath = safeName
           // Android: o Rust só escreve na área PRIVADA (scoped storage nega

@@ -16,6 +16,25 @@ use serde::{Deserialize, Serialize};
 
 // ================================ SCHEMA ================================
 
+/// `column_exists` local: o helper de `storage.rs` só aceita tabelas da
+/// allowlist dele, e `profiles` não está nela (devolveria `false` sempre e o
+/// ALTER rodaria de novo, estourando "duplicate column" no segundo boot).
+fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("PRAGMA table_info({table})");
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) else {
+        return false;
+    };
+    // O `any()` consome o iterador; sem esta variável o `stmt` (e o
+    // `MappedRows` que empresta dele) era dropado com a expressão ainda viva e
+    // o borrow checker recusava (E0597). Materializar a resposta antes de
+    // devolver resolve — e o custo é o mesmo (para no primeiro match).
+    let found = rows.filter_map(|r| r.ok()).any(|c| c == column);
+    found
+}
+
 /// Cria as tabelas da camada social. Idempotente — pode rodar em todo boot.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -186,7 +205,33 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             created_at INTEGER NOT NULL,
             PRIMARY KEY (conv_id, name)
          );",
-    )
+    )?;
+
+    // ---------------------------------------------------------------
+    // Revisão de perfil (sincronização P2P sem servidor central).
+    //
+    // Antes só existia `updated_at`, gravado com o relógio de QUEM RECEBE.
+    // Dois efeitos ruins: (1) era impossível comparar versões entre
+    // dispositivos — relógio adiantado "vencia" para sempre; (2) revisão velha
+    // chegando atrasada sobrescrevia a nova sem aviso.
+    //
+    // `rev` é um contador monotônico por identidade: o autor incrementa a cada
+    // edição efetiva, e o receptor só aceita `rev` maior. `content_hash` é o
+    // blake3 do conteúdo público — detecta "nada mudou" sem trafegar imagens e
+    // identifica edições concorrentes (mesmo `rev`, conteúdo diferente) sem
+    // depender de relógio: nesse caso o desempate é determinístico pelo hash.
+    // ---------------------------------------------------------------
+    for column in ["rev", "content_hash"] {
+        if !column_exists(conn, "profiles", column) {
+            let ddl = if column == "rev" {
+                "ALTER TABLE profiles ADD COLUMN rev INTEGER NOT NULL DEFAULT 0;"
+            } else {
+                "ALTER TABLE profiles ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';"
+            };
+            conn.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
 }
 
 // ================================ TIPOS ================================
@@ -243,6 +288,35 @@ pub struct ProfileView {
     pub banner_b64: String,
     pub accent: String,
     pub updated_at: i64,
+    /// Revisão monotônica do autor (0 = perfil legado, sem revisão). Usada
+    /// para decidir quem vence quando duas versões se cruzam na rede.
+    #[serde(default)]
+    pub rev: i64,
+    /// blake3 (hex, 32 chars) do conteúdo público. Detecta "nada mudou" e
+    /// desempata edições concorrentes sem depender do relógio do aparelho.
+    #[serde(default)]
+    pub content_hash: String,
+}
+
+/// Campos públicos de um perfil, na ordem em que entram no hash de conteúdo.
+///
+/// `updated_at` NÃO entra: é o relógio de quem grava e mudaria o hash a cada
+/// recebimento, fazendo dois peers "discordarem" sobre o mesmo perfil para
+/// sempre. `rev` entra porque duas edições no mesmo contador são conflito real.
+pub fn profile_content_hash(
+    display_name: &str,
+    about: &str,
+    avatar_b64: &str,
+    banner_b64: &str,
+    accent: &str,
+) -> String {
+    let mut h = blake3::Hasher::new();
+    for part in [display_name, about, avatar_b64, banner_b64, accent] {
+        // separador de tamanho: sem isto "ab"+"c" e "a"+"bc" colidiriam
+        h.update(&(part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    h.finalize().to_hex().to_string()[..32].to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -948,6 +1022,192 @@ impl crate::storage::Store {
 
     // ======================= PERFIL =======================
 
+    /// Grava o perfil do PRÓPRIO usuário, incrementando a revisão.
+    ///
+    /// Retorna `None` quando nada mudou de verdade — nesse caso NÃO cria
+    /// revisão nova e NÃO vale a pena reanunciar na rede. Isso é o que impede
+    /// a reconciliação de 10 min de "inventar" uma versão a cada tique.
+    ///
+    /// `clear_avatar`/`clear_banner` existem porque antes `avatar_b64=""`
+    /// significava "mantenha o anterior": era impossível remover a foto.
+    pub fn profile_set_local(
+        &self,
+        fp: &str,
+        display_name: &str,
+        about: &str,
+        avatar_b64: &str,
+        banner_b64: &str,
+        accent: &str,
+        clear_avatar: bool,
+        clear_banner: bool,
+    ) -> Result<Option<ProfileView>, String> {
+        let conn = self.locked();
+        let cur_rev: i64 = conn
+            .query_row("SELECT rev FROM profiles WHERE fp=?1", params![fp], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+
+        let old_avatar: String = conn
+            .query_row(
+                "SELECT avatar_b64 FROM profiles WHERE fp=?1",
+                params![fp],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        // Mesma semântica de antes: vazio = mantém a foto atual. A remoção
+        // explícita passa por `clear_avatar`.
+        let av = if clear_avatar {
+            String::new()
+        } else if avatar_b64.is_empty() {
+            old_avatar
+        } else {
+            avatar_b64.to_string()
+        };
+        let old_banner: String = conn
+            .query_row(
+                "SELECT banner_b64 FROM profiles WHERE fp=?1",
+                params![fp],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let bn = if clear_banner {
+            String::new()
+        } else if banner_b64.is_empty() {
+            old_banner
+        } else {
+            banner_b64.to_string()
+        };
+
+        let new_hash = profile_content_hash(display_name, about, &av, &bn, accent);
+        // Hash igual ⇒ nada mudou. Não incrementa revisão (idempotência).
+        let old_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM profiles WHERE fp=?1",
+                params![fp],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        if old_hash == new_hash && !old_hash.is_empty() {
+            drop(conn);
+            return Ok(None);
+        }
+
+        let rev = cur_rev + 1;
+        conn.execute(
+            "INSERT INTO profiles (fp, display_name, about, avatar_b64, banner_b64, accent, updated_at, rev, content_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(fp) DO UPDATE SET display_name=excluded.display_name, about=excluded.about,
+               avatar_b64=excluded.avatar_b64,
+               banner_b64=excluded.banner_b64,
+               accent=excluded.accent, updated_at=excluded.updated_at,
+               rev=excluded.rev, content_hash=excluded.content_hash",
+            params![
+                fp,
+                display_name,
+                about,
+                av,
+                bn,
+                accent,
+                crate::identity::now_ms(),
+                rev,
+                new_hash
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        drop(conn);
+        Ok(Some(self.profile_get(fp)?))
+    }
+
+    /// Aplica um perfil vindo da rede, com resolução de conflito.
+    ///
+    /// Regras (nesta ordem) — todas sem depender do relógio do aparelho:
+    /// 1. `rev` maior vence.
+    /// 2. `rev` menor é descartado (versão antiga NUNCA sobrescreve a nova).
+    /// 3. mesmo `rev`, conteúdo idêntico (`content_hash` do autor): nada a fazer
+    ///    — é o caso normal da reconciliação periódica, sem escrita.
+    /// 4. mesmo `rev` e conteúdo diferente (dois dispositivos editaram a partir
+    ///    do mesmo ponto): desempate determinístico pelo MAIOR `content_hash`.
+    ///    Todos os peers escolhem o mesmo vencedor, então a rede converge em
+    ///    vez de ficar oscilando.
+    ///
+    /// Retorna `true` quando o estado local mudou (a UI precisa ser avisada).
+    pub fn profile_apply_remote(
+        &self,
+        fp: &str,
+        display_name: &str,
+        about: &str,
+        avatar_b64: &str,
+        banner_b64: &str,
+        accent: &str,
+        rev: i64,
+    ) -> Result<bool, String> {
+        let conn = self.locked();
+        let cur = conn
+            .query_row(
+                "SELECT rev, content_hash FROM profiles WHERE fp=?1",
+                params![fp],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        // Avatar/banner vazios de um peer = "não tenho a foto", não "apague":
+        // apagar é decisão do autor, e o autor manda o campo vazio junto com
+        // a revisão nova apenas quando ele mesmo limpou.
+        let (cur_rev, cur_hash) = cur.unwrap_or((0, String::new()));
+        let new_hash = profile_content_hash(display_name, about, avatar_b64, banner_b64, accent);
+
+        let accept = if rev > cur_rev {
+            true
+        } else if rev < cur_rev {
+            false
+        } else if !cur_hash.is_empty() && cur_hash == new_hash {
+            false // mesmo estado: evita escrita e notificação inúteis
+        } else if rev == 0 {
+            // Perfis legados (sem revisão): comportamento antigo, LWW simples.
+            cur_hash != new_hash
+        } else {
+            new_hash > cur_hash // desempate determinístico entre edições concorrentes
+        };
+        if !accept {
+            return Ok(false);
+        }
+
+        conn.execute(
+            "INSERT INTO profiles (fp, display_name, about, avatar_b64, banner_b64, accent, updated_at, rev, content_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(fp) DO UPDATE SET display_name=excluded.display_name, about=excluded.about,
+               avatar_b64=excluded.avatar_b64,
+               banner_b64=excluded.banner_b64,
+               accent=excluded.accent, updated_at=excluded.updated_at,
+               rev=excluded.rev, content_hash=excluded.content_hash",
+            params![
+                fp,
+                display_name,
+                about,
+                avatar_b64,
+                banner_b64,
+                accent,
+                crate::identity::now_ms(),
+                rev,
+                new_hash
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    /// Grava sem tocar em `rev`/`content_hash` — compatibilidade com chamadas
+    /// antigas (testes e seeds locais que só querem semear um perfil).
     pub fn profile_set(
         &self,
         fp: &str,
@@ -957,14 +1217,16 @@ impl crate::storage::Store {
         banner_b64: &str,
         accent: &str,
     ) -> Result<(), String> {
+        let hash = profile_content_hash(display_name, about, avatar_b64, banner_b64, accent);
         let conn = self.locked();
         conn.execute(
-            "INSERT INTO profiles (fp, display_name, about, avatar_b64, banner_b64, accent, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
+            "INSERT INTO profiles (fp, display_name, about, avatar_b64, banner_b64, accent, updated_at, content_hash)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(fp) DO UPDATE SET display_name=excluded.display_name, about=excluded.about,
                avatar_b64=CASE WHEN excluded.avatar_b64='' THEN profiles.avatar_b64 ELSE excluded.avatar_b64 END,
                banner_b64=CASE WHEN excluded.banner_b64='' THEN profiles.banner_b64 ELSE excluded.banner_b64 END,
-               accent=excluded.accent, updated_at=excluded.updated_at",
+               accent=excluded.accent, updated_at=excluded.updated_at,
+               content_hash=excluded.content_hash",
             params![
                 fp,
                 display_name,
@@ -972,7 +1234,8 @@ impl crate::storage::Store {
                 avatar_b64,
                 banner_b64,
                 accent,
-                crate::identity::now_ms()
+                crate::identity::now_ms(),
+                hash
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -983,7 +1246,7 @@ impl crate::storage::Store {
         let conn = self.locked();
         let r = conn
             .query_row(
-                "SELECT fp, display_name, about, avatar_b64, banner_b64, accent, updated_at
+                "SELECT fp, display_name, about, avatar_b64, banner_b64, accent, updated_at, rev, content_hash
                    FROM profiles WHERE fp=?1",
                 params![fp],
                 |r| {
@@ -995,6 +1258,8 @@ impl crate::storage::Store {
                         banner_b64: r.get(4)?,
                         accent: r.get(5)?,
                         updated_at: r.get(6)?,
+                        rev: r.get(7)?,
+                        content_hash: r.get(8)?,
                     })
                 },
             )
@@ -1010,7 +1275,7 @@ impl crate::storage::Store {
         let conn = self.locked();
         let mut stmt = conn
             .prepare(
-                "SELECT fp, display_name, about, avatar_b64, banner_b64, accent, updated_at
+                "SELECT fp, display_name, about, avatar_b64, banner_b64, accent, updated_at, rev, content_hash
                    FROM profiles ORDER BY updated_at DESC",
             )
             .map_err(|e| e.to_string())?;
@@ -1024,6 +1289,8 @@ impl crate::storage::Store {
                     banner_b64: r.get(4)?,
                     accent: r.get(5)?,
                     updated_at: r.get(6)?,
+                    rev: r.get(7)?,
+                    content_hash: r.get(8)?,
                 })
             })
             .map_err(|e| e.to_string())?;
