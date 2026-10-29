@@ -1021,10 +1021,14 @@ pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
     let via = proxy.map(|p| format!(" via {p}")).unwrap_or_default();
     let is_proxied = proxy.is_some();
     // connect timeout: Tor abre circuito (pode passar de 5s); direto falha rápido.
+    //
+    // 3s era pouco: o probe agora espera o CONNACK (não só o TCP) e brokers
+    // públicos respondem com 1-4s de folga variável (o hivemq levou ~3,8s no
+    // teste local). Estourar aqui reportava "falha" para uma perna que funciona.
     let connect_timeout = if is_proxied {
-        Duration::from_secs(10)
+        Duration::from_secs(12)
     } else {
-        Duration::from_secs(3)
+        Duration::from_secs(8)
     };
     let mqtt_hosts = [
         ("mqtt broker.emqx.io:1883", "broker.emqx.io", 1883u16),
@@ -1043,20 +1047,29 @@ pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
     let mut out = Vec::new();
     for (name, host, port) in mqtt_hosts {
         let t0 = Instant::now();
+        // UM TCP CONNECT NÃO PROVA QUE O BROKER FUNCIONA.
+        //
+        // O probe antigo parava no connect. Um broker que aceita a conexão TCP e
+        // recusa/ignora MQTT (auth, sobrecarga, cliente banido) aparecia como
+        // "alcançável" e o relay depois falhava de verdade — e o contrário também
+        // acontecia: broker lento no CONNACK (o hivemq levou ~3,8s no teste local)
+        // estourava o timeout de 3s e era reportado como "falha" mesmo
+        // respondendo. Agora o probe faz o handshake MQTT (CONNECT → CONNACK) e
+        // só dá a perna como boa com `rc=0`. Nada é publicado: o socket fecha
+        // logo após o CONNACK, sem spam na infra pública.
         let res = tokio::time::timeout(connect_timeout, async {
-            match proxy {
+            let stream = match proxy {
                 Some(p) => crate::net::socks5::socks5_connect(
                     p,
                     &crate::net::socks5::SocksTarget::Host(host.to_string(), port),
                 )
                 .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
+                .map_err(|e| e.to_string())?,
                 None => tokio::net::TcpStream::connect((host, port))
                     .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-            }
+                    .map_err(|e| e.to_string())?,
+            };
+            mqtt_connack(stream, host).await
         })
         .await;
         match res {
@@ -1076,13 +1089,17 @@ pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
                 name: format!("{name}{via}"),
                 ok: false,
                 latency_ms: None,
+                // O timeout agora cobre TCP + CONNACK. Dizer só "porta 1883
+                // bloqueada" era mentira quando o TCP abre e o broker apenas
+                // demora/ignora o CONNACK (acontece com broker público
+                // sobrecarregado). A mensagem cita as duas possibilidades.
                 last_error: Some(format!(
-                    "timeout {}s{}",
+                    "sem resposta em {}s{}",
                     connect_timeout.as_secs(),
                     if is_proxied {
-                        " (proxy/Tor inacessível ou lento?)"
+                        " (proxy/Tor inacessível, lento, ou broker sem CONNACK)"
                     } else {
-                        " (porta 1883 bloqueada no 4G/NAT?)"
+                        " (porta TCP bloqueada no 4G/NAT, ou broker sem CONNACK)"
                     }
                 )),
             }),
@@ -1099,6 +1116,85 @@ fn short_err(s: &str) -> String {
         t.truncate(160);
     }
     t
+}
+
+/// Handshake MQTT 3.1.1 mínimo: envia CONNECT e exige um CONNACK com `rc=0`.
+///
+/// Usado pelo diagnóstico para distinguir "porta TCP aberta" de "broker MQTT
+/// funcionando". Aceita qualquer `AsyncRead + AsyncWrite` para servir tanto ao
+/// caminho direto (`TcpStream`) quanto ao túnel SOCKS5 (`SocksStream`).
+///
+/// Não publica, não assina, não retém: fecha o socket logo após o CONNACK.
+async fn mqtt_connack<S>(mut stream: S, client_id_host: &str) -> std::result::Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // CONNECT v3.1.1, clean session, keepalive 30s, client id único e curto.
+    // O host entra no id para o broker não confundir com outra perna (o mesmo
+    // fingerprint abrindo 4 brokers com ids iguais é aceito, mas separar evita
+    // "session takeover" entre pernas durante o probe).
+    let client_id = format!(
+        "distorrent-probe-{}-{}",
+        crate::identity::now_ms(),
+        client_id_host.replace('.', "-")
+    );
+    let host = client_id_host.as_bytes();
+    let cid = client_id.as_bytes();
+
+    let mut body = Vec::with_capacity(64 + cid.len());
+    // Protocol name "MQTT"
+    body.extend_from_slice(&[0x00, 0x04, b'M', b'Q', b'T', b'T']);
+    body.push(0x04); // level 3.1.1
+    body.push(0x02); // clean session
+    body.extend_from_slice(&[0x00, 0x1e]); // keepalive 30s
+    body.extend_from_slice(&[(cid.len() >> 8) as u8, (cid.len() & 0xff) as u8]);
+    body.extend_from_slice(cid);
+    let _ = host;
+
+    // Remaining Length (varint)
+    let mut packet = vec![0x10u8];
+    let mut n = body.len();
+    loop {
+        let mut d = (n % 128) as u8;
+        n /= 128;
+        if n > 0 {
+            d |= 0x80;
+        }
+        packet.push(d);
+        if n == 0 {
+            break;
+        }
+    }
+    packet.extend_from_slice(&body);
+
+    stream
+        .write_all(&packet)
+        .await
+        .map_err(|e| format!("escrita CONNECT: {e}"))?;
+
+    // CONNACK: 0x20, remaining length 2, flags, return code.
+    let mut head = [0u8; 2];
+    stream
+        .read_exact(&mut head)
+        .await
+        .map_err(|e| format!("sem CONNACK: {e}"))?;
+    if head[0] != 0x20 {
+        return Err(format!("resposta inesperada do broker (0x{:02x})", head[0]));
+    }
+    let mut payload = vec![0u8; head[1] as usize];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .map_err(|e| format!("CONNACK incompleto: {e}"))?;
+    let rc = payload.get(1).copied().unwrap_or(0xff);
+    if rc != 0 {
+        // 1..=5 são recusas do protocolo (versão, id, auth...). Reportar o
+        // código é mais útil que "falha".
+        return Err(format!("broker recusou a conexão (CONNACK rc={rc})"));
+    }
+    Ok(())
 }
 
 /// TESTE ONLINE do proxy SOCKS5 (botão "Testar conexão" da UI): abre um
@@ -1827,5 +1923,104 @@ mod tests {
             ids.iter().any(|&v| v > 0xFFFF),
             "deve cobrir o espaço todo, não começar em 1: {ids:?}"
         );
+    }
+
+    /// O probe de diagnóstico precisa REPROVAR um broker que aceita TCP e não
+    /// fala MQTT — era o falso positivo do "broker alcançável" (connect só).
+    #[tokio::test]
+    async fn mqtt_connack_recusa_servidor_que_nao_e_broker() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        // Servidor que aceita a conexão e responde lixo (não é MQTT).
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((mut s, _)) = l.accept().await {
+                let _ = s.write_all(&[0xff, 0xff, 0xff]).await;
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let r = super::mqtt_connack(stream, "127.0.0.1").await;
+        assert!(r.is_err(), "lixo na resposta não pode passar como perna OK");
+        let _ = srv.await;
+    }
+
+    /// Lê o CONNECT inteiro do cliente de teste (header + varint + corpo).
+    ///
+    /// Sem drenar, fechar o socket com bytes não lidos faz o TCP enviar RST e o
+    /// cliente recebe "conexão forçada" em vez do CONNACK que escrevemos.
+    async fn drain_connect<S>(s: &mut S)
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut head = [0u8; 1];
+        if s.read_exact(&mut head).await.is_err() {
+            return;
+        }
+        // Remaining Length (varint de até 4 bytes)
+        let mut len: usize = 0;
+        let mut mult: usize = 1;
+        loop {
+            let mut b = [0u8; 1];
+            if s.read_exact(&mut b).await.is_err() {
+                return;
+            }
+            len += (b[0] as usize & 0x7f) * mult;
+            if b[0] & 0x80 == 0 {
+                break;
+            }
+            mult *= 128;
+            if mult > 128 * 128 * 128 {
+                return;
+            }
+        }
+        let mut body = vec![0u8; len];
+        let _ = s.read_exact(&mut body).await;
+    }
+
+    /// CONNACK com `rc != 0` (broker recusou) também é falha — não "alcançável".
+    #[tokio::test]
+    async fn mqtt_connack_recusa_rc_diferente_de_zero() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((mut s, _)) = l.accept().await {
+                drain_connect(&mut s).await;
+                // CONNACK: flags 0, rc 5 (not authorized)
+                let _ = s.write_all(&[0x20, 0x02, 0x00, 0x05]).await;
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let err = super::mqtt_connack(stream, "127.0.0.1")
+            .await
+            .expect_err("rc=5 deve ser recusa");
+        assert!(err.contains("rc=5"), "erro deve citar o código: {err}");
+        let _ = srv.await;
+    }
+
+    /// CONNACK `rc=0` é a única resposta que aprova a perna.
+    #[tokio::test]
+    async fn mqtt_connack_aceita_rc_zero() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            if let Ok((mut s, _)) = l.accept().await {
+                drain_connect(&mut s).await;
+                let _ = s.write_all(&[0x20, 0x02, 0x00, 0x00]).await;
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        super::mqtt_connack(stream, "127.0.0.1")
+            .await
+            .expect("rc=0 é conexão aceita");
+        let _ = srv.await;
     }
 }
