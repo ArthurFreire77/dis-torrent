@@ -2,7 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 
 // Reusa padrao de live.spec.ts: amizade ao vivo via BroadcastChannel, sem restart.
 async function createAccount(page: Page, name: string) {
-  await page.goto('/');
+  // Fontes externas não devem travar o fluxo E2E em máquinas sem acesso à internet.
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
@@ -50,7 +51,7 @@ function assertNoWebRTCrash(allErrors: string[]) {
   expect(joined).not.toContain('ReferenceError');
 }
 
-test('chamada de voz abre overlay sem crash (ou mensagem honesta sem WebRTC)', async ({ browser }) => {
+test('chamada de voz mantém conversa visível no painel lateral sem crash (ou mensagem honesta sem WebRTC)', async ({ browser }) => {
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
@@ -61,7 +62,7 @@ test('chamada de voz abre overlay sem crash (ou mensagem honesta sem WebRTC)', a
 
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
-  const { fpB } = await befriendLive(a, b);
+  const { fpA, fpB } = await befriendLive(a, b);
 
   // Abre a DM com Bob para exibir a toolbar de chamada
   await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
@@ -81,13 +82,29 @@ test('chamada de voz abre overlay sem crash (ou mensagem honesta sem WebRTC)', a
     return;
   }
 
-  // Com WebRTC: botao habilitado, clica e overlay abre.
+  // Com WebRTC: botao habilitado, clica e o painel lateral abre sem esconder a DM.
   const voiceBtn = a.getByTitle('Iniciar chamada de voz');
   await expect(voiceBtn).toBeVisible({ timeout: 15000 });
   await expect(voiceBtn).toBeEnabled();
   await voiceBtn.click();
 
-  // Overlay ativo: contagem de participantes no cabeçalho da chamada
+  // Painel ativo ao lado da conversa e com controles de tamanho reversíveis.
+  const panel = a.getByTestId('call-panel');
+  await expect(panel).toBeVisible({ timeout: 15000 });
+  await expect(a.getByLabel('Mensagem')).toBeVisible();
+  const localTile = panel.locator(`[data-call-participant="${fpA}"]`);
+  await expect(localTile).toBeVisible();
+  const normalWidth = await panel.evaluate(el => el.getBoundingClientRect().width);
+  await a.getByTestId('call-panel-smaller').click();
+  await expect.poll(() => panel.evaluate(el => el.getBoundingClientRect().width)).toBeLessThan(normalWidth);
+  await a.getByTestId('call-panel-larger').click();
+  await expect.poll(() => panel.evaluate(el => el.getBoundingClientRect().width)).toBeGreaterThanOrEqual(normalWidth);
+  await localTile.getByRole('button', { name: /Fixar/ }).click();
+  await expect(localTile.getByRole('button', { name: /Ampliar participante fixado/ })).toBeVisible();
+  await localTile.getByRole('button', { name: /Ampliar participante fixado/ }).click();
+  await expect(localTile).toBeVisible();
+
+  // O painel ainda mostra contagem de participantes.
   await expect(a.getByText(/1 participante/)).toBeVisible({ timeout: 15000 });
 
   // B recebe o convite AO VIVO (modal "está ligando…")

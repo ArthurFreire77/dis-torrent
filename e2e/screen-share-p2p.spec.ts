@@ -66,6 +66,9 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
 
   test('captura a tela e transmite para um segundo peer sem perder frames', async () => {
     const browser = await chromium.launch({
+      // Permite usar Edge instalado quando o Chromium gerenciado não inicia
+      // por dependência do runtime Windows; sem variável, usa o Chromium padrão.
+      channel: process.env.PLAYWRIGHT_BROWSER_CHANNEL || undefined,
       headless: false,
       args: [
         '--use-fake-ui-for-media-stream',
@@ -166,6 +169,7 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           const stimTimer = setInterval(() => { stimOn = !stimOn; stim.style.background = stimOn ? '#f0f' : '#0ff' }, 250)
 
           const senderVideo = sender.addTrack(track, stream)
+          let unexpectedRenegotiation = false
           const offer = await sender.createOffer()
           await sender.setLocalDescription(offer)
           await receiver.setRemoteDescription(offer)
@@ -194,8 +198,10 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
 
           // O segundo peer precisa reaproveitar o MESMO m-line ao trocar a fonte
           // (é o que o callManager faz com replaceTrack): nada de renegociar.
-          sender.onnegotiationneeded = () => { probe.renegotiationStable = true }
+          sender.onnegotiationneeded = () => { unexpectedRenegotiation = true }
           await senderVideo.replaceTrack(track)
+          await new Promise(r => setTimeout(r, 100))
+          probe.renegotiationStable = !unexpectedRenegotiation
           probe.peersReusedSender = true
 
           // ── medição real por 8s ────────────────────────────────────────
@@ -324,6 +330,8 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
 
     // 6) a degradação adaptativa desce um degrau (e o piso é 480p)
     expect(probe!.degradedAfterPressure).toBe(true)
+    // Trocar a fonte no sender existente não pode exigir uma negociação extra.
+    expect(probe!.renegotiationStable).toBe(true)
 
     // 7) nenhum erro de página durante a captura/transmissão
     const joined = errors.join('\n')

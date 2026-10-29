@@ -18,7 +18,7 @@ async function createAccountMobile(page: Page, name: string) {
   await expect(page.locator('button').filter({ hasText: 'Você' }).first()).toBeVisible({ timeout: 15000 });
 }
 
-test('desktop: diagnóstico mostra versão+fp e copia relatório', async ({ page }) => {
+test('desktop: diagnóstico oculta dados por padrão e copia após consentimento', async ({ page }) => {
   await createAccountDesktop(page, 'DiagAlice');
 
   // Configurações (engrenagem no rodapé) → Diagnóstico de conexão
@@ -42,8 +42,13 @@ test('desktop: diagnóstico mostra versão+fp e copia relatório', async ({ page
   expect(report).toContain('versão:');
   expect(report).toContain('fingerprint:');
   expect(report).toContain(version);
-  // fp completo aparece no relatório (não só o curto da lista)
-  expect(report).toContain(fp.slice(0, 6));
+  expect(report).toContain('(ocultado)');
+  expect(report).not.toContain(fp.slice(0, 6));
+
+  // Desmarcar a proteção é o consentimento explícito para incluir dados pessoais.
+  await page.getByRole('checkbox', { name: /Ocultar IPs, fingerprints, apelidos e portas/ }).uncheck();
+  const consentedReport = (await page.getByTestId('diag-report-text').innerText()).trim();
+  expect(consentedReport).toContain(fp);
 
   // clipboard mock honesto (headless pode negar permissão real)
   await page.evaluate(() => {
@@ -65,6 +70,7 @@ test('desktop: diagnóstico mostra versão+fp e copia relatório', async ({ page
   expect(copied).toContain('versão:');
   expect(copied).toContain('fingerprint:');
   expect(copied).toContain(version);
+  expect(copied).toContain(fp);
 });
 
 test('mobile: diagnóstico acessível pelo menu Você e copia relatório', async ({ page }) => {
@@ -84,6 +90,8 @@ test('mobile: diagnóstico acessível pelo menu Você e copia relatório', async
   const report = (await page.getByTestId('diag-report-text').innerText()).trim();
   expect(report).toContain('versão:');
   expect(report).toContain('fingerprint:');
+  expect(report).toContain('(ocultado)');
+  expect(report).not.toContain(fp.slice(0, 6));
 
   await page.evaluate(() => {
     const w = window as unknown as { __copied?: string };

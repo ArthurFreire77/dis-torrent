@@ -14,6 +14,7 @@ test.use({
       '--use-fake-ui-for-media-stream',
       '--mute-audio',
       '--autoplay-policy=no-user-gesture-required',
+      '--disable-features=WebRtcHideLocalIpsWithMdns',
     ],
   },
 });
@@ -52,6 +53,21 @@ function collectCrashSignals(page: Page, bucket: string[]) {
   });
 }
 
+async function useLocalHostIce(pages: Page[]) {
+  await Promise.all(pages.map((p) => p.addInitScript(() => {
+    const Native = window.RTCPeerConnection
+    window.RTCPeerConnection = new Proxy(Native, {
+      construct(target, args) {
+        // Este E2E roda duas abas no mesmo PC: força candidatos host para não
+        // depender do hairpin NAT/STUN da rede local nem transformar flake de
+        // infraestrutura em regressão de signaling/cleanup do app.
+        const options = args[0] && typeof args[0] === 'object' ? { ...args[0], iceServers: [] } : { iceServers: [] }
+        return Reflect.construct(target, [options, ...args.slice(1)])
+      },
+    })
+  })))
+}
+
 /** Abre a DM (se ainda não estiver aberta) e liga (voz).
  *  Após a 1ª chamada a view já é a DM — as .friend-row só existem na lista
  *  de amigos, e clicar nelas de novo travava em retry eterno. */
@@ -85,6 +101,7 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
+  await useLocalHostIce([a, b])
   const errs: string[] = [];
   collectCrashSignals(a, errs);
   collectCrashSignals(b, errs);
@@ -115,8 +132,10 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
   await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await b.getByRole('button', { name: 'Aceitar' }).click();
-  await expect(a.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });
-  await expect(b.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });
+  await Promise.all([
+    expect(a.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 }),
+    expect(b.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 }),
+  ]);
 
   assertNoCrash(errs);
   await ctx.close();
@@ -127,6 +146,7 @@ test('quem ATENDEu consegue ligar de volta depois de sair (direção invertida)'
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
+  await useLocalHostIce([a, b])
   const errs: string[] = [];
   collectCrashSignals(a, errs);
   collectCrashSignals(b, errs);

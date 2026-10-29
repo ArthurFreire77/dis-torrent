@@ -82,7 +82,6 @@ test.describe('camada social', () => {
     await createAccount(page, 'Bia');
     await send(page, 'mensagem para reagir');
 
-    await page.getByText('mensagem para reagir').first().hover();
     const quick = page.getByTitle(/^Reagir /).first();
     await expect(quick).toBeVisible({ timeout: 5000 });
     await quick.click();

@@ -14,6 +14,7 @@ test.use({
       '--use-fake-ui-for-media-stream',
       '--mute-audio',
       '--autoplay-policy=no-user-gesture-required',
+      '--disable-features=WebRtcHideLocalIpsWithMdns',
     ],
   },
 });
@@ -56,6 +57,22 @@ function collectCrashSignals(page: Page, bucket: string[]) {
   });
 }
 
+async function useLocalHostIce(pages: Page[]) {
+  await Promise.all(pages.map((page) => page.addInitScript(() => {
+    const Native = window.RTCPeerConnection;
+    window.RTCPeerConnection = new Proxy(Native, {
+      construct(target, args) {
+        // As duas abas deste E2E estão no mesmo PC; STUN público pode testar
+        // hairpin NAT em vez do fluxo do app. ICE host valida o mesh local real.
+        const config = args[0] && typeof args[0] === 'object'
+          ? { ...args[0], iceServers: [] }
+          : { iceServers: [] };
+        return Reflect.construct(target, [config, ...args.slice(1)]);
+      },
+    });
+  })));
+}
+
 function assertNoWebRTCrash(allErrors: string[]) {
   const joined = allErrors.join('\n');
   expect(joined).not.toContain("Can't find variable");
@@ -63,16 +80,45 @@ function assertNoWebRTCrash(allErrors: string[]) {
   expect(joined).not.toContain('ReferenceError');
 }
 
-test('voz A->B com WebRTC real (fake device): B aceita e overlay aparece nos dois sem pageerror', async ({
+test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app', async ({
   browser,
 }) => {
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
+  await useLocalHostIce([a, b]);
   const errsA: string[] = [];
   const errsB: string[] = [];
   collectCrashSignals(a, errsA);
   collectCrashSignals(b, errsB);
+  await a.addInitScript(() => {
+    const mediaDevices = navigator.mediaDevices as MediaDevices & { getDisplayMedia?: (constraints?: DisplayMediaStreamOptions) => Promise<MediaStream> };
+    if (!mediaDevices) return;
+    Object.defineProperty(mediaDevices, 'getDisplayMedia', {
+      configurable: true,
+      value: async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 320;
+        canvas.height = 180;
+        const context = canvas.getContext('2d');
+        let frame = 0;
+        const draw = () => {
+          if (!context) return;
+          context.fillStyle = `hsl(${frame++ % 360} 70% 45%)`;
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.fillStyle = '#fff';
+          context.font = '20px sans-serif';
+          context.fillText('DisTorrent screen test', 12, 32);
+        };
+        draw();
+        const timer = window.setInterval(draw, 100);
+        const stream = canvas.captureStream(15);
+        (window as unknown as { __fakeScreen?: MediaStream; __fakeScreenTimer?: number }).__fakeScreen = stream;
+        (window as unknown as { __fakeScreenTimer?: number }).__fakeScreenTimer = timer;
+        return stream;
+      },
+    });
+  });
 
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
@@ -146,6 +192,92 @@ test('voz A->B com WebRTC real (fake device): B aceita e overlay aparece nos doi
   await expect(a.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
   // Modal entrante sumiu em B.
   await expect(b.getByText(/está ligando/)).toBeHidden({ timeout: 15000 });
+
+  // O ganho e o mute por participante alteram o elemento de áudio remoto real
+  // e ficam restritos ao fingerprint daquele peer.
+  const remoteAudio = a.locator(`audio[data-call-audio-fp="${await fpOf(b)}"]`);
+  await expect(remoteAudio).toHaveCount(1, { timeout: 15000 });
+  const remoteTile = a.locator(`[data-call-participant="${await fpOf(b)}"]`);
+  await remoteTile.locator('summary[aria-label^="Controles de áudio"]').click();
+  const remoteVolume = remoteTile.getByRole('slider');
+  await expect(remoteVolume).toBeVisible();
+  await remoteVolume.evaluate((element) => {
+    const input = element as HTMLInputElement;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '37');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect.poll(() => remoteAudio.evaluate((element) => (element as HTMLAudioElement).volume)).toBe(0.37);
+  await remoteTile.getByRole('button', { name: 'Silenciar para mim' }).click();
+  await expect.poll(() => remoteAudio.evaluate((element) => (element as HTMLAudioElement).muted)).toBe(true);
+  expect(await a.evaluate((key) => {
+    const store = JSON.parse(localStorage.getItem('distorrent:call-playback:v1') ?? '{}') as Record<string, { volume: number; muted: boolean }>;
+    return store[key];
+  }, await fpOf(b))).toEqual({ volume: 37, muted: true });
+
+  // Usa o fluxo real do app (botão → CallManager → sender → SDP/sinalização →
+  // tile remoto), com uma fonte canvas animada para não depender do seletor do SO.
+  const callerFp = await fpOf(a);
+  const callerTileOnB = b.locator(`[data-call-participant="${callerFp}"]`);
+  // Cancelar o seletor antes da captura não deve parar áudio nem alterar a
+  // transmissão remota (se houver uma captura anterior, ela continua viva).
+  await a.getByTestId('call-screen-share').click();
+  await a.getByRole('menu').getByRole('button', { name: /Configurações avançadas/ }).click();
+  await expect(a.getByRole('button', { name: 'Cancelar compartilhamento' })).toBeVisible();
+  await a.getByRole('button', { name: 'Cancelar compartilhamento' }).click();
+  await expect(a.getByTestId('call-screen-stop')).toBeHidden();
+  await expect(callerTileOnB.getByText('TELA')).toBeHidden();
+
+  await a.getByTestId('call-screen-share').click();
+  await a.getByRole('menu').getByRole('button', { name: 'Tela inteira' }).click();
+  await expect(a.getByTestId('call-screen-stop')).toBeVisible({ timeout: 15000 });
+  const receivedScreen = callerTileOnB.locator('video');
+  await expect(receivedScreen).toBeVisible({ timeout: 15000 });
+  await expect(callerTileOnB.getByText('TELA')).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => receivedScreen.evaluate((element) => {
+    const video = element as HTMLVideoElement;
+    return video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      && video.videoWidth === 320
+      && video.videoHeight === 180
+      && video.currentTime > 0;
+  })).toBe(true);
+  await a.getByTestId('call-screen-stop').click();
+  await expect(a.getByTestId('call-screen-share')).toBeVisible({ timeout: 15000 });
+  await expect(callerTileOnB.getByText('TELA')).toBeHidden({ timeout: 15000 });
+  await expect(receivedScreen).toBeHidden({ timeout: 15000 });
+  await expect.poll(() => a.evaluate(() => {
+    const win = window as unknown as { __fakeScreen?: MediaStream };
+    return win.__fakeScreen?.getVideoTracks()[0]?.readyState ?? 'missing';
+  })).toBe('ended');
+  await a.evaluate(() => {
+    const win = window as unknown as { __fakeScreen?: MediaStream; __fakeScreenTimer?: number };
+    if (win.__fakeScreenTimer) clearInterval(win.__fakeScreenTimer);
+  });
+
+  // A mesma chamada precisa poder reutilizar o sender após parar a tela.
+  await a.getByTestId('call-screen-share').click();
+  await a.getByRole('menu').getByRole('button', { name: 'Tela inteira' }).click();
+  await expect(a.getByTestId('call-screen-stop')).toBeVisible({ timeout: 15000 });
+  await expect(callerTileOnB.getByText('TELA')).toBeVisible({ timeout: 15000 });
+  await expect.poll(() => receivedScreen.evaluate((element) => {
+    const video = element as HTMLVideoElement;
+    return video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      && video.videoWidth === 320
+      && video.videoHeight === 180
+      && video.currentTime > 0;
+  })).toBe(true);
+  await a.getByTestId('call-screen-stop').click();
+  await expect(a.getByTestId('call-screen-share')).toBeVisible({ timeout: 15000 });
+  await expect(callerTileOnB.getByText('TELA')).toBeHidden({ timeout: 15000 });
+  await expect(receivedScreen).toBeHidden({ timeout: 15000 });
+  await expect.poll(() => a.evaluate(() => {
+    const win = window as unknown as { __fakeScreen?: MediaStream };
+    return win.__fakeScreen?.getVideoTracks()[0]?.readyState ?? 'missing';
+  })).toBe('ended');
+  await a.evaluate(() => {
+    const win = window as unknown as { __fakeScreenTimer?: number };
+    if (win.__fakeScreenTimer) clearInterval(win.__fakeScreenTimer);
+  });
 
   // NENHUM pageerror / "Can't find variable" em nenhuma aba.
   assertNoWebRTCrash([...errsA, ...errsB]);
