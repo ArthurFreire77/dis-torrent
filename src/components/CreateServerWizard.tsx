@@ -53,87 +53,127 @@ import { PERMS, PERM_LABELS } from '../services/models'
 // precisam de seletor. O mesmo caminho que `BotConfigPanel` usa.
 
 const css = `
-.csw-cols{ display:grid; grid-template-columns:minmax(0,1fr) 280px; gap:${ui.xl}px; align-items:start }
+/* ==========================================================================
+   Assistente de criação de servidor
+   --------------------------------------------------------------------------
+   Estrutura: [conteúdo 1fr] [resumo 300px]. O resumo fica STICKY porque é ele
+   que confirma o que está sendo criado — em um formulário longo, perder o
+   resumo de vista obriga a pessoa a rolar de volta para conferir o nome.
+   ========================================================================== */
+.csw-cols{ display:grid; grid-template-columns:minmax(0,1fr) 268px; gap:${ui.lg}px; align-items:start }
+/* grid-template-columns com minmax(0,1fr) é obrigatório: com 1fr puro o
+   mínimo automático da coluna é o conteúdo, e o grid devolvia 534px de 558
+   disponíveis (medido) — sobrava espaço e os cards ficavam estreitos. */
+.csw-cols > *{ min-width:0 }
 .csw-side{ position:sticky; top:0; min-width:0 }
-.csw-main{ min-width:0 }
+.csw-main{ min-width:0; display:flex; flex-direction:column; gap:${ui.lg}px }
+/* Filhos do flex precisam width:100%: sem isso um DIV com grid dentro
+   encolhe para o conteúdo (medido: csw-cats ocupava 534px de 858px e os cards
+   ficavam com 263px, cortando a descrição). */
+.csw-main > *{ width:100% }
 
-/* passo 1 — modelos e categorias de ícone */
+/* ---- cabeçalho do passo ------------------------------------------------- */
+.csw-step-head{ display:flex; align-items:flex-start; gap:${ui.md}px; padding-bottom:${ui.md}px; border-bottom:1px solid ${ui.border} }
+.csw-step-num{ width:34px; height:34px; border-radius:10px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.16); color:${ui.accent}; font-size:14px; font-weight:900 }
+.csw-step-title{ font-size:15px; font-weight:800; color:${ui.heading}; line-height:1.3 }
+.csw-step-sub{ font-size:12px; color:${ui.muted}; line-height:1.5; margin-top:3px }
+
+/* ---- modelos (atalhos) -------------------------------------------------- */
 .csw-models{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:${ui.sm}px }
-.csw-model{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; color:${ui.text}; display:flex; flex-direction:column; gap:5px; min-width:0; transition:background .15s, border-color .15s }
+.csw-model{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:12px 13px; color:${ui.text}; display:flex; flex-direction:column; gap:6px; min-width:0; transition:background .15s, border-color .15s, transform .12s }
 .csw-model:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.csw-model:active:not(:disabled){ background:${ui.elevated} }
+.csw-model:active:not(:disabled){ background:${ui.elevated}; transform:translateY(1px) }
 .csw-model:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
 .csw-model[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-model-t{ font-size:13px; font-weight:800; color:${ui.heading}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-model-d{ font-size:11px; color:${ui.muted}; line-height:1.4; min-width:0 }
+.csw-model-row{ display:flex; align-items:center; gap:8px; min-width:0 }
+.csw-model-t{ display:block; font-size:13px; font-weight:800; color:${ui.heading}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.csw-model-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; min-width:0 }
 
-/* Categorias de ícone: o título e a descrição eram spans INLINE dentro do
-   flex item e saíam grudados numa linha só ("ServidorSem tema definido…").
-   display:block é o que separa as duas linhas; min-width:0 deixa o
-   text-overflow funcionar em card estreito. */
-.csw-cats{ display:grid; grid-template-columns:repeat(auto-fill,minmax(168px,1fr)); gap:${ui.sm}px }
-.csw-cat{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px; color:${ui.text}; display:flex; gap:9px; align-items:flex-start; min-width:0; transition:background .15s, border-color .15s }
+/* ---- categorias de ícone -------------------------------------------------
+   Título e descrição são elementos de BLOCO: como spans inline eles saíam
+   grudados ("ServidorSem tema definido…"), defeito que já apareceu em build
+   publicado. min-width:0 é o que deixa o ellipsis funcionar no card.
+   -------------------------------------------------------------------------- */
+.csw-cats{ display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:${ui.sm}px; align-items:stretch }
+.csw-cat{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; color:${ui.text}; display:flex; gap:10px; align-items:flex-start; min-width:0; min-height:76px; transition:background .15s, border-color .15s, transform .12s }
 .csw-cat:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.csw-cat:active:not(:disabled){ background:${ui.elevated} }
+.csw-cat:active:not(:disabled){ background:${ui.elevated}; transform:translateY(1px) }
 .csw-cat:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
 .csw-cat[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-cat-ic{ width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; background:${ui.input}; color:${ui.muted}; flex-shrink:0 }
-.csw-cat[aria-pressed="true"] .csw-cat-ic{ background:rgba(88,101,242,.24); color:#fff }
+.csw-cat-ic{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; background:${ui.input}; color:${ui.muted}; flex-shrink:0; transition:background .15s, color .15s }
+.csw-cat[aria-pressed="true"] .csw-cat-ic{ background:rgba(88,101,242,.26); color:#fff }
+.csw-cat-body{ min-width:0; flex:1 }
 .csw-cat-t{ display:block; font-size:12px; font-weight:800; color:${ui.heading}; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-cat-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.4; margin-top:2px }
+.csw-cat-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; margin-top:2px }
 
-/* passo 2 — canais */
-.csw-chan{ display:grid; grid-template-columns:22px minmax(0,1fr) 116px 148px 32px; gap:${ui.sm}px; align-items:start; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:9px 10px }
+/* ---- canais ------------------------------------------------------------- */
+.csw-chan{ display:grid; grid-template-columns:24px minmax(0,1fr) 96px 160px 32px; gap:${ui.sm}px; align-items:start; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px; transition:border-color .15s }
+.csw-chan:focus-within{ border-color:${ui.borderStrong} }
 .csw-chan[data-bad="true"]{ border-color:${ui.danger} }
-.csw-chan-ic{ color:${ui.muted}; display:flex; justify-content:center; padding-top:9px }
+.csw-chan-ic{ color:${ui.muted}; display:flex; justify-content:center; padding-top:10px }
 .csw-chan > div > div:last-child{ margin-bottom:0 !important }
 
-/* passo 3 — cargos */
-.csw-role{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px }
-.csw-role[data-on="false"]{ opacity:.62 }
-.csw-role-top{ display:flex; align-items:center; gap:9px }
-.csw-role-dot{ width:11px; height:11px; border-radius:50%; flex-shrink:0 }
-.csw-role-why{ font-size:11px; color:${ui.muted}; line-height:1.5; margin-top:7px }
+/* ---- cargos ------------------------------------------------------------- */
+.csw-role{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; transition:opacity .15s, border-color .15s }
+.csw-role:focus-within{ border-color:${ui.borderStrong} }
+.csw-role[data-on="false"]{ opacity:.6 }
+.csw-role-top{ display:flex; align-items:center; gap:10px }
+/* O campo de nome ocupa a linha inteira e o text-field padrão tem altura de
+   formulário; em uma lista de 3 cargos isso vira três caixas gigantes. Aqui ele
+   fica compacto, sem label, alinhado ao checkbox. */
+.csw-role-name{ flex:1; min-width:0 }
+.csw-role-name input{ height:32px; padding:5px 9px; font-size:13px; font-weight:700 }
+.csw-role-top input[type="checkbox"]{ appearance:none; -webkit-appearance:none; margin:0; width:18px; height:18px; flex-shrink:0; cursor:pointer; border-radius:5px; border:1.5px solid ${ui.borderStrong}; background:${ui.input}; position:relative; transition:background .15s, border-color .15s }
+.csw-role-top input[type="checkbox"]:checked{ background:${ui.accent}; border-color:${ui.accent} }
+.csw-role-top input[type="checkbox"]:checked::after{ content:""; position:absolute; left:5px; top:2px; width:5px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg) }
+.csw-role-top input[type="checkbox"]:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
+.csw-role-dot{ width:11px; height:11px; border-radius:50%; flex-shrink:0; box-shadow:0 0 0 3px rgba(255,255,255,.05) }
+/* A descrição alinha com o NOME (não com o checkbox): padding-left = checkbox
+   (18) + gaps (10+10). Sem isso o texto ficava deslocado à esquerda. */
+.csw-role-why{ font-size:11px; color:${ui.muted}; line-height:1.5; margin-top:7px; padding-left:38px }
 .csw-check{ display:flex; align-items:center; gap:8px; font-size:12px; color:${ui.text}; cursor:pointer; padding:5px 7px; border-radius:6px; transition:background .15s }
 .csw-check:hover{ background:${ui.surfaceHover} }
 .csw-check input{ margin:0; width:15px; height:15px; flex-shrink:0; cursor:pointer; accent-color:${ui.accent} }
 .csw-check:focus-within{ box-shadow:0 0 0 2px ${ui.accent}66 }
-.csw-perms{ display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:2px; margin-top:8px; padding-top:8px; border-top:1px solid ${ui.border} }
+.csw-perms{ display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:2px; margin-top:10px; padding-top:10px; border-top:1px solid ${ui.border} }
 
-/* barra de passos */
-.csw-seg{ appearance:none; cursor:pointer; background:transparent; border:0; padding:0; display:flex; flex-direction:column; gap:6px; min-width:0; text-align:left; font:inherit }
-.csw-seg-bar{ height:4px; border-radius:99px; background:${ui.input}; transition:background .18s; width:100% }
+/* ---- barra de etapas ---------------------------------------------------- */
+.csw-seg{ appearance:none; cursor:pointer; background:transparent; border:0; padding:0; display:flex; flex-direction:column; gap:7px; min-width:0; text-align:left; font:inherit }
+.csw-seg-bar{ height:3px; border-radius:99px; background:${ui.input}; transition:background .18s; width:100% }
 .csw-seg:hover:not(:disabled) .csw-seg-bar{ background:${ui.borderStrong} }
 .csw-seg[data-state="done"] .csw-seg-bar{ background:${ui.success} }
 .csw-seg[data-state="now"] .csw-seg-bar{ background:${ui.accent} }
 .csw-seg:focus-visible{ outline:2px solid ${ui.link}; outline-offset:3px; border-radius:4px }
 .csw-seg:disabled{ cursor:default }
-.csw-seg-l{ display:flex; align-items:center; gap:5px; font-size:11px; font-weight:700; color:${ui.muted}; min-width:0 }
+.csw-seg-l{ display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:${ui.muted}; min-width:0; transition:color .15s }
 .csw-seg[data-state="now"] .csw-seg-l{ color:${ui.heading} }
-.csw-seg-n{ width:16px; height:16px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; flex-shrink:0; background:${ui.input}; color:${ui.muted} }
+.csw-seg[data-state="done"] .csw-seg-l{ color:${ui.text} }
+.csw-seg-n{ width:17px; height:17px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; flex-shrink:0; background:${ui.input}; color:${ui.muted}; transition:background .15s, color .15s }
 .csw-seg[data-state="done"] .csw-seg-n{ background:rgba(35,165,89,.22); color:#a5e5bd }
 .csw-seg[data-state="now"] .csw-seg-n{ background:var(--csw-accent, ${ui.accent}); color:#fff }
 .csw-seg-t{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 
-/* texto utilitário */
+/* ---- utilitários -------------------------------------------------------- */
 .csw-cap{ font-size:11px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin:0 0 ${ui.sm}px }
 .csw-falta{ font-size:12px; color:#ffe0a3; line-height:1.5; display:flex; gap:7px; align-items:flex-start }
-.csw-prev{ display:flex; align-items:center; gap:${ui.md}px; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; margin-bottom:${ui.lg}px }
-.csw-prev-ic{ width:40px; height:40px; border-radius:12px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.2); color:#fff }
-.csw-prev-n{ font-size:14px; font-weight:800; color:${ui.heading}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-prev-d{ font-size:11px; color:${ui.muted}; line-height:1.4; margin-top:2px }
+.csw-prev{ display:flex; align-items:center; gap:${ui.md}px; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:12px; padding:13px 14px; margin-bottom:${ui.md}px }
+.csw-prev-ic{ width:44px; height:44px; border-radius:13px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.2); color:#fff }
+.csw-prev-body{ min-width:0; flex:1 }
+.csw-prev-n{ display:block; font-size:14px; font-weight:800; color:${ui.heading}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.csw-prev-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; margin-top:3px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical }
 .csw-count{ font-size:11px; color:${ui.muted}; text-align:right; margin-top:6px; font-variant-numeric:tabular-nums }
-.csw-done{ display:flex; flex-direction:column; align-items:center; text-align:center; gap:${ui.md}px; padding:${ui.md}px 0 ${ui.lg}px }
-.csw-done-ic{ width:64px; height:64px; border-radius:20px; display:flex; align-items:center; justify-content:center; background:rgba(35,165,89,.18); color:#a5e5bd }
-.csw-side-box{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:12px 13px; margin-bottom:${ui.md}px }
-.csw-side-t{ font-size:10px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin-bottom:8px; display:flex; align-items:center; gap:6px }
+.csw-done{ display:flex; flex-direction:column; align-items:center; text-align:center; gap:${ui.md}px; padding:${ui.lg}px 0 ${ui.xl}px }
+.csw-done-ic{ width:68px; height:68px; border-radius:22px; display:flex; align-items:center; justify-content:center; background:rgba(35,165,89,.18); color:#a5e5bd }
+.csw-side-box{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:12px; padding:13px 14px; margin-bottom:${ui.md}px }
+.csw-side-t{ font-size:10px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin-bottom:9px; display:flex; align-items:center; gap:6px }
 .csw-tag{ display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; border-radius:99px; padding:3px 9px; background:${ui.input}; border:1px solid ${ui.border}; color:${ui.text} }
-.csw-list{ display:flex; flex-direction:column; gap:4px }
+.csw-list{ display:flex; flex-direction:column; gap:5px }
 .csw-li{ display:flex; align-items:center; gap:7px; font-size:12px; color:${ui.text}; min-width:0 }
 .csw-li span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .csw-li-i{ color:${ui.muted}; flex-shrink:0; display:flex }
+.csw-empty{ font-size:12px; color:${ui.muted}; line-height:1.5 }
 
-/* Abaixo de 860px a coluna de 280px rouba a largura do conteúdo: o resumo desce
+/* Abaixo de 860px a coluna de 300px rouba a largura do conteúdo: o resumo desce
    para baixo (order:2) em vez de sumir, porque é ele que mostra a contagem de
    canais e cargos que a pessoa está criando. */
 @media (max-width: 860px) {
@@ -141,10 +181,10 @@ const css = `
   .csw-side{ position:static; order:2 }
   .csw-models{ grid-template-columns:minmax(0,1fr) }
 }
-/* 360px: 4 colunas de canal não cabem em ~300px úteis. O tipo e a categoria
-   descem para a linha de baixo, o nome fica com o espaço que sobrar. */
+/* 560px: 4 colunas de canal não cabem. Tipo e categoria descem para a linha de
+   baixo; o nome fica com o espaço que sobrar. */
 @media (max-width: 560px) {
-  .csw-chan{ grid-template-columns:22px minmax(0,1fr) 32px }
+  .csw-chan{ grid-template-columns:24px minmax(0,1fr) 32px }
   .csw-chan-ic{ grid-row:1 }
   .csw-chan-name{ grid-column:2 / 4 }
   .csw-chan-kind{ grid-column:1 / 2 }
@@ -153,6 +193,7 @@ const css = `
   .csw-cats{ grid-template-columns:minmax(0,1fr) }
   .csw-perms{ grid-template-columns:minmax(0,1fr) }
   .csw-seg-t{ display:none }
+  .csw-step-head{ gap:${ui.sm}px }
 }
 `
 
@@ -386,6 +427,20 @@ function StepCap({ children }: { children: ReactNode }) {
 }
 
 /** Rótulo + dica de uma linha, usado nos blocos do resumo lateral. */
+/** Título + explicação do passo. Cabeçalho dentro do CONTEÚDO (abaixo da barra
+ *  de etapas) para que o texto mude junto com o passo, e não só no modal. */
+function StepHead({ step, title, sub }: { step: number; title: string; sub: string }) {
+  return (
+    <div className="csw-step-head">
+      <span className="csw-step-num" aria-hidden>{step}</span>
+      <div style={{ minWidth: 0 }}>
+        <div className="csw-step-title">{title}</div>
+        <div className="csw-step-sub">{sub}</div>
+      </div>
+    </div>
+  )
+}
+
 function SideBox({ icon, title, children }: { icon: IconName; title: string; children: ReactNode }) {
   return (
     <div className="csw-side-box">
@@ -699,52 +754,56 @@ export default function CreateServerWizard({
     if (step === 0) {
       return (
         <>
-          <StepCap>Comece por um modelo (opcional)</StepCap>
-          <div className="csw-models" style={{ marginBottom: ui.xl }}>
-            {MODELOS.map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                className="csw-model"
-                aria-pressed={modeloId === m.id}
-                onClick={() => aplicarModelo(m.id)}
-              >
-                <span style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                  <span style={{ color: ui.muted, display: 'flex' }}>
-                    <Ic name={m.icon} size={15} />
+          <StepHead step={1} title="Identidade" sub="Como o servidor aparece na lista e para quem pensa em entrar." />
+
+          <div>
+            <StepCap>Comece por um modelo (opcional)</StepCap>
+            <div className="csw-models">
+              {MODELOS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className="csw-model"
+                  aria-pressed={modeloId === m.id}
+                  onClick={() => aplicarModelo(m.id)}
+                >
+                  <span className="csw-model-row">
+                    <span style={{ color: modeloId === m.id ? ui.accent : ui.muted, display: 'flex' }}>
+                      <Ic name={m.icon} size={15} />
+                    </span>
+                    <span className="csw-model-t">{m.label}</span>
                   </span>
-                  <span className="csw-model-t">{m.label}</span>
-                </span>
-                <span className="csw-model-d">{m.desc}</span>
-              </button>
-            ))}
+                  <span className="csw-model-d">{m.desc}</span>
+                </button>
+              ))}
+            </div>
           </div>
           {modeloId && (
-            <div style={{ marginBottom: ui.lg }}>
-              <Notice tone="info" icon="info">
-                O modelo preencheu a descrição, o ícone e os canais abaixo. Pode trocar
-                qualquer um deles — inclusive escolher outro modelo.
-              </Notice>
-            </div>
+            <Notice tone="info" icon="info">
+              O modelo preencheu a descrição, o ícone e os canais abaixo. Pode trocar
+              qualquer um deles — inclusive escolher outro modelo.
+            </Notice>
           )}
 
-          <TextField
-            label="Nome do servidor"
-            value={name}
-            onChange={setName}
-            maxLength={LIMITE_NOME + 20}
-            placeholder="ex.: Prefeitura de Vila Nova"
-            ariaLabel="Nome do servidor"
-            error={nomeCheck.error}
-            hint={`${name.trim().length}/${LIMITE_NOME} caracteres. Esse é o nome que a pessoa vê no rail.`}
-          />
-          {nomeCheck.warning && !nomeCheck.error && (
-            <div style={{ marginTop: -ui.sm, marginBottom: ui.lg }}>
-              <Notice tone="warning" icon="info">
-                {nomeCheck.warning}
-              </Notice>
-            </div>
-          )}
+          <div>
+            <TextField
+              label="Nome do servidor"
+              value={name}
+              onChange={setName}
+              maxLength={LIMITE_NOME + 20}
+              placeholder="ex.: Prefeitura de Vila Nova"
+              ariaLabel="Nome do servidor"
+              error={nomeCheck.error}
+              hint={`${name.trim().length}/${LIMITE_NOME} caracteres. Esse é o nome que a pessoa vê no rail.`}
+            />
+            {nomeCheck.warning && !nomeCheck.error && (
+              <div style={{ marginTop: ui.sm }}>
+                <Notice tone="warning" icon="info">
+                  {nomeCheck.warning}
+                </Notice>
+              </div>
+            )}
+          </div>
 
           <TextArea
             label="Descrição (opcional)"
@@ -756,28 +815,27 @@ export default function CreateServerWizard({
             hint="Aparece para quem está pensando em entrar. Uma linha basta."
           />
 
-          <StepCap>Ícone</StepCap>
-          <div className="csw-cats" style={{ marginBottom: ui.sm }}>
-            {ICON_CATEGORIES.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className="csw-cat"
-                aria-pressed={iconId === c.id}
-                onClick={() => setIconId(c.id)}
-              >
-                <span className="csw-cat-ic">
-                  <Ic name={c.id} size={16} />
-                </span>
-                <span style={{ minWidth: 0, flex: 1 }}>
-                  <span className="csw-cat-t">{c.label}</span>
-                  <span className="csw-cat-d">{c.desc}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-          <div style={{ ...{ fontSize: 12, color: ui.muted, lineHeight: 1.5 } }}>
-            Escolhido: <strong style={{ color: ui.text }}>{ICON_CATEGORIES.find((c) => c.id === iconId)?.label}</strong>
+          <div>
+            <StepCap>Ícone — {ICON_CATEGORIES.find((c) => c.id === iconId)?.label ?? 'Servidor'}</StepCap>
+            <div className="csw-cats" role="group" aria-label="Ícone do servidor">
+              {ICON_CATEGORIES.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className="csw-cat"
+                  aria-pressed={iconId === c.id}
+                  onClick={() => setIconId(c.id)}
+                >
+                  <span className="csw-cat-ic">
+                    <Ic name={c.id} size={16} />
+                  </span>
+                  <span className="csw-cat-body">
+                    <span className="csw-cat-t">{c.label}</span>
+                    <span className="csw-cat-d">{c.desc}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
         </>
       )
@@ -786,12 +844,19 @@ export default function CreateServerWizard({
     if (step === 1) {
       return (
         <>
-          <Notice tone="info" icon="hash">
-            Um servidor precisa de pelo menos um canal de texto. Você sempre pode criar
-            mais depois — em Configurações do servidor, quantos quiser.
-          </Notice>
-          <div style={{ height: ui.lg }} />
-          <StepCap>{channels.length} {channels.length === 1 ? 'canal' : 'canais'}</StepCap>
+          <StepHead
+            step={2}
+            title="Canais"
+            sub="O que a pessoa vê ao entrar. Precisa de pelo menos um canal de texto."
+          />
+          <div className="csw-cap" style={{ marginBottom: 0 }}>
+            {channels.length} {channels.length === 1 ? 'canal' : 'canais'}
+            {validosCount !== channels.length && (
+              <span style={{ color: ui.danger, marginLeft: 6 }}>
+                • {channels.length - validosCount} com problema
+              </span>
+            )}
+          </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
             {channels.map((c, i) => (
               <div key={i} className="csw-chan" data-bad={channelErrors[i] !== null}>
@@ -820,7 +885,7 @@ export default function CreateServerWizard({
                   <Select
                     value={c.category}
                     onChange={(v) => updateChannel(i, { category: v })}
-                    options={CATEGORIAS_PADRAO.map((c) => ({ value: c, label: c }))}
+                    options={CATEGORIAS_PADRAO.map((c2) => ({ value: c2, label: c2 }))}
                     ariaLabel={`Categoria do canal ${i + 1}`}
                   />
                 </div>
@@ -839,7 +904,7 @@ export default function CreateServerWizard({
               </div>
             ))}
           </div>
-          <div style={{ marginTop: ui.md }}>
+          <div>
             <Button icon="plus" onClick={addChannel}>
               Adicionar canal
             </Button>
@@ -851,11 +916,11 @@ export default function CreateServerWizard({
     if (step === 2) {
       return (
         <>
-          <Notice tone="info" icon="shield">
-            Os três cargos abaixo vêm prontos e marcados. Desmarque o que não quiser, ou
-            renomeie. Permissões finer-grained ficam no botão de seta de cada cargo.
-          </Notice>
-          <div style={{ height: ui.lg }} />
+          <StepHead
+            step={3}
+            title="Cargos"
+            sub="Quem pode fazer o quê. Os três abaixo vêm prontos — pode deixar como está."
+          />
           <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
             {roles.map((r) => {
               const aberto = expandedRole === r.key
@@ -870,7 +935,7 @@ export default function CreateServerWizard({
                       style={{ margin: 0, width: 16, height: 16, cursor: 'pointer', accentColor: ui.accent }}
                     />
                     <span className="csw-role-dot" style={{ background: r.color }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="csw-role-name">
                       <TextField
                         value={r.name}
                         onChange={(v) =>
@@ -916,12 +981,10 @@ export default function CreateServerWizard({
             })}
           </div>
           {cargosAtivos.length === 0 && (
-            <div style={{ marginTop: ui.md }}>
-              <Notice tone="warning" icon="warn">
-                Nenhum cargo marcado. O servidor funciona assim mesmo — todo mundo entra
-                com o mesmo nível, e você pode criar cargos depois.
-              </Notice>
-            </div>
+            <Notice tone="warning" icon="warn">
+              Nenhum cargo marcado. O servidor funciona assim mesmo — todo mundo entra
+              com o mesmo nível, e você pode criar cargos depois.
+            </Notice>
           )}
         </>
       )
@@ -930,16 +993,16 @@ export default function CreateServerWizard({
     if (step === PASSO_REGRAS) {
       return (
         <>
-          <Notice tone="info" icon="file">
-            Regras são opcionais. Pode deixar em branco e criar o servidor do mesmo jeito —
-            o campo só aparece para quem entra depois.
-          </Notice>
-          <div style={{ height: ui.lg }} />
+          <StepHead
+            step={4}
+            title="Regras"
+            sub="Opcional. Aparece para quem está pensando em entrar."
+          />
           <TextArea
             label="Regras do servidor (opcional)"
             value={rulesText}
             onChange={setRulesText}
-            rows={7}
+            rows={8}
             maxLength={LIMITE_REGRAS}
             placeholder={'1. Respeite todo mundo.\n2. Nada de spam nem link quebrado.\n3. Duvida? Pergunta no canal geral.'}
             ariaLabel="Regras do servidor"
@@ -948,13 +1011,6 @@ export default function CreateServerWizard({
           <div className="csw-count">
             {rulesText.length}/{LIMITE_REGRAS}
           </div>
-          {error && (
-            <div style={{ marginTop: ui.lg }}>
-              <Notice tone="danger" icon="warn">
-                {error}
-              </Notice>
-            </div>
-          )}
         </>
       )
     }
@@ -988,19 +1044,12 @@ export default function CreateServerWizard({
     )
   })()
 
-  const titulo =
-    step === 0 ? 'O que é este servidor?'
-      : step === 1 ? 'Canais'
-        : step === 2 ? 'Cargos'
-          : step === 3 ? 'Regras'
-            : 'Servidor criado'
-
-  const subtitulo =
-    step === 0 ? 'Nome, descrição e o que ele é. O resto do fluxo sai daqui.'
-      : step === 1 ? 'O que a pessoa vê quando entra.'
-        : step === 2 ? 'Quem pode fazer o quê. Pode deixar como está.'
-          : step === 3 ? 'Opcional. Pode pular.'
-            : undefined
+  // Título do modal: STÁVEL ("Criar servidor") em todos os passos, para o
+  // diálogo não trocar de nome a cada etapa. Quem dá o contexto do passo é o
+  // `StepHead` dentro do conteúdo (com número + explicação) — antes o subtítulo
+  // do modal duplicava essa informação e competia com o formulário.
+  const titulo = 'Criar servidor'
+  const subtitulo = step === PASSO_CONCLUIDO ? 'Pronto. O convite está abaixo.' : 'Leva menos de um minuto.'
 
   return (
     <>
@@ -1064,11 +1113,11 @@ export default function CreateServerWizard({
                 <span className="csw-prev-ic">
                   <Ic name={iconId} size={20} />
                 </span>
-                <span style={{ minWidth: 0 }}>
-                  <span className="csw-prev-n" style={{ display: 'block' }}>
+                <span className="csw-prev-body">
+                  <span className="csw-prev-n">
                     {name.trim() || 'Sem nome ainda'}
                   </span>
-                  <span className="csw-prev-d" style={{ display: 'block' }}>
+                  <span className="csw-prev-d">
                     {description.trim() || 'Sem descrição'}
                   </span>
                 </span>
@@ -1076,7 +1125,7 @@ export default function CreateServerWizard({
 
               <SideBox icon="hash" title="Canais">
                 <div className="csw-list">
-                  {channels.length === 0 && <div style={{ fontSize: 12, color: ui.muted }}>nenhum</div>}
+                  {channels.length === 0 && <div className="csw-empty">nenhum</div>}
                   {channels.map((c, i) => (
                     <div key={i} className="csw-li">
                       <span className="csw-li-i">
@@ -1088,17 +1137,15 @@ export default function CreateServerWizard({
                     </div>
                   ))}
                 </div>
-                <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <span className="csw-tag">
-                    {canaisTexto} {canaisTexto === 1 ? 'texto' : 'texto'}
-                  </span>
+                <div style={{ marginTop: 9, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <span className="csw-tag">{canaisTexto} texto</span>
                   {canaisVoz > 0 && <span className="csw-tag">{canaisVoz} voz</span>}
                 </div>
               </SideBox>
 
               <SideBox icon="shield" title="Cargos">
                 {cargosAtivos.length === 0 ? (
-                  <div style={{ fontSize: 12, color: ui.muted }}>nenhum cargo marcado</div>
+                  <div className="csw-empty">nenhum cargo marcado</div>
                 ) : (
                   <div className="csw-list">
                     {cargosAtivos.map((r) => (
@@ -1117,7 +1164,7 @@ export default function CreateServerWizard({
                     {rulesText.trim()}
                   </div>
                 ) : (
-                  <div style={{ fontSize: 12, color: ui.muted }}>nenhuma — opcional</div>
+                  <div className="csw-empty">nenhuma — opcional</div>
                 )}
               </SideBox>
             </aside>
