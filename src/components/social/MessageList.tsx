@@ -21,13 +21,13 @@ import {
   LinkUnfurl,
   PollCard,
   PresenceDot,
-  ReactionBar,
-  ReactionPicker,
+  ReactionWhoPopover,
   RichText,
   UnreadDivider,
   fmtClock,
 } from './Social'
 import { Icon, Icons } from '../../shared/icons'
+import { EmojiPicker } from '../../shared/EmojiPicker'
 
 
 export interface MessageListProps {
@@ -79,6 +79,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const [emojis, setEmojis] = useState<EmojiView[]>([])
   const [unreadBefore, setUnreadBefore] = useState<number | null>(null)
   const [picker, setPicker] = useState<string | null>(null)
+  /** `${msgId}:${emoji}` do popover "quem reagiu" aberto (paridade com o mobile). */
+  const [whoReagiu, setWhoReagiu] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ id: string; body: string } | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -159,7 +161,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }, [convId])
 
   useEffect(() => {
-    const close = () => { setMenu(null); setPicker(null) }
+    // Fecha menu/seletor ao clicar fora.
+    //
+    // Isto era um `click` cego: qualquer clique fechava o seletor — inclusive o
+    // clique no botão que ACABOU de abri-lo (React aplica o estado e o listener
+    // nativo roda logo depois, anulando na mesma batida). Era por isso que o
+    // botão "reagir" do desktop simplesmente não funcionava, enquanto os
+    // botões da barra de hover funcionavam (eles fazem `stopPropagation`).
+    // Agora um clique dentro de um popover não fecha nada.
+    const close = (e: MouseEvent) => {
+      const el = e.target as Element | null
+      if (el && typeof el.closest === 'function' && el.closest('[data-popover]')) return
+      setMenu(null)
+      setPicker(null)
+    }
     document.addEventListener('click', close)
     return () => document.removeEventListener('click', close)
   }, [])
@@ -218,6 +233,23 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }
 
   const scrollRef = useRef<HTMLDivElement>(null)
+  /**
+   * Para onde abrir o seletor de emoji desta mensagem.
+   *
+   * O `EmojiPicker` é `position: absolute` e tem ~330px de altura. Abrir sempre
+   * para cima fazia o painel cobrir o cabeçalho do canal quando a mensagem
+   * estava no topo; abrir sempre para baixo fazia ele sair pela borda inferior
+   * nas últimas mensagens. Decide pela posição real da mensagem na viewport.
+   */
+  const pickerAnchor = (msgId: string): 'up' | 'down' => {
+    try {
+      const el = scrollRef.current?.querySelector(`[data-mid="${msgId}"]`)
+      const box = el?.getBoundingClientRect()
+      if (!box) return 'up'
+      const spaceBelow = window.innerHeight - box.bottom
+      return spaceBelow < 360 ? 'up' : 'down'
+    } catch { return 'up' }
+  }
   useEffect(() => { if (unreadBefore) setUnreadBefore(null) }, [messages.length])
 
   if (messages.length === 0) return <>{emptyBlock}</>
@@ -325,30 +357,84 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   </>
                 )}
 
-                {/* Barra de reações + botão "reagir" no MESMO bloco relativo:
-                    o seletor abre logo abaixo das pílulas, colado na mensagem.
-                    Antes ele era anexado no fim da linha com `height: 0`, então
-                    abria deslocado (chegava a cobrir a mensagem de baixo ou o
-                    cabeçalho do canal quando a mensagem estava no topo). */}
-                <div style={{ position: 'relative' }}>
-                  <ReactionBar reactions={rx} onToggle={e => toggleReact(m.id, e)}
-                    resolveName={fp => nameOf(fp)}
-                    onAdd={() => setPicker(picker === m.id ? null : m.id)} />
+                {/* Reações IDÊNTICAS ao app do celular (MobileMessage): mesmas
+                    pílulas, mesmo botão "?" de quem reagiu (com 2+ pessoas),
+                    mesmo ícone de carinha ao lado das pílulas e mesma pílula
+                    "reagir" quando a mensagem ainda não tem reação. O seletor é
+                    o EmojiPicker compartilhado (o do compositor), não o
+                    ReactionPicker antigo — é o que o mobile usa. */}
+                <div style={{ position: 'relative' }} data-popover>
+                  {rx.length > 0 && (
+                    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 6 }}>
+                      {rx.map(r => (
+                        <div key={r.emoji} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                          {/* clique = alterna a MINHA reação (como o Discord) */}
+                          <button
+                            onClick={() => toggleReact(m.id, r.emoji)}
+                            aria-label={`${r.emoji}, ${r.count} reações. Clique para alternar a sua`}
+                            title={r.reactors.length ? r.reactors.join(', ') : undefined}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13,
+                              background: r.mine ? 'rgba(88,101,242,0.22)' : T_INPUT,
+                              border: `1px solid ${r.mine ? T_ACCENT : T_BORDER}`,
+                              color: r.mine ? '#f2f3f5' : T_TEXT, borderRadius: 8, padding: '3px 8px',
+                              cursor: 'pointer', fontWeight: 700,
+                            }}
+                          >
+                            <span style={{ fontSize: 14 }}>{r.emoji}</span>
+                            <span style={{ fontSize: 12 }}>{r.count}</span>
+                          </button>
+                          {/* com 2+ pessoas, o separador mostra QUEM reagiu */}
+                          {r.count > 1 && (
+                            <button
+                              onClick={() => setWhoReagiu(w => w === `${m.id}:${r.emoji}` ? null : `${m.id}:${r.emoji}`)}
+                              aria-label={`Ver quem reagiu com ${r.emoji}`}
+                              style={{
+                                position: 'absolute', right: -9, bottom: 6, width: 18, height: 18,
+                                borderRadius: '50%', background: T_SIDEBAR, border: `1px solid ${T_BORDER}`,
+                                color: T_MUTED, fontSize: 9, fontWeight: 800, display: 'inline-flex',
+                                alignItems: 'center', justifyContent: 'center', padding: 0, cursor: 'pointer',
+                              }}
+                            >?</button>
+                          )}
+                          {whoReagiu === `${m.id}:${r.emoji}` && (
+                            <ReactionWhoPopover
+                              r={r as never}
+                              resolve={(fp: string) => nameOf(fp)}
+                              onClose={() => setWhoReagiu(null)}
+                            />
+                          )}
+                        </div>
+                      ))}
+                      <button
+                        onClick={() => setPicker(picker === m.id ? null : m.id)}
+                        aria-label="Adicionar reação"
+                        style={{ background: T_INPUT, border: `1px solid ${T_BORDER}`, color: T_MUTED, borderRadius: 8, padding: '3px 8px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}
+                      ><Icon d={Icons.smile} size={14} /></button>
+                    </div>
+                  )}
 
-                  {/* Reagir quando ainda não há reação — mesmo padrão do mobile:
-                      pílula pequena com ícone, sem cobrir a mensagem. */}
                   {!grouped && rx.length === 0 && (
                     <button
                       onClick={() => setPicker(picker === m.id ? null : m.id)}
                       aria-label="Reagir à mensagem"
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, background: 'transparent', border: `1px solid ${T_BORDER}`, color: T_MUTED, borderRadius: 99, padding: '1px 8px 1px 5px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+                      title="Reagir"
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 3,
+                        background: 'transparent', border: `1px solid ${T_BORDER}`, color: T_MUTED,
+                        borderRadius: 99, padding: '1px 8px 1px 5px', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                      }}
                     ><Icon d={Icons.smile} size={12} /> reagir</button>
                   )}
 
                   {picker === m.id && (
-                    <div style={{ position: 'absolute', left: 0, top: '100%', zIndex: 40 }} onClick={e => e.stopPropagation()}>
-                      <ReactionPicker placement="down" onPick={em => { toggleReact(m.id, em); setPicker(null) }} customEmojis={emojis} onClose={() => setPicker(null)} />
-                    </div>
+                    <EmojiPicker
+                      open
+                      onClose={() => setPicker(null)}
+                      onPick={e2 => { toggleReact(m.id, e2); setPicker(null) }}
+                      serverEmojis={emojis}
+                      anchor={pickerAnchor(m.id)}
+                    />
                   )}
                 </div>
 
@@ -482,6 +568,8 @@ const T_BORDER = '#3f4147'
 const T_TEXT = '#dbdee1'
 const T_HEADING = '#f2f3f5'
 const T_MUTED = '#949ba4'
+const T_ACCENT = '#5865f2'
+const T_SIDEBAR = '#2b2d31'
 const BTN_PRIMARY: React.CSSProperties = { background: T_HEADING, color: '#1e1f22', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontWeight: 800, fontSize: 12 }
 const BTN_GHOST: React.CSSProperties = { background: 'transparent', color: T_MUTED, border: `1px solid ${T_BORDER}`, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontWeight: 700, fontSize: 12 }
 const TOOL_BTN: React.CSSProperties = { background: 'transparent', border: 'none', color: T_TEXT, cursor: 'pointer', fontSize: 14, width: 28, height: 26, borderRadius: 4 }
