@@ -28,13 +28,19 @@
     <uses-permission android:name="android.permission.CAMERA" />
 
     <!-- Foreground service para chamadas (Android 14+ corta mic/camera em
-         background sem isto). O service é iniciado ao entrar em chamada e
-         parado ao sair — a notificação persistente fica visível enquanto a
-         chamada estiver ativa. -->
+         background sem isto). O service (`CallForegroundService.kt`) é
+         iniciado ao entrar em chamada pelo plugin `callfg` e parado ao sair —
+         a notificação persistente fica visível enquanto a chamada estiver
+         ativa. Só o tipo `microphone` é usado: NÃO mantemos um serviço
+         permanente de "ficar online" (o Android restringe e seria desonesto
+         prometer execução contínua). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 13+: sem isto o sistema NÃO mostra notificação nenhuma (nem de
+         chamada, nem de mensagem). É pedida em runtime (NotificationPrompt /
+         tela de configurações), nunca no boot. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Compartilhamento de TELA no Android: NÃO existe hoje.
@@ -79,6 +85,14 @@
                 <data android:scheme="distorrent" android:host="invite" />
             </intent-filter>
         </activity>
+
+        <!-- Serviço de chamada em primeiro plano. `foregroundServiceType`
+             precisa bater com o que o `startForeground` pede no código, senão
+             o Android 14+ lança SecurityException. -->
+        <service
+            android:name=".CallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

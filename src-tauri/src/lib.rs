@@ -16,6 +16,19 @@ use distorrent_core::{Identity, Keypair};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+// Segundo plano: bandeja, fechar-para-bandeja, autostart oficial e
+// notificações nativas do sistema. Ver o cabeçalho do módulo para as decisões
+// de transparência (nada de processo oculto ou script de persistência).
+mod background;
+
+// Comandos do segundo plano reexportados para o `generate_handler!` abaixo.
+use background::{
+    app_hide_to_tray, app_quit, app_show_window, autostart_get, autostart_set,
+    background_prefs_get, background_prefs_set, background_set_connection, call_ring_start,
+    call_ring_stop, notification_cancel, notification_cancel_all, notification_permission_state,
+    notification_request_permission, notification_show,
+};
+
 /// Plugin `downloads` — só existe no Android.
 ///
 /// No desktop o `save_file` (Rust) escreve direto na pasta Downloads do
@@ -4171,9 +4184,23 @@ fn main() {
             .init();
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(downloads_plugin())
         .plugin(tauri_plugin_deep_link::init())
+        // Notificações nativas (toast do Windows via WinRT, NotificationManager
+        // no Android, freedesktop no Linux). Plugin OFICIAL do Tauri: o AUMID
+        // vem do atalho criado pelo instalador — não inventamos janela falsa.
+        .plugin(tauri_plugin_notification::init());
+    // Autostart só existe no desktop (o plugin nem compila para Android/iOS).
+    // `--minimized` = abrir direto na bandeja quando disparado pelo login.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ));
+    }
+    builder
         // PERMISSÕES DE MÍDIA DO WEBVIEW — a correção do "não consegue enviar
         // tela/câmera/mic" no Windows (WebView2) e o pré-requisito do
         // getDisplayMedia no WebKitGTK.
@@ -4380,7 +4407,53 @@ fn main() {
             emoji_delete,
             bookmark_set,
             bookmark_list,
+            // ---- segundo plano (bandeja / autostart / notificações) ----
+            background_prefs_get,
+            background_prefs_set,
+            autostart_get,
+            autostart_set,
+            notification_show,
+            notification_cancel,
+            notification_cancel_all,
+            notification_permission_state,
+            notification_request_permission,
+            app_show_window,
+            app_hide_to_tray,
+            app_quit,
+            background_set_connection,
+            call_ring_start,
+            call_ring_stop,
         ])
+        // FECHAR A JANELA ≠ ENCERRAR O APP.
+        //
+        // Com "fechar para a bandeja" ligado, o X esconde a janela e o
+        // processo (com a conexão P2P) segue vivo — é o que permite receber
+        // mensagem/chamada com o app fora da tela. "Sair" (menu da bandeja ou
+        // configurações) marca `quitting` e aí sim encerra tudo.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                #[cfg(desktop)]
+                {
+                    let app = window.app_handle();
+                    if let Some(bg) = app.try_state::<background::Background>() {
+                        let hide = bg.close_to_tray.load(std::sync::atomic::Ordering::Relaxed)
+                            && !bg.quitting.load(std::sync::atomic::Ordering::Relaxed);
+                        if hide {
+                            api.prevent_close();
+                            let _ = window.hide();
+                            // A UI precisa saber que saiu da tela: só assim a
+                            // presença cai para "ausente" em vez de mentir que
+                            // o usuário está online só porque o socket vive.
+                            background::emit_hidden(app);
+                        }
+                    }
+                }
+                #[cfg(mobile)]
+                {
+                    let _ = (&api, &window);
+                }
+            }
+        })
         .setup(|app| {
             let dir = app
                 .path()
@@ -4415,6 +4488,11 @@ fn main() {
                 // reincidência. Ver `distorrent-core/src/authlimit.rs`.
                 auth_limit: distorrent_core::authlimit::AuthLimiter::new(),
             });
+            // Segundo plano DEPOIS do AppState: a bandeja lê preferências do
+            // kv, e o handler de clique da notificação consulta o mapa de
+            // conversas. `Background` precisa existir antes do `init`.
+            app.manage(background::Background::new());
+            background::init(app.handle());
             // Pré-aquece o SQLite ENQUANTO a janela/WebView ainda está subindo.
             // O primeiro comando que a UI chama é `identity_get`, que abre este
             // mesmo arquivo: sem o aquecimento a tela de boot espera o disco

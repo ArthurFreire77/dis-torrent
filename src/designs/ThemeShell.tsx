@@ -38,6 +38,12 @@ import { attachStream } from '../shared/mediaAttach'
 import { addFolder, folderOf, isMutedServer, moveServerToFolder, removeFolder, renameFolder, shouldNotify, toggleMuteChannel, toggleMuteServer, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
+import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
+import {
+  notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
+  setOpenConversation, onOpenConversation,
+} from '../services/notifications'
+import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 
 // DisTorrent — visual Discord original. Dados 100% reais do motor (distorrent-core).
@@ -1022,6 +1028,30 @@ export default function ThemeShell({ designId }: {designId:string}){
       }
       refreshConvos()
       if (notify && socialPresence[identity?.fingerprint ?? ''] !== 'dnd') sfxMessage()
+      // Aviso do SISTEMA (toast/notificação) quando a janela não está em uso.
+      // O gerenciador decide por atividade + preferências; aqui só passamos o
+      // contexto que o shell já tem (canal, autor, menção).
+      if (notify) {
+        const evAny = ev as unknown as { id?: string; author_fp?: string; body?: string; ts?: number }
+        const chName = cid
+          ? communities.find(c => c.id === cid)?.channels.find(([id]) => id === ev.conv_id)?.[1]
+          : undefined
+        const authorFp = evAny.author_fp ?? ''
+        const author = authorFp
+          ? (peers.find(p => p.fp === authorFp)?.nickname
+            || friendsAccepted.find(f => f.fp === authorFp)?.nickname
+            || authorFp.slice(0, 8))
+          : 'DisTorrent'
+        notifyMessage({
+          id: String(evAny.id ?? ''),
+          conversationId: ev.conv_id,
+          title: chName ? `#${chName}` : author,
+          preview: String(evAny.body ?? ''),
+          mentioned,
+          serverId: cid,
+          ts: Number(evAny.ts) || Date.now(),
+        })
+      }
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
     if (ev.type === 'typing') {
@@ -1081,12 +1111,18 @@ export default function ThemeShell({ designId }: {designId:string}){
         // quando chegar, sem perder o ring que já está tocando.
       }
       if (socialPresence[identity?.fingerprint ?? ''] !== 'dnd') sfxRingStart()
+      // Fora da tela, o ring silencioso do WebView pode ser estrangulado: o
+      // aviso do sistema garante que a chamada apareça.
+      notifyIncomingCall({ callId: ev.call_id, title: known || fp.slice(0, 8) })
     }
     if (ev.type === 'call_ended') {
       // Só reage ao fim da chamada CORRETA: um call_ended de outra chamada
       // (mesh/grupo/frame atrasado) fechava o overlay com a mídia viva.
       const mine = activeCall?.callId === ev.call_id || incomingCall?.call_id === ev.call_id
       if (mine) { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
+      // Chamada terminou: some o aviso do sistema; se ninguém atendeu, vira
+      // "chamada perdida" (uma vez só).
+      endCallNotice(ev.call_id)
     }
     if (ev.type === 'voice_joined' || ev.type === 'voice_left' || ev.type === 'voice_state_changed') {
       if (voiceChannel && ev.community_id === voiceChannel.communityId && ev.channel_id === voiceChannel.channelId) {
@@ -1108,6 +1144,12 @@ export default function ThemeShell({ designId }: {designId:string}){
       setError(msg)
     }
   })
+
+  // Conversa aberta = aviso daquela conversa cancelado (e sem badge parado).
+  useEffect(() => { setOpenConversation(selConv) }, [selConv])
+  // Clique na notificação → abre a conversa certa (id vem do Rust, que
+  // guardou o mapa notificação→conversa).
+  useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
 
   const selPeer: PeerView | null = selPeerFp ? peers.find(p => p.fp === selPeerFp) ?? null : null
   const selConvObj = conversations.find(c => c.id === selConv) ?? null
@@ -1542,6 +1584,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
       await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
       sfxRingStop()
+      markCallHandled(incomingCall.call_id)
       setIncomingCall(null)
       sfxCallConnect()
     } catch (e: any) {
@@ -1556,6 +1599,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   function handleIncomingReject() {
     if (!incomingCall) return
     sfxRingStop()
+    markCallHandled(incomingCall.call_id)
+    endCallNotice(incomingCall.call_id)
     callManager.rejectIncoming(incomingCall.call_id, incomingCall.from_fp)
     setIncomingCall(null)
   }
@@ -1742,10 +1787,12 @@ export default function ThemeShell({ designId }: {designId:string}){
     list.push({ id: 'search', label: 'Buscar mensagens', hint: 'Ctrl+F', group: 'navegar', run: () => setShowSearch(true) })
     list.push({ id: 'pins', label: 'Mensagens fixadas', hint: 'Ctrl+Shift+P', group: 'navegar', run: () => setShowPins(true) })
     list.push({ id: 'shortcuts', label: 'Ver atalhos de teclado', group: 'ajuda', run: () => setShowShortcuts(true) })
-    list.push({ id: 'on', label: 'Ficar online', group: 'presença', run: () => services.presenceSet('online', '', '').catch(() => {}) })
-    list.push({ id: 'idle', label: 'Ficar ausente', group: 'presença', run: () => services.presenceSet('idle', '', '').catch(() => {}) })
-    list.push({ id: 'dnd', label: 'Não perturbe', group: 'presença', run: () => services.presenceSet('dnd', '', '').catch(() => {}) })
-    list.push({ id: 'inv', label: 'Ficar invisível', group: 'presença', run: () => services.presenceSet('invisible', '', '').catch(() => {}) })
+    // Presença pelo estado central: com a janela fechada, "online" cai para
+    // "ausente" sozinho (conexão ≠ presença).
+    list.push({ id: 'on', label: 'Ficar online', group: 'presença', run: () => setDesiredPresence('online') })
+    list.push({ id: 'idle', label: 'Ficar ausente', group: 'presença', run: () => setDesiredPresence('idle') })
+    list.push({ id: 'dnd', label: 'Não perturbe', group: 'presença', run: () => setDesiredPresence('dnd') })
+    list.push({ id: 'inv', label: 'Ficar invisível', group: 'presença', run: () => setDesiredPresence('invisible') })
     return list
   }, [conversations, selCommunity, extraChannels, identity])
 
@@ -3557,6 +3604,9 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
 
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>NOTIFICAÇÕES</div>
+            <div style={{ marginBottom: 16 }}>
+              <SystemNotificationSettings T={t} inputBg={inputBg} borderColor={borderColor} text={text} muted={muted} />
+            </div>
             <div style={{ marginBottom: 8 }}>
               <NotificationSettings
                 servers={communities.map(c => ({ id: c.id, name: c.name }))}

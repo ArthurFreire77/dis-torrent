@@ -14,7 +14,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-tauri = { version = "2", features = [] }
+# `tray-icon`: bandeja do Windows (fechar a janela = continuar recebendo, sem
+# processo escondido — o ícone fica visível e sai por "Sair").
+# `image-png`: decodifica o .png do ícone da bandeja em runtime (o ícone do
+# bundle é decodificado em build, mas o fallback `Image::from_bytes` precisa).
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 keyring = "2.3"
 hex = "0.4"
 base64 = "0.22"
@@ -24,6 +28,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tauri-plugin-deep-link = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
 
 # LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,
 # `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do

@@ -5,6 +5,11 @@
 let ctx: AudioContext | null = null
 let ringTimer: number | null = null
 let muted = false
+// Toque nativo: no app instalado quem marca o RITMO é o processo nativo, não o
+// `setInterval` da página. Motivo: com a janela escondida (bandeja) o Chromium
+// estrangula timers de página oculta → o toque espaçava e podia parar de tocar.
+let ringToken = 0
+let ringUnlisten: (() => void) | null = null
 
 /** Liga/desliga todos os efeitos (ex.: modo silencioso do usuário). */
 export function setSfxMuted(m: boolean) { muted = m }
@@ -70,20 +75,85 @@ export function sfxCallEnd() {
 export function sfxJoin() { if (!ensure()) return; tone(520, 0, 0.07, 'triangle', 0.08) }
 export function sfxLeave() { if (!ensure()) return; tone(380, 0, 0.09, 'triangle', 0.08) }
 
-/** Toque de chamada recebida (repete até `sfxRingStop`). */
-export function sfxRingStart() {
-  if (!ensure()) return
-  sfxRingStop()
-  const ring = () => {
-    if (!ensure()) return
-    tone(880, 0, 0.35, 'sine', 0.14)
-    tone(660, 0.18, 0.35, 'sine', 0.12)
-  }
-  ring()
-  ringTimer = window.setInterval(ring, 1800)
+function isTauriRuntime(): boolean {
+  try {
+    const w = window as unknown as Record<string, unknown>
+    return '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
+  } catch { return false }
 }
 
-/** Para o toque de chamada. */
-export function sfxRingStop() {
+function isAndroidRuntimeSfx(): boolean {
+  try { return isTauriRuntime() && /android/i.test(navigator.userAgent ?? '') } catch { return false }
+}
+
+/** Um ciclo do toque (dois tons). */
+function ringBeep() {
+  if (!ensure()) return
+  tone(880, 0, 0.35, 'sine', 0.14)
+  tone(660, 0.18, 0.35, 'sine', 0.12)
+}
+
+/** Fallback (navegador puro ou shell sem os comandos nativos). */
+function startIntervalRing() {
+  if (ringTimer !== null) return
+  ringBeep()
+  ringTimer = window.setInterval(ringBeep, 1800)
+}
+
+async function startNativeRing(token: number) {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    if (token !== ringToken) return
+    if (isAndroidRuntimeSfx()) {
+      // Android: Ringtone do SISTEMA (respeita silencioso/DND, continua com a
+      // tela bloqueada porque quem toca é o MediaPlayer nativo, não a página).
+      await invoke('plugin:callfg|ringStart')
+      return
+    }
+    const { listen } = await import('@tauri-apps/api/event')
+    const un = await listen('distorrent://ring', () => { ringBeep() })
+    if (token !== ringToken) { try { un() } catch { /* ignore */ }; return }
+    ringUnlisten = un
+    await invoke('call_ring_start', { callId: 'incoming' })
+  } catch {
+    // Build antiga/plugin ausente: cai no timer da página (melhor que silêncio).
+    if (token === ringToken) startIntervalRing()
+  }
+}
+
+/** Limpa só o lado da página (timer, listener, token). */
+function stopLocalRing() {
+  ringToken++
   if (ringTimer !== null) { try { clearInterval(ringTimer) } catch { /* ignore */ } ; ringTimer = null }
+  if (ringUnlisten) { try { ringUnlisten() } catch { /* ignore */ } ; ringUnlisten = null }
+}
+
+function stopNativeRing() {
+  if (!isTauriRuntime()) return
+  void import('@tauri-apps/api/core')
+    .then(({ invoke }) => {
+      if (isAndroidRuntimeSfx()) void invoke('plugin:callfg|ringStop').catch(() => {})
+      else void invoke('call_ring_stop').catch(() => {})
+    })
+    .catch(() => { /* sem Tauri: nada a parar no nativo */ })
+}
+
+/** Toque de chamada recebida (repete até `sfxRingStop`). */
+export function sfxRingStart() {
+  // Só limpa o lado local: mandar `stop` nativo aqui podia chegar DEPOIS do
+  // `start` e calar o toque que estava começando.
+  stopLocalRing()
+  if (!ensure()) return
+  const token = ringToken
+  if (isTauriRuntime()) {
+    void startNativeRing(token)
+    return
+  }
+  startIntervalRing()
+}
+
+/** Para o toque de chamada (atendeu, recusou, encerrou, overlay fechou). */
+export function sfxRingStop() {
+  stopLocalRing()
+  stopNativeRing()
 }

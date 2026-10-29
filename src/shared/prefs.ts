@@ -2,6 +2,19 @@ import { useSyncExternalStore } from 'react'
 
 export type NotifLevel = 'all' | 'mentions' | 'none'
 
+/** Presença escolhida pelo usuário (persistida entre sessões). */
+export type Presenca = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline'
+
+/**
+ * Em segundo plano, "online" vira "ausente" por padrão.
+ *
+ * `away` (padrão): conexão em segundo plano NÃO te deixa online — é a regra
+ *   "conexão ≠ presença".
+ * `online`: o usuário pediu explicitamente para continuar online mesmo com a
+ *   janela minimizada (ex.: está ouvindo um canal de voz).
+ */
+export type PresencaEmSegundoPlano = 'away' | 'online'
+
 export interface Prefs {
   theme: 'dark' | 'light'
   fontScale: number
@@ -16,6 +29,25 @@ export interface Prefs {
   echo: boolean
   noise: boolean
   gain: boolean
+  // ---- notificações do sistema / segundo plano ----
+  /** Mostrar avisos do SO (Windows toast / Android) quando em segundo plano. */
+  notifySystem: boolean
+  /** Incluir texto da mensagem no aviso (se off: "Nova mensagem"). */
+  notifyPreview: boolean
+  notifySounds: boolean
+  notifyCallSounds: boolean
+  /** Presença a anunciar com a janela fora de foco. */
+  presenceInBackground: PresencaEmSegundoPlano
+  /** Fechar (X) esconde para a bandeja em vez de encerrar. */
+  closeToTray: boolean
+  /** Abrir já na bandeja quando iniciado pelo autostart. */
+  startMinimized: boolean
+  /** Espelho da preferência REAL do SO (o Rust é a fonte de verdade). */
+  autostart: boolean
+  /** Já perguntamos sobre ativar notificações? (não perguntar de novo) */
+  notifPromptDone: boolean
+  /** Presença do usuário, restaurável no próximo boot. */
+  myPresence: Presenca
 }
 
 const KEY = 'distorrent:prefs:v1'
@@ -34,6 +66,16 @@ const DEFAULTS: Prefs = {
   echo: true,
   noise: true,
   gain: true,
+  notifySystem: true,
+  notifyPreview: true,
+  notifySounds: true,
+  notifyCallSounds: true,
+  presenceInBackground: 'away',
+  closeToTray: true,
+  startMinimized: false,
+  autostart: false,
+  notifPromptDone: false,
+  myPresence: 'online',
 }
 
 function load(): Prefs {

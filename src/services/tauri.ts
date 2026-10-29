@@ -345,6 +345,31 @@ export const tauriServices: DisTorrentServices = {
 
   presenceSet: (status, custom, customEmoji) =>
     invoke<void>('presence_set', { status, custom, customEmoji }),
+
+  // Segundo plano / notificações — tudo implementado em `background.rs`.
+  backgroundPrefs: () => invoke<import('./models').BackgroundPrefsView>('background_prefs_get'),
+  backgroundPrefsSet: (patch) => invoke<void>('background_prefs_set', {
+    closeToTray: patch.closeToTray ?? null,
+    startMinimized: patch.startMinimized ?? null,
+  }),
+  autostartGet: () => invoke<boolean>('autostart_get'),
+  autostartSet: (enabled) => invoke<boolean>('autostart_set', { enabled }),
+  notificationShow: (a) => invoke<void>('notification_show', {
+    id: a.id,
+    title: a.title,
+    body: a.body,
+    conversation: a.conversation ?? null,
+    silent: a.silent ?? false,
+  }),
+  notificationCancel: (id) => invoke<void>('notification_cancel', { id }),
+  notificationCancelAll: () => invoke<void>('notification_cancel_all'),
+  notificationPermission: () => invoke<string>('notification_permission_state'),
+  notificationRequestPermission: () => invoke<string>('notification_request_permission'),
+  appShowWindow: () => invoke<void>('app_show_window'),
+  appHideToTray: () => invoke<void>('app_hide_to_tray'),
+  appQuit: () => invoke<void>('app_quit'),
+  backgroundSetConnection: (state, onlinePeers, unread) =>
+    invoke<void>('background_set_connection', { stateLabel: state, onlinePeers, unread: unread ?? null }),
   presenceList: () => invoke<PresenceView[]>('presence_list'),
   presenceGet: (fp) => invoke<PresenceView>('presence_get', { fp }),
   profileSet: (p) => invoke<ProfileView>('profile_set', p),

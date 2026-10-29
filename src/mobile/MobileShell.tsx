@@ -27,6 +27,12 @@ import { BookmarksPanel } from '../components/social/Social'
 import { shouldNotify, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
+import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
+import {
+  notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
+  setOpenConversation, onOpenConversation,
+} from '../services/notifications'
+import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
 import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage } from '../services/models'
@@ -709,6 +715,10 @@ export default function MobileShell() {
     }
     return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone }
   }, [])
+  // Conversa aberta = aviso daquela conversa cancelado; clique na notificação
+  // abre a conversa certa (id vem do shell nativo).
+  useEffect(() => { setOpenConversation(selConv) }, [selConv])
+  useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
   useEffect(() => {
     if (!activeCall) return
     setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000))
@@ -814,6 +824,20 @@ export default function MobileShell() {
       if (ev.conv_id === selConv) append(ev)
       refreshConvos()
       if (notify && myPresence !== 'dnd') sfxMessage()
+      if (notify) {
+        const evAny = ev as unknown as { id?: string; author_fp?: string; body?: string; ts?: number; nickname?: string }
+        const chName = communities
+          .find(c => c.channels.some(([id]) => id === ev.conv_id))
+          ?.channels.find(([id]) => id === ev.conv_id)?.[1]
+        notifyMessage({
+          id: String(evAny.id ?? ''),
+          conversationId: ev.conv_id,
+          title: chName ? `#${chName}` : (evAny.nickname || (evAny.author_fp ?? '').slice(0, 8) || 'DisTorrent'),
+          preview: String(evAny.body ?? ''),
+          mentioned,
+          ts: Number(evAny.ts) || Date.now(),
+        })
+      }
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
     // "digitando…" — o desktop já mostrava; no mobile faltava (lacuna auditada).
@@ -854,10 +878,14 @@ export default function MobileShell() {
         setIncomingCall(ev)
       }
       if (myPresence !== 'dnd') sfxRingStart()
+      // Com a tela apagada/outro app na frente, o aviso do sistema é o que
+      // faz a chamada aparecer (o overlay da UI está atrás).
+      notifyIncomingCall({ callId: ev.call_id, title: known || fp.slice(0, 8) })
     }
     if (ev.type === 'call_ended') {
       const mine = activeCall?.callId === ev.call_id || incomingCall?.call_id === ev.call_id
       if (mine) { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
+      endCallNotice(ev.call_id)
     }
     if (ev.type === 'file_announce') {
       const ok = fileSwarm.onAnnounce(ev.file_id, ev.name, ev.size, ev.chunks, ev.hash, ev.from_fp, (ev as any).chunk_hashes ?? undefined)
@@ -954,6 +982,7 @@ export default function MobileShell() {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
       await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
       sfxRingStop()
+      markCallHandled(incomingCall.call_id)
       setIncomingCall(null)
       sfxCallConnect()
     } catch (e: any) {
@@ -966,6 +995,8 @@ export default function MobileShell() {
   function handleIncomingReject() {
     if (!incomingCall) return
     sfxRingStop()
+    markCallHandled(incomingCall.call_id)
+    endCallNotice(incomingCall.call_id)
     callManager.rejectIncoming(incomingCall.call_id, incomingCall.from_fp)
     setIncomingCall(null)
   }
@@ -1503,6 +1534,9 @@ export default function MobileShell() {
     setMyStatusBusy(true)
     try {
       await services.presenceSet(st, txt, emoji)
+      // O estado central também passa a conhecer a escolha: é ele quem decide
+      // o que anunciar quando a janela sai de foco.
+      setDesiredPresence(st)
       setMyPresence(st)
       setCustomStatus(txt)
       setError(null)
@@ -2369,6 +2403,8 @@ export default function MobileShell() {
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>NOTIFICAÇÕES</div>
+              <SystemNotificationSettings T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} />
+              <div style={{ height: 12 }} />
               <NotificationSettings
                 servers={communities.map(c => ({ id: c.id, name: c.name }))}
                 channelsOf={(sid) => (communities.find(c => c.id === sid)?.channels ?? []).map(([id, name]) => ({ id, name }))}

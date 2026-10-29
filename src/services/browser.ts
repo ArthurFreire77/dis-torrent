@@ -1531,6 +1531,28 @@ export const browserServices: DisTorrentServices = {
       m.ts > (cursors[m.conv_id]?.last_read_ts ?? 0)).length
   },
 
+  // Segundo plano NÃO existe no navegador puro: sem bandeja, sem toast do SO.
+  // Devolvemos o estado honesto (nada de botão que finge funcionar).
+  backgroundPrefs: async () => ({
+    close_to_tray: false,
+    start_minimized: false,
+    autostart: false,
+    tray: false,
+    notification_permission: 'unsupported',
+  }),
+  backgroundPrefsSet: async () => {},
+  autostartGet: async () => false,
+  autostartSet: async () => false,
+  notificationShow: async () => {},
+  notificationCancel: async () => {},
+  notificationCancelAll: async () => {},
+  notificationPermission: async () => 'unsupported',
+  notificationRequestPermission: async () => 'unsupported',
+  appShowWindow: async () => {},
+  appHideToTray: async () => {},
+  appQuit: async () => {},
+  backgroundSetConnection: async () => {},
+
   presenceSet: async (status, custom, customEmoji) => {
     const all = loadAll<PresenceView>(PRESENCE_BASE)
     all[meFp()] = { fp: meFp(), status, custom, custom_emoji: customEmoji, updated_at: Date.now() }

@@ -88,8 +88,13 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+; `AppUserModelID` é o que faz o toast do Windows funcionar no app INSTALADO.
+; O plugin oficial de notificações usa `com.distorrent.app` como AppUserModelID
+; (o mesmo `identifier` do tauri.conf.json); sem o ID no atalho, o Windows não
+; associa a notificação ao app e o aviso simplesmente não aparece. Não é
+; truque: é o mecanismo documentado da Microsoft (atalho = identidade do app).
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "com.distorrent.app"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "com.distorrent.app"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

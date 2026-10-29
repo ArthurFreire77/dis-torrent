@@ -1,3 +1,5 @@
+package com.distorrent.app.kotlin
+
 import java.io.File
 import org.apache.tools.ant.taskdefs.condition.Os
 import org.gradle.api.DefaultTask

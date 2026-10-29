@@ -489,6 +489,17 @@ export interface SearchQuery {
 
 export const EMPTY_SEARCH: SearchQuery = { text: '', from: '', conv: '', has: '', before: 0, limit: 50 }
 
+/** Preferências REAIS de segundo plano (lidas do shell nativo). */
+export interface BackgroundPrefsView {
+  close_to_tray: boolean
+  start_minimized: boolean
+  autostart: boolean
+  /** `true` quando existe ícone de bandeja de verdade nesta plataforma. */
+  tray: boolean
+  /** "granted" | "denied" | "prompt" */
+  notification_permission: string
+}
+
 export interface DisTorrentServices {
   kind: 'native' | 'browser'
   version(): Promise<string>
@@ -689,6 +700,29 @@ export interface DisTorrentServices {
 
   presenceSet(status: PresenceStatus, custom: string, customEmoji: string): Promise<void>
   presenceList(): Promise<PresenceView[]>
+
+  // ---- segundo plano / notificações do sistema ----
+  // No navegador puro tudo isso é indisponível (não existe bandeja nem toast),
+  // e as implementações devolvem o estado honesto em vez de fingir.
+  backgroundPrefs(): Promise<BackgroundPrefsView>
+  backgroundPrefsSet(patch: { closeToTray?: boolean; startMinimized?: boolean }): Promise<void>
+  autostartGet(): Promise<boolean>
+  autostartSet(enabled: boolean): Promise<boolean>
+  notificationShow(args: {
+    id: number
+    title: string
+    body: string
+    conversation?: string | null
+    silent?: boolean
+  }): Promise<void>
+  notificationCancel(id: number): Promise<void>
+  notificationCancelAll(): Promise<void>
+  notificationPermission(): Promise<string>
+  notificationRequestPermission(): Promise<string>
+  appShowWindow(): Promise<void>
+  appHideToTray(): Promise<void>
+  appQuit(): Promise<void>
+  backgroundSetConnection(state: string, onlinePeers: number, unread?: number): Promise<void>
   presenceGet(fp: string): Promise<PresenceView>
   profileSet(patch: { display_name: string; about: string; avatar_b64: string; banner_b64: string; accent: string }): Promise<ProfileView>
   profileGet(fp: string): Promise<ProfileView>

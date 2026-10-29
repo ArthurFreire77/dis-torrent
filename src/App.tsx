@@ -2,6 +2,9 @@ import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation, useNavigate } from 'react-router-dom'
 import ThemeShell from './designs/ThemeShell'
 import MobileShell from './mobile/MobileShell'
+import { NotificationPrompt } from './components/NotificationPrompt'
+import { initAppState } from './services/appState'
+import { initNotifications } from './services/notifications'
 
 // A largura decidia o shell só no primeiro render: quem abria no desktop e
 // reduzia a janela (ou girava um tablet) ficava com o layout de PC espremido
@@ -48,6 +51,13 @@ function InviteRoute({ token }: { token: string }){
 
 function AppRoutes(){
   const navigate = useNavigate()
+
+  // Uma vez só, para os DOIS shells: conexão × atividade × presença e o
+  // ouvinte do clique na notificação (que abre a conversa certa).
+  React.useEffect(() => {
+    initAppState()
+    initNotifications()
+  }, [])
 
   React.useEffect(() => {
     const w = window as unknown as Record<string, unknown>
@@ -101,6 +111,8 @@ export default function App(){
   return (
     <BrowserRouter>
       <AppRoutes />
+      {/* Pergunta de notificações: uma vez, ~1 min após abrir, nunca repete. */}
+      <NotificationPrompt />
     </BrowserRouter>
   )
 }

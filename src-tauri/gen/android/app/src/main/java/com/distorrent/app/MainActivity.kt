@@ -57,6 +57,19 @@ class MainActivity : TauriActivity() {
     } catch (e: Throwable) {
       android.util.Log.w("distorrentDownloads", "plugin downloads não registrado: ${e.message}")
     }
+    // Serviço de chamada em primeiro plano. O frontend já invoca
+    // `plugin:callfg|start`/`|stop` (callManager) — sem este registro o invoke
+    // falhava em silêncio e o Android 14+ cortava o microfone ao minimizar.
+    try {
+      app.tauri.plugin.PluginManager.load(
+        webView,
+        "callfg",
+        CallForegroundPlugin(this),
+        "{}"
+      )
+    } catch (e: Throwable) {
+      android.util.Log.w("distorrentCallFg", "plugin callfg não registrado: ${e.message}")
+    }
   }
 
   // Nota (removido): existia aqui um `hasMediaPermissions()` que checava
