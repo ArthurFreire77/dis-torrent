@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## [1.1.8-pre-alpha] — 2026-10-29
+
+### O app passa a existir com a janela fechada (Windows e Android)
+
+- **Windows: fechar (X) não encerra mais o app.** Com "fechar para a bandeja"
+  ligado, a janela esconde e o processo — com a conexão P2P — continua vivo;
+  bandeja com menu (abrir, estado REAL da rede, iniciar com o Windows, sair).
+  Sem processo oculto: o ícone é visível e o "Sair" derruba a rede de verdade.
+- **Notificações nativas** de mensagem e chamada pelo plugin oficial do Tauri
+  (toast WinRT no Windows, NotificationManager no Android). Uma notificação por
+  conversa, com contador, sem duplicata (dedupe por id de mensagem) e com
+  prévia opcional — desligada, o aviso diz só "Nova mensagem".
+- **Clique abre a conversa certa**: o Rust guarda notificação→conversa e devolve
+  no evento `distorrent://notification-action`; a UI navega.
+- **Iniciar com o Windows** funciona pelo plugin oficial (chave `Run` do
+  usuário, sem administrador e sem `reg.exe`/PowerShell). O instalador Inno
+  passou a marcar os atalhos com `AppUserModelID: com.distorrent.app` — sem
+  isso o Windows descarta o toast do app instalado em silêncio.
+- **Conexão ≠ presença**: `online` com a janela fora de foco vira **ausente**
+  (preferência "continuar online minimizado" para quem quiser o contrário).
+  O tooltip da bandeja mostra só o estado da REDE, nunca a presença.
+- **Android**: pergunta contextual de notificações (~1 min, uma única vez, com
+  "Ativar notificações" / "Agora não"); `POST_NOTIFICATIONS` pedido no
+  contexto; canal `distorrent_messages`; e o serviço de primeiro plano de
+  CHAMADA (`CallForegroundService`, tipo `microphone`) — o frontend já pedia
+  `plugin:callfg|start/stop`, mas o plugin Kotlin não existia, então o Android
+  14+ cortava o microfone ao minimizar.
+- **Corrige o build Android**: `buildSrc` perdeu a declaração `package`
+  (`com.distorrent.app.kotlin`) no rename forge→disTorrent, e TODO build
+  Gradle falhava com "Could not find implementation class RustPlugin".
+- **Toque de chamada com ritmo nativo**: no desktop uma thread do Rust emite
+  `distorrent://ring` a cada 1,8 s (teto de 90 s) e a página só toca o bipe —
+  antes era `setInterval`, que o Chromium estrangula em página oculta e deixava
+  a chamada muda na bandeja. No Android o toque é o `Ringtone` do SISTEMA em
+  loop (`plugin:callfg|ringStart/ringStop`), que continua com a tela bloqueada e
+  respeita silencioso/DND.
+- **Cancelamento de aviso**: Android ganhou `auto_cancel` (toque remove o
+  aviso); no Windows o toast não pode ser fechado por código (limite do
+  `notify-rust`, verificado na crate) — o app descarta o mapa
+  notificação→conversa, então clique atrasado não abre conversa errada.
+- Testes: 152/152 unit (20 novos em `tests/notifications.test.ts`), typecheck,
+  lint, build, `cargo check` e compilação Kotlin do app Android verdes. Limites
+  e checklist em `docs/background-notifications.md`.
+
+### Tela com áudio no app e reações iguais às do celular
+
+- Corrige o compartilhamento de tela DENTRO do app no Windows: o WebView2
+  recusava `frameRate: { min: 30 }` em `getDisplayMedia` com
+  `TypeError: min constraints are not supported`, então nenhuma captura
+  acontecia. As constraints passam a usar só `ideal`/`max`, com degradação
+  progressiva até `{ video: true }` — o seletor do sistema abre e a tela é
+  enviada.
+- Corrige o áudio do compartilhamento: as trilhas (som do sistema e/ou
+  microfone) entram na MESMA oferta do vídeo. Antes eram anexadas depois, com o
+  PC em `have-local-offer`, e o `addTrack` era pulado — a tela chegava muda ao
+  outro lado. O E2E agora exige a segunda trilha de áudio viva no elemento
+  remoto e a sua parada quando o share termina.
+- Reações do desktop alinhadas ao mobile: sai a fileira de quatro emojis fixos
+  (que cobria o texto) e entra um único ícone de reação no hover/foco, mais a
+  pílula discreta "reagir" quando a mensagem ainda não tem reações.
+- Nota de dados: a identidade fica em `distorrent.db`, no diretório do app
+  (`com.distorrent.app`). Uma base antiga de `com.forge.app` continua válida
+  quando copiada para o novo diretório — nenhuma migração destrutiva é feita.
+
 ## [1.1.7-pre-alpha] — 2026-10-28
 
 ### Auditoria local de chamadas, rede e reações
