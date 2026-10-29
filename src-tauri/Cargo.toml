@@ -30,6 +30,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tauri-plugin-deep-link = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
+# UMA INSTÂNCIA SÓ no desktop. Sem isto, abrir um convite (`distorrent://`) com o
+# app já aberto subia um SEGUNDO processo — e dois motores P2P sobre o mesmo
+# SQLite brigam pelo arquivo (WAL, locks) e pela porta de escuta. A feature
+# `deep-link` faz a 2ª instância entregar os argumentos à 1ª pelo plugin de
+# deep-link, então o convite abre na janela existente.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 # LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,
 # `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do
