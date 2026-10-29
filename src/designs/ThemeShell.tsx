@@ -79,11 +79,13 @@ function avatarColor(fp: string): string {
 }
 
 
-function Avatar({ name, fp, size }: { name: string; fp: string; size: number }) {
+function Avatar({ name, fp, size, avatarB64, accent }: { name: string; fp: string; size: number; avatarB64?: string; accent?: string }) {
   const initial = (name || '?').trim().charAt(0).toUpperCase()
   return (
-    <span style={{ width: size, height: size, borderRadius: '50%', background: avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0 }}>
-      {initial}
+    <span style={{ width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, overflow: 'hidden', boxShadow: accent ? `0 0 0 2px ${accent}55` : undefined }}>
+      {avatarB64
+        ? <img src={`data:image/jpeg;base64,${avatarB64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        : initial}
     </span>
   )
 }
@@ -1019,7 +1021,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         setUnreadServers(prev => new Set(prev).add(cid))
       }
       refreshConvos()
-      if (notify) sfxMessage()
+      if (notify && socialPresence[identity?.fingerprint ?? ''] !== 'dnd') sfxMessage()
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
     if (ev.type === 'typing') {
@@ -1078,7 +1080,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         // resolução assíncrona (peer ainda não carregado no tick): preenche
         // quando chegar, sem perder o ring que já está tocando.
       }
-      sfxRingStart()
+      if (socialPresence[identity?.fingerprint ?? ''] !== 'dnd') sfxRingStart()
     }
     if (ev.type === 'call_ended') {
       // Só reage ao fim da chamada CORRETA: um call_ended de outra chamada
@@ -1128,7 +1130,9 @@ export default function ThemeShell({ designId }: {designId:string}){
   })()
   const channelLabel = mergedChannelsForLabel.find(c => c.id === selConv)?.name ?? (activeComm?.channels.find(([cid]) => cid === selConv)?.[1] ?? 'canal')
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
-  const shownFriends = friendsTab === 'online' ? friendsAccepted.filter(f => onlineFps.has(f.fp)) : friendsAccepted
+  const shownFriends = friendsTab === 'online'
+    ? friendsAccepted.filter(f => onlineFps.has(f.fp) && socialPresence[f.fp] !== 'invisible')
+    : friendsAccepted
   // Suporte a chamadas: 'full' = WebRTC direto, 'none' = sem WebRTC neste
   // aparelho. Não existe mais o modo áudio-via-relay: sem WebRTC a chamada
   // falha honesto em vez de degradar para um caminho de latência alta.
@@ -2218,9 +2222,19 @@ export default function ThemeShell({ designId }: {designId:string}){
           <div style={{ marginTop: 'auto', padding: 10, background: t.footer, borderTop: `1px solid ${borderColor}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
             {identity && (
               <button onClick={() => setShowProfile(true)} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 4px', borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}>
-                <Avatar name={identity.nickname} fp={identity.fingerprint} size={36} />
+                {(() => {
+                  const meProfile = socialProfiles[identity.fingerprint]
+                  const mePresence = socialPresence[identity.fingerprint] || 'online'
+                  const presenceColors: Record<string, string> = { online: '#23a559', idle: '#f0b232', dnd: '#f23f42', invisible: '#80848e', offline: '#80848e' }
+                  return (
+                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                      <Avatar name={meProfile?.display_name || identity.nickname} fp={identity.fingerprint} size={36} avatarB64={meProfile?.avatar_b64} accent={meProfile?.accent || undefined} />
+                      <span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, borderRadius: '50%', background: presenceColors[mePresence] || '#80848e', border: '3px solid var(--sidebar)' }} />
+                    </span>
+                  )
+                })()}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: t.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{identity.nickname}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: socialProfiles[identity.fingerprint]?.accent || t.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{socialProfiles[identity.fingerprint]?.display_name || identity.nickname}</div>
                   <div style={{ fontSize: 10, color: '#949ba4', fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{identity.fingerprint.slice(0, 12)}</div>
                 </div>
               </button>
@@ -3373,11 +3387,14 @@ export default function ThemeShell({ designId }: {designId:string}){
       {showProfile && identity && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 80 }} onClick={() => setShowProfile(false)}>
           <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 12, padding: 0, width: 480, maxHeight: '85vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
-            <div style={{ background: `linear-gradient(135deg, ${t.accent}33, ${t.accent}11)`, borderRadius: '12px 12px 0 0', padding: '24px 20px 16px', position: 'relative' }}>
+            <div style={{
+              backgroundImage: socialProfiles[identity.fingerprint]?.banner_b64 ? `url(data:image/jpeg;base64,${socialProfiles[identity.fingerprint].banner_b64})` : `linear-gradient(135deg, ${(socialProfiles[identity.fingerprint]?.accent || t.accent)}33, ${(socialProfiles[identity.fingerprint]?.accent || t.accent)}11)`,
+              backgroundSize: 'cover', backgroundPosition: 'center', borderRadius: '12px 12px 0 0', padding: '24px 20px 16px', position: 'relative',
+            }}>
               <button onClick={() => setShowProfile(false)} style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(0,0,0,0.4)', border: 'none', color: '#fff', cursor: 'pointer', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>x</button>
               <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
                 <div style={{ position: 'relative' }}>
-                  <Avatar name={identity.nickname} fp={identity.fingerprint} size={80} />
+                  <Avatar name={socialProfiles[identity.fingerprint]?.display_name || identity.nickname} fp={identity.fingerprint} size={80} avatarB64={socialProfiles[identity.fingerprint]?.avatar_b64} accent={socialProfiles[identity.fingerprint]?.accent || undefined} />
                   <div style={{ position: 'absolute', bottom: -2, right: -2, width: 20, height: 20, borderRadius: '50%', background: t.green, border: `3px solid ${t.panel}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
                   </div>

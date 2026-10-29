@@ -88,11 +88,13 @@ function avatarColor(fp: string): string {
 
 // memo: avatar/dot puros — antes recriavam DOM virtual a cada render do shell
 // (cada tecla no composer, cada chunk do swarm, cada poll de 3s).
-const Avatar = memo(function Avatar({ name, fp, size }: { name: string; fp: string; size: number }) {
+const Avatar = memo(function Avatar({ name, fp, size, avatarB64, accent }: { name: string; fp: string; size: number; avatarB64?: string; accent?: string }) {
   const initial = (name || '?').trim().charAt(0).toUpperCase()
   return (
-    <span style={{ width: size, height: size, borderRadius: '50%', background: avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0 }}>
-      {initial}
+    <span style={{ width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, overflow: 'hidden', boxShadow: accent ? `0 0 0 2px ${accent}55` : undefined }}>
+      {avatarB64
+        ? <img src={`data:image/jpeg;base64,${avatarB64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        : initial}
     </span>
   )
 })
@@ -741,7 +743,7 @@ export default function MobileShell() {
   const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []) } catch { /* ignore */ } }, [])
   const refreshFriends = useMemo(() => coalesceAsyncRefresh(refreshFriendsImpl, 5000), [refreshFriendsImpl])
   async function refreshCommunities() { try { setCommunities(await services.communitiesList() ?? []) } catch { /* ignore */ } }
-  useEffect(() => { if (phase !== 'app') return; refreshFriends(); refreshCommunities(); const id = window.setInterval(() => { if (!document.hidden) refreshFriends() }, 10000); return () => window.clearInterval(id) }, [phase, refreshFriends])
+  useEffect(() => { if (phase !== 'app') return; refreshFriends(); refreshCommunities(); const id = window.setInterval(() => { if (!document.hidden) refreshFriends() }, 30000); return () => window.clearInterval(id) }, [phase, refreshFriends])
   useEffect(() => () => refreshFriends.cancel(), [refreshFriends])
   // GARGALO 2 (fileSwarm.onChange): 1 setState por chunk de 256KB (4 em
   // paralelo = tempestade de re-renders da árvore inteira). Throttle de 300ms
@@ -811,7 +813,7 @@ export default function MobileShell() {
       const notify = shouldNotify(ev.conv_id, undefined, mentioned)
       if (ev.conv_id === selConv) append(ev)
       refreshConvos()
-      if (notify) sfxMessage()
+      if (notify && myPresence !== 'dnd') sfxMessage()
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
     // "digitando…" — o desktop já mostrava; no mobile faltava (lacuna auditada).
@@ -851,7 +853,7 @@ export default function MobileShell() {
       } else {
         setIncomingCall(ev)
       }
-      sfxRingStart()
+      if (myPresence !== 'dnd') sfxRingStart()
     }
     if (ev.type === 'call_ended') {
       const mine = activeCall?.callId === ev.call_id || incomingCall?.call_id === ev.call_id
@@ -882,9 +884,12 @@ export default function MobileShell() {
   const peerTitle = useMemo(() => selConvObj?.title || peers.find(p => p.fp === selPeerFp)?.nickname || selPeerFp || '', [selConvObj, peers, selPeerFp])
   const activeComm = useMemo(() => selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null, [communities, selCommunity])
   const onlineFps = useMemo(() => new Set(peers.filter(p => p.state === 'CONNECTED').map(p => p.fp)), [peers])
+  const { presence } = usePresence()
   const filteredConvs = useMemo(() => conversations.filter(c => !searchQ || c.title.toLowerCase().includes(searchQ.toLowerCase())), [conversations, searchQ])
   const filteredComms = useMemo(() => communities.filter(c => !searchQ || c.name.toLowerCase().includes(searchQ.toLowerCase())), [communities, searchQ])
-  const onlineFriends = useMemo(() => friendsAccepted.filter(f => onlineFps.has(f.fp)), [friendsAccepted, onlineFps])
+  const onlineFriends = useMemo(() => friendsAccepted.filter(f =>
+    onlineFps.has(f.fp) && presence.get(f.fp)?.status !== 'invisible'
+  ), [friendsAccepted, onlineFps, presence])
   const shownFriends = friendsTab === 'online' ? onlineFriends : friendsAccepted
   const unreadTotal = useMemo(() => conversations.reduce((a, c) => a + (((c as any).unread_count as number) || 0), 0), [conversations])
   const netState: NetworkState | null = status?.state ?? null
@@ -1189,7 +1194,6 @@ export default function MobileShell() {
 
   const social = useSocialWindow(messages, selConv)
   const actions = useMessageActions((ids) => social.refreshIds(ids))
-  const { presence } = usePresence()
 
   // ---- autocompletar @menção / :emoji: / /comando (paridade com o desktop) ----
   const [activeAutocomplete, setActiveAutocomplete] = useState<{ kind: 'mention' | 'emoji' | 'slash'; query: string; start: number; end: number } | null>(null)
@@ -2307,9 +2311,18 @@ export default function MobileShell() {
 
         {tab === 'profile' && <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 4px 8px' }}>
-            {identity && <Avatar name={identity.nickname} fp={identity.fingerprint} size={64} />}
+            {identity && <span style={{ position: 'relative', display: 'inline-flex' }}>
+              <Avatar
+                name={profilesByFp[identity.fingerprint]?.display_name || identity.nickname}
+                fp={identity.fingerprint}
+                size={64}
+                avatarB64={profilesByFp[identity.fingerprint]?.avatar_b64}
+                accent={profilesByFp[identity.fingerprint]?.accent || undefined}
+              />
+              <PeerDot on={myPresence !== 'offline' && myPresence !== 'invisible'} ring={t.sidebar} />
+            </span>}
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 18, fontWeight: 900, color: t.heading }}>{identity?.nickname}</div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: profilesByFp[identity?.fingerprint ?? '']?.accent || t.heading }}>{profilesByFp[identity?.fingerprint ?? '']?.display_name || identity?.nickname}</div>
               <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO, wordBreak: 'break-all', marginTop: 2 }}>{identity?.fingerprint}</div>
               <div style={{ fontSize: 11, color: t.muted, marginTop: 6 }}>{friendsAccepted.length} amigos • {communities.length} servidores • {status?.online_peers ?? 0} online</div>
             </div>
