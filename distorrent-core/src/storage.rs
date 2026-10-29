@@ -634,6 +634,28 @@ impl Store {
         Ok(())
     }
 
+    /// Lista `(key, value)` cujo prefixo bate. Usado para restaurar convites
+    /// pendentes no boot: um join que não foi confirmado (host offline) não
+    /// pode desaparecer quando o app fecha — era exatamente o caso "colei o
+    /// token, o servidor não apareceu e ao reabrir tive de colar de novo".
+    pub fn kv_list_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.locked();
+        // LIKE com escape: `_` e `%` são curinga no SQL. O prefixo aqui é
+        // sempre literal (`join.pending.`), mas escapar evita surpresa futura.
+        let escaped = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let mut st =
+            conn.prepare("SELECT key,value FROM kv WHERE key LIKE ?1 ESCAPE '\\' ORDER BY key")?;
+        let rows = st
+            .query_map(params![format!("{escaped}%")], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ---------- identidade ----------
 
     pub fn save_identity(&self, id: &Identity, secret_hex: &str) -> Result<()> {
