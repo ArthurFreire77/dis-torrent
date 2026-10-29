@@ -4,7 +4,8 @@ import { Icon, Icons } from '../shared/icons'
 import { useConversations, useEngineEvents, useMessages, useNetwork } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
-import { ParticipantAudioControls } from '../components/calls/ParticipantAudioControls'
+import CallTileComponent from '../components/calls/CallTile'
+import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
@@ -637,8 +638,10 @@ export default function MobileShell() {
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
   const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
-  const [pinnedCallFp, setPinnedCallFp] = useState<string | null>(null)
-  const [expandedCallPin, setExpandedCallPin] = useState(false)
+  // Seleção por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`): a tela é um quadrado
+  // próprio e precisa de fixação/expansão independentes da pessoa.
+  const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
+  const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [isMuted, setIsMuted] = useState(false)
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
@@ -761,6 +764,47 @@ export default function MobileShell() {
     const q = (activeCall as any)?.quality as CallQuality | undefined
     if (q === '480p' || q === '720p' || q === '1080p' || q === '4K') setCallQuality(q)
   }, [activeCall?.quality])
+
+  // Quadrados da chamada (mesma regra pura do desktop). A mídia do "eu" vem do
+  // manager — no mobile o roster também pode não ter o stream local, e era por
+  // isso que quem transmitia não via a própria câmera.
+  const callTilesMobile = useMemo(() => buildCallTiles({
+    participants: (activeCall?.participants ?? []) as any[],
+    myFp: identity?.fingerprint ?? null,
+    local: activeCall ? {
+      stream: (activeCall as any).localStream ?? null,
+      screenStream: (activeCall as any).localScreenStream ?? null,
+      sharing: !!activeCall.sharing,
+      cameraOn: !!activeCall.cameraOn,
+      muted: !!activeCall.muted,
+      nativeMedia: !!(activeCall as any).nativeMedia,
+    } : null,
+  }), [
+    activeCall?.participants,
+    activeCall?.sharing,
+    activeCall?.cameraOn,
+    activeCall?.muted,
+    (activeCall as any)?.localStream,
+    (activeCall as any)?.localScreenStream,
+    (activeCall as any)?.nativeMedia,
+    identity?.fingerprint,
+  ])
+
+  const visibleCallTilesMobile = useMemo(() => {
+    const valid = callTilesMobile.map((tile) => tile.id)
+    const pin = pinnedTileId && valid.includes(pinnedTileId) ? pinnedTileId : null
+    const exp = expandedTileId && valid.includes(expandedTileId) ? expandedTileId : null
+    const ordered = pin ? sortTilesForPin(callTilesMobile, pin) : callTilesMobile
+    if (exp) return [ordered.find((x) => x.id === exp)!, ...ordered.filter((x) => x.id !== exp)]
+    return ordered
+  }, [callTilesMobile, pinnedTileId, expandedTileId])
+
+  useEffect(() => {
+    if (pinnedTileId && !callTilesMobile.some((tile) => tile.id === pinnedTileId)) setPinnedTileId(null)
+  }, [callTilesMobile, pinnedTileId])
+  useEffect(() => {
+    if (expandedTileId && !callTilesMobile.some((tile) => tile.id === expandedTileId)) setExpandedTileId(null)
+  }, [callTilesMobile, expandedTileId])
   async function changeQuality(q: CallQuality) {
     setQualityError(null)
     try { await callManager.setQuality(q); setCallQuality(q) }
@@ -1954,39 +1998,38 @@ export default function MobileShell() {
                   é o mesmo padrão do desktop. */}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>}
-            {/* Receptor view-only: tela compartilhada chega como track de vídeo — exibe igual desktop.
-                VÍDEO NATIVO (Linux): o core decodifica em Rust; a UI desenha o frame JPEG por <img>. */}
+            {/* Quadrados da chamada no mobile: MESMO modelo do desktop
+                (`callTiles.ts`) e mesmo componente. A tela ganha quadrado
+                próprio; fixar/expandir vale para pessoa E para tela. */}
             {(() => {
-              const participants = [...(activeCall.participants ?? [])] as any[]
-              if (pinnedCallFp) participants.sort((a, b) => a.fp === pinnedCallFp ? -1 : b.fp === pinnedCallFp ? 1 : 0)
-              if (participants.length === 0) return null
+              if (callTilesMobile.length === 0) return null
+              const expanded = !!expandedTileId
+              const cols = expanded ? 'minmax(0, 1fr)' : pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
               return (
-                <div style={{ display: 'grid', gridTemplateColumns: pinnedCallFp && !expandedCallPin ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 8 }}>
-                  {participants.map((pp: any) => {
-                    const isPinned = pp.fp === pinnedCallFp
-                    const isMine = pp.fp === identity?.fingerprint
-                    const hasVideo = !!pp.sharing || pp.cameraOn === true || (pp.cameraOn !== false && (() => { try { return !!(pp.stream as MediaStream)?.getVideoTracks?.()?.length } catch { return false } })()) || !!pp.videoUrl
-                    const isSharing = isMine ? !!activeCall.sharing : !!pp.sharing
-                    const isMuted = isMine ? !!activeCall.muted : !!pp.muted
-                    return (
-                    <div key={pp.fp} data-call-participant={pp.fp} style={{ position: 'relative', background: '#202226', borderRadius: 10, overflow: 'hidden', height: isPinned && expandedCallPin ? '40vh' : callPanelSize === 'compact' ? 92 : isPinned ? 150 : 104, display: 'flex', alignItems: 'center', justifyContent: 'center', gridColumn: isPinned && expandedCallPin ? '1 / -1' : undefined, border: `2px solid ${pp.speaking ? t.green : isMuted ? t.red + '88' : 'transparent'}`, transition: 'height 180ms ease' }}>
-                      {hasVideo && pp.videoUrl && !pp.stream
-                        ? <img src={pp.videoUrl} alt={`Conteúdo compartilhado por ${pp.nickname || pp.fp}`} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
-                        : hasVideo
-                          ? <video autoPlay playsInline muted ref={(el: any) => attachStream(el, pp.stream)} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
-                          : <div style={{ textAlign: 'center', color: '#fff' }}><Avatar name={pp.nickname || pp.fp} fp={pp.fp} size={40} /><div style={{ fontSize: 11, marginTop: 4 }}>{pp.nickname || String(pp.fp).slice(0, 8)}</div></div>}
-                      {(hasVideo || isSharing) && <span title={isSharing ? 'Compartilhamento de tela ativo' : 'Câmera ativa'} style={{ position: 'absolute', top: 6, left: 6, background: isSharing ? t.green : '#5865f2', color: '#fff', fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>{isSharing ? 'TELA' : 'CÂMERA'}</span>}
-                      {!hasVideo && !isSharing && <span title="Câmera desligada" aria-label="Câmera desligada" style={{ position: 'absolute', top: 6, left: 6, background: '#111a', color: '#fff', fontSize: 9, padding: '2px 5px', borderRadius: 4 }}>▣̸</span>}
-                      {pp.disconnected && <span title="Conexão instável; tentando reconectar" style={{ position: 'absolute', top: 6, right: 6, background: '#111a', color: t.yellow, fontSize: 9, padding: '2px 5px', borderRadius: 4 }}>◌</span>}
-                      <div style={{ position: 'absolute', top: 6, right: pp.disconnected ? 42 : 6, display: 'flex', gap: 4 }}>
-                        <button type="button" aria-label={isPinned ? `Desafixar ${pp.nickname || pp.fp}` : `Fixar ${pp.nickname || pp.fp}`} title={isPinned ? 'Desafixar participante' : 'Fixar participante'} onClick={() => { setPinnedCallFp(isPinned ? null : pp.fp); setExpandedCallPin(false) }} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px' }}>{isPinned ? '📌' : '⌖'}</button>
-                        {isPinned && <button type="button" aria-label={expandedCallPin ? 'Recolher participante fixado' : 'Ampliar participante fixado'} title={expandedCallPin ? 'Voltar à miniatura' : 'Ampliar conteúdo fixado'} onClick={() => setExpandedCallPin(v => !v)} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px' }}>{expandedCallPin ? '▣' : '□'}</button>}
-                      </div>
-                      {!isMine && <ParticipantAudioControls fp={pp.fp} nickname={pp.nickname || pp.fp} callDeafened={!!activeCall.deafened} />}
-                      <span style={{ position: 'absolute', bottom: 6, left: 6, fontSize: 10, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)' }}>{pp.nickname || String(pp.fp).slice(0, 8)} {isMuted && <Icon d={Icons.micOff} size={11} />}{pp.speaking && ' • falando'}</span>
+                <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 8 }}>
+                  {visibleCallTilesMobile.map((tile) => (
+                    <div
+                      key={tile.id}
+                      style={{
+                        // No mobile o quadrado da tela expandido ocupa a maior
+                        // área útil que o painel permite (sem estourar a tela).
+                        height: tile.id === expandedTileId ? '52vh' : callPanelSize === 'compact' ? 92 : tile.kind === 'screen' ? 168 : 124,
+                        transition: 'height 180ms ease',
+                      }}
+                    >
+                      <CallTileComponent
+                        tile={tile}
+                        pinned={tile.id === pinnedTileId}
+                        expanded={tile.id === expandedTileId}
+                        onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
+                        onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+                        callDeafened={!!activeCall.deafened}
+                        palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
+                        minHeight={callPanelSize === 'compact' ? 92 : 124}
+                        avatarColor={avatarColor}
+                      />
                     </div>
-                    )
-                  })}
+                  ))}
                 </div>
               )
             })()}

@@ -174,6 +174,27 @@ export interface CallState {
   relayManual?: boolean
   /** Motivo: 'manual' | 'ice-failed' | 'ice-disconnected' | 'relay-only' | null */
   relayReason?: string | null
+  /**
+   * STREAM LOCAL DE TELA (prévia de quem compartilha).
+   *
+   * A UI precisa desenhar o quadrado da tela para TODOS, inclusive para quem
+   * transmite — e não pode depender de receber o próprio stream pelo mesh
+   * (loopback não existe). Antes o `screenStream` era privado do manager e o
+   * tile local caía no avatar/"COMPARTILHANDO" sem imagem.
+   */
+  localScreenStream?: MediaStream | null
+  /**
+   * STREAM LOCAL DE CÂMERA/MIC.
+   *
+   * A UI desenha o quadrado de quem transmite a partir DESTE campo, não de
+   * `participants[i].stream`. Motivo (bug real): o roster pode ter sido criado
+   * antes do `getUserMedia` (ou no caminho nativo, sem stream nenhum), e o tile
+   * local ficava no avatar mesmo com a câmera ligada e o peer remoto vendo a
+   * imagem. Fonte da verdade da própria mídia é o manager, não o roster.
+   */
+  localStream?: MediaStream | null
+  /** `true` = mídia no core Rust (Linux), sem MediaStream na página. */
+  nativeMedia?: boolean
 }
 
 // Privacidade Ã— ICE: a lÃ³gica vive em ./callIcePrivacy (mÃ³dulo standalone
@@ -1205,7 +1226,25 @@ export class CallManager {
   }
 
   bind(cb: (s: CallState | null) => void) {
-    this.onUpdate = (s) => cb(s)
+    // Publica o stream local de TELA junto de CADA emissão de estado. Fazer isso
+    // num ponto só (e não em cada `onUpdate`) evita 30 call sites esquecendo o
+    // campo — que era o motivo de a prévia da tela nunca chegar na UI.
+    this.onUpdate = (s) => {
+      if (s) {
+        try {
+          const withScreen = s as CallState
+          if (withScreen.localScreenStream !== (this.screenStream ?? null)) {
+            withScreen.localScreenStream = this.screenStream ?? null
+          }
+          // Mesma razão do stream de tela: quem transmite precisa do PRÓPRIO
+          // stream, e não do roster (que pode não tê-lo no caminho nativo).
+          if (withScreen.localStream !== (this.localStream ?? null)) {
+            withScreen.localStream = this.localStream ?? null
+          }
+        } catch { /* estado sem o campo: nunca derruba o bus */ }
+      }
+      cb(s)
+    }
     try { setLocalMediaNotice((m) => { try { this.onCallNotice?.(m) } catch { /* ignore */ } }) } catch { /* ignore */ }
     // identidade já disponível (shells chamam setCallIdentity antes) — base do polite/impolite
     try { const me = this.getIdentity(); if (me && !this.myFp) this.myFp = me.fingerprint } catch { /* ignore */ }

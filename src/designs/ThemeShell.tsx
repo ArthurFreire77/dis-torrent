@@ -17,7 +17,8 @@ import {
 } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
-import { ParticipantAudioControls } from '../components/calls/ParticipantAudioControls'
+import CallTileComponent from '../components/calls/CallTile'
+import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CreateServerWizard from '../components/CreateServerWizard'
@@ -37,7 +38,6 @@ import { Modal, Notice } from '../shared/ui'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
-import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
@@ -45,7 +45,6 @@ import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport
 import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize } from '../services/fileSwarm'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import { throttleTrailing } from '../shared/perf'
-import { attachStream } from '../shared/mediaAttach'
 import { addFolder, folderOf, isMutedServer, moveServerToFolder, removeFolder, renameFolder, shouldNotify, toggleMuteChannel, toggleMuteServer, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
@@ -447,17 +446,6 @@ const SLASH_BASE = [
   { name: 'dado' },
 ]
 
-/** Um MediaStream só merece `<video>` se tiver trilha de VÍDEO: todo peer em
- *  chamada de voz tem stream (de áudio), e o tile virava um retângulo vazio
- *  sem avatar nem nome. */
-function streamHasVideo(s: unknown): boolean {
-  try {
-    const ms = s as MediaStream | null | undefined
-    if (!ms || typeof ms.getVideoTracks !== 'function') return false
-    return ms.getVideoTracks().length > 0
-  } catch { return false }
-}
-
 /** "3d 4h" — legível, para uptime. */
 function fmtShortDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
@@ -814,8 +802,12 @@ export default function ThemeShell({ designId }: {designId:string}){
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
   const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
-  const [pinnedCallFp, setPinnedCallFp] = useState<string | null>(null)
-  const [expandedCallPin, setExpandedCallPin] = useState(false)
+  // Fixar/expandir por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`), e não por fp:
+  // a tela e a pessoa têm quadrados separados e precisam de seleção própria.
+  // `pinnedCallFp`/`expandedCallPin` eram indexados por participante e por isso
+  // a tela nunca podia ser fixada sozinha.
+  const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
+  const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [showAddToCall, setShowAddToCall] = useState(false)
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [groupTitle, setGroupTitle] = useState('')
@@ -1022,6 +1014,57 @@ export default function ThemeShell({ designId }: {designId:string}){
     const q = (activeCall as any)?.quality as CallQuality | undefined
     if (q === '480p' || q === '720p' || q === '1080p' || q === '4K') setCallQuality(q)
   }, [activeCall?.quality])
+
+  // ---- Quadrados da chamada (pessoa + tela) -------------------------------
+  // Regra pura em `callTiles.ts` (testável no node:test). Aqui só ligamos os
+  // dados REAIS: a própria mídia vem do manager (`localStream`/
+  // `localScreenStream`), nunca do roster — era o motivo de quem transmite não
+  // ver a própria câmera.
+  const callTiles = useMemo(() => buildCallTiles({
+    participants: (activeCall?.participants ?? []) as any[],
+    myFp: identity?.fingerprint ?? null,
+    local: activeCall ? {
+      stream: (activeCall as any).localStream ?? null,
+      screenStream: (activeCall as any).localScreenStream ?? null,
+      sharing: !!activeCall.sharing,
+      cameraOn: !!activeCall.cameraOn,
+      muted: !!activeCall.muted,
+      nativeMedia: !!(activeCall as any).nativeMedia,
+    } : null,
+  }), [
+    activeCall?.participants,
+    activeCall?.sharing,
+    activeCall?.cameraOn,
+    activeCall?.muted,
+    (activeCall as any)?.localStream,
+    (activeCall as any)?.localScreenStream,
+    (activeCall as any)?.nativeMedia,
+    identity?.fingerprint,
+  ])
+
+  // Fixação/expansão só valem enquanto a transmissão existir. Sem isto, parar
+  // o compartilhamento deixava `expandedTileId` apontando para um id morto e o
+  // grid ficava travado em uma coluna.
+  const visibleCallTiles = useMemo(() => {
+    const valid = callTiles.map((tile) => tile.id)
+    const pin = pinnedTileId && valid.includes(pinnedTileId) ? pinnedTileId : null
+    const exp = expandedTileId && valid.includes(expandedTileId) ? expandedTileId : null
+    const ordered = pin ? sortTilesForPin(callTiles, pin) : callTiles
+    // Expandido ocupa a área principal; os demais viram miniaturas ao lado.
+    if (exp) {
+      return [ordered.find((x) => x.id === exp)!, ...ordered.filter((x) => x.id !== exp)]
+    }
+    return ordered
+  }, [callTiles, pinnedTileId, expandedTileId])
+
+  useEffect(() => {
+    if (!pinnedTileId) return
+    if (!callTiles.some((tile) => tile.id === pinnedTileId)) setPinnedTileId(null)
+  }, [callTiles, pinnedTileId])
+  useEffect(() => {
+    if (!expandedTileId) return
+    if (!callTiles.some((tile) => tile.id === expandedTileId)) setExpandedTileId(null)
+  }, [callTiles, expandedTileId])
   useEffect(() => {
     if (showSettings) { setTurnInput(getTurnUrl()); setTurnMsg(null) }
   }, [showSettings])
@@ -3243,73 +3286,56 @@ export default function ThemeShell({ designId }: {designId:string}){
           {/* `alignContent: 'stretch'` + tile com altura mínima real: antes o
               grid deixava uma faixa vazia embaixo dos vídeos, porque as linhas
               não ocupavam a altura disponível. */}
-          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: pinnedCallFp && expandedCallPin ? 'minmax(0, 1fr) minmax(96px, 28%)' : `repeat(${Math.min(activeCall.participants.length, callPanelSize === 'compact' ? 1 : 2)}, minmax(0, 1fr))`, gridAutoRows: `minmax(${callPanelSize === 'compact' ? 112 : 150}px, 1fr)`, alignContent: 'stretch', gap: 10, padding: 12, overflowY: 'auto', background: '#1a1a1a', transition: 'grid-template-columns 180ms ease' }}>
-            {(() => {
-              const unique = Array.from(new Map((activeCall.participants as any[]).map((p: any) => [p.fp, p])).values()) as any[]
-              if (pinnedCallFp) unique.sort((a, b) => a.fp === pinnedCallFp ? -1 : b.fp === pinnedCallFp ? 1 : 0)
-              return unique.map((p: any) => {
-              const isPinned = p.fp === pinnedCallFp
-              const isMine = p.fp === identity?.fingerprint
-              const hasVideo = isMine
-                ? !!activeCall.cameraOn || !!activeCall.sharing
-                : !!p.sharing || p.cameraOn === true || (p.cameraOn !== false && streamHasVideo(p.stream)) || !!p.videoUrl
-              const isMuted = isMine ? !!activeCall.muted : !!p.muted
-              const isSharing = isMine ? !!activeCall.sharing : !!p.sharing
-              return (
-              <div key={p.fp} data-call-participant={p.fp} style={{ background: `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`, borderRadius: 12, overflow: 'hidden', position: 'relative', minHeight: isPinned && expandedCallPin ? 320 : callPanelSize === 'compact' ? 112 : 150, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `2px solid ${p.speaking ? t.green : isMuted ? t.red + '55' : 'transparent'}`, boxShadow: '0 2px 10px rgba(0,0,0,.35)', gridColumn: isPinned && expandedCallPin ? '1' : undefined, gridRow: isPinned && expandedCallPin ? '1 / span 2' : undefined }}>
-                {hasVideo && streamHasVideo(p.stream) ? (
-                  /* remoto: vídeo SEMPRE mudo — o som sai do <audio> abaixo.
-                      Antes os dois tocavam: voz duplicada (eco/comb-filter). */
-                  <video autoPlay playsInline muted ref={(el:any)=>attachStream(el, p.stream)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                ) : (p as any).videoUrl ? (
-                  /* VÍDEO NATIVO (Linux): o core decodifica o RTP em Rust e a UI
-                     faz polling do último frame JPEG — não existe MediaStream do
-                     WebView aqui, então o tile é um <img> honesto. */
-                  <img src={(p as any).videoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
-                ) : (
-                  /* Avatar maior + subtitulo que era o MESMO nome repetido
-                     (duas expressões identicas) — agora diz o que a pessoa é. */
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ width: 104, height: 104, borderRadius: '50%', background: avatarColor(p.fp), display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 40, boxShadow: '0 6px 24px rgba(0,0,0,.4)' }}>{(p.nickname || p.fp).charAt(0).toUpperCase()}</div>
-                    <div style={{ fontWeight: 700, color: t.heading, marginTop: 12, fontSize: 15 }}>{p.nickname || p.fp.slice(0,8)}</div>
-                    <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{p.fp===identity?.fingerprint ? 'você' : 'aguardando o vídeo…'}</div>
-                  </div>
-                )}
-                {/* Áudio remoto SEMPRE presente (inclusive quando não há vídeo):
-                    antes ele vivia dentro do ramo `p.stream` e sumia junto com o
-                    vídeo em chamadas só de voz. */}
-                {!!p.stream && p.fp!==identity?.fingerprint && (
-                  <audio
-                    autoPlay
-                    playsInline
-                    hidden
-                    data-call-audio-fp={p.fp}
-                    ref={(el: HTMLAudioElement | null) => {
-                      attachStream(el, p.stream)
-                      if (el) applyParticipantPlayback(el, p.fp, !!activeCall.deafened)
-                    }}
-                  />
-                )}
-                {p.disconnected && (
-                  <span style={{ position: 'absolute', top: 8, right: 8, background: '#faa61a', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>RECONECTANDO…</span>
-                )}
-                {/* badge tela compartilhada: local COMPARTILHANDO, remoto com vídeo ASSISTINDO */}
-                {hasVideo && !isMine && <span title={isSharing ? 'Compartilhamento de tela ativo' : 'Câmera ativa'} style={{ position: 'absolute', top: 8, left: 8, background: isSharing ? t.green : '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>{isSharing ? 'TELA' : 'CÂMERA'}</span>}
-                {activeCall.sharing && isMine && <span style={{ position: 'absolute', top: 8, left: 8, background: t.green, color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>COMPARTILHANDO</span>}
-                {!hasVideo && !isSharing && <span title="Câmera desligada" aria-label="Câmera desligada" style={{ position: 'absolute', top: 8, left: 8, background: '#111a', color: '#fff', fontSize: 10, padding: '3px 6px', borderRadius: 4 }}>▣̸</span>}
-                <div style={{ position: 'absolute', right: 8, top: 38, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <button type="button" aria-label={isPinned ? `Desafixar ${p.nickname || p.fp}` : `Fixar ${p.nickname || p.fp}`} title={isPinned ? 'Desafixar participante' : 'Fixar participante'} onClick={() => { setPinnedCallFp(isPinned ? null : p.fp); setExpandedCallPin(false) }} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px', cursor: 'pointer', fontSize: 11 }}>{isPinned ? '📌' : '⌖'}</button>
-                  {isPinned && <button type="button" aria-label={expandedCallPin ? 'Recolher participante fixado' : 'Ampliar participante fixado'} title={expandedCallPin ? 'Voltar à miniatura' : 'Ampliar conteúdo fixado'} onClick={() => setExpandedCallPin(v => !v)} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px', cursor: 'pointer', fontSize: 11 }}>{expandedCallPin ? '▣' : '□'}</button>}
-                </div>
-                {!isMine && <ParticipantAudioControls fp={p.fp} nickname={p.nickname || p.fp} callDeafened={!!activeCall.deafened} />}
-                <div style={{ position: 'absolute', bottom: 8, left: 8, right: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.nickname || p.fp.slice(0,8)} {isMuted ? <Icon d={Icons.micOff} size={12} /> : <Icon d={Icons.mic} size={12} />}</span>
-                  {p.speaking && <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}` }}/>}
-                </div>
-              </div>
-              )
-              })
-            })()}
+          {/* Quadrados da chamada: PESSOA e TELA. A contagem de colunas vem do
+              número de TILES (não de participantes) — com 2 pessoas + 1 tela o
+              grid antigo abria 2 colunas para 3 itens e a tela caía sozinha
+              numa linha. Fixar/expandir é por `id` de TRANSMISSÃO (`p:<fp>` /
+              `s:<fp>`), então a tela tem vida própria.
+
+              EXPANDIDO: o quadrado escolhido ocupa a maior área útil (coluna
+              principal, largura e altura completas); os demais viram uma faixa
+              de miniaturas ao lado — continuam na chamada, com áudio, sem sair
+              do estado. */}
+          <div
+            style={{
+              flex: 1,
+              display: 'grid',
+              gridTemplateColumns: expandedTileId ? 'minmax(0, 1fr) minmax(88px, 22%)' : `repeat(${Math.min(callTiles.length, callPanelSize === 'compact' ? 1 : 2)}, minmax(0, 1fr))`,
+              gridTemplateRows: expandedTileId ? 'minmax(0, 1fr)' : undefined,
+              gridAutoRows: expandedTileId ? 'minmax(72px, 96px)' : `minmax(${callPanelSize === 'compact' ? 112 : 150}px, 1fr)`,
+              alignContent: 'stretch',
+              // Expandido: centraliza a caixa da tela (que abraça a proporção)
+              // em vez de deixá-la colada no topo da coluna.
+              alignItems: expandedTileId ? 'center' : 'stretch',
+              justifyItems: expandedTileId ? 'center' : 'stretch',
+              gap: 10,
+              padding: 12,
+              // Expandido não rola: o conteúdo tem de caber na área útil. No
+              // layout normal a rolagem continua para caber muita gente.
+              overflowY: expandedTileId ? 'hidden' : 'auto',
+              background: '#1a1a1a',
+              transition: 'grid-template-columns 180ms ease',
+            }}
+          >
+            {visibleCallTiles.map((tile) => (
+              <CallTileComponent
+                key={tile.id}
+                tile={tile}
+                pinned={tile.id === pinnedTileId}
+                expanded={tile.id === expandedTileId}
+                thumbnail={!!expandedTileId && tile.id !== expandedTileId}
+                onPin={(id) => {
+                  setPinnedTileId((cur) => (cur === id ? null : id))
+                  // Fixar NÃO expande e NÃO desfaz a expansão: são independentes.
+                }}
+                onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+                showAudioControls
+                callDeafened={!!activeCall.deafened}
+                palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
+                minHeight={callPanelSize === 'compact' ? 112 : 150}
+                avatarColor={avatarColor}
+              />
+            ))}
           </div>
           {/* A linha do aviso de mesh ficou FORA do grid de propósito: dentro
               dele virava mais uma linha (`gridColumn: 1 / -1`) e disputava a
