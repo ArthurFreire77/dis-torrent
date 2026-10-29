@@ -1117,7 +1117,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     ? (((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
       || (window as unknown as Record<string, unknown>).__TAURI__
       || (window as unknown as Record<string, unknown>).__TAURI_IPC__)
-      ? `distorrent://invite/${encodeURIComponent(inviteToken)}`
+      ? `distorrent://invite?invite=${encodeURIComponent(inviteToken)}`
       : `${window.location.origin}/invite/${encodeURIComponent(inviteToken)}`)
     : ''
   // PRESENÇA HONESTA: "online" é SÓ sessão estabelecida (verde). CONECTANDO/
@@ -2899,13 +2899,13 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <div style={{ background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: t.accent, fontWeight: 700, flex: 1, wordBreak: 'break-all' }}>{createdServerToken ? (
                     '__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window
-                      ? `distorrent://invite/${encodeURIComponent(createdServerToken)}`
+                      ? `distorrent://invite?invite=${encodeURIComponent(createdServerToken)}`
                       : `${window.location.origin}/invite/${encodeURIComponent(createdServerToken)}`
                   ) : createdServerId}</span>
                   <button onClick={async () => {
                     const link = createdServerToken
                       ? ('__TAURI_INTERNALS__' in window || '__TAURI__' in window || '__TAURI_IPC__' in window
-                        ? `distorrent://invite/${encodeURIComponent(createdServerToken)}`
+                        ? `distorrent://invite?invite=${encodeURIComponent(createdServerToken)}`
                         : `${window.location.origin}/invite/${encodeURIComponent(createdServerToken)}`)
                       : createdServerId
                     await navigator.clipboard?.writeText?.(link).catch(() => {})

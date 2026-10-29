@@ -609,7 +609,7 @@ export default function CreateServerWizard({
       const w = window as unknown as Record<string, unknown>
       const isTauri = '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
       setInviteUrl(isTauri
-        ? `distorrent://invite/${encodeURIComponent(token)}`
+        ? `distorrent://invite?invite=${encodeURIComponent(token)}`
         : `${window.location.origin}/invite/${encodeURIComponent(token)}`)
       setStep(PASSO_CONCLUIDO)
     } catch (e: unknown) {
