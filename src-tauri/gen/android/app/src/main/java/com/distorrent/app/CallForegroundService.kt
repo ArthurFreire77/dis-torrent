@@ -40,20 +40,29 @@ class CallForegroundService : Service() {
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    createChannel()
-    val notification = buildNotification()
     try {
+      // `createChannel()` e `buildNotification()` ficavam FORA do try. Uma
+      // exceção em qualquer um dos dois (ROMs que recusam ícone adaptativo no
+      // `setSmallIcon`, por exemplo) estourava dentro de
+      // `Service.onStartCommand` e derrubava o APP no instante em que a
+      // chamada começava — sem log útil e sem relação aparente com voz.
+      createChannel()
+      val notification = buildNotification()
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        startForeground(
-          NOTIFICATION_ID,
-          notification,
-          ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-        )
+        // MICROFONE sempre; CÂMERA só com a permissão concedida. O manifesto
+        // declara `microphone|camera`, e pedir o tipo `camera` sem `CAMERA`
+        // concedida lança SecurityException (o serviço pararia e a chamada de
+        // vídeo perderia a câmera ao minimizar, sem aviso).
+        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        if (hasCameraPermission()) {
+          types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        }
+        startForeground(NOTIFICATION_ID, notification, types)
       } else {
         startForeground(NOTIFICATION_ID, notification)
       }
     } catch (e: Throwable) {
-      // Sem permissão de mic declarada/ concedida o Android recusa o tipo —
+      // Sem permissão de mic declarada/concedida o Android recusa o tipo —
       // melhor parar do que ficar num estado que promete algo que não existe.
       android.util.Log.w("distorrentCallFg", "startForeground recusado: ${e.message}")
       stopSelf()
@@ -75,6 +84,11 @@ class CallForegroundService : Service() {
       }
     } catch (_: Throwable) { }
     super.onDestroy()
+  }
+
+  private fun hasCameraPermission(): Boolean {
+    return checkSelfPermission(android.Manifest.permission.CAMERA) ==
+      android.content.pm.PackageManager.PERMISSION_GRANTED
   }
 
   private fun createChannel() {

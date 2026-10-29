@@ -1020,6 +1020,15 @@ pub struct VoiceStats {
     pub frames_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_out: Option<u64>,
+    /// Quantos pares desta chamada estao em `connected` AGORA. Existe porque o
+    /// `state` agregado e' o PIOR caso: num mesh de 3, um par atras de NAT
+    /// simetrico virava `failed` e o frontend derrubava a chamada inteira,
+    /// incluindo os dois pares que estavam funcionando. Com estes dois campos o
+    /// consumidor consegue distinguir "um par caiu" de "a chamada acabou".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_connected: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers_total: Option<u32>,
 }
 
 /// Gerenciador de midia de voz. Estado interno por (call_id, peer_fp): varios
@@ -1910,6 +1919,12 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
     };
     let worst = all.iter().max_by_key(|peer| gravidade(peer))?;
     let mut out = worst.clone();
+
+    // Contagem por estado ANTES de somar contadores: e' a informacao que o
+    // frontend usa para nao matar a chamada por causa de UM par ruim (ver
+    // `peers_connected`/`peers_total` em `VoiceStats`).
+    out.peers_total = Some(all.len() as u32);
+    out.peers_connected = Some(all.iter().filter(|peer| peer.state == "connected").count() as u32);
 
     // Soma os contadores de TODOS os peers UMA vez. Antes era `skip(1)`, que
     // pulava o primeiro elemento do mapa (não o peer escolhido): quando o pior

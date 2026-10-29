@@ -14,6 +14,15 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+/// Validade da presença anunciada por push (`PresenceSet`).
+///
+/// POR QUE 90 s E NÃO 30 s: o heartbeat do engine é de 30 s. Com TTL igual ao
+/// intervalo, qualquer jitter (rede, suspensão, GC do WebView) fazia o registro
+/// expirar ANTES do próximo anúncio — os amigos piscavam offline↔online de 30
+/// em 30 segundos, e o usuário lia isso como "a rede caiu". 90 s = 3× o
+/// heartbeat: tolera duas perdas seguidas e ainda detecta app fechado rápido.
+pub const PRESENCE_TTL_MS: i64 = 90_000;
+
 // ================================ SCHEMA ================================
 
 /// `column_exists` local: o helper de `storage.rs` só aceita tabelas da
@@ -949,9 +958,15 @@ impl crate::storage::Store {
             custom_emoji: String::new(),
             updated_at: 0,
         });
-        // Presença recebida tem validade de 30 segundos. Sem heartbeat,
-        // um peer que fechou o app não pode continuar aparecendo online.
-        if presence.status != "offline" && presence.updated_at < crate::identity::now_ms() - 30_000
+        // Presença recebida tem validade de PRESENCE_TTL. Sem heartbeat, um
+        // peer que fechou o app não pode continuar aparecendo online.
+        //
+        // BUG CORRIGIDO: o TTL era 30 s e o heartbeat também era 30 s. Com
+        // qualquer jitter de rede/renderização o registro expirava ANTES do
+        // próximo `PresenceSet`, e a lista de amigos piscava offline↔online a
+        // cada meio minuto (parecia instabilidade da rede, era o TTL).
+        if presence.status != "offline"
+            && presence.updated_at < crate::identity::now_ms() - PRESENCE_TTL_MS
         {
             presence.status = "offline".into();
             presence.custom.clear();
@@ -1011,7 +1026,7 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())?;
         let now = crate::identity::now_ms();
         for presence in &mut rows {
-            if presence.status != "offline" && presence.updated_at < now - 30_000 {
+            if presence.status != "offline" && presence.updated_at < now - PRESENCE_TTL_MS {
                 presence.status = "offline".into();
                 presence.custom.clear();
                 presence.custom_emoji.clear();

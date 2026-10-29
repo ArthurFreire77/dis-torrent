@@ -1880,6 +1880,63 @@ impl Store {
         Ok(rows)
     }
 
+    /// Canais de voz em que ESTE fingerprint está (todos, de todas as
+    /// comunidades). Usado pelo re-anúncio periódico de presença de voz.
+    ///
+    /// POR QUE PRECISA: `VoiceJoin` era enviado UMA vez, só para peers que já
+    /// estivessem `Online` naquele instante (`link_tx` devolve `None` fora de
+    /// `Online` e o `SendToPeer` vira no-op silencioso). Quem abria o app e
+    /// entrava no canal logo depois — o caso normal com Tor/relay, que leva
+    /// segundos para estabelecer — nunca era visto pelos outros, e como não há
+    /// reenvio, a lista de participantes ficava assimétrica PARA SEMPRE.
+    pub fn my_voice_states(&self, fp: &str) -> Result<Vec<(String, String, bool, bool)>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT community_id,channel_id,muted,deafened FROM voice_states WHERE fp=?1",
+        )?;
+        let rows = st
+            .query_map(params![fp], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)? != 0,
+                    r.get::<_, i64>(3)? != 0,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Remove TODAS as linhas de voz deste fingerprint.
+    ///
+    /// Chamado no boot: `voice_states` é persistente e não tinha expiração.
+    /// Fechar o app (ou cair) durante uma chamada deixava a linha gravada, e no
+    /// próximo boot o usuário aparecia "na voz" sozinho — e no Linux o
+    /// `voice_join` ainda abria sessão nativa com esses fantasmas.
+    pub fn clear_my_voice_states(&self, fp: &str) -> Result<()> {
+        self.locked()
+            .execute("DELETE FROM voice_states WHERE fp=?1", params![fp])?;
+        Ok(())
+    }
+
+    /// Remove as linhas de voz de OUTRO fingerprint e devolve os canais de onde
+    /// ele saiu. Usado quando o peer cai: sem isso o participante ficava
+    /// "na voz" para sempre (a linha só era apagada por um `VoiceLeave`
+    /// explícito, que nunca chega quando o processo morre).
+    pub fn drop_peer_voice_states(&self, fp: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.locked();
+        let mut st =
+            conn.prepare("SELECT community_id,channel_id FROM voice_states WHERE fp=?1")?;
+        let rows = st
+            .query_map(params![fp], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(st);
+        conn.execute("DELETE FROM voice_states WHERE fp=?1", params![fp])?;
+        Ok(rows)
+    }
+
     // ---------- files swarm ----------
     pub fn announce_file(
         &self,

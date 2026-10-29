@@ -1749,7 +1749,25 @@ export class CallManager {
     try {
       const st = this.state
       if (!st || st.callId !== callId || !fp || fp === this.myFp) return
-      if (addVoiceParticipant(st.participants, fp)) this.onUpdate({ ...st })
+      const added = addVoiceParticipant(st.participants, fp)
+      if (added) this.onUpdate({ ...st })
+      // MESH NO CAMINHO NAVEGADOR: quem entra DEPOIS de mim precisa abrir a
+      // mídia do meu lado também. Antes `voice_joined` só mexia no roster e a
+      // PC só nascia no joiner (`joinVoice`) — quando o anúncio do outro lado
+      // se perdia (link ainda subindo), os dois apareciam "conectados" e não
+      // havia RTP nenhum entre eles.
+      //
+      // REGRA DETERMINÍSTICA: só o lado de fingerprint MAIOR oferece — a mesma
+      // do mesh nativo (`voice_mesh_maybe_offer`). Evita offer contra offer.
+      if (
+        !(st as any).nativeMedia &&
+        !this.pcs.has(fp) &&
+        isCallPhaseActive(st.phase) &&
+        this.myFp &&
+        this.myFp > fp
+      ) {
+        void this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
+      }
     } catch { /* evento de roster não derruba a chamada */ }
   }
 
@@ -1775,6 +1793,20 @@ export class CallManager {
       const added = addVoiceParticipant(st.participants, fp)
       const changed = updateVoiceParticipantState(st.participants, fp, muted, deafened)
       if (added || changed) this.onUpdate({ ...st })
+      // ANÚNCIO REVERSO do core (quem já estava no canal responde ao meu
+      // VoiceJoin com VoiceState). Sem criar a PC aqui, o joiner na WebView
+      // nunca abre mídia com quem chegou antes dele — o "conectado e mudo".
+      // Mesma regra determinística de quem oferece (eu, o lado maior).
+      if (
+        added &&
+        !(st as any).nativeMedia &&
+        !this.pcs.has(fp) &&
+        isCallPhaseActive(st.phase) &&
+        this.myFp &&
+        this.myFp > fp
+      ) {
+        void this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
+      }
     } catch { /* estado remoto inválido não derruba a chamada */ }
   }
 
@@ -1996,6 +2028,28 @@ export class CallManager {
         participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }],
         nativeMedia: true,
       } as unknown as CallState
+      // ROSTER SEMEADO PELO ESTADO REAL DO CANAL.
+      //
+      // Antes o caminho nativo começava com "só eu" e crescia apenas por
+      // evento `voice_joined`. Quem já estava no canal quando eu entrei não
+      // dispara evento nenhum para mim (o core só anuncia novos joins), então
+      // o overlay mostrava 1 participante enquanto a sidebar mostrava todos —
+      // o "entrei e não vejo as pessoas". `voiceStates` é a fonte de verdade
+      // (o mesmo SQLite que o core usa para montar a mesh).
+      try {
+        const states = await services.voiceStates(communityId, channelId)
+        for (const [fp, muted, deafened] of states) {
+          if (!fp || fp === me.fingerprint) continue
+          if (!this.state.participants.some((p: any) => p.fp === fp)) {
+            this.state.participants.push({
+              fp,
+              nickname: fp.slice(0, 6),
+              muted: !!muted,
+              deafened: !!deafened,
+            })
+          }
+        }
+      } catch { /* roster best-effort: os eventos ainda chegam */ }
       this.startNativeVoiceMonitor(callId)
       this.onUpdate({ ...this.state })
       return this.state
@@ -4154,6 +4208,13 @@ export class CallManager {
       if (!st || st.callId !== callId) { this.stopNativeVoiceMonitor(); return }
       // So espera timeout quando a chamada esta pendente de midia. Depois de
       // conectada (`-1`), `waited` fica 0 e o vigilante so age em `failed`.
+      //
+      // BUG CORRIGIDO: `nativeVoiceSince` era atribuido `-1` aqui e em mais
+      // nada — `waited` era SEMPRE 0 e o timeout de "sem sessao no core" nunca
+      // disparava. O overlay ficava em "Conectando…" para sempre (o oposto do
+      // que o comentario acima prometia). Agora a contagem comeca no primeiro
+      // tick em que a midia AINDA nao conectou, e zera quando conecta.
+      if (this.nativeVoiceSince < 0) this.nativeVoiceSince = Date.now()
       const waited = this.nativeVoiceSince > 0 ? Date.now() - this.nativeVoiceSince : 0
       void services.voiceMediaStats(callId).then((s) => {
         if (!this.state || this.state.callId !== callId) return
@@ -4215,11 +4276,17 @@ export class CallManager {
         if (s.state === 'connected') {
           this.nativeVoiceSince = -1
           this.applyPhase('media-connected')
-        } else if (s.state === 'failed' || waited > CallManager.NATIVE_VOICE_TIMEOUT_MS) {
+        } else if (this.nativeCallIsDead(s, waited)) {
           // O ICE que nunca fecha é o caso do CGNAT simétrico. Sem este
           // timeout a tela ficava em "Conectando…" indefinidamente — que é
           // exatamente o bug que a versão anterior resolveu no caminho do
           // WebRTC, e que voltou no caminho nativo.
+          //
+          // BUG CORRIGIDO (o "cai sozinho" do grupo): o agregado do core é o
+          // PIOR par, então UM peer com rota quebrada (`failed`) derrubava a
+          // chamada inteira — inclusive os pares que estavam conectados e
+          // ouvindo. `nativeCallIsDead` só considera a chamada morta quando
+          // nenhum par está conectado (ou o timeout expirou).
           this.nativeVoiceSince = -1
           this.setFailureCause(
             s.state === 'failed'
@@ -4233,6 +4300,12 @@ export class CallManager {
           )
           this.applyPhase('reconnect-timeout')
           this.leave()
+        } else if (s.state === 'failed' || s.state === 'connecting' || s.state === 'reconnecting') {
+          // Um par com problema num mesh: avisa (diagnóstico honesto) mas NÃO
+          // sai do canal. Antes da correção este era o caminho do `leave()`.
+          this.setFailureCause(
+            `um participante sem rota de mídia (${s.route}; ${s.peers_connected ?? '?'}/${s.peers_total ?? '?'} conectados)`,
+          )
         }
       }).catch(() => { /* poll best-effort */ })
     }, 700)
@@ -4242,6 +4315,34 @@ export class CallManager {
   private stopNativeVoiceMonitor() {
     if (this.nativeVoiceTimer) { clearInterval(this.nativeVoiceTimer); this.nativeVoiceTimer = null }
     this.stopNativeVideoMonitor()
+  }
+
+  /**
+   * A chamada nativa está MORTA de verdade?
+   *
+   * `VoiceStats` do core é AGREGADO e adota o PIOR par (de propósito: antes o
+   * `HashMap` sorteava e o estado oscilava). O problema é que o consumidor
+   * tratava `failed` como fatal: num mesh de 3, um único par atrás de NAT
+   * simétrico derrubava a chamada de todos — exatamente o relato "aparece todo
+   * mundo conectado e cai sozinho".
+   *
+   * Regra: só é morta quando NENHUM par está conectado. Com pelo menos um par
+   * conectado e mídia entrando/saindo, a chamada segue e a UI avisa do par
+   * ruim em vez de encerrar. O timeout continua valendo para quando nada
+   * conectou (offer perdida / SDP recusado).
+   *
+   * `peers_connected` só vem de builds novas do core; ausente = build antiga,
+   * e aí mantemos o comportamento conservador anterior (confia no `state`).
+   */
+  private nativeCallIsDead(
+    s: { state?: string | null; peers_connected?: number | null; peers_total?: number | null },
+    waited: number,
+  ): boolean {
+    const connected = typeof s.peers_connected === 'number' ? s.peers_connected : null
+    // Mídia comprovadamente fluindo: a chamada está viva, ponto.
+    if (connected !== null && connected > 0) return false
+    if (s.state === 'failed') return true
+    return waited > CallManager.NATIVE_VOICE_TIMEOUT_MS
   }
 
   /** ICE restart com BACKOFF: até MAX_ICE_RESTARTS por peer (1s/4s/9s entre
@@ -4525,7 +4626,22 @@ export class CallManager {
     if (!isAndroidRuntime()) return
     try {
       void import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('plugin:callfg|start').catch(() => { /* plugin ausente (build antigo) */ })
+        // Android 13+ exige POST_NOTIFICATIONS para o FGS mostrar a notificação
+        // permanente. Sem ela o serviço sobe MUDO (mic aberto sem indicador) e
+        // o usuário não tem como saber que a chamada continua. Pedimos no
+        // momento da chamada, que é quando o pedido faz sentido.
+        void services.notificationPermission().then((state) => {
+          if (state === 'prompt') void services.notificationRequestPermission().catch(() => {})
+        }).catch(() => {})
+        invoke('plugin:callfg|start').catch((e) => {
+          // Antes era `catch(() => {})`: se o FGS não subisse (Android 14
+          // `ForegroundServiceStartNotAllowed`, mic negado → SecurityException),
+          // o microfone era cortado ao minimizar SEM NENHUM aviso.
+          this.onCallNotice?.(
+            'não consegui manter a chamada em segundo plano — o microfone pode ser cortado ao minimizar',
+          )
+          void e
+        })
       }).catch(() => { /* sem Tauri: browser, ignora */ })
     } catch { /* ignore */ }
   }

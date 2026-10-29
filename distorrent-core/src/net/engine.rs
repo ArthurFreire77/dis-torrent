@@ -4149,7 +4149,12 @@ impl NetworkEngine {
                 if self.link_tx(&fp).is_some() {
                     continue;
                 }
-                self.connect_to_community_peer_throttled(&fp, now, 120_000);
+                // 120 s → 45 s. O valor antigo (documentado como "90s") fazia
+                // uma única falha de dial custar DOIS MINUTOS de silêncio num
+                // membro: o servidor abria no PC e no celular e o celular só
+                // via o PC depois disso. 45 s mantém o custo de announce/DHT
+                // baixo (o de host já é 30 s) e converge em tempo de uso.
+                self.connect_to_community_peer_throttled(&fp, now, 45_000);
             }
             self.request_community_sync(&cid);
         }
@@ -6199,6 +6204,14 @@ impl NetworkEngine {
             false,
         )?;
         let call_id = format!("voice-{}-{}", community_id, channel_id);
+        // SAIR DE QUALQUER OUTRO CANAL ANTES DE ENTRAR NESTE.
+        //
+        // Antes o core só empilhava o novo canal: a linha antiga em
+        // `voice_states` e o registro em `voice_channel_calls` continuavam
+        // vivos. Efeito real: o par nos via em DOIS canais e as offers do
+        // canal velho seguiam sendo absorvidas pelo auto-register (chamada
+        // fantasma, áudio de um canal que você já tinha deixado).
+        self.voice_leave_other_channels(&call_id);
         // Registro ANTES do broadcast: se um offer de canal chegar junto com
         // o VoiceJoin de outro par, o auto-register do handle_frame já nos
         // considera "no canal".
@@ -6288,6 +6301,10 @@ impl NetworkEngine {
         self.store
             .leave_voice(community_id, channel_id, &self.identity.fingerprint)?;
         let call_id = format!("voice-{}-{}", community_id, channel_id);
+        // `call_id` só é usado no ramo Linux; nas outras plataformas o nome
+        // existe apenas para manter o mesmo formato dos índices do core.
+        #[cfg(not(target_os = "linux"))]
+        let _ = &call_id;
         #[cfg(target_os = "linux")]
         {
             self.voice_channel_calls
@@ -6327,6 +6344,193 @@ impl NetworkEngine {
             fp: self.identity.fingerprint.clone(),
         });
         Ok(())
+    }
+
+    /// Sai de TODOS os canais de voz diferentes de `keep_call_id`.
+    ///
+    /// Vale nas três plataformas: no caminho navegador (Windows/Android) a
+    /// linha antiga em `voice_states` fazia o par nos ver em dois canais e
+    /// criava PC para um canal que já tinha sido abandonado. No Linux, além
+    /// disso, mantinha a sessão nativa viva.
+    fn voice_leave_other_channels(&self, keep_call_id: &str) {
+        let me = self.identity.fingerprint.clone();
+        let mine = match self.store.my_voice_states(&me) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        for (community_id, channel_id, _, _) in mine {
+            let call_id = format!("voice-{community_id}-{channel_id}");
+            if call_id == keep_call_id {
+                continue;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                self.voice_hangup(&call_id);
+                self.voice_forget_call(&call_id);
+                self.voice_channel_calls
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&call_id);
+            }
+            let _ = self.store.leave_voice(&community_id, &channel_id, &me);
+            for (fp, _, _) in self.store.list_members(&community_id).unwrap_or_default() {
+                if fp == me {
+                    continue;
+                }
+                self.cmd_tx
+                    .send(EngineCmd::SendToPeer(
+                        fp,
+                        SecureFrame::VoiceLeave {
+                            community_id: community_id.clone(),
+                            channel_id: channel_id.clone(),
+                        },
+                    ))
+                    .ok();
+            }
+            let _ = self.events.send(EngineEvent::VoiceLeft {
+                community_id,
+                channel_id,
+                fp: me.clone(),
+            });
+        }
+    }
+
+    /// Flush de voz para UM peer que acabou de ficar Online.
+    ///
+    /// Cobre o caso em que o link não existia no instante do `voice_join`:
+    /// manda o `VoiceJoin` + o estado real (mudo/ensurdecido) de cada canal em
+    /// que estamos. Idempotente no receptor (`set_voice_state` é upsert).
+    fn flush_voice_state_to(&self, peer_fp: &str) {
+        let me = self.identity.fingerprint.clone();
+        let Ok(mine) = self.store.my_voice_states(&me) else {
+            return;
+        };
+        for (community_id, channel_id, muted, deafened) in mine {
+            // Só para quem é membro da comunidade: fora isso o receptor recusa
+            // o frame de qualquer forma (gate de membro), e mandar seria spam.
+            if self.store.member_role(&community_id, peer_fp).is_none() {
+                continue;
+            }
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    peer_fp.to_string(),
+                    SecureFrame::VoiceJoin {
+                        community_id: community_id.clone(),
+                        channel_id: channel_id.clone(),
+                    },
+                ))
+                .ok();
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    peer_fp.to_string(),
+                    SecureFrame::VoiceState {
+                        community_id: community_id.clone(),
+                        channel_id: channel_id.clone(),
+                        muted,
+                        deafened,
+                        speaking: false,
+                    },
+                ))
+                .ok();
+        }
+    }
+
+    /// Re-anuncia a NOSSA presença em todos os canais de voz em que estamos.
+    ///
+    /// BUG QUE ISTO CORRIGE (o "conectado mas ninguém aparece"): `voice_join`
+    /// mandava `VoiceJoin` uma única vez e só para membros com link `Online`
+    /// naquele instante. `EngineCmd::SendToPeer` para quem não tem link é
+    /// no-op SILENCIOSO (`engine.rs`, braço do command_loop) — sem fila, sem
+    /// retry, sem log. Em Tor/relay, onde as sessões levam segundos para
+    /// subir, entrar no canal logo depois de abrir o app fazia o anúncio cair
+    /// no vazio para todos. Como não havia reenvio, o roster ficava
+    /// assimétrico para sempre: um lado via o outro, o outro não via ninguém.
+    ///
+    /// Idempotente no receptor: `set_voice_state` é upsert e o evento
+    /// `voice_joined` é deduplicado no front (`addVoiceParticipant`).
+    /// Frames pequenos, uma vez a cada tick de 15 s — custo desprezível.
+    fn reannounce_voice_channels(&self) {
+        let me = self.identity.fingerprint.clone();
+        let mine = match self.store.my_voice_states(&me) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        for (community_id, channel_id, muted, deafened) in mine {
+            // Mesma condição do `voice_join`, agora repetida: quem já está
+            // online recebe o join E o estado atual (mudo/ensurdecido).
+            for (fp, _, _) in self.store.list_members(&community_id).unwrap_or_default() {
+                if fp == me {
+                    continue;
+                }
+                if self.link_tx(&fp).is_none() {
+                    // Link ainda subindo: o PRÓXIMO tick tenta de novo. É
+                    // exatamente o retry que faltava.
+                    continue;
+                }
+                self.cmd_tx
+                    .send(EngineCmd::SendToPeer(
+                        fp.clone(),
+                        SecureFrame::VoiceJoin {
+                            community_id: community_id.clone(),
+                            channel_id: channel_id.clone(),
+                        },
+                    ))
+                    .ok();
+                self.cmd_tx
+                    .send(EngineCmd::SendToPeer(
+                        fp,
+                        SecureFrame::VoiceState {
+                            community_id: community_id.clone(),
+                            channel_id: channel_id.clone(),
+                            muted,
+                            deafened,
+                            speaking: false,
+                        },
+                    ))
+                    .ok();
+            }
+            // Linux: aproveita para reabrir a mesh com quem apareceu no canal
+            // depois do join (e cujo anúncio se perdeu). É idempotente.
+            #[cfg(target_os = "linux")]
+            if self.native_voice_available() {
+                for (fp, _, _) in self
+                    .store
+                    .list_voice_states(&community_id, &channel_id)
+                    .unwrap_or_default()
+                {
+                    if fp == me {
+                        continue;
+                    }
+                    self.voice_mesh_maybe_offer(&community_id, &channel_id, &fp);
+                }
+            }
+        }
+    }
+
+    /// Limpa a presença de voz de um peer que caiu.
+    ///
+    /// Antes, a linha em `voice_states` só era apagada por um `VoiceLeave`
+    /// explícito. Processo morto/crash/queda de rede = participante fantasma
+    /// para sempre no canal (e, no Linux, o `voice_join` ainda abria sessão
+    /// nativa contra esse fingerprint morto, que nunca conectava e mantinha o
+    /// agregado em `failed`).
+    fn drop_voice_presence_of(&self, peer_fp: &str) {
+        let Ok(canais) = self.store.drop_peer_voice_states(peer_fp) else {
+            return;
+        };
+        for (community_id, channel_id) in canais {
+            #[cfg(target_os = "linux")]
+            {
+                let call_id = format!("voice-{community_id}-{channel_id}");
+                self.voice_hangup_peer(&call_id, peer_fp);
+                self.voice_forget_peer(&call_id, peer_fp);
+            }
+            let _ = self.events.send(EngineEvent::VoiceLeft {
+                community_id,
+                channel_id,
+                fp: peer_fp.to_string(),
+            });
+        }
     }
 
     pub fn voice_state_update(
@@ -6761,6 +6965,22 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     // desligado, fail-closed) — sem isso o modo `proxy` iniciaria com as
     // rotas públicas diretas e vazaria o IP no primeiro frame de relay.
     engine.refresh_relay_for_privacy();
+
+    // LIMPEZA DE PRESENÇA DE VOZ NO BOOT.
+    //
+    // `voice_states` é persistente e não tinha expiração: fechar o app (ou ele
+    // morrer) durante uma chamada deixava a linha gravada, e no boot seguinte o
+    // usuário aparecia "na voz" sozinho — no Linux, o `voice_join` ainda abria
+    // sessão nativa contra esses fantasmas, que nunca conectavam e mantinham o
+    // agregado em `failed` (o que derrubava a chamada dos pares vivos).
+    // Só limpamos o NOSSO fingerprint: as linhas de terceiros podem estar
+    // corretas em outro dispositivo e o `PeerOffline` cuida delas.
+    if let Err(e) = engine
+        .store
+        .clear_my_voice_states(&engine.identity.fingerprint)
+    {
+        tracing::debug!(error = %e, "não consegui limpar presença de voz antiga");
+    }
 
     // FAST-CONNECT no boot: não espera o 1º tick de descoberta. Disca já para
     // peers conhecidos (peerbook) e reengata o relay/announce dos amigos —
@@ -7546,6 +7766,13 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 //     roster depois de reiniciar;
                 //  3) reenvia o `JoinCommunity` que não foi confirmado.
                 engine.maintain_communities();
+                // 4) RE-ANUNCIA a presença de voz. `VoiceJoin` era enviado uma
+                //    vez só, para peers já `Online`; quem entrava no canal antes
+                //    do link fechar nunca era visto e não havia retry. Um frame
+                //    pequeno por canal a cada 15 s é idempotente no receptor
+                //    (`set_voice_state` é upsert) e conserta o roster
+                //    assimétrico sem tocar no protocolo.
+                engine.reannounce_voice_channels();
             }
             _ = presence_tick.tick() => {
                 let me = engine.identity.fingerprint.clone();
@@ -7585,7 +7812,19 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 // isto, uma descoberta em rede grande disparava centenas de
                 // laços de dial simultâneos (fd/CPU). Sem vaga: NÃO insere a
                 // chave de dedup — o próximo tick de descoberta re-engatilha.
+                //
+                // POR QUE NÃO É SÓ `continue`: o dial de MEMBRO DE SERVIDOR é
+                // pedido pelo `maintain_communities` a cada 15 s, mas com
+                // throttle de 120 s por fingerprint. Se o comando caísse aqui
+                // (pool de 64 cheio), a vaga negada era silenciosa E o
+                // throttle já tinha sido marcado — o membro só seria tentado
+                // de novo 2 minutos depois. Em servidor com muita gente isso
+                // virava "ninguém entra no canal e só reiniciar resolve".
                 let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
+                    tracing::debug!(
+                        %addr,
+                        "sem vaga de dial — o pedido volta no próximo tick"
+                    );
                     continue;
                 };
                 // Dedup por destino: 1 laço direto por `fp@addr`. Sem isto, a
@@ -8801,6 +9040,14 @@ async fn register_and_run(
         engine.flush_joins(peer_fp);
         engine.flush_pending_calls(peer_fp);
         engine.flush_pending_reacts(peer_fp);
+        // VOZ: a sessão acabou de ficar Online. Sem este flush, quem entrou no
+        // canal antes do link subir nunca era informado (o `VoiceJoin` original
+        // virou no-op silencioso) — o par aparecia conectado e não se ouvia.
+        engine.flush_voice_state_to(peer_fp);
+        // PRESENÇA: anuncia o status atual para a sessão que acabou de subir.
+        // Sem isto o peer novo via "offline" por até 30 s (até o próximo tick),
+        // e com o TTL antigo isso virava flicker constante na lista de amigos.
+        engine.announce_presence();
     }
 
     // writer task: drena comandos → cifra e envia. QoS em duas etapas:
@@ -8994,6 +9241,10 @@ async fn register_and_run(
         let _ = engine.events.send(EngineEvent::PeerOffline {
             fp: peer_fp.to_string(),
         });
+        // Presença de voz: o peer que caiu não manda `VoiceLeave` (processo
+        // morto, crash, rede caiu). Sem esta limpeza ele ficava "na voz" para
+        // sempre no nosso banco e o tile ficava sem mídia para sempre.
+        engine.drop_voice_presence_of(peer_fp);
         engine.emit_state();
     }
     true
@@ -11025,25 +11276,50 @@ async fn handle_frame(
                 // ainda não conhecida o estado do outro — NENHUM lado oferecia e o
                 // canal ficava mudo até alguém reinstalar o app.
                 engine.voice_mesh_maybe_offer(&community_id, &channel_id, peer_fp);
-                // Eu sou o lado MENOR: quem oferece é o joiner, mas ele pode não
-                // me conhecer ainda (ele acabou de entrar). Anuncio meu estado
-                // para que o store dele me enxergue — o arm de VoiceState
-                // completa a mesh pelo lado que oferece.
-                if engine.native_voice_available()
-                    && engine.identity.fingerprint.as_str() < peer_fp
-                    && engine
-                        .voice_channel_calls
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains_key(&format!("voice-{community_id}-{channel_id}"))
-                {
+            }
+            // ANÚNCIO REVERSO — TODAS AS PLATAFORMAS.
+            //
+            // BUG QUE ISTO CORRIGE (o sintoma "conectados mas não se veem"):
+            // o `VoiceJoin` só vai para quem já está `Online` e quem o recebe
+            // apenas grava o estado. Assim, quem ENTRA no canal depois de mim
+            // nunca fica sabendo que eu estou lá — ele vê só a si mesmo. Este
+            // era o furo que só o Linux tapava (o filtro `#[cfg]` acima cobria
+            // todo o anúncio). Aqui, se EU estou no canal e sou o lado de
+            // fingerprint MENOR, respondo com meu `VoiceState`; o frontend que
+            // recebe cria a `RTCPeerConnection` (regra determinística de quem
+            // oferece, a mesma do mesh nativo — evita glare).
+            //
+            // O gate é o NOSSO próprio estado de voz (`my_voice_states`), não
+            // `voice_channel_calls`, que só existe no Linux.
+            if engine.identity.fingerprint.as_str() < peer_fp {
+                let estou_no_canal = engine
+                    .store
+                    .my_voice_states(&engine.identity.fingerprint)
+                    .map(|v| {
+                        v.iter()
+                            .any(|(c, ch, _, _)| c == &community_id && ch == &channel_id)
+                    })
+                    .unwrap_or(false);
+                if estou_no_canal {
+                    // Mudo/ensurdecido REAIS: anunciar `false,false` fixo fazia
+                    // o par mostrar "mudo" errado logo depois de um rejoin.
+                    let (muted, deafened) = engine
+                        .store
+                        .my_voice_states(&engine.identity.fingerprint)
+                        .ok()
+                        .and_then(|v| {
+                            v.into_iter()
+                                .find(|(c, ch, _, _)| c == &community_id && ch == &channel_id)
+                                .map(|(_, _, m, d)| (m, d))
+                        })
+                        .unwrap_or((false, false));
                     let _ = engine.cmd_tx.send(EngineCmd::SendToPeer(
                         peer_fp.to_string(),
                         SecureFrame::VoiceState {
                             community_id: community_id.clone(),
                             channel_id: channel_id.clone(),
-                            muted: false,
-                            deafened: false,
+                            muted,
+                            deafened,
                             speaking: false,
                         },
                     ));
