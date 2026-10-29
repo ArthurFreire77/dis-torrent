@@ -428,7 +428,13 @@ fn tray_available(bg: &Background) -> bool {
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
-        let _ = w.unminimize();
+        // `unminimize` só existe no desktop: no Android o `WebviewWindow` não
+        // expõe essa API e o build quebrava (E0599) — o app mobile nunca fica
+        // minimizado nesse sentido, então basta mostrar/focar.
+        #[cfg(desktop)]
+        {
+            let _ = w.unminimize();
+        }
         let _ = w.set_focus();
     }
     // A janela voltou: a camada de presença sobe de "ausente" para o que o

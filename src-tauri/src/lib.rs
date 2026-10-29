@@ -4184,6 +4184,9 @@ fn main() {
             .init();
     }
 
+    // `mut` só é usado no desktop (o autostart é reatribuído); no Android o
+    // bloco `#[cfg(desktop)]` some e o compilador reclamaria de `unused_mut`.
+    #[cfg_attr(mobile, allow(unused_mut))]
     let mut builder = tauri::Builder::default()
         .plugin(downloads_plugin())
         .plugin(tauri_plugin_deep_link::init())

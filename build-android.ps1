@@ -77,17 +77,10 @@ try {
     Copy-Item $so "$jniLibs\libdistorrent_lib.so" -Force
     if ((Get-Item "$jniLibs\libdistorrent_lib.so").Length -lt 1MB) { throw "libdistorrent_lib.so copiada parece truncada" }
 
-    # Hard link (ou cópia, se symlink exigir Developer Mode) do lib para o
-    # caminho alternativo que alguns ambientes do Tauri 2 usam
-    $altJniLibs = "src-tauri\gen\android\app\src\main\jniLibs\arm64"
-    New-Item -ItemType Directory -Path $altJniLibs -Force | Out-Null
-    try {
-        if (Test-Path "$jniLibs\libdistorrent_lib.so") {
-            New-Item -ItemType HardLink -Path "$altJniLibs\libdistorrent_lib.so" -Value "$jniLibs\libdistorrent_lib.so" -Force | Out-Null
-        }
-    } catch {
-        Copy-Item "$jniLibs\libdistorrent_lib.so" "$altJniLibs\libdistorrent_lib.so" -Force
-    }
+    # NÃO criar uma pasta `jniLibs/arm64`: o Gradle lê CADA subpasta de jniLibs
+    # como um ABI e falha com "…/out/arm64/libdistorrent_lib.so is not an ABI"
+    # (arm64-v8a é o nome válido). O caminho alternativo não existe no Tauri 2
+    # usado aqui — manter aquilo quebrava o build na etapa de merge das libs.
     Write-Host "  libdistorrent_lib.so em jniLibs: $([math]::Round((Get-Item "$jniLibs\libdistorrent_lib.so").Length/1MB,2)) MB" -ForegroundColor Green
 
     Write-Host "`n[3/4] gradle (skip rustBuild — Rust já está pronto)..." -ForegroundColor Yellow
