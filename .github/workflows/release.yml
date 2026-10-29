@@ -13,6 +13,17 @@ jobs:
   build-windows:
     name: Build Windows (instalador .exe)
     runs-on: windows-latest
+    env:
+      # ASSINATURA OPCIONAL DE CÓDIGO.
+      # Sem `WINDOWS_CERT_PFX_BASE64` nos secrets o job roda exatamente como
+      # antes (artefato não assinado) — a assinatura é um upgrade, não um
+      # pré-requisito do release.
+      #
+      # POR QUE ESTE ENV EXISTE: o GitHub Actions NÃO aceita o contexto
+      # `secrets` dentro de `if:` de step (erro "Unrecognized named-value:
+      # 'secrets'"). Convertemos a presença do segredo em um env booleano no
+      # nível do job e os passos condicionais olham `env.HAS_SIGNING_CERT`.
+      HAS_SIGNING_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,6 +35,22 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
+      # --- ASSINATURA OPCIONAL (só roda se o secret existir) ----------------
+      # Decodifica o PFX num arquivo TEMPORÁRIO fora do workspace e exporta
+      # apenas o CAMINHO por GITHUB_ENV (caminho não é segredo). A SENHA nunca
+      # entra em arquivo nem em GITHUB_ENV: vai como env do step que assina,
+      # direto do secret para o processo.
+      # O PFX é apagado no passo "Limpar certificado" (abaixo, sempre).
+      - name: Preparar certificado de assinatura (opcional)
+        if: env.HAS_SIGNING_CERT == 'true'
+        shell: pwsh
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "distorrent-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
+          "DISTORRENT_SIGN_PFX=$pfx" >> $env:GITHUB_ENV
+          Write-Host "certificado de assinatura preparado (conteúdo não exibido)"
       # INSTALADOR EM INNO SETUP — não trocar por NSIS.
       # O instalador NSIS do Tauri (`--bundles nsis`) cai no falso positivo
       # `Program:Win32/Contebrew.A!ml`: baixado pelo navegador (com
@@ -34,12 +61,27 @@ jobs:
       # MOTW + MpCmdRun: "found no threats"), com instalador de verdade:
       # atalhos, entrada em Aplicativos e desinstalador.
       # `--no-bundle` compila só o app; o instalador é gerado pelo nosso .iss.
+      # O build-installer.ps1 chama sign-windows.ps1 (app ANTES do Inno,
+      # instalador DEPOIS). Sem certificado o script avisa e segue — o job não
+      # quebra por falta do secret.
       - name: Instalar Inno Setup
         run: choco install innosetup --no-progress -y
       - run: npm run tauri build -- --no-bundle
       - name: Gerar instalador (Inno Setup)
         shell: pwsh
+        # A senha chega só como env deste processo. Sem secret, fica vazia e o
+        # sign-windows.ps1 imprime "sem certificado configurado" e segue.
+        env:
+          DISTORRENT_SIGN_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: ./scripts/build-installer.ps1 -SkipBuild
+      - name: Limpar certificado temporário
+        if: always() && env.HAS_SIGNING_CERT == 'true'
+        shell: pwsh
+        run: |
+          if ($env:DISTORRENT_SIGN_PFX -and (Test-Path $env:DISTORRENT_SIGN_PFX)) {
+            Remove-Item $env:DISTORRENT_SIGN_PFX -Force
+          }
+          Write-Host "certificado temporário removido"
       - uses: actions/upload-artifact@v4
         with:
           # Só o instalador: subir `bundle/**/*` enchia a release de lixo (o

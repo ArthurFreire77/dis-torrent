@@ -62,6 +62,48 @@ if (-not (Test-Path $appExe)) {
     }
 }
 
+# --- Assinatura de código (opcional, best-effort) ---
+# Assina o .exe do APP antes do Inno empacotar — assim o payload que o usuário
+# executa já sai assinado — e assina o INSTALADOR depois de compilado, que é o
+# arquivo que o navegador/SmartScreen avalia no download.
+#
+# Sem certificado configurado o sign-windows.ps1 imprime "sem certificado
+# configurado — pulando assinatura" e sai 0: o build continua igual. Se um
+# certificado ESTÁ configurado e a assinatura falha, avisamos alto mas não
+# derrubamos o build (best-effort) — o resumo final marca NÃO assinado para
+# ninguém publicar achando que assinou.
+$signScript = Join-Path $PSScriptRoot "sign-windows.ps1"
+# Estado por artefato: o app pode estar assinado e o instalador não (ou
+# vice-versa). Um único booleano global já mentiu em teste manual.
+$script:signStates = [ordered]@{}
+function Invoke-Sign([string]$target, [string]$label) {
+    if (-not (Test-Path $signScript)) {
+        Write-Host "  sign-windows.ps1 ausente — pulando assinatura de ${label}" -ForegroundColor DarkYellow
+        $script:signStates[$label] = "não assinado (script ausente)"
+        return
+    }
+    & $signScript -File $target
+    if ($LASTEXITCODE -eq 0) {
+        $sig = Get-AuthenticodeSignature -FilePath $target
+        if ($sig.Status -eq "Valid") {
+            Write-Host "  ${label} assinado ($($sig.SignerCertificate.Subject))" -ForegroundColor Green
+            $script:signStates[$label] = "assinado"
+        } else {
+            Write-Host "  ${label} NÃO assinado (sem certificado configurado)" -ForegroundColor Yellow
+            $script:signStates[$label] = "não assinado"
+        }
+    } else {
+        Write-Host "  ATENÇÃO: falha ao assinar ${label} — o artefato segue NÃO assinado." -ForegroundColor Yellow
+        Write-Host "  NÃO publique como se estivesse assinado (ver docs/DEFENDER.md)." -ForegroundColor Yellow
+        $script:signStates[$label] = "FALHA na assinatura"
+    }
+}
+Write-Host "Assinatura de código (opcional)..." -ForegroundColor Cyan
+Invoke-Sign -target $appExe -label "app"
+# Observação: NÃO apagamos `DISTORRENT_SIGN_PASSWORD` do ambiente. Ela foi
+# definida pelo próprio usuário/CI na sessão; removê-la surpreenderia quem roda
+# o build duas vezes seguidas. O sign-windows.ps1 nunca a imprime nem a grava.
+
 # --- ISCC (compilador do Inno Setup) ---
 if (-not $ISCC) {
     $candidates = @(
@@ -88,12 +130,17 @@ if ($LASTEXITCODE -ne 0) { Fail "ISCC falhou (exit $LASTEXITCODE)." }
 $setup = Join-Path $outDir "DisTorrent_${appVersion}_x64_setup.exe"
 if (-not (Test-Path $setup)) { Fail "instalador não foi gerado em $outDir." }
 
+# Assina o INSTALADOR (é o arquivo que o navegador baixa e o SmartScreen
+# avalia). Roda depois do ISCC porque assinar antes invalidaria o pacote.
+Invoke-Sign -target $setup -label "instalador"
+
 $item = Get-Item $setup
 $sha = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
 Write-Host ""
 Write-Host "Instalador: $($item.FullName)" -ForegroundColor Green
 Write-Host ("Tamanho: {0:N2} MB" -f ($item.Length / 1MB))
 Write-Host "SHA256: $sha"
+Write-Host "Assinatura: instalador = $($script:signStates['instalador']); app = $($script:signStates['app'])"
 
 # --- Teste de aceitação: download simulado (MOTW) + Defender ---
 if ($Scan) {

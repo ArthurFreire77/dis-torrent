@@ -4452,29 +4452,66 @@ fn main() {
         ));
     }
     builder
-        // PERMISSÕES DE MÍDIA DO WEBVIEW — a correção do "não consegue enviar
-        // tela/câmera/mic" no Windows (WebView2) e o pré-requisito do
-        // getDisplayMedia no WebKitGTK.
+        // PERMISSÕES DO WEBVIEW — ALLOWLIST, não `Allow` para tudo.
         //
-        // Windows/WebView2: sem um handler em `PermissionRequested`, o WebView2
-        // nega por padrão o pedido de captura de tela do `getDisplayMedia` — o
-        // picker nativo NEM abre (o clique no botão morria em NotAllowedError
-        // silencioso). Com `Allow`, o WebView2 mostra o seletor de
-        // tela/janela/app do Windows e a captura vira uma MediaStreamTrack
-        // normal para o WebRTC da página. IMPORTANTE: o wry (0.57) não mapeia o
-        // `COREWEBVIEW2_PERMISSION_KIND_SCREEN_CAPTURE` — ele chega aqui como
-        // `Other`, por isso Other também é Allow. O conteúdo do webview é
-        // EXCLUSIVAMENTE o frontend próprio (protocolo custom), nunca web
-        // arbitrária, então permitir os kinds restantes não abre superfície.
+        // POR QUE NÃO DAR ALLOW EM TUDO: antes o handler respondia `Allow` para
+        // QUALQUER `PermissionKind`. O conteúdo é o frontend próprio, mas um XSS
+        // ou bug no frontend herdava todas as permissões que o motor oferece
+        // (geolocalização, clipboard, fontes locais, MIDI, sensores, File System
+        // Access...). Restringir não custa nenhuma funcionalidade e fecha a
+        // superfície: só o que a chamada de voz/vídeo e o áudio precisam passa.
         //
-        // Linux/WebKitGTK: sem handler o `permission-request` fica sem
-        // `request.allow()` → negado (o Default do WebKitGTK é DENY, ver doc do
-        // wry `PermissionResponse::Default`). Com Allow, `getDisplayMedia`
-        // pede DisplayCapture de verdade.
+        // Exceções OBRIGATÓRIAS — não remover sem testar nos TRÊS engines
+        // (WebView2, WebKitGTK e WebView do Android):
+        // - Microphone / Camera: `getUserMedia` da chamada de voz e de vídeo.
+        // - DisplayCapture: é o kind que o WebKitGTK (Linux) usa para
+        //   `getDisplayMedia`. No Windows/WebView2 ele NÃO é emitido (ver Other).
+        // - Other: no WebView2 (wry 0.57) não existe mapeamento de
+        //   `COREWEBVIEW2_PERMISSION_KIND_SCREEN_CAPTURE`; o pedido de captura de
+        //   tela chega como `Other`. Sem permitir, o seletor nativo de
+        //   tela/janela do Windows nem abre e o botão morre em NotAllowedError
+        //   silencioso. O `Other` também absorve kinds novos do runtime (o enum é
+        //   `#[non_exhaustive]`), então ele é o único "curinga" aceitável aqui.
+        // - Autoplay: o WebView2 bloqueia `HTMLMediaElement.play()` sem gesto do
+        //   usuário. O áudio remoto da chamada é um elemento criado por JS (não
+        //   há gesto no momento em que o peer começa a falar) — sem Autoplay a
+        //   voz de quem chega não toca.
+        //
+        // Todo o resto é `Deny`: geolocalização, notificações DO WEBVIEW,
+        // clipboard read, MIDI, sensores, MediaKeySystemAccess, fontes locais,
+        // window management, pointer lock, downloads automáticos e File System
+        // Access não são usados pela UI. Notificações nativas continuam
+        // funcionando pelo plugin oficial (`tauri-plugin-notification`), que não
+        // passa por este handler.
+        //
+        // EFEITO COLATERAL CONHECIDO do `ClipboardRead` negado: o botão "colar
+        // fingerprint" do shell mobile usa `navigator.clipboard.readText()`; com
+        // a permissão negada ele cai no caminho de erro que já existe ("não foi
+        // possível ler a área de transferência — cole manualmente"). Copiar
+        // (`writeText`) NÃO passa por este handler e continua funcionando. Se um
+        // dia a colagem por botão for obrigatória no desktop, reavalie — não
+        // libere o kind inteiro só por causa de um atalho.
+        //
+        // Linux/WebKitGTK: sem handler o `permission-request` é negado (o
+        // `Default` do backend é DENY — doc do wry); o `Deny` explícito aqui
+        // garante o MESMO resultado nos três engines, em vez de depender do
+        // default de cada um.
         //
         // Android: o handler do wry cobre mic/câmera (RESOURCE_AUDIO/VIDEO_
         // CAPTURE) e o fluxo de permissão de runtime do Android segue normal.
-        .on_permission_request(|_webview, _kind| tauri::webview::PermissionResponse::Allow)
+        .on_permission_request(|_webview, kind| {
+            use tauri::webview::{PermissionKind, PermissionResponse};
+            match kind {
+                PermissionKind::Microphone
+                | PermissionKind::Camera
+                | PermissionKind::DisplayCapture
+                | PermissionKind::Autoplay
+                // Other = captura de tela no WebView2 (kind sem mapeamento no
+                // wry) + kinds novos de runtimes futuros.
+                | PermissionKind::Other => PermissionResponse::Allow,
+                _ => PermissionResponse::Deny,
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             identity_get,
