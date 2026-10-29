@@ -1,10 +1,11 @@
 import React from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation, useNavigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom'
 import ThemeShell from './designs/ThemeShell'
 import MobileShell from './mobile/MobileShell'
 import { NotificationPrompt } from './components/NotificationPrompt'
 import { initAppState } from './services/appState'
 import { initNotifications } from './services/notifications'
+import { offerInvite, tokenFromInviteUrl } from './services/deepLink'
 
 // A largura decidia o shell só no primeiro render: quem abria no desktop e
 // reduzia a janela (ou girava um tablet) ficava com o layout de PC espremido
@@ -42,16 +43,21 @@ function DesktopRoute(){
   return <ThemeShell designId="distorrent" />
 }
 
-// Link de convite público: /invite/TOKEN → abre o shell com o token pré-preenchido
+// Link de convite público: /invite/TOKEN.
+//
+// NÃO redireciona com `?invite=` na URL. O redirecionamento era o que quebrava
+// o fluxo: o shell já estava montado, lia a query só na montagem e o convite
+// se perdia. Agora o token vai para o store de convites e o shell o consome
+// quando estiver pronto para abrir o modal.
 function InviteRoute({ token }: { token: string }){
   const isMobile = useIsMobile()
-  const target = isMobile ? '/m' : '/d/distorrent'
-  return <Navigate to={`${target}?invite=${encodeURIComponent(token)}`} replace />
+  React.useEffect(() => {
+    if (token) offerInvite(token)
+  }, [token])
+  return <Navigate to={isMobile ? '/m' : '/d/distorrent'} replace />
 }
 
 function AppRoutes(){
-  const navigate = useNavigate()
-
   // Uma vez só, para os DOIS shells: conexão × atividade × presença e o
   // ouvinte do clique na notificação (que abre a conversa certa).
   React.useEffect(() => {
@@ -59,24 +65,50 @@ function AppRoutes(){
     initNotifications()
   }, [])
 
+  // Convites por DEEP LINK (desktop + Android).
+  //
+  // O que estava errado: `navigate('/d/distorrent?invite=...')` com o shell já
+  // montado não reexecutava nenhum efeito — o convite era descartado e a URL
+  // ficava suja. Além disso a capability padrão não permitia `getCurrent`, e o
+  // `.catch` engolia o erro.
+  //
+  // Agora todos os caminhos (boot, link com o app aberto, /invite/:token)
+  // desembocam em `offerInvite`, que deduplica e notifica os shells via
+  // `subscribeInvite`.
   React.useEffect(() => {
+    // 1) query da URL atual (?invite= / ?token=) — cobre o modo navegador e o
+    //    redirecionamento de instalações antigas.
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const fromQuery = params.get('invite') || params.get('token')
+      if (fromQuery) {
+        offerInvite(fromQuery)
+        // Limpa a query para o convite não ser reprocessado num refresh.
+        params.delete('invite')
+        params.delete('token')
+        const qs = params.toString()
+        window.history.replaceState(
+          null,
+          '',
+          `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`,
+        )
+      }
+    } catch { /* URL malformada não pode derrubar o boot */ }
+
+    // 2) deep link do sistema. No Windows/Linux o single-instance entrega a
+    //    URL à instância viva; no Android/macOS o plugin emite o evento.
     const w = window as unknown as Record<string, unknown>
     if (!('__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w)) return
 
     let disposed = false
     let unlisten: (() => void) | undefined
 
-    const openInvite = (urls: string[]) => {
+    const handleUrls = (urls: string[]) => {
       for (const raw of urls) {
-        try {
-          const url = new URL(raw)
-          const invite = url.searchParams.get('invite') || url.searchParams.get('token')
-            || url.pathname.split('/').filter(Boolean).pop()
-          if (!invite) continue
-          const target = window.innerWidth <= MOBILE_MAX_WIDTH ? '/m' : '/d/distorrent'
-          navigate(`${target}?invite=${encodeURIComponent(invite)}`, { replace: false })
+        if (tokenFromInviteUrl(raw)) {
+          offerInvite(raw)
           break
-        } catch { /* URL inválida: ignorar sem derrubar o shell */ }
+        }
       }
     }
 
@@ -84,16 +116,20 @@ function AppRoutes(){
       .then(async (deepLink) => {
         if (disposed) return
         const current = await deepLink.getCurrent()
-        if (current?.length) openInvite(current)
-        unlisten = await deepLink.onOpenUrl(openInvite)
+        if (current?.length) handleUrls(current)
+        unlisten = await deepLink.onOpenUrl((urls) => handleUrls(urls))
       })
-      .catch(() => { /* Deep-link indisponível em builds antigas */ })
+      .catch((e) => {
+        // NÃO silenciar: se o ACL negar `get_current`, o convite por link não
+        // funciona e quem depura precisa ver por quê. O token manual segue.
+        console.warn('[distorrent] deep link indisponível:', String(e))
+      })
 
     return () => {
       disposed = true
       unlisten?.()
     }
-  }, [navigate])
+  }, [])
 
   return (
     <Routes>
