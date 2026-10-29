@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## [1.1.9-pre-alpha] — 2026-10-29
+
+### Chamadas: a própria câmera e a tela como quadrado independente
+
+- **Quem transmite passa a ver a própria câmera.** O quadrado local era
+  desenhado a partir do roster (`participants[i].stream`), que fica vazio
+  quando o roster nasce antes do `getUserMedia` e é sempre vazio no caminho
+  nativo (Linux), onde a mídia vive no core Rust. Agora `CallState` publica
+  `localStream`/`localScreenStream` e o quadrado do "eu" usa a mídia própria —
+  nunca um stream remoto que só existiria por loopback.
+- **Câmera desligada restaura o avatar.** O vídeo local exige `cameraOn` **e**
+  trilha viva; uma captura que morre no meio não deixa frame congelado.
+- **A tela tem quadrado próprio, para todos.** Identidade de transmissão
+  separada da identidade de pessoa: `p:<fp>` (câmera/avatar) e `s:<fp>` (tela).
+  Quem compartilha continua no seu quadrado normal, com câmera ou foto. Se o
+  outro lado manda um vídeo só, ele vai para a tela e a pessoa fica no avatar —
+  o mesmo stream nunca aparece duas vezes.
+- **Fixar, expandir e recolher valem para pessoa E para tela**, são
+  independentes entre si (fixar não expande; recolher preserva a fixação) e a
+  seleção é descartada quando a transmissão termina. Expandir mantém todos os
+  quadrados montados, então o áudio dos outros continua tocando.
+- **Proporção preservada.** A caixa da tela acompanha a proporção real do
+  stream (`aspect-ratio` lido do próprio vídeo + `contain`). Medido no
+  navegador: normal 683×384 e expandido 1063×598, ambos 1,778 contra 1,778 do
+  1920×1080 compartilhado. Antes o `height: 100%` esticava o vídeo.
+- **Nada de duplicata**: evento repetido do motor não cria dois quadrados nem
+  dois `<audio>`.
+- Testes: 192/192 unit (17 novos em `tests/callTiles.test.ts`), typecheck,
+  lint e build verdes; medido no navegador real com câmera e tela sintéticas.
+
+### Interface
+
+- **Assistente de servidor**: o `Modal` rolava o diálogo inteiro e o conteúdo
+  passava por baixo do rodapé (cards terminavam em y=852, rodapé em y=735).
+  Agora o corpo tem rolagem própria e cabeçalho/rodapé ficam parados.
+- **Cards de ícone** tinham título e descrição grudados numa linha só
+  ("ServidorSem tema definido…"); agora são duas linhas.
+- **Dev server não cai mais** com `EBUSY`: o Vite deixou de vigiar
+  `src-tauri/target`, onde o build cria arquivos bloqueados.
+
+### Segurança e distribuição
+
+- **Permissões do WebView em allowlist** (antes era `Allow` para tudo):
+  microfone, câmera, captura de tela, autoplay e `Other` (captura de tela no
+  WebView2, que não tem mapeamento no wry 0.57) passam; geolocalização,
+  clipboard, MIDI, sensores, fontes locais, File System Access e o resto são
+  negados.
+- **Assinatura opcional no Windows**: `scripts/sign-windows.ps1` assina app e
+  instalador quando há certificado (`DISTORRENT_SIGN_PFX` + senha, ou
+  thumbprint), com timestamp RFC3161 e sem gravar segredo em argv/log/arquivo.
+  Sem certificado, avisa e segue.
+- **`docs/DEFENDER.md`**: detecção `Program:Win32/Contebrew.A!ml`, hashes e
+  scans com Mark-of-the-Web (`found no threats`), auditoria do comportamento
+  (plugins oficiais, chave `Run` do usuário, sem shell/`reg.exe`/download de
+  binário), o que não foi reproduzido localmente e o procedimento de falso
+  positivo na Microsoft. Nenhum mecanismo de evasão foi adicionado.
+
 ## [1.1.8-pre-alpha] — 2026-10-29
 
 ### O app passa a existir com a janela fechada (Windows e Android)
