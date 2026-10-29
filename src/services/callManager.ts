@@ -11,6 +11,7 @@ import type { VoiceMediaStats } from './models'
 import {
   detectScreenEnvironment,
   buildDisplayMediaConstraints,
+  derivedDisplayConstraints,
   classifyScreenShareError,
   applyScreenConstraints,
   applySenderTuning,
@@ -3374,7 +3375,10 @@ export class CallManager {
     this.screenMonitor.attach(track)
     await this.tuneScreenTrack(track)
     try {
-      await this.seedScreenPeers(stream, track)
+      // O áudio é coletado ANTES de semear: assim ele entra na mesma oferta
+      // do vídeo (antes ficava para depois e nunca era enviado).
+      const audioTracks = await this.collectScreenAudioTracks(stream)
+      await this.seedScreenPeers(stream, track, audioTracks)
     } catch (e) {
       // Não deixa captura local aberta nem UI dizendo "compartilhando" quando
       // nenhum peer aceitou a oferta; restaura a câmera antes de informar falha.
@@ -3407,15 +3411,19 @@ export class CallManager {
     try {
       return await md.getDisplayMedia(constraints) as MediaStream
     } catch (e) {
-      // Pede 30 fps de piso; se o aparelho/GPU nao sustenta, o engine recusa
-      // com OverconstrainedError. Derrotar o `min` e melhor que nada: sem
-      // esse retry a tela simplesmente nao abria em aparelho mais modesto.
-      if ((e as Error)?.name !== 'OverconstrainedError') throw e
-      const semPiso = { ...constraints } as Record<string, unknown>
-      const video = semPiso.video as Record<string, unknown>
-      delete video.frameRate
-      video.frameRate = { ideal: 60 }
-      return await md.getDisplayMedia(semPiso) as MediaStream
+      // Nem todo engine aceita o mesmo conjunto: o Chromium/WebView2 recusa
+      // qualquer `min` em getDisplayMedia (TypeError "min constraints are not
+      // supported") e alguns recusam o `displaySurface` pedido
+      // (OverconstrainedError). Degradar é melhor que dizer que o aparelho não
+      // tem captura: primeiro sem frameRate, depois só {video:true,audio}.
+      const derived = derivedDisplayConstraints(constraints)
+      if (!derived) throw e
+      try {
+        return await md.getDisplayMedia(derived) as MediaStream
+      } catch {
+        const minimal = { video: true, audio: !!constraints.audio }
+        return await md.getDisplayMedia(minimal) as MediaStream
+      }
     }
   }
 
@@ -3465,7 +3473,7 @@ export class CallManager {
   }
 
   /** Semeia a track em todo o mesh e negocia envio quando o m-line era recvonly. */
-  private async seedScreenPeers(stream: MediaStream, track: MediaStreamTrack): Promise<void> {
+  private async seedScreenPeers(stream: MediaStream, track: MediaStreamTrack, audioTracks: MediaStreamTrack[] = []): Promise<void> {
     const failures: string[] = []
     let peersSeeded = 0
     for (const [fp, pc] of this.pcs) {
@@ -3481,6 +3489,23 @@ export class CallManager {
         } else {
           pc.addTrack(track, stream)
           needsOffer = true
+        }
+        // Áudio (sistema e/ou mic) entra no MESMO offer do vídeo. Antes ele era
+        // anexado DEPOIS da oferta de vídeo: o PC ficava em `have-local-offer`,
+        // o `signalingState !== 'stable'` pulava o addTrack e o áudio do
+        // compartilhamento simplesmente nunca era enviado (tela com som mudo).
+        for (const atrack of audioTracks) {
+          try {
+            if (pc.getSenders().some(x => x.track === atrack)) continue
+            const reusable = this.screenAudioSenders.get(pc)
+            if (reusable && pc.getSenders().includes(reusable)) {
+              await reusable.replaceTrack(atrack)
+              continue
+            }
+            const audioSender = pc.addTrack(atrack, stream)
+            this.screenAudioSenders.set(pc, audioSender)
+            needsOffer = true
+          } catch { /* áudio é opcional: o vídeo continua */ }
         }
         if (needsOffer) {
           if (pc.signalingState !== 'stable' || !this.state) {
@@ -3504,7 +3529,6 @@ export class CallManager {
         throw new ScreenShareError('unknown', notice, true)
       }
     }
-    await this.seedScreenAudio(stream)
     await this.applyScreenSenderTuning()
   }
 
@@ -3515,31 +3539,37 @@ export class CallManager {
    * cada um é opcional e a falta de um NUNCA derruba o outro nem o vídeo.
    * `getDisplayMedia` só entrega o áudio do sistema; o mic vem sempre do
    * `getUserMedia` (é o mesmo mic da chamada, não um segundo dispositivo).
+   *
+   * Devolve as trilhas que devem ir NESTA oferta — quem as anexa é o
+   * `seedScreenPeers`, antes de criar o offer (ver comentário lá).
    */
-  private async seedScreenAudio(stream: MediaStream): Promise<void> {
+  private async collectScreenAudioTracks(stream: MediaStream): Promise<MediaStreamTrack[]> {
     const mode = this.screenOptions.audio
+    const out: MediaStreamTrack[] = []
     if (mode === 'system' || mode === 'system+mic') {
       const atrack = stream.getAudioTracks()[0]
       if (!atrack) {
         this.noteScreenEvent('áudio do sistema indisponível nesta fonte — o vídeo continua normalmente')
       } else {
-        await this.sendAudioTrackToPeers(atrack, stream)
+        out.push(atrack)
       }
     }
     if (mode === 'mic' || mode === 'system+mic') {
-      const mic = await this.ensureShareMicrophone()
-      if (!mic) this.noteScreenEvent('microfone indisponível — compartilhando sem a sua voz')
+      const live = this.localStream?.getAudioTracks().find(t => t.readyState === 'live') ?? null
+      if (live) {
+        // O mic da chamada já vai pelo sender de voz; reenviar a mesma trilha
+        // duplicaria a voz do usuário (eco/comb-filter).
+      } else {
+        const captured = await this.captureShareMicrophone()
+        if (captured) out.push(captured)
+        else this.noteScreenEvent('microfone indisponível — compartilhando sem a sua voz')
+      }
     }
+    return out
   }
 
-  /**
-   * Garante que exista um mic VIVO para o compartilhamento. Reaproveita o da
-   * chamada quando ele já está no mesh (não abre um segundo microfone, o que
-   * brigaria com o áudio da voz); senão captura um e semeia nos peers.
-   */
-  private async ensureShareMicrophone(): Promise<MediaStreamTrack | null> {
-    const live = this.localStream?.getAudioTracks().find(t => t.readyState === 'live') ?? null
-    if (live) return live
+  /** Captura um mic quando a chamada não tem um vivo e o guarda em localStream. */
+  private async captureShareMicrophone(): Promise<MediaStreamTrack | null> {
     let captured: MediaStream | null
     try {
       captured = await getLocalMedia({ audio: { ...AUDIO_CONSTRAINTS }, video: false })
@@ -3550,31 +3580,7 @@ export class CallManager {
       if (this.localStream) this.localStream.addTrack(track)
       else this.localStream = captured
     } catch { /* segue: o que importa é enviar o áudio */ }
-    await this.sendAudioTrackToPeers(track, this.localStream ?? (captured as MediaStream))
     return track
-  }
-
-  /** Manda uma trilha de áudio a todo o mesh, renegociando só o necessário. */
-  private async sendAudioTrackToPeers(track: MediaStreamTrack, stream: MediaStream): Promise<void> {
-    for (const pc of this.pcs.values()) {
-      try {
-        if (pc.getSenders().some(x => x.track === track)) continue
-        // Reusa o sender de áudio da tela de um share anterior (m-line já
-        // negociada): replaceTrack não exige nova oferta.
-        const existing = this.screenAudioSenders.get(pc)
-        if (existing && pc.getSenders().includes(existing)) {
-          await existing.replaceTrack(track)
-          continue
-        }
-        if (pc.signalingState !== 'stable') continue
-        const sender = pc.addTrack(track, stream)
-        this.screenAudioSenders.set(pc, sender)
-        const offer = await createTunedOffer(pc)
-        await pc.setLocalDescription(offer)
-        const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
-        if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
-      } catch { /* áudio opcional: vídeo continua */ }
-    }
   }
 
   /** Zera o áudio da tela nos senders reusáveis, sem fechar a m-line. */

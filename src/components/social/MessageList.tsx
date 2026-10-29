@@ -30,8 +30,6 @@ import {
 import { Icon, Icons } from '../../shared/icons'
 
 
-const QUICK = ['👍', '❤️', '🔥', '😂', '🎉', '👀']
-
 export interface MessageListProps {
   messages: StoredMessage[]
   convId: string
@@ -328,7 +326,31 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 )}
 
                 <ReactionBar reactions={rx} onToggle={e => toggleReact(m.id, e)}
-                  resolveName={fp => nameOf(fp)} />
+                  resolveName={fp => nameOf(fp)}
+                  onAdd={() => setPicker(picker === m.id ? null : m.id)} />
+
+                {/* Seletor fora da barra `.msg-tools` (que só aceita clique em
+                    hover): aqui ele abre também pela pílula "reagir" e pelo
+                    ícone ao lado das reações, como no app do celular. */}
+                {picker === m.id && (
+                  <div style={{ position: 'relative', height: 0 }} onClick={e => e.stopPropagation()}>
+                    <ReactionPicker onPick={em => { toggleReact(m.id, em); setPicker(null) }} customEmojis={emojis} onClose={() => setPicker(null)} />
+                  </div>
+                )}
+
+                {/* Reagir quando ainda não há reação — mesmo padrão do mobile:
+                    pílula pequena com ícone, sem cobrir a mensagem. Precisa
+                    ficar DENTRO da linha da mensagem: o seletor abre na barra
+                    `.msg-tools`, que só aceita clique enquanto a linha está em
+                    hover/focus. Fora dela, o primeiro clique abria um seletor
+                    inerte (o "reação bugada" que o usuário via). */}
+                {!grouped && rx.length === 0 && (
+                  <button
+                    onClick={() => setPicker(picker === m.id ? null : m.id)}
+                    aria-label="Reagir à mensagem"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, background: 'transparent', border: `1px solid ${T_BORDER}`, color: T_MUTED, borderRadius: 99, padding: '1px 8px 1px 5px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+                  ><Icon d={Icons.smile} size={12} /> reagir</button>
+                )}
 
                 {/* Enquetes ancoradas nas últimas mensagens. A âncora é
                     distribuída: a i-ésima enquete (das N mais recentes) fica na
@@ -354,20 +376,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 })}
               </div>
 
-              {/* Ações sempre tabuláveis; hover-only escondia reação de teclado e touch. */}
+              {/* Ações no hover/foco (CSS .msg-tools). Antes eram 4 emojis fixos
+                  sempre visíveis: cobriam o texto e não pareciam com o mobile.
+                  Agora é UM ícone de reação, igual ao app do celular. */}
               <div className="msg-tools" style={{ position: 'absolute', top: -14, right: 12, display: 'flex', gap: 2, background: T_MAIN, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 2, boxShadow: '0 4px 12px rgba(0,0,0,.4)', zIndex: 5 }}>
-                {QUICK.slice(0, 4).map(e => (
-                  <button key={e} title={`Reagir ${e}`} onClick={e2 => { e2.stopPropagation(); toggleReact(m.id, e) }}
-                    style={TOOL_BTN}>{e}</button>
-                ))}
-                <button title="Mais reações" aria-label="Mais reações" onClick={e2 => { e2.stopPropagation(); setPicker(picker === m.id ? null : m.id) }} style={{ ...TOOL_BTN, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.smile} size={15} /></button>
+                <button title="Reagir" aria-label="Reagir" onClick={e2 => { e2.stopPropagation(); setPicker(picker === m.id ? null : m.id) }} style={{ ...TOOL_BTN, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.smile} size={15} /></button>
                 <button title="Responder" onClick={e2 => { e2.stopPropagation(); onReply(m) }} style={{ ...TOOL_BTN, width: 'auto', padding: '0 8px', fontSize: 11, fontWeight: 800 }}>Responder</button>
                 <button title="Mais" onClick={e2 => { e2.stopPropagation(); setMenu({ id: m.id, x: e2.clientX, y: e2.clientY }) }} style={TOOL_BTN}>⋯</button>
-                {picker === m.id && (
-                  <div onClick={e2 => e2.stopPropagation()}>
-                    <ReactionPicker onPick={em => toggleReact(m.id, em)} customEmojis={emojis} onClose={() => setPicker(null)} />
-                  </div>
-                )}
               </div>
             </div>
 

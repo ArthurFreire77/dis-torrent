@@ -293,13 +293,15 @@ export function ReactionWhoPopover({ r, resolve, onClose }: {
   )
 }
 
-export function ReactionBar({ reactions, onToggle, onHoverList, resolveName }: {
+export function ReactionBar({ reactions, onToggle, onHoverList, resolveName, onAdd }: {
   reactions: ReactionSummary[]
   onToggle: (emoji: string) => void
   /** clique simples já alterna; este callback lista quem reagiu (opcional). */
   onHoverList?: (r: ReactionSummary) => void
   /** fp → nome bonito, para o popover "quem reagiu". */
   resolveName?: ReactorNameFn
+  /** ícone "+" ao lado das pílulas — mesmo botão de reação do app mobile. */
+  onAdd?: () => void
 }) {
   const [who, setWho] = useState<{ emoji: string; r: ReactionSummary } | null>(null)
   if (reactions.length === 0) return null
@@ -327,6 +329,18 @@ export function ReactionBar({ reactions, onToggle, onHoverList, resolveName }: {
           )}
         </div>
       ))}
+      {onAdd && (
+        <button
+          onClick={onAdd}
+          aria-label="Adicionar reação"
+          title="Adicionar reação"
+          style={{
+            background: T.input, border: '1px solid transparent', color: T.muted,
+            borderRadius: 8, padding: '3px 8px', cursor: 'pointer',
+            display: 'inline-flex', alignItems: 'center',
+          }}
+        ><Ic name="smile" size={14} /></button>
+      )}
     </div>
   )
 }

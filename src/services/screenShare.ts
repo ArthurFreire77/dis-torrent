@@ -52,6 +52,7 @@ export type ScreenShareErrorCode =
   | 'insecure'
   | 'ended'
   | 'unsupported'
+  | 'constraints'
   | 'unknown'
 
 export class ScreenShareError extends Error {
@@ -75,6 +76,7 @@ const MESSAGES: Record<ScreenShareErrorCode, string> = {
   insecure: 'contexto não seguro: a captura de tela exige app://, https:// ou localhost',
   ended: 'o compartilhamento de tela foi encerrado pelo sistema',
   unsupported: 'este aparelho não expõe captura de tela (getDisplayMedia ausente)',
+  constraints: 'este engine recusou as opções de captura de tela',
   unknown: 'não foi possível compartilhar a tela',
 }
 
@@ -87,6 +89,11 @@ export function classifyScreenShareError(e: unknown): ScreenShareError {
   else if (name === 'AbortError') code = 'cancelled'
   else if (name === 'NotFoundError' || name === 'OverconstrainedError') code = 'no-source'
   else if (name === 'NotReadableError' || name === 'TrackStartError') code = 'unavailable'
+  // ANTES do teste de "getDisplayMedia" abaixo: a mensagem do TypeError do
+  // Chromium ("min constraints are not supported") também cita getDisplayMedia,
+  // e cair em `unsupported` dizia que o aparelho não tem captura — mentira,
+  // o engine só recusou as opções.
+  else if (name === 'TypeError' && /constraint/i.test(String(anyE?.message ?? ''))) code = 'constraints'
   else if (/getDisplayMedia/i.test(String(anyE?.message ?? ''))) code = 'unsupported'
   const retryable = RETRYABLE_CODES.has(code)
   const extra = name && name !== 'Error' ? ` (${name})` : ''
@@ -271,11 +278,13 @@ export function buildDisplayMediaConstraints(
   const wantsSystemAudio = opts.audio === 'system' || opts.audio === 'system+mic'
   const displaySurface = opts.source === 'window' ? 'window' : 'monitor'
   const constraints: Record<string, unknown> = {
-    // `min: 30`: pede o piso de videochamada de verdade. Sem isto o WebView
-    // entregava 15-24 fps por escolha própria. Se o aparelho não sustentar 30,
-    // `acquireScreenStream` derruba o `min` e tenta de novo (ver callManager) —
-    // tela a 20 fps continua melhor que tela preta.
-    video: { displaySurface, frameRate: { min: 30, ideal: 60 } },
+    // SEM `min` aqui: o `getDisplayMedia` do Chromium (WebView2 inclusive)
+    // recusa constraint obrigatória com `TypeError: min constraints are not
+    // supported` — e a captura simplesmente não abria dentro do app, embora
+    // funcionasse no teste com o Edge. `ideal` é dica, não exigência, e é o
+    // que o engine aceita. O piso de fps é perseguido depois, em
+    // `applyScreenConstraints` (applyConstraints, que ESSE aceita `max`).
+    video: { displaySurface, frameRate: { ideal: 60 } },
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
     // Loopback do desktop inclui a voz dos próprios participantes saindo nos
@@ -292,6 +301,24 @@ export function buildDisplayMediaConstraints(
     preferCurrentTab: false,
   }
   return constraints
+}
+
+/**
+ * Versão relaxada das constraints para quando o engine recusa o pedido
+ * original (WebView2 recusa `min`; alguns engines recusam `displaySurface`).
+ * Devolve `null` quando não há nada a relaxar — aí não vale repetir a chamada.
+ */
+export function derivedDisplayConstraints(
+  constraints: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const video = constraints.video
+  if (!video || typeof video !== 'object') return null
+  const next: Record<string, unknown> = { ...constraints, video: { ...(video as Record<string, unknown>) } }
+  const v = next.video as Record<string, unknown>
+  let changed = false
+  if ('frameRate' in v) { delete v.frameRate; changed = true }
+  if ('displaySurface' in v) { delete v.displaySurface; changed = true }
+  return changed ? next : null
 }
 
 export function resolveFps(opts: ScreenShareOptions): number | null {

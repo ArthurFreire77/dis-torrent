@@ -113,8 +113,38 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
         draw();
         const timer = window.setInterval(draw, 100);
         const stream = canvas.captureStream(15);
-        (window as unknown as { __fakeScreen?: MediaStream; __fakeScreenTimer?: number }).__fakeScreen = stream;
-        (window as unknown as { __fakeScreenTimer?: number }).__fakeScreenTimer = timer;
+        // Áudio "do sistema" de mentira: o seletor real do SO entrega a track de
+        // loopback junto com o vídeo. Sem esta track o E2E nunca exercitava o
+        // envio de áudio da tela (o bug em que ele era anexado DEPOIS da oferta
+        // e, por isso, nunca saía do app).
+        const audioCtx = new AudioContext();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.05;
+        osc.frequency.value = 660;
+        const dest = audioCtx.createMediaStreamDestination();
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start();
+        for (const track of dest.stream.getAudioTracks()) stream.addTrack(track);
+        (
+          window as unknown as {
+            __fakeScreen?: MediaStream;
+            __fakeScreenTimer?: number;
+            __fakeScreenAudio?: { ctx: AudioContext; osc: OscillatorNode };
+          }
+        ).__fakeScreen = stream;
+        (
+          window as unknown as {
+            __fakeScreenTimer?: number;
+            __fakeScreenAudio?: { ctx: AudioContext; osc: OscillatorNode };
+          }
+        ).__fakeScreenTimer = timer;
+        (
+          window as unknown as {
+            __fakeScreenAudio?: { ctx: AudioContext; osc: OscillatorNode };
+          }
+        ).__fakeScreenAudio = { ctx: audioCtx, osc };
         return stream;
       },
     });
@@ -241,17 +271,30 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
       && video.videoHeight === 180
       && video.currentTime > 0;
   })).toBe(true);
+  // Áudio do compartilhamento: além da voz, o elemento remoto precisa receber a
+  // track de áudio da tela. Antes ela era anexada com o PC em `have-local-offer`
+  // e nunca virava oferta — a tela chegava muda e o teste só olhava o vídeo.
+  const callerAudioOnB = b.locator(`audio[data-call-audio-fp="${callerFp}"]`);
+  await expect(callerAudioOnB).toHaveCount(1, { timeout: 15000 });
+  const liveAudioTracks = () => callerAudioOnB.evaluate((element) => {
+    const stream = (element as HTMLAudioElement).srcObject as MediaStream | null;
+    return stream ? stream.getAudioTracks().filter((track) => track.readyState === 'live').length : 0;
+  });
+  await expect.poll(liveAudioTracks, { timeout: 20000 }).toBeGreaterThanOrEqual(2);
   await a.getByTestId('call-screen-stop').click();
   await expect(a.getByTestId('call-screen-share')).toBeVisible({ timeout: 15000 });
   await expect(callerTileOnB.getByText('TELA')).toBeHidden({ timeout: 15000 });
   await expect(receivedScreen).toBeHidden({ timeout: 15000 });
+  // Sem a tela, o áudio do sistema também para: sobra só a voz da chamada.
+  await expect.poll(liveAudioTracks, { timeout: 20000 }).toBe(1);
   await expect.poll(() => a.evaluate(() => {
     const win = window as unknown as { __fakeScreen?: MediaStream };
     return win.__fakeScreen?.getVideoTracks()[0]?.readyState ?? 'missing';
   })).toBe('ended');
   await a.evaluate(() => {
-    const win = window as unknown as { __fakeScreen?: MediaStream; __fakeScreenTimer?: number };
+    const win = window as unknown as { __fakeScreen?: MediaStream; __fakeScreenTimer?: number; __fakeScreenAudio?: { ctx: AudioContext } };
     if (win.__fakeScreenTimer) clearInterval(win.__fakeScreenTimer);
+    void win.__fakeScreenAudio?.ctx.close();
   });
 
   // A mesma chamada precisa poder reutilizar o sender após parar a tela.
@@ -275,8 +318,9 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
     return win.__fakeScreen?.getVideoTracks()[0]?.readyState ?? 'missing';
   })).toBe('ended');
   await a.evaluate(() => {
-    const win = window as unknown as { __fakeScreenTimer?: number };
+    const win = window as unknown as { __fakeScreenTimer?: number; __fakeScreenAudio?: { ctx: AudioContext } };
     if (win.__fakeScreenTimer) clearInterval(win.__fakeScreenTimer);
+    void win.__fakeScreenAudio?.ctx.close();
   });
 
   // NENHUM pageerror / "Can't find variable" em nenhuma aba.

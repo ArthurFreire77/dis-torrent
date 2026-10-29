@@ -321,24 +321,38 @@ test('constraints: microfone nunca vem do getDisplayMedia (só o áudio do siste
 test('constraints: fonte janela vs monitor muda o displaySurface pedido', () => {
   const env = detectScreenEnvironment()
   const win = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'window' }, env)
-  assert.deepEqual(win.video, { displaySurface: 'window', frameRate: { min: 30, ideal: 60 } })
+  assert.deepEqual(win.video, { displaySurface: 'window', frameRate: { ideal: 60 } })
   const mon = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor' }, env)
-  assert.deepEqual(mon.video, { displaySurface: 'monitor', frameRate: { min: 30, ideal: 60 } })
+  assert.deepEqual(mon.video, { displaySurface: 'monitor', frameRate: { ideal: 60 } })
   assert.equal(mon.monitorTypeSurfaces, 'include')
   assert.equal(win.monitorTypeSurfaces, 'exclude')
 })
 
-test('constraints: piso de 30 fps é pedido na tela', () => {
-  // Sem o `min: 30` o WebView escolhia 15-24 fps sozinho e a tela chegava
-  // como slideshow. O `min` é derrotado no acquireScreenStream se o aparelho
-  // não sustentar (retry), então não pode desaparecer daqui.
+test('constraints: nunca pede min no getDisplayMedia (WebView2 recusa)', () => {
+  // Bug real: dentro do app o Chromium/WebView2 responde
+  // "TypeError: min constraints are not supported" e a tela não abria — o
+  // teste no Edge não pegava porque usava outras constraints. `min` só pode
+  // aparecer em applyConstraints (screenConstraints), nunca aqui.
   const env = detectScreenEnvironment()
   for (const source of ['screen', 'window', 'monitor'] as const) {
     const c = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source }, env)
     const video = c.video as Record<string, any>
-    assert.equal(video.frameRate.min, 30, `${source}: piso de 30 fps`)
+    assert.equal(video.frameRate.min, undefined, `${source}: min não é suportado`)
     assert.ok(video.frameRate.ideal >= 30, `${source}: ideal >= 30`)
   }
+})
+
+test('derivedDisplayConstraints: relaxa frameRate/displaySurface e desiste quando não há o que mudar', async () => {
+  const { derivedDisplayConstraints } = await import('../src/services/screenShare.ts')
+  const env = detectScreenEnvironment()
+  const original = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor' }, env)
+  const relaxed = derivedDisplayConstraints(original)
+  assert.ok(relaxed, 'deve haver versão relaxada')
+  const video = relaxed!.video as Record<string, any>
+  assert.equal(video.frameRate, undefined)
+  assert.equal(video.displaySurface, undefined)
+  assert.equal(relaxed!.audio, original.audio)
+  assert.equal(derivedDisplayConstraints({ video: true, audio: false }), null)
 })
 
 test('monitores: fora do app nativo devolve lista vazia em vez de inventar', async () => {

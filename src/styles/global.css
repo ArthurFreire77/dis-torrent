@@ -7,6 +7,19 @@ button{font:inherit}
 ::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:99px}
 ::-webkit-scrollbar-track{background:transparent}
 
+/* ==========================================================================
+   Barra de ações da mensagem (reagir/responder/⋯)
+   Fica só no hover ou no foco por teclado. Sempre visível, ela cobria o texto
+   das mensagens e o usuário lia aquilo como "reação bugada". No toque não
+   existe hover, então ali ela aparece direto.
+   ========================================================================== */
+.msg-tools{opacity:0;pointer-events:none;transition:opacity .12s ease}
+.msg-row:hover .msg-tools,
+.msg-row:focus-within .msg-tools{opacity:1;pointer-events:auto}
+@media (hover:none),(pointer:coarse){
+  .msg-tools{opacity:1;pointer-events:auto}
+}
+
 /* mobile polish */
 @media (max-width: 768px){
   .hide-mobile{ display:none !important }
