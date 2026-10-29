@@ -17,6 +17,7 @@ import {
 } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
+import { ParticipantAudioControls } from '../components/calls/ParticipantAudioControls'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CreateServerWizard from '../components/CreateServerWizard'
@@ -25,6 +26,7 @@ import ServerSettings from '../components/server/ServerSettings'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
+import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
@@ -675,6 +677,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [createdServerToken, setCreatedServerToken] = useState('')
   const [createdServerId, setCreatedServerId] = useState<string | null>(null)
   const [joinToken, setJoinToken] = useState('')
+  const [joinBusy, setJoinBusy] = useState(false)
   useEffect(() => {
     // Link de convite público: /d/distorrent?invite=TOKEN (vindo da rota /invite/:token)
     try {
@@ -744,9 +747,13 @@ export default function ThemeShell({ designId }: {designId:string}){
   // --- CALL (Discord idêntico) ---
   const [activeCall, setActiveCall] = useState<any>(null)
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
+  const [callActionBusy, setCallActionBusy] = useState(false)
   // fp → apelido (memo do ring): quem já apareceu com nome mantém o nome.
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
+  const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
+  const [pinnedCallFp, setPinnedCallFp] = useState<string | null>(null)
+  const [expandedCallPin, setExpandedCallPin] = useState(false)
   const [showAddToCall, setShowAddToCall] = useState(false)
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [groupTitle, setGroupTitle] = useState('')
@@ -834,6 +841,22 @@ export default function ThemeShell({ designId }: {designId:string}){
       // browser local: merge se vazio e há comunidades locais
       setCommunities(list)
     } catch { /* engine indisponível */ }
+  }
+  async function submitJoinInvite() {
+    const token = joinToken.trim()
+    if (!token || joinBusy) return
+    setJoinBusy(true)
+    try {
+      const cid = await services.joinCommunity(token)
+      setJoinToken('')
+      closeServerModal()
+      setSelCommunity(cid as string)
+      await refreshCommunities()
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+    } finally {
+      setJoinBusy(false)
+    }
   }
   // carregar canais/cargos/bots extras quando muda servidor selecionado
   async function refreshExtras(cid: string | null) {
@@ -1475,6 +1498,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     return `${m}:${sec}`
   }
   async function startCall(kind: 'voice' | 'video') {
+    if (callActionBusy) return
     if (!selConv) return
     const conv = conversations.find(c => c.id === selConv)
     const isGroup = conv?.kind === 'group'
@@ -1488,10 +1512,12 @@ export default function ThemeShell({ designId }: {designId:string}){
     // que falta neste aparelho.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     if (activeCall) { setError('já existe uma chamada em andamento'); return }
+    setCallActionBusy(true)
     try { await callManager.start(kind, selConv, fps) } catch (e: any) { setError(String(e?.message ?? e)) }
+    finally { setCallActionBusy(false) }
   }
   async function handleIncomingAccept() {
-    if (!incomingCall) return
+    if (!incomingCall || callActionBusy) return
     // Sem WebRTC: mostra o que falta em vez de aceitar uma chamada muda.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     // O ring SÓ para quando o aceite de fato sucedeu — antes o catch deixava
@@ -1501,6 +1527,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     // sem chamada nenhuma (estado dos dois divergentes).
     const bloqueio = callManager.canAccept(incomingCall.call_id)
     if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
+    setCallActionBusy(true)
     try {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
       await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
@@ -1511,6 +1538,8 @@ export default function ThemeShell({ designId }: {designId:string}){
       setError(String(e?.message ?? e))
       sfxRingStop()
       setIncomingCall(null)
+    } finally {
+      setCallActionBusy(false)
     }
   }
 
@@ -2041,8 +2070,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                                 <button
                                   onClick={async () => {
                                     if (ch.kind === 'voice') {
+                                      if (callActionBusy) return
                                       // Canal de voz: 'none' → detalhado; 'relay-only'/'full' → joinVoice (que delega p/ relay quando preciso).
                                       if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
+                                      setCallActionBusy(true)
                                       if (voiceChannel?.channelId === ch.id) {
                                         try {
                                           await callManager.leaveVoice(selCommunity!, ch.id)
@@ -2058,7 +2089,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                                           // sessão nativa para o mesmo canal
                                           // (offers/sessões duplicadas).
                                           await callManager.joinVoice(selCommunity!, ch.id)
-                                        } catch (e: any) { setError(String(e?.message ?? e)); setVoiceChannel(null); return }
+                                        } catch (e: any) { setError(String(e?.message ?? e)); setVoiceChannel(null); setCallActionBusy(false); return }
                                         // Só marca a barra DEPOIS do join: se
                                         // havia outro canal de voz, o
                                         // `joinVoice` sai dele e emite
@@ -2067,6 +2098,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                                         setVoiceChannel({ communityId: selCommunity!, channelId: ch.id })
                                         services.voiceStates(selCommunity!, ch.id).then(setVoiceStates).catch(()=>{})
                                       }
+                                      setCallActionBusy(false)
                                     } else setSelConv(ch.id)
                                   }}
                                   onContextMenu={e => { e.preventDefault(); setChannelMenu({ x: e.clientX, y: e.clientY, id: ch.id }) }}
@@ -2220,7 +2252,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           </div>
         </div>
 
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: activeCall ? (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
           {view === 'servidores' && selCommunity ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, display: 'flex' }}><Icon d={Icons.hash} size={20} /></span>
@@ -2423,7 +2455,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                       <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
                       <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono' }}>{f.fp.slice(0, 12)} · não consegue te achar</div>
                     </div>
-                    <button title="Desbloquear" className="row-icon ok" onClick={async e => { e.stopPropagation(); try { await services.friendRemove(f.fp); refreshFriends(); setFriendSuccess('Desbloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M4 12l5 5L20 7" /></svg></button>
+                    <button title="Desbloquear" className="row-icon ok" onClick={async e => { e.stopPropagation(); try { await services.friendUnblock(f.fp); refreshFriends(); setFriendSuccess('Desbloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M4 12l5 5L20 7" /></svg></button>
                   </div>
                 ))
               ) : shownFriends.length === 0 ? (
@@ -2446,7 +2478,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono' }}>{f.fp.slice(0, 12)}</div>
                   </div>
                   <button title="Conversar" className="row-icon" onClick={e => { e.stopPropagation(); openDm(f) }}><Icon d={Icons.send} size={15} /></button>
-                  <button title="Bloquear" className="row-icon no" onClick={async e => { e.stopPropagation(); if (!confirm(`Bloquear ${f.nickname || f.fp}? Ele não consegue mais te achar e suas mensagens são rejeitadas.`)) return; try { await services.friendBlock(f.fp); await services.friendRemove(f.fp); refreshFriends(); refreshConvos(); setFriendSuccess('Amigo bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="9" /><path d="M5.6 5.6l12.8 12.8" /></svg></button>
+                  <button title="Bloquear" className="row-icon no" onClick={async e => { e.stopPropagation(); if (!confirm(`Bloquear ${f.nickname || f.fp}? Ele não consegue mais te achar e suas mensagens são rejeitadas.`)) return; try { await services.friendBlock(f.fp); refreshFriends(); refreshConvos(); setFriendSuccess('Amigo bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="12" cy="12" r="9" /><path d="M5.6 5.6l12.8 12.8" /></svg></button>
                   <button title="Remover amigo" className="row-icon no" onClick={async e => { e.stopPropagation(); if (!confirm(`Remover ${f.nickname || f.fp} dos amigos?`)) return; try { await services.friendRemove(f.fp); refreshFriends(); refreshConvos(); setFriendSuccess('Amigo removido') } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
                 </div>
               ))}
@@ -2867,16 +2899,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <div style={{ fontSize: 13, color: muted, marginTop: 6, lineHeight: 1.5 }}>Cole o token/ID do servidor que recebeu do dono.</div>
                 </div>
                 <input value={joinToken} onChange={e => setJoinToken(e.target.value)} placeholder="Cole o token aqui" autoFocus
-                  onKeyDown={e => e.key === 'Enter' && joinToken.trim() && services.joinCommunity(joinToken.trim()).then((cid) => { setJoinToken(''); setShowCreateServer(false); setServerFlow('choose'); setSelCommunity(cid as string); refreshCommunities() }).catch((e: any) => setError(String(e?.message ?? e)))}
+                  onKeyDown={e => { if (e.key === 'Enter') void submitJoinInvite() }}
                   style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '12px 14px', color: text, fontSize: 15, fontFamily: 'JetBrains Mono', outline: 'none', boxSizing: 'border-box' }} />
-                <button onClick={async () => {
-                  if (!joinToken.trim()) return
-                  try {
-                    const cid = await services.joinCommunity(joinToken.trim())
-                    closeServerModal(); setSelCommunity(cid as string); refreshCommunities()
-                  } catch (e: any) { setError(String(e?.message ?? e)) }
-                }} disabled={!joinToken.trim()} style={{ width: '100%', background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: joinToken.trim() ? 'pointer' : 'not-allowed', opacity: joinToken.trim() ? 1 : 0.5, fontSize: 14, marginTop: 12 }}>
-                  Entrar
+                <button onClick={() => void submitJoinInvite()} disabled={!joinToken.trim() || joinBusy} style={{ width: '100%', background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: joinToken.trim() && !joinBusy ? 'pointer' : 'not-allowed', opacity: joinToken.trim() && !joinBusy ? 1 : 0.5, fontSize: 14, marginTop: 12 }}>
+                  {joinBusy ? 'Conectando...' : 'Entrar'}
                 </button>
                 <div style={{ textAlign: 'center', marginTop: 8 }}>
                   <button onClick={() => setServerFlow('choose')} className="link-btn" style={{ fontSize: 13 }}>← Voltar</button>
@@ -3070,11 +3096,11 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* ACTIVE CALL OVERLAY — mesh grid idêntico Discord */}
+      {/* Painel lateral: a navegação e a conversa permanecem acessíveis durante a chamada. */}
       {activeCall && (
-        <div style={{ position: 'fixed', inset: 0, background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ height: 56, background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 12 }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)', background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
+          <div style={{ minHeight: 56, height: 'auto', background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', gap: 8 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 250, flex: '1 1 250px' }}>
               <span style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}22`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={16} /> : <Icon d={Icons.phone} size={16} />}</span>
               <span style={{ minWidth: 0 }}>
                 <span style={{ display: 'block', fontWeight: 800, color: t.heading, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{conversations.find(c=>c.id===activeCall.convId)?.title ?? peerTitle ?? 'Chamada'}</span>
@@ -3085,6 +3111,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                       sumia quando o badge virava "Conectado • MM:SS". */}
                   <span style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{fmtDuration(callDuration)}</span>
                 </span>
+              </span>
+              <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }} aria-label="Tamanho do painel da chamada">
+                <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'compact' ? muted : text, opacity: callPanelSize === 'compact' ? 0.5 : 1, cursor: callPanelSize === 'compact' ? 'default' : 'pointer' }}>↑</button>
+                <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'expanded' ? muted : text, opacity: callPanelSize === 'expanded' ? 0.5 : 1, cursor: callPanelSize === 'expanded' ? 'default' : 'pointer' }}>↓</button>
               </span>
             </span>
             <span style={{ width: 1, height: 26, background: borderColor, flexShrink: 0 }} />
@@ -3133,10 +3163,21 @@ export default function ThemeShell({ designId }: {designId:string}){
           {/* `alignContent: 'stretch'` + tile com altura mínima real: antes o
               grid deixava uma faixa vazia embaixo dos vídeos, porque as linhas
               não ocupavam a altura disponível. */}
-          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: `repeat(${Math.min(activeCall.participants.length, 3)}, 1fr)`, gridAutoRows: 'minmax(180px, 1fr)', alignContent: 'stretch', gap: 10, padding: 12, overflowY: 'auto', background: '#1a1a1a' }}>
-            {Array.from(new Map((activeCall.participants as any[]).map((p: any) => [p.fp, p])).values()).map((p: any) => (
-              <div key={p.fp} style={{ background: `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`, borderRadius: 12, overflow: 'hidden', position: 'relative', minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `2px solid ${p.muted ? t.red + '55' : 'transparent'}`, boxShadow: '0 2px 10px rgba(0,0,0,.35)' }}>
-                {streamHasVideo(p.stream) ? (
+          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: pinnedCallFp && expandedCallPin ? 'minmax(0, 1fr) minmax(96px, 28%)' : `repeat(${Math.min(activeCall.participants.length, callPanelSize === 'compact' ? 1 : 2)}, minmax(0, 1fr))`, gridAutoRows: `minmax(${callPanelSize === 'compact' ? 112 : 150}px, 1fr)`, alignContent: 'stretch', gap: 10, padding: 12, overflowY: 'auto', background: '#1a1a1a', transition: 'grid-template-columns 180ms ease' }}>
+            {(() => {
+              const unique = Array.from(new Map((activeCall.participants as any[]).map((p: any) => [p.fp, p])).values()) as any[]
+              if (pinnedCallFp) unique.sort((a, b) => a.fp === pinnedCallFp ? -1 : b.fp === pinnedCallFp ? 1 : 0)
+              return unique.map((p: any) => {
+              const isPinned = p.fp === pinnedCallFp
+              const isMine = p.fp === identity?.fingerprint
+              const hasVideo = isMine
+                ? !!activeCall.cameraOn || !!activeCall.sharing
+                : !!p.sharing || p.cameraOn === true || (p.cameraOn !== false && streamHasVideo(p.stream)) || !!p.videoUrl
+              const isMuted = isMine ? !!activeCall.muted : !!p.muted
+              const isSharing = isMine ? !!activeCall.sharing : !!p.sharing
+              return (
+              <div key={p.fp} data-call-participant={p.fp} style={{ background: `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`, borderRadius: 12, overflow: 'hidden', position: 'relative', minHeight: isPinned && expandedCallPin ? 320 : callPanelSize === 'compact' ? 112 : 150, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `2px solid ${p.speaking ? t.green : isMuted ? t.red + '55' : 'transparent'}`, boxShadow: '0 2px 10px rgba(0,0,0,.35)', gridColumn: isPinned && expandedCallPin ? '1' : undefined, gridRow: isPinned && expandedCallPin ? '1 / span 2' : undefined }}>
+                {hasVideo && streamHasVideo(p.stream) ? (
                   /* remoto: vídeo SEMPRE mudo — o som sai do <audio> abaixo.
                       Antes os dois tocavam: voz duplicada (eco/comb-filter). */
                   <video autoPlay playsInline muted ref={(el:any)=>attachStream(el, p.stream)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -3158,20 +3199,37 @@ export default function ThemeShell({ designId }: {designId:string}){
                     antes ele vivia dentro do ramo `p.stream` e sumia junto com o
                     vídeo em chamadas só de voz. */}
                 {!!p.stream && p.fp!==identity?.fingerprint && (
-                  <audio autoPlay playsInline hidden muted={!!activeCall.deafened} ref={(el:any)=>attachStream(el, p.stream)} />
+                  <audio
+                    autoPlay
+                    playsInline
+                    hidden
+                    data-call-audio-fp={p.fp}
+                    ref={(el: HTMLAudioElement | null) => {
+                      attachStream(el, p.stream)
+                      if (el) applyParticipantPlayback(el, p.fp, !!activeCall.deafened)
+                    }}
+                  />
                 )}
                 {p.disconnected && (
                   <span style={{ position: 'absolute', top: 8, right: 8, background: '#faa61a', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>RECONECTANDO…</span>
                 )}
                 {/* badge tela compartilhada: local COMPARTILHANDO, remoto com vídeo ASSISTINDO */}
-                {(() => { try { const s = (p as any)?.stream as MediaStream | undefined; const hasV = (!!s && typeof (s as any).getVideoTracks === 'function' && (s as any).getVideoTracks().length > 0) || !!(p as any).videoUrl; if (hasV && p.fp!==identity?.fingerprint) return <span style={{ position: 'absolute', top: 8, left: 8, background: '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>TELA/CÂMERA</span>; return null } catch { return null } })()}
-                {activeCall.sharing && p.fp===identity?.fingerprint && <span style={{ position: 'absolute', top: 8, left: 8, background: t.green, color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>COMPARTILHANDO</span>}
+                {hasVideo && !isMine && <span title={isSharing ? 'Compartilhamento de tela ativo' : 'Câmera ativa'} style={{ position: 'absolute', top: 8, left: 8, background: isSharing ? t.green : '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>{isSharing ? 'TELA' : 'CÂMERA'}</span>}
+                {activeCall.sharing && isMine && <span style={{ position: 'absolute', top: 8, left: 8, background: t.green, color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>COMPARTILHANDO</span>}
+                {!hasVideo && !isSharing && <span title="Câmera desligada" aria-label="Câmera desligada" style={{ position: 'absolute', top: 8, left: 8, background: '#111a', color: '#fff', fontSize: 10, padding: '3px 6px', borderRadius: 4 }}>▣̸</span>}
+                <div style={{ position: 'absolute', right: 8, top: 38, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <button type="button" aria-label={isPinned ? `Desafixar ${p.nickname || p.fp}` : `Fixar ${p.nickname || p.fp}`} title={isPinned ? 'Desafixar participante' : 'Fixar participante'} onClick={() => { setPinnedCallFp(isPinned ? null : p.fp); setExpandedCallPin(false) }} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px', cursor: 'pointer', fontSize: 11 }}>{isPinned ? '📌' : '⌖'}</button>
+                  {isPinned && <button type="button" aria-label={expandedCallPin ? 'Recolher participante fixado' : 'Ampliar participante fixado'} title={expandedCallPin ? 'Voltar à miniatura' : 'Ampliar conteúdo fixado'} onClick={() => setExpandedCallPin(v => !v)} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px', cursor: 'pointer', fontSize: 11 }}>{expandedCallPin ? '▣' : '□'}</button>}
+                </div>
+                {!isMine && <ParticipantAudioControls fp={p.fp} nickname={p.nickname || p.fp} callDeafened={!!activeCall.deafened} />}
                 <div style={{ position: 'absolute', bottom: 8, left: 8, right: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.nickname || p.fp.slice(0,8)} {p.muted ? <Icon d={Icons.micOff} size={12} /> : <Icon d={Icons.mic} size={12} />}</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.nickname || p.fp.slice(0,8)} {isMuted ? <Icon d={Icons.micOff} size={12} /> : <Icon d={Icons.mic} size={12} />}</span>
                   {p.speaking && <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}` }}/>}
                 </div>
               </div>
-            ))}
+              )
+              })
+            })()}
           </div>
           {/* A linha do aviso de mesh ficou FORA do grid de propósito: dentro
               dele virava mais uma linha (`gridColumn: 1 / -1`) e disputava a
@@ -3336,7 +3394,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               <label style={{ display: 'block', fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted }}>NOME</label>
               <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                 <input id="profile-nick" defaultValue={identity.nickname} style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px', color: text }} />
-                <button onClick={async () => { const el = document.getElementById('profile-nick') as HTMLInputElement | null; if (el?.value) { await services.identityRename(el.value); setShowProfile(false); window.location.reload() } }} style={{ background: t.accent, color: '#fff', border: 'none', padding: '0 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>Salvar</button>
+                <button onClick={async () => { const el = document.getElementById('profile-nick') as HTMLInputElement | null; if (el?.value) { try { const updated = await services.identityRename(el.value.trim()); setIdentity(updated); setShowProfile(false) } catch (e: any) { setError(String(e?.message ?? e)) } } }} style={{ background: t.accent, color: '#fff', border: 'none', padding: '0 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer' }}>Salvar</button>
               </div>
 
               <label style={{ display: 'block', fontSize: 11, fontWeight: 700, letterSpacing: 1, marginTop: 14, color: muted }}>FINGERPRINT (IDENTIFICADOR ÚNICO)</label>
@@ -3415,7 +3473,7 @@ export default function ThemeShell({ designId }: {designId:string}){
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>SEU NOME</div>
             <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
               <input id="nick-rename" defaultValue={identity.nickname} style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', color: text, fontSize: 15 }} />
-              <button onClick={async () => { const el = document.getElementById('nick-rename') as HTMLInputElement | null; if (el?.value) { await services.identityRename(el.value); setShowSettings(false); window.location.reload() } }} style={{ background: t.accent, color: '#fff', border: 'none', padding: '0 20px', borderRadius: 10, fontWeight: 800, cursor: 'pointer', fontSize: 14 }}>Salvar</button>
+              <button onClick={async () => { const el = document.getElementById('nick-rename') as HTMLInputElement | null; if (el?.value) { try { const updated = await services.identityRename(el.value.trim()); setIdentity(updated); setShowSettings(false) } catch (e: any) { setError(String(e?.message ?? e)) } } }} style={{ background: t.accent, color: '#fff', border: 'none', padding: '0 20px', borderRadius: 10, fontWeight: 800, cursor: 'pointer', fontSize: 14 }}>Salvar</button>
             </div>
 
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>FINGERPRINT</div>

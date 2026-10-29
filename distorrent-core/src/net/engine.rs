@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use crate::net::netlimit::{Decision, FrameVerdict, NetLimiter};
+use crate::net::reaction_limit::ReactionLimiter;
 use crate::net::socks5::{socks5_connect, split_host_port, SocksTarget};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Notify};
@@ -689,6 +690,9 @@ pub struct NetworkEngine {
     /// Anti-spam: último `(hash_do_conteúdo, ts_ms)` por peer — repetida
     /// em <60s é descartada.
     spam_dup: StdMutex<HashMap<String, (String, i64)>>,
+    /// Limites próprios para reações recebidas. A identidade da chave é o
+    /// peer autenticado da sessão, nunca o `reactor_fp` declarado no frame.
+    reaction_limiter: StdMutex<ReactionLimiter>,
     /// Limites de rede (rate limits/concorrência/tetos) — o "rate limit para
     /// tudo": TCP inbound, discovery UDP, relay, frames/bytes por sessão,
     /// dials outbound. `Arc` porque discovery/mDNS compartilham a MESMA
@@ -951,6 +955,7 @@ impl NetworkEngine {
             )),
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
+            reaction_limiter: StdMutex::new(ReactionLimiter::new()),
             netlimiter: NetLimiter::from_env(),
             #[cfg(target_os = "linux")]
             voice: StdMutex::new(build_voice_media()),
@@ -1033,6 +1038,7 @@ impl NetworkEngine {
             )),
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
+            reaction_limiter: StdMutex::new(ReactionLimiter::new()),
             netlimiter: NetLimiter::from_env(),
             #[cfg(target_os = "linux")]
             voice: StdMutex::new(build_voice_media()),
@@ -3230,10 +3236,9 @@ impl NetworkEngine {
                     .store
                     .message_by_id_raw(target)?
                     .ok_or_else(|| DistorrentError::Protocol("mensagem inexistente".into()))?;
-                let owner_cid = self
-                    .store
-                    .channel_community(&msg.conv_id)?
-                    .ok_or_else(|| DistorrentError::Protocol("mensagem fora deste servidor".into()))?;
+                let owner_cid = self.store.channel_community(&msg.conv_id)?.ok_or_else(|| {
+                    DistorrentError::Protocol("mensagem fora deste servidor".into())
+                })?;
                 if owner_cid != community_id {
                     return Err(DistorrentError::Protocol("mensagem fora deste servidor".into()));
                 }
@@ -3814,24 +3819,21 @@ impl NetworkEngine {
                 "convite é para outro fingerprint".into(),
             ));
         }
-        // a pubkey do host precisa validar a assinatura — busco no peerbook
-        let host_pub = self
-            .store
-            .get_peer(&host_fp)?
-            .map(|p| p.pubkey_hex)
-            .ok_or_else(|| {
-                DistorrentError::Protocol("host desconhecido — conecte-se a ele primeiro".into())
-            })?;
-        if !Keypair::verify(
-            &host_pub,
-            &crate::protocol::invite_sign_bytes(&cid, &member_fp, exp),
-            &sig,
-        )
-        .map_err(|e| DistorrentError::Crypto(e.to_string()))?
-        {
-            return Err(DistorrentError::Protocol(
-                "convite com assinatura inválida".into(),
-            ));
+        // Se o host já está no peerbook, verifica agora. Convites recebidos
+        // antes do primeiro contato são verificados em `flush_joins`, depois
+        // que o handshake autenticado fornecer a chave pública do fingerprint.
+        if let Some(host) = self.store.get_peer(&host_fp)? {
+            if !Keypair::verify(
+                &host.pubkey_hex,
+                &crate::protocol::invite_sign_bytes(&cid, &member_fp, exp),
+                &sig,
+            )
+            .map_err(|e| DistorrentError::Crypto(e.to_string()))?
+            {
+                return Err(DistorrentError::Protocol(
+                    "convite com assinatura inválida".into(),
+                ));
+            }
         }
         self.pending_joins
             .lock()
@@ -3845,6 +3847,14 @@ impl NetworkEngine {
                     token: token.to_string(),
                 },
             ))
+            .ok();
+        // Inicia conexao e busca direta/relay agora, em vez de esperar o
+        // ticker geral. O pedido fica pendente e sera repetido ao conectar.
+        self.cmd_tx
+            .send(EngineCmd::ConnectRelay(host_fp.clone()))
+            .ok();
+        self.cmd_tx
+            .send(EngineCmd::LookupAnnounce(host_fp.clone()))
             .ok();
         Ok(cid)
     }
@@ -4782,6 +4792,34 @@ impl NetworkEngine {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         for (cid, token) in joins {
+            // O pedido pertence ao host do token e só deve sair depois que o
+            // handshake autenticado permitir validar a assinatura do convite.
+            let Some((host_fp, token_cid, member_fp, exp, sig)) =
+                crate::protocol::parse_invite_token(&token).ok()
+            else {
+                continue;
+            };
+            const WILDCARD: &str = "000000000000";
+            if host_fp != peer_fp
+                || token_cid != cid
+                || (member_fp != WILDCARD && member_fp != self.identity.fingerprint)
+                || crate::identity::now_ms() > exp
+            {
+                continue;
+            }
+            let Some(host) = self.store.get_peer(peer_fp).ok().flatten() else {
+                continue;
+            };
+            let valid_signature = Keypair::verify(
+                &host.pubkey_hex,
+                &crate::protocol::invite_sign_bytes(&cid, &member_fp, exp),
+                &sig,
+            )
+            .unwrap_or(false);
+            if !valid_signature {
+                debug!(%peer_fp, %cid, "convite pendente descartado: assinatura inválida");
+                continue;
+            }
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
                     peer_fp.into(),
@@ -7228,7 +7266,9 @@ async fn connect_and_maintain(
                         );
                         return Err(e);
                     }
-                    Err(_) => return Err(DistorrentError::Protocol("proxy connect timeout".into())),
+                    Err(_) => {
+                        return Err(DistorrentError::Protocol("proxy connect timeout".into()))
+                    }
                 }
             } else {
                 match &target {
@@ -8642,6 +8682,183 @@ fn cap_b64(s: &str, max: usize) -> String {
         .collect()
 }
 
+const MAX_REACTION_ID_CHARS: usize = 128;
+const MAX_REACTION_EMOJI_CHARS: usize = 16;
+const MAX_REACTION_EMOJI_BYTES: usize = 64;
+const MAX_REACTION_EMOJIS_PER_MESSAGE: usize = 20;
+const MAX_REACTIONS_PER_MESSAGE: i64 = 128;
+const MAX_REACTIONS_PER_PARTICIPANT: usize = 20;
+const MAX_REACTORS_PER_EMOJI: i64 = 64;
+
+fn valid_reaction_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REACTION_ID_CHARS
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+fn valid_reaction_emoji(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REACTION_EMOJI_BYTES
+        && value.chars().count() <= MAX_REACTION_EMOJI_CHARS
+        && value.chars().all(|c| {
+            !c.is_control()
+                && !c.is_whitespace()
+                && !matches!(
+                    c,
+                    '\u{200B}'
+                        | '\u{200C}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{00AD}'
+                        | '\u{FEFF}'
+                )
+        })
+}
+
+fn reaction_storage_error(error: String) -> DistorrentError {
+    DistorrentError::Storage(rusqlite::Error::ToSqlConversionFailure(Box::new(
+        std::io::Error::new(std::io::ErrorKind::Other, error),
+    )))
+}
+
+/// Aplica uma reação recebida. O peer autenticado determina o reator; campo
+/// `reactor_fp` do payload nunca tem autoridade. Duplicatas são no-op antes
+/// de consumir o bucket, e o lock serializa dedupe+persistência no mesmo nó.
+fn receive_reaction(
+    engine: &Arc<NetworkEngine>,
+    peer_fp: &str,
+    conv_id: &str,
+    msg_id: &str,
+    emoji: &str,
+    add_from_peer: bool,
+    now: std::time::Instant,
+) -> Result<()> {
+    if engine.is_blocked(peer_fp) {
+        return Ok(());
+    }
+    if !valid_reaction_id(conv_id) || !valid_reaction_id(msg_id) || !valid_reaction_emoji(emoji) {
+        debug!(%peer_fp, "reação descartada: identificador ou emoji inválido");
+        return Ok(());
+    }
+
+    // Autorização: o peer precisa compartilhar a conversa (DM, grupo ou canal).
+    let shared = engine
+        .store
+        .get_conversation(conv_id)
+        .ok()
+        .flatten()
+        .is_some()
+        || engine
+            .store
+            .list_group_members(conv_id)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+    let is_friend = engine
+        .store
+        .get_friend(peer_fp)
+        .ok()
+        .flatten()
+        .map(|(_, status)| status == "accepted")
+        .unwrap_or(false);
+    if !shared && !is_friend {
+        return Err(DistorrentError::Protocol(
+            "reação fora de conversa compartilhada".into(),
+        ));
+    }
+
+    // Exigir a mensagem no mesmo conversation_id evita gravar reações órfãs
+    // com IDs inventados. Se frames de participantes diferentes chegarem fora
+    // de ordem, a reação é descartada e pode ser enviada de novo após a sync.
+    let message_matches = engine
+        .store
+        .message_by_id_raw(msg_id)?
+        .map(|message| message.conv_id == conv_id)
+        .unwrap_or(false);
+    if !message_matches {
+        debug!(%peer_fp, %conv_id, %msg_id, "reação descartada: mensagem ausente ou de outra conversa");
+        return Ok(());
+    }
+
+    // Serializa consulta, rate limit e escrita: duas cópias simultâneas do
+    // mesmo estado não podem gerar dois eventos de UI/retransmissões.
+    let mut limiter = engine
+        .reaction_limiter
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let current = engine
+        .store
+        .reactions_for_msg(msg_id)
+        .map_err(reaction_storage_error)?;
+    let current_emoji = current.iter().find(|r| r.emoji == emoji);
+    let already_applied = current_emoji
+        .map(|r| r.reactors.iter().any(|fp| fp == peer_fp))
+        .unwrap_or(false);
+
+    // React é uma operação de estado. A mesma adição/remoção reenviada por
+    // retry não muda SQLite nem volta a ser retransmitida como evento novo.
+    if already_applied == add_from_peer {
+        return Ok(());
+    }
+
+    if add_from_peer {
+        let total_reactions: i64 = current.iter().map(|r| r.count).sum();
+        let participant_reactions = current
+            .iter()
+            .filter(|r| r.reactors.iter().any(|fp| fp == peer_fp))
+            .count();
+        let emoji_count = current_emoji.map(|r| r.count).unwrap_or(0);
+        let is_new_emoji = current_emoji.is_none();
+        if total_reactions >= MAX_REACTIONS_PER_MESSAGE
+            || participant_reactions >= MAX_REACTIONS_PER_PARTICIPANT
+            || emoji_count >= MAX_REACTORS_PER_EMOJI
+            || (is_new_emoji && current.len() >= MAX_REACTION_EMOJIS_PER_MESSAGE)
+        {
+            debug!(%peer_fp, "reação descartada: limite de reações persistidas atingido");
+            return Ok(());
+        }
+    }
+
+    if let Err(reason) = limiter.allow_at(peer_fp, conv_id, msg_id, now) {
+        debug!(%peer_fp, %reason, "reação descartada por rate limit");
+        return Ok(());
+    }
+
+    let applied = engine
+        .store
+        .reaction_apply(msg_id, conv_id, emoji, peer_fp, add_from_peer)
+        .map_err(reaction_storage_error)?;
+    drop(limiter);
+
+    let _ = engine.events.send(EngineEvent::ReactionChanged {
+        msg_id: msg_id.to_string(),
+        conv_id: conv_id.to_string(),
+        emoji: emoji.to_string(),
+        add: applied,
+        reactor_fp: peer_fp.to_string(),
+    });
+    // Ecoa somente mudanças aceitas para os demais membros da conversa.
+    for fp in engine.social_peers_of(conv_id) {
+        if fp != peer_fp {
+            engine
+                .cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    fp,
+                    SecureFrame::React {
+                        conv_id: conv_id.to_string(),
+                        msg_id: msg_id.to_string(),
+                        emoji: emoji.to_string(),
+                        add: applied,
+                        reactor_fp: peer_fp.to_string(),
+                    },
+                ))
+                .ok();
+        }
+    }
+    Ok(())
+}
+
 /// Normaliza presença (allowlist — nunca string arbitrária do peer).
 fn normalize_presence(s: &str) -> &'static str {
     match s {
@@ -9542,16 +9759,45 @@ async fn handle_frame(
                 .map(|(_, _, o)| o)
             {
                 Some(stored_owner) => stored_owner == peer_fp,
-                None => engine
-                    .pending_joins
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&community_id)
-                    .and_then(|tok| crate::protocol::parse_invite_token(tok).ok())
-                    .map(|(host_fp, tok_cid, _, _, _)| {
-                        host_fp == peer_fp && tok_cid == community_id
-                    })
-                    .unwrap_or(false),
+                None => {
+                    // O handshake autentica a identidade, mas o token também
+                    // precisa provar que esse host emitiu o convite. Sem esta
+                    // verificação, um host malicioso poderia enviar o sync
+                    // antes de receber o JoinCommunity enfileirado.
+                    let pending = engine
+                        .pending_joins
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&community_id)
+                        .cloned();
+                    let Some(token) = pending else {
+                        return Err(DistorrentError::Protocol(
+                            "CommunityState sem convite pendente".into(),
+                        ));
+                    };
+                    let (host_fp, token_cid, member_fp, exp, sig) =
+                        crate::protocol::parse_invite_token(&token)?;
+                    const WILDCARD: &str = "000000000000";
+                    let member_bound =
+                        member_fp == WILDCARD || member_fp == engine.identity.fingerprint;
+                    let host_key = engine.store.get_peer(peer_fp)?.map(|p| p.pubkey_hex);
+                    if host_fp != peer_fp
+                        || token_cid != community_id
+                        || !member_bound
+                        || crate::identity::now_ms() > exp
+                    {
+                        false
+                    } else if let Some(host_key) = host_key {
+                        Keypair::verify(
+                            &host_key,
+                            &crate::protocol::invite_sign_bytes(&community_id, &member_fp, exp),
+                            &sig,
+                        )
+                        .unwrap_or(false)
+                    } else {
+                        false
+                    }
+                }
             };
             if !allowed {
                 return Err(DistorrentError::Protocol("CommunityState fora do host".into()));
@@ -10277,89 +10523,15 @@ async fn handle_frame(
             add: add_from_peer,
             reactor_fp: _,
         } => {
-            if engine.is_blocked(peer_fp) {
-                return Ok(());
-            }
-            let em = cap_str(&emoji, 16);
-            if em.is_empty() {
-                return Err(DistorrentError::Protocol("reação vazia".into()));
-            }
-            // Autorização: o peer tem que COMPARTILHAR essa conversa (DM de
-            // 1:1 ou grupo). NÃO exigimos que a mensagem já tenha chegado:
-            // reação e mensagem viajam em frames diferentes e a ordem não é
-            // garantida — exigir o msg aqui descartaria reações legítimas.
-            let shared = engine
-                .store
-                .get_conversation(&conv_id)
-                .ok()
-                .flatten()
-                .is_some()
-                || engine
-                    .store
-                    .list_group_members(&conv_id)
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false);
-            // AMIGO vale também: num DM a mensagem e a reação saem em frames
-            // diferentes e a ordem não é garantida — exigir a conversa já
-            // criada no receptor descartaria reações legítimas.
-            let is_friend = engine
-                .store
-                .get_friend(peer_fp)
-                .ok()
-                .flatten()
-                .map(|(_, s)| s == "accepted")
-                .unwrap_or(false);
-            if !shared && !is_friend {
-                return Err(DistorrentError::Protocol(
-                    "reação fora de conversa compartilhada".into(),
-                ));
-            }
-            // teto deente de reatores por emoji (anti-abuso)
-            let mine = engine
-                .store
-                .reactions_for_msg(&msg_id)
-                .ok()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|r| r.emoji == em)
-                .map(|r| r.count)
-                .unwrap_or(0);
-            if mine >= 64 {
-                return Ok(());
-            }
-            let added = engine
-                .store
-                .reaction_apply(&msg_id, &conv_id, &em, peer_fp, add_from_peer)
-                .map_err(|e| {
-                    DistorrentError::Storage(rusqlite::Error::ToSqlConversionFailure(Box::new(
-                        std::io::Error::new(std::io::ErrorKind::Other, e),
-                    )))
-                })?;
-            let _ = engine.events.send(EngineEvent::ReactionChanged {
-                msg_id: msg_id.clone(),
-                conv_id: conv_id.clone(),
-                emoji: em.clone(),
-                add: added,
-                reactor_fp: peer_fp.to_string(),
-            });
-            // ecoa pros demais membros do mesmo grupo/canal
-            for fp in engine.social_peers_of(&conv_id) {
-                if fp != peer_fp {
-                    engine
-                        .cmd_tx
-                        .send(EngineCmd::SendToPeer(
-                            fp,
-                            SecureFrame::React {
-                                conv_id: conv_id.clone(),
-                                msg_id: msg_id.clone(),
-                                emoji: em.clone(),
-                                add: added,
-                                reactor_fp: peer_fp.to_string(),
-                            },
-                        ))
-                        .ok();
-                }
-            }
+            receive_reaction(
+                engine,
+                peer_fp,
+                &conv_id,
+                &msg_id,
+                &emoji,
+                add_from_peer,
+                std::time::Instant::now(),
+            )?;
         }
         SecureFrame::Reply {
             conv_id,
@@ -11182,6 +11354,132 @@ mod tests {
         let kp = Keypair::generate();
         let e = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
         (e, dir)
+    }
+
+    #[tokio::test]
+    async fn reacoes_rejeitadas_nao_persistem_nem_sao_ecoada() {
+        let (e, _dir) = mk_engine("ReactionLimit");
+        let peer = "peer-autenticado";
+        let outro_membro = "peer-destino";
+        e.store.set_friend(peer, "", "accepted").unwrap();
+        let conv = e
+            .store
+            .create_group_dm(
+                &e.identity.fingerprint,
+                &[peer.to_string(), outro_membro.to_string()],
+                "teste de rate limit",
+            )
+            .unwrap();
+        let mut events = e.subscribe();
+        // Captura a fila do motor sem iniciar rede real; assim o teste prova
+        // que frames aceitos ecoam e frames barrados não entram na fila.
+        let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
+
+        let msg_ids: Vec<String> = (0..6)
+            .map(|i| {
+                let message = crate::protocol::MessageEnvelope::new(
+                    &e.keypair,
+                    &conv.id,
+                    &format!("mensagem {i}"),
+                );
+                e.store.insert_message(&message, "in", "ok").unwrap();
+                message.id
+            })
+            .collect();
+
+        for msg_id in msg_ids.iter().take(5) {
+            handle_frame(
+                &e,
+                peer,
+                "",
+                "peer",
+                SecureFrame::React {
+                    conv_id: conv.id.clone(),
+                    msg_id: msg_id.clone(),
+                    emoji: "🔥".into(),
+                    add: true,
+                    // Campo declarado é adulterado de propósito: somente a
+                    // identidade da sessão pode virar `reactor_fp` persistido.
+                    reactor_fp: "vitima-falsificada".into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        // Repetir exatamente o último estado é deduplicado e não consome
+        // outro evento nem outro envio para os membros do grupo.
+        handle_frame(
+            &e,
+            peer,
+            "",
+            "peer",
+            SecureFrame::React {
+                conv_id: conv.id.clone(),
+                msg_id: msg_ids[0].clone(),
+                emoji: "🔥".into(),
+                add: true,
+                reactor_fp: "vitima-falsificada".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Mesmo uma identidade autorizada não pode criar estado órfão para
+        // um id que nunca foi persistido nesta conversa.
+        handle_frame(
+            &e,
+            peer,
+            "",
+            "peer",
+            SecureFrame::React {
+                conv_id: conv.id.clone(),
+                msg_id: "msg-inexistente".into(),
+                emoji: "🔥".into(),
+                add: true,
+                reactor_fp: "vitima-falsificada".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // A 6ª mudança no burst é descartada sem encerrar a sessão.
+        handle_frame(
+            &e,
+            peer,
+            "",
+            "peer",
+            SecureFrame::React {
+                conv_id: conv.id.clone(),
+                msg_id: msg_ids[5].clone(),
+                emoji: "🔥".into(),
+                add: true,
+                reactor_fp: "vitima-falsificada".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let stored = e.store.reactions_for_msg(&msg_ids[0]).unwrap();
+        assert_eq!(stored[0].reactors, vec![peer.to_string()]);
+        assert!(e.store.reactions_for_msg("msg-inexistente").unwrap().is_empty());
+        assert!(e.store.reactions_for_msg(&msg_ids[5]).unwrap().is_empty());
+
+        let mut emitted = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, EngineEvent::ReactionChanged { .. }) {
+                emitted += 1;
+            }
+        }
+        assert_eq!(emitted, 5, "duplicata e rejeição não emitem eventos");
+
+        let mut relayed = 0;
+        while let Ok(command) = commands.try_recv() {
+            if matches!(command, EngineCmd::SendToPeer(_, SecureFrame::React { .. })) {
+                relayed += 1;
+            }
+        }
+        assert_eq!(relayed, 5, "duplicata e rejeição não são retransmitidas");
     }
 
     #[test]

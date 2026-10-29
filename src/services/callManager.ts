@@ -4,6 +4,8 @@
 
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
+import { setCallVideoSending } from './callMedia'
+import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
 import type { VoiceMediaStats } from './models'
 import {
@@ -161,7 +163,7 @@ export interface CallState {
   deafened: boolean
   cameraOn: boolean
   sharing: boolean
-  participants: { fp: string; nickname: string; stream?: MediaStream; speaking?: boolean; muted?: boolean; sharing?: boolean; disconnected?: boolean }[]
+  participants: CallParticipantView[]
   startAt: number
   quality?: CallQuality
   qualityNotice?: string | null
@@ -1040,15 +1042,12 @@ export class CallManager {
   /** Trava de reentrância da câmera (dois cliques = dois getUserMedia vivos). */
   private cameraBusy = false
   /**
-   * Candidatos ICE recebidos ANTES de a `remoteDescription` existir.
-   * Por que importa: no trickle ICE os candidatos do peer podem chegar pela
-   * sinalização (relay, com atraso/reordenação) antes da offer/answer ser
-   * aplicada. `addIceCandidate` sem remoteDescription lança e o candidato é
-   * PERDIDO — a chamada fica sem rota (voz/vídeo/tela mudos) principalmente
-   * sobre relay. Aqui guardamos por peer e despejamos assim que a descrição
-   * remota entra (ver `flushPendingIce`).
+   * Candidatos ICE recebidos antes da offer/answer ou do próprio `call_incoming`.
+   * A entrega do evento e o trickle ICE podem se cruzar; guardar só por peer
+   * misturava sessões em reingressos rápidos. O call_id isola cada fila e o
+   * flush só consome a fila da chamada que aplicou a descrição remota.
    */
-  private pendingIce = new Map<string, RTCIceCandidateInit[]>()
+  private pendingIce = new Map<string, Map<string, RTCIceCandidateInit[]>>()
   /** Candidatos ICE LOCAIS por peer — reenviados quando o gathering termina,
    *  para recuperar qualquer candidato que se perdeu no caminho (ver
    *  `resendLocalIce`). */
@@ -1094,6 +1093,8 @@ export class CallManager {
   private endedCalls = new Set<string>()
   /** callIds com aceite em andamento (duplo clique). */
   private accepting = new Set<string>()
+  /** Evita que o eco de `call_ended` execute `leave()` recursivamente. */
+  private leavingCalls = new Set<string>()
   private connectTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly CONNECT_TIMEOUT_MS = 20_000
   /** Sem resposta do outro lado (ninguém atendeu / sinalização não andou). */
@@ -1300,6 +1301,20 @@ export class CallManager {
       }
       if (ev.type === 'call_participant_added') {
         this.onParticipantAdded(String(ev.call_id ?? ''), String(ev.fp ?? ''))
+      }
+      if (ev.type === 'voice_joined' && typeof ev.community_id === 'string' && typeof ev.channel_id === 'string') {
+        this.onVoiceParticipantJoined(`voice-${ev.community_id}-${ev.channel_id}`, String(ev.fp ?? ''))
+      }
+      if (ev.type === 'voice_left' && typeof ev.community_id === 'string' && typeof ev.channel_id === 'string') {
+        this.onVoiceParticipantLeft(`voice-${ev.community_id}-${ev.channel_id}`, String(ev.fp ?? ''))
+      }
+      if (ev.type === 'voice_state_changed' && typeof ev.community_id === 'string' && typeof ev.channel_id === 'string') {
+        this.onVoiceParticipantState(
+          `voice-${ev.community_id}-${ev.channel_id}`,
+          String(ev.fp ?? ''),
+          !!ev.muted,
+          !!ev.deafened,
+        )
       }
       if (ev.type === 'screen_share_offer') {
         this.onScreenShareSignal(String(ev.call_id ?? ''), String(ev.from_fp ?? ''), String(ev.sdp ?? ''))
@@ -1685,6 +1700,39 @@ export class CallManager {
     } catch { /* ignore */ }
   }
 
+  private onVoiceParticipantJoined(callId: string, fp: string) {
+    try {
+      const st = this.state
+      if (!st || st.callId !== callId || !fp || fp === this.myFp) return
+      if (addVoiceParticipant(st.participants, fp)) this.onUpdate({ ...st })
+    } catch { /* evento de roster não derruba a chamada */ }
+  }
+
+  private onVoiceParticipantLeft(callId: string, fp: string) {
+    try {
+      const st = this.state
+      if (!st || st.callId !== callId || !fp || fp === this.myFp) return
+      if (!removeVoiceParticipant(st.participants, fp)) return
+      try { this.pcs.get(fp)?.close() } catch { /* encerra apenas a mídia deste participante */ }
+      this.pcs.delete(fp)
+      this.iceRestarts.delete(fp)
+      this.localIce.delete(fp)
+      this.lastRemoteOffer.delete(fp)
+      this.pendingIce.delete(fp)
+      this.onUpdate({ ...st })
+    } catch { /* saída de participante não derruba a chamada */ }
+  }
+
+  private onVoiceParticipantState(callId: string, fp: string, muted: boolean, deafened: boolean) {
+    try {
+      const st = this.state
+      if (!st || st.callId !== callId || !fp || fp === this.myFp) return
+      const added = addVoiceParticipant(st.participants, fp)
+      const changed = updateVoiceParticipantState(st.participants, fp, muted, deafened)
+      if (added || changed) this.onUpdate({ ...st })
+    } catch { /* estado remoto inválido não derruba a chamada */ }
+  }
+
   /**
    * Sinal dedicado de TELA (frame ScreenShareOffer): o campo sdp carrega um
    * JSON de estado {screen:'on'|'off'} — quem compartilha fica com badge TELA
@@ -1697,12 +1745,17 @@ export class CallManager {
       const p = st.participants.find((x: any) => x.fp === fromFp)
       if (!p) return
       let on: boolean | null = null
+      let cameraOn: boolean | null = null
       try {
         const parsed = JSON.parse(sdpStr)
-        if (parsed && typeof parsed === 'object') on = (parsed as any).screen === 'on'
+        if (parsed && typeof parsed === 'object') {
+          on = (parsed as any).screen === 'on'
+          if (typeof (parsed as any).cameraOn === 'boolean') cameraOn = (parsed as any).cameraOn
+        }
       } catch { /* sdp legado: ignora */ }
       if (on !== null) {
         p.sharing = on
+        if (cameraOn !== null) p.cameraOn = cameraOn
         if (!on) {
           // Não deixa o ÚLTIMO frame da tela congelado no tile depois que o
           // outro lado parou de compartilhar (parecia que ainda estava no ar).
@@ -1715,11 +1768,11 @@ export class CallManager {
   }
 
   /** Envia o sinal de TELA (on/off) para todos os participantes ativos. */
-  private broadcastScreenSignal(on: boolean) {
+  private broadcastScreenSignal(on: boolean, cameraOn?: boolean) {
     try {
       const st = this.state
       if (!st) return
-      const payload = JSON.stringify({ screen: on ? 'on' : 'off' })
+      const payload = JSON.stringify({ screen: on ? 'on' : 'off', ...(cameraOn === undefined ? {} : { cameraOn }) })
       for (const p of st.participants) {
         if (!p.fp || p.fp === this.myFp) continue
         services.screenShareOffer(p.fp, st.callId, payload).catch(() => {})
@@ -2826,44 +2879,60 @@ export class CallManager {
   }
 
   async leave() {
-    if (!this.state) return
-    const cid = this.state.callId
-    this.applyPhase('hangup')
-    this.stopReconnectWatchdog()
-    this.clearIceRestartTimers()
-    this.stopNativeVoiceMonitor()
-    if (cid.startsWith('voice-')) {
-      // CANAL DE VOZ: sem este `voiceLeave` o core NUNCA ficava sabendo — a
-      // sessão nativa (webrtc-rs + cpal + ximagesrc) continuava viva depois do
-      // "desligar", o áudio do canal seguia saindo e a próxima vez que se
-      // entrava no mesmo canal o mesh duplicava em cima da sessão morta.
-      //
-      // `convId` É o channel_id (ver joinVoice); a comunidade é o que sobra
-      // entre o prefixo e o sufixo — funciona mesmo que os ids tenham '-'.
-      const ch = this.state?.convId
-      const community = ch && cid.endsWith(`-${ch}`)
-        ? cid.slice('voice-'.length, cid.length - `-${ch}`.length)
-        : ''
-      if (community) void services.voiceLeave(community, ch as string).catch(() => {})
-    } else {
-      try { await services.callEnd(cid) } catch { /* silent */ }
-    }
-    // Rede de segurança: a captura nativa (câmera/tela) é derrubada pelo
-    // `voice_leave`/`call_end` do core, mas se algum caminho chegou aqui sem
-    // um desses (estado já meio-mortido), o encoder ficava aberto e o
-    // `ximagesrc`/`v4l2src` só soltavam o device reiniciando o app.
+    const st = this.state
+    if (!st) return
+    const cid = st.callId
+    // No navegador `callEnd` também ecoa pelo event bus local. Sem esta trava,
+    // o eco chamava `leave()` de novo antes do primeiro cleanup terminar.
+    if (this.leavingCalls.has(cid)) return
+    this.leavingCalls.add(cid)
     try {
-      const st = this.state
-      if ((st as any)?.nativeMedia) {
-        for (const p of st?.participants ?? []) {
-          if (p.fp && p.fp !== this.myFp) {
-            try { void services.voiceVideoStop(cid, p.fp) } catch { /* best-effort */ }
+      this.applyPhase('hangup')
+      this.stopReconnectWatchdog()
+      this.clearIceRestartTimers()
+      this.stopNativeVoiceMonitor()
+
+      // Emite o fim primeiro, mas não espera a resposta do core para limpar a
+      // UI e os PCs. O `call_ended` remoto já fecha o overlay; aguardar o invoke
+      // antes do cleanup permitia que uma chamada nova começasse e fosse
+      // apagada pela limpeza atrasada da sessão anterior.
+      let endSignal: Promise<unknown> = Promise.resolve()
+      if (cid.startsWith('voice-')) {
+        // CANAL DE VOZ: sem este `voiceLeave` o core NUNCA ficava sabendo — a
+        // sessão nativa (webrtc-rs + cpal + ximagesrc) continuava viva depois do
+        // "desligar", o áudio do canal seguia saindo e a próxima vez que se
+        // entrava no mesmo canal o mesh duplicava em cima da sessão morta.
+        //
+        // `convId` É o channel_id (ver joinVoice); a comunidade é o que sobra
+        // entre o prefixo e o sufixo — funciona mesmo que os ids tenham '-'.
+        const ch = st.convId
+        const community = ch && cid.endsWith(`-${ch}`)
+          ? cid.slice('voice-'.length, cid.length - `-${ch}`.length)
+          : ''
+        if (community) endSignal = services.voiceLeave(community, ch as string).catch(() => {})
+      } else {
+        endSignal = services.callEnd(cid).catch(() => {})
+      }
+
+      // Rede de segurança: a captura nativa (câmera/tela) é derrubada pelo
+      // `voice_leave`/`call_end` do core, mas se algum caminho chegou aqui sem
+      // um desses (estado já meio-mortido), o encoder ficava aberto e o
+      // `ximagesrc`/`v4l2src` só soltavam o device reiniciando o app.
+      try {
+        if ((st as any).nativeMedia) {
+          for (const p of st.participants ?? []) {
+            if (p.fp && p.fp !== this.myFp) {
+              try { void services.voiceVideoStop(cid, p.fp) } catch { /* best-effort */ }
+            }
           }
         }
-      }
-    } catch { /* nunca impede o encerramento */ }
-    this.stopCallForeground()
-    this.cleanup()
+      } catch { /* nunca impede o encerramento */ }
+      this.stopCallForeground()
+      this.cleanup(cid)
+      await endSignal
+    } finally {
+      this.leavingCalls.delete(cid)
+    }
   }
 
   async leaveVoice(communityId: string, channelId: string) {
@@ -3168,11 +3237,7 @@ export class CallManager {
             const tr = this.findVideoTransceiver(pc)
             let needsOffer = false
             if (tr) {
-              const dir = tr.direction
-              if (dir === 'recvonly' || dir === 'inactive') {
-                try { tr.direction = 'sendrecv' } catch { /* engine sem setter */ }
-                needsOffer = true
-              }
+              needsOffer = setCallVideoSending(tr, true)
               await tr.sender.replaceTrack(track)
             } else {
               pc.addTrack(track, this.localStream)
@@ -3308,9 +3373,29 @@ export class CallManager {
     this.watchScreenTrack(track)
     this.screenMonitor.attach(track)
     await this.tuneScreenTrack(track)
-    await this.seedScreenPeers(stream, track)
+    try {
+      await this.seedScreenPeers(stream, track)
+    } catch (e) {
+      // Não deixa captura local aberta nem UI dizendo "compartilhando" quando
+      // nenhum peer aceitou a oferta; restaura a câmera antes de informar falha.
+      this.stopScreenStatsTimer()
+      try { await this.clearScreenAudioSenders() } catch { /* limpeza best-effort */ }
+      this.stopScreenStreamOnly()
+      this.screenMonitor.detach()
+      this.screenLastSize = ''
+      this.state.sharing = false
+      try { await this.restoreCameraAfterScreen() } catch { /* falha original é a mais útil */ }
+      const cameraOn = !!this.localStream?.getVideoTracks().some(cam => cam.readyState === 'live' && cam.enabled)
+      this.broadcastScreenSignal(false, cameraOn)
+      this.onUpdate({ ...this.state })
+      const err = e instanceof ScreenShareError
+        ? e
+        : new ScreenShareError('unknown', String((e as Error)?.message ?? e), true, e)
+      this.setScreenError(err.code, err.message)
+      throw err
+    }
     this.startScreenStatsTimer()
-    this.broadcastScreenSignal(true)
+    this.broadcastScreenSignal(true, false)
     this.onUpdate({ ...this.state })
   }
 
@@ -3379,22 +3464,45 @@ export class CallManager {
     }
   }
 
-  /** Semeia a track em todo o mesh (replaceTrack quando já existe m-line). */
+  /** Semeia a track em todo o mesh e negocia envio quando o m-line era recvonly. */
   private async seedScreenPeers(stream: MediaStream, track: MediaStreamTrack): Promise<void> {
-    for (const pc of this.pcs.values()) {
+    const failures: string[] = []
+    let peersSeeded = 0
+    for (const [fp, pc] of this.pcs) {
       try {
-        const sender = this.findVideoSender(pc)
-        if (sender) {
-          await sender.replaceTrack(track)
-          if (pc.signalingState !== 'stable') continue
+        if (pc.signalingState === 'closed') continue
+        const transceiver = this.findVideoTransceiver(pc)
+        let needsOffer = false
+        if (transceiver) {
+          // O transceiver criado para chamadas de voz é recvonly. Apenas
+          // substituir sua track não muda o SDP e fazia a tela ficar local.
+          needsOffer = setCallVideoSending(transceiver, true)
+          await transceiver.sender.replaceTrack(track)
         } else {
           pc.addTrack(track, stream)
+          needsOffer = true
         }
-        const offer = await createTunedOffer(pc)
-        await pc.setLocalDescription(offer)
-        const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
-        if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
-      } catch { /* peer isolado não derruba os demais */ }
+        if (needsOffer) {
+          if (pc.signalingState !== 'stable' || !this.state) {
+            throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
+          }
+          const offer = await createTunedOffer(pc)
+          await pc.setLocalDescription(offer)
+          await services.callOffer(fp, this.state.callId, JSON.stringify(offer))
+        }
+        peersSeeded++
+      } catch (e) {
+        failures.push(`${fp.slice(0, 6)}: ${String((e as Error)?.message ?? e)}`)
+      }
+    }
+    if (failures.length) {
+      const notice = `não foi possível negociar a tela com ${failures.join('; ')}`
+      try { this.onCallNotice?.(notice) } catch { /* o aviso não derruba a chamada */ }
+      // Se todos os peers falharam, propaga para o fluxo desfazer a captura em
+      // vez de manter o estado local de compartilhamento como sucesso falso.
+      if (this.pcs.size > 0 && peersSeeded === 0) {
+        throw new ScreenShareError('unknown', notice, true)
+      }
     }
     await this.seedScreenAudio(stream)
     await this.applyScreenSenderTuning()
@@ -3497,8 +3605,9 @@ export class CallManager {
     this.screenLastSize = ''
     this.screenMetrics = emptyScreenMetrics()
     this.state.sharing = false
-    this.broadcastScreenSignal(false)
     await this.restoreCameraAfterScreen()
+    const cameraOn = !!this.localStream?.getVideoTracks().some(track => track.readyState === 'live' && track.enabled)
+    this.broadcastScreenSignal(false, cameraOn)
     this.onUpdate({ ...this.state })
   }
 
@@ -3511,17 +3620,23 @@ export class CallManager {
   /** Receiveram a última tela; volta a câmera viva para não congelar. */
   private async restoreCameraAfterScreen(): Promise<void> {
     const cam = this.localStream?.getVideoTracks().find(tr => tr.readyState === 'live') ?? null
-    if (!cam) return
-    for (const pc of this.pcs.values()) {
+    for (const [fp, pc] of this.pcs) {
       try {
-        const sender = this.findVideoSender(pc)
-        if (sender) await sender.replaceTrack(cam).catch(() => {})
-        if (pc.signalingState !== 'closed' && pc.signalingState === 'stable') {
+        if (pc.signalingState === 'closed') continue
+        const transceiver = this.findVideoTransceiver(pc)
+        let needsOffer = false
+        if (transceiver) {
+          needsOffer = setCallVideoSending(transceiver, !!cam)
+          await transceiver.sender.replaceTrack(cam)
+        } else if (cam && this.localStream) {
+          pc.addTrack(cam, this.localStream)
+          needsOffer = true
+        }
+        if (needsOffer && pc.signalingState === 'stable' && this.state) {
           const offer = await createTunedOffer(pc).catch(() => null)
           if (offer) {
             await pc.setLocalDescription(offer).catch(() => {})
-            const fp = [...this.pcs.entries()].find(([, v]) => v === pc)?.[0]
-            if (fp && this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
+            await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
           }
         }
       } catch { /* peer isolado não derruba os demais */ }
@@ -3888,7 +4003,7 @@ export class CallManager {
         this.resendLocalIce(fp, pc, callId)
         return
       }
-      this.sendLocalIce(fp, callId, e.candidate)
+      this.sendLocalIce(fp, callId, e.candidate, pc)
     }
     // ICE restart best-effort quando 'failed' (logIceState já emite o evento de UI).
     try {
@@ -3926,8 +4041,12 @@ export class CallManager {
   }
 
   /** Envia um candidato ICE local, remembering-o para reenvio posterior. */
-  private sendLocalIce(fp: string, callId: string, cand: RTCIceCandidate) {
+  private sendLocalIce(fp: string, callId: string, cand: RTCIceCandidate, pc: RTCPeerConnection) {
     try {
+      // `close()` não cancela callbacks de ICE já enfileirados. Sem conferir
+      // chamada e instância, um candidato antigo podia contaminar o cache do
+      // mesmo peer e ser reenviado pelo PC da chamada seguinte.
+      if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       const list = this.localIce.get(fp) ?? []
       list.push(cand)
       this.localIce.set(fp, list)
@@ -3948,6 +4067,7 @@ export class CallManager {
    */
   private resendLocalIce(fp: string, pc: RTCPeerConnection, callId: string) {
     try {
+      if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       for (const cand of this.localIce.get(fp) ?? []) {
         void services.callIce(fp, callId, JSON.stringify(cand), cand.sdpMid ?? '0').catch(() => {})
       }
@@ -3956,6 +4076,7 @@ export class CallManager {
       // `getLocalCandidates` existe no WebRTC real mas não no lib.dom deste TS.
       const anyPc = pc as unknown as { getLocalCandidates?: () => Promise<RTCIceCandidate[]> }
       void anyPc.getLocalCandidates?.().then((rest: RTCIceCandidate[] | null | undefined) => {
+        if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
         for (const cand of rest ?? []) {
           void services.callIce(fp, callId, JSON.stringify(cand), cand.sdpMid ?? '0').catch(() => {})
         }
@@ -4163,6 +4284,7 @@ export class CallManager {
 
   private async handleOffer(fromFp: string, callId: string, sdpStr: string) {
     if (!fromFp || fromFp === this.myFp) return
+    if (this.endedCalls.has(callId)) return
     const offer = parseWireSdp(sdpStr, 'offer')
     if (!offer) return
     if (!this.state || this.state.callId !== callId) {
@@ -4235,11 +4357,16 @@ export class CallManager {
     }
     try {
       await pc.setRemoteDescription(offer)
+      // Uma renegociação pode terminar depois de o usuário já ter encerrado
+      // esta chamada e iniciado outra com o mesmo peer. Sem conferir o ID e a
+      // instância do PC, a resposta antiga podia sair no meio da sessão nova.
+      if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       this.lastRemoteOffer.set(fromFp, sdpStr)
       // candidatos do ofertante podem ter chegado antes desta offer (relay)
-      await this.flushPendingIce(fromFp, pc)
+      await this.flushPendingIce(fromFp, pc, callId)
       const answer = await createTunedAnswer(pc)
       await pc.setLocalDescription(answer)
+      if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       await services.callAnswer(fromFp, callId, JSON.stringify(answer)).catch(() => {})
     } catch (e) {
       // Antes era `/* silent */`: uma falha de setRemoteDescription/createAnswer
@@ -4251,7 +4378,9 @@ export class CallManager {
   }
 
   private async handleAnswer(fromFp: string, callId: string, sdpStr: string) {
-    if (!fromFp || fromFp === this.myFp) return
+    // ICE/SDP atrasados da chamada anterior não podem usar o PC novo do mesmo
+    // peer. O mapa é por fingerprint, então o call_id também precisa bater.
+    if (!fromFp || fromFp === this.myFp || this.state?.callId !== callId) return
     const pc = this.pcs.get(fromFp)
     if (!pc) return
     const ans = parseWireSdp(sdpStr, 'answer')
@@ -4261,8 +4390,9 @@ export class CallManager {
       // answer só vale se ainda temos offer local pendente (anti-GLARE/rollback).
       if (pc.signalingState !== 'have-local-offer') return
       await pc.setRemoteDescription(ans as RTCSessionDescriptionInit)
+      if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       // descrição remota pronta → candidatos ICE que chegaram cedo podem entrar
-      await this.flushPendingIce(fromFp, pc)
+      await this.flushPendingIce(fromFp, pc, callId)
     } catch (e) {
       // Idem handleOffer: sinalização que falha em silêncio é indistinguível
       // de "peer nunca respondeu" no log.
@@ -4271,7 +4401,11 @@ export class CallManager {
   }
 
   private async handleIce(fromFp: string, callId: string, candidateStr: string, mid: string) {
-    if (!fromFp || fromFp === this.myFp) return
+    // Callbacks de uma chamada encerrada não podem contaminar a seguinte. Sem
+    // estado local ainda, porém, o ICE pode legitimamente chegar antes do ring
+    // pelo transporte; nesse caso fica numa fila isolada pelo call_id.
+    if (!fromFp || fromFp === this.myFp || this.endedCalls.has(callId)) return
+    if (this.state && this.state.callId !== callId) return
     // Relay "áudio via sinalização" chega pelo mesmo callIce (mid 'audio-relay').
     // Detecta ANTES de tratar como candidato ICE — inclusive sem PC (relay-only).
     try {
@@ -4296,22 +4430,41 @@ export class CallManager {
     // Sem PC ou sem remoteDescription: GUARDA (não descarta). O flush acontece
     // quando a offer/answer for aplicada — trickle ICE sobre relay chega antes.
     if (!pc || !pc.remoteDescription) {
-      const q = this.pendingIce.get(fromFp) ?? []
+      let byCall = this.pendingIce.get(fromFp)
+      if (!byCall) {
+        byCall = new Map()
+        this.pendingIce.set(fromFp, byCall)
+      }
+      let q = byCall.get(callId)
+      if (!q) {
+        q = []
+        byCall.set(callId, q)
+        // Callbacks atrasados nunca devem transformar o buffer de ICE em
+        // armazenamento sem limite quando não há sessão ativa.
+        while (byCall.size > 4) {
+          const oldest = byCall.keys().next().value
+          if (!oldest) break
+          byCall.delete(oldest)
+        }
+      }
       // cap defensivo (peer malicioso/rajada): mantém os mais recentes
       if (q.length >= 256) q.shift()
       q.push(cand)
-      this.pendingIce.set(fromFp, q)
       return
     }
+    if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
     try { await pc.addIceCandidate(cand) } catch { /* candidato tardio/inválido: ignora */ }
   }
 
   /** Despeja (em ordem) os candidatos ICE guardados antes da remoteDescription. */
-  private async flushPendingIce(fp: string, pc: RTCPeerConnection) {
-    const q = this.pendingIce.get(fp)
+  private async flushPendingIce(fp: string, pc: RTCPeerConnection, callId: string) {
+    const byCall = this.pendingIce.get(fp)
+    const q = byCall?.get(callId)
     if (!q || q.length === 0) return
-    this.pendingIce.delete(fp)
+    byCall?.delete(callId)
+    if (byCall?.size === 0) this.pendingIce.delete(fp)
     for (const cand of q) {
+      if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       try { await pc.addIceCandidate(cand) } catch { /* candidato individual inválido: segue os demais */ }
     }
   }
@@ -4337,7 +4490,9 @@ export class CallManager {
     } catch { /* ignore */ }
   }
 
-  private cleanup() {
+  private cleanup(expectedCallId?: string) {
+    // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
+    if (expectedCallId && this.state?.callId !== expectedCallId) return
     this.stopCallForeground()
     // Captura NATIVA (câmera/tela) antes de qualquer coisa: o `leave` já pede,
     // mas `cleanup` também é alcançado por outros caminhos e um encoder

@@ -4,9 +4,11 @@ import { Icon, Icons } from '../shared/icons'
 import { useConversations, useEngineEvents, useMessages, useNetwork } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
+import { ParticipantAudioControls } from '../components/calls/ParticipantAudioControls'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
+import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
@@ -142,11 +144,12 @@ const ServerRow = memo(function ServerRow({ c, active, onSelect }: {
   )
 })
 
-const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove }: {
+const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove, onBlock }: {
   f: { fp: string, nickname: string }
   online: boolean
   onOpen: (fp: string, nick?: string) => void
   onRemove: (fp: string, nickname: string) => void
+  onBlock: (fp: string, nickname: string) => void
 }) {
   return (
     <div className="friend-row" onClick={() => onOpen(f.fp, f.nickname)}>
@@ -159,6 +162,7 @@ const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove }: {
         <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{f.fp.slice(0, 12)}</div>
       </div>
       <button title="Conversar" aria-label="Conversar" className="row-icon" onClick={e => { e.stopPropagation(); onOpen(f.fp, f.nickname) }}><Icon d={Icons.send} size={15} /></button>
+      <button title="Bloquear" aria-label="Bloquear" className="row-icon no" onClick={e => { e.stopPropagation(); onBlock(f.fp, f.nickname) }}>⊘</button>
       <button title="Remover amigo" aria-label="Remover amigo" className="row-icon no" onClick={e => { e.stopPropagation(); void onRemove(f.fp, f.nickname) }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
     </div>
   )
@@ -439,6 +443,7 @@ export default function MobileShell() {
     } catch { /* quota cheia: rascunho fica só na sessão */ }
   }, [input, selConv])
   const [communities, setCommunities] = useState<CommunityView[]>([])
+  const [callActionBusy, setCallActionBusy] = useState(false)
   const [selCommunity, setSelCommunity] = useState<string | null>(null)
   const [showDrawer, setShowDrawer] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
@@ -614,6 +619,9 @@ export default function MobileShell() {
   // fp → apelido (memo do ring): nome > fingerprint no "está ligando…".
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
+  const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
+  const [pinnedCallFp, setPinnedCallFp] = useState<string | null>(null)
+  const [expandedCallPin, setExpandedCallPin] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
@@ -894,6 +902,7 @@ export default function MobileShell() {
   const openConv = useCallback((c: Conversation) => { setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp) }, [])
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => { if (!confirm(`Apagar conversa com ${title}?`)) return; try { await services.conversationDelete(id); if (isSelected) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshConvos])
   const removeFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Remover ${nickname || fp} dos amigos?`)) return; try { await services.friendRemove(fp); refreshFriends(); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
+  const blockFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Bloquear ${nickname || fp}? As mensagens recebidas serão rejeitadas.`)) return; try { await services.friendBlock(fp); refreshFriends(); refreshConvos(); setNotice('Participante bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   // v6: a fila real mora no downloadManager (progresso/pausa/resume/validação);
   // o painel abre para acompanhar. O card continua lendo o fileSwarm (sincronizado).
   const downloadFile = useCallback((fileId: string) => {
@@ -916,15 +925,18 @@ export default function MobileShell() {
     return `${m}:${sec}`
   }
   async function startCall(kind: 'voice' | 'video') {
+    if (callActionBusy) return
     if (!selConv) return
     const fp = selPeerFp ?? selConvObj?.peer_fp
     if (!fp) { setError('selecione um amigo para ligar'); return }
     // Rota única: WebRTC direto (host/STUN/TURN) ou erro honesto.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
+    setCallActionBusy(true)
     try { await callManager.start(kind, selConv, [fp]) } catch (e: any) { setError(String(e?.message ?? e)) }
+    finally { setCallActionBusy(false) }
   }
   async function handleIncomingAccept() {
-    if (!incomingCall) return
+    if (!incomingCall || callActionBusy) return
     const support = getCallsSupport()
     if (support === 'none') { setError(getCallsUnavailableMessage()); return }
     // Valida ANTES de avisar o peer: se o frame CallAccept sair e o
@@ -932,6 +944,7 @@ export default function MobileShell() {
     // sem chamada nenhuma (estado dos dois divergentes).
     const bloqueio = callManager.canAccept(incomingCall.call_id)
     if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
+    setCallActionBusy(true)
     try {
       await services.callAccept(incomingCall.call_id, incomingCall.from_fp)
       await callManager.acceptInbound(incomingCall.call_id, (incomingCall.kind as any) ?? 'voice', (selConv ?? incomingCall.call_id), incomingCall.from_fp, incomingCall.nickname)
@@ -942,7 +955,7 @@ export default function MobileShell() {
       setError(String(e?.message ?? e))
       sfxRingStop()
       setIncomingCall(null)
-    }
+    } finally { setCallActionBusy(false) }
   }
 
   function handleIncomingReject() {
@@ -1792,13 +1805,21 @@ export default function MobileShell() {
         />
 
         {activeCall && (
-          <div style={{ margin: '10px 12px 0', background: t.panel, border: `1px solid ${t.green}55`, borderRadius: 12, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              {(activeCall.participants ?? []).filter((p: any) => p.fp !== identity?.fingerprint && p.stream).map((p: any) => {
-                const hasVideo = (() => { try { return !!(p.stream as MediaStream)?.getVideoTracks?.()?.length } catch { return false } })()
-                if (hasVideo) return null
-                return <audio key={p.fp} autoPlay playsInline ref={(el: any) => attachStream(el, p.stream)} style={{ display: 'none' }} />
-              })}
+          <div data-testid="mobile-call-panel" style={{ margin: '10px 12px 0', background: t.panel, border: `1px solid ${t.green}55`, borderRadius: 12, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, maxHeight: callPanelSize === 'compact' ? 190 : callPanelSize === 'normal' ? '46vh' : '68vh', overflowY: 'auto', transition: 'max-height 180ms ease' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              {(activeCall.participants ?? []).filter((p: any) => p.fp !== identity?.fingerprint && p.stream).map((p: any) => (
+                <audio
+                  key={p.fp}
+                  autoPlay
+                  playsInline
+                  data-call-audio-fp={p.fp}
+                  ref={(el: HTMLAudioElement | null) => {
+                    attachStream(el, p.stream)
+                    if (el) applyParticipantPlayback(el, p.fp, !!activeCall.deafened)
+                  }}
+                  style={{ display: 'none' }}
+                />
+              ))}
               <span style={{ fontSize: 13, fontWeight: 800, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={15} /> : <Icon d={Icons.phone} size={15} />} Em chamada • {fmtCallDuration(callDuration)} • {(activeCall.participants ?? []).length} na sala</span>
               </span>
@@ -1813,17 +1834,19 @@ export default function MobileShell() {
               )}
               {/* v6: fase (chamando/conectando/reconectando…) com elapsed */}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} />
+              <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'compact' ? t.muted : t.text, opacity: callPanelSize === 'compact' ? 0.5 : 1 }}>↑</button>
+              <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'expanded' ? t.muted : t.text, opacity: callPanelSize === 'expanded' ? 0.5 : 1 }}>↓</button>
               <button aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} title={isMuted ? 'Ativar microfone' : 'Silenciar'} className="m-iconbtn" style={isMuted ? { background: t.red, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}>{isMuted ? <Icon d={Icons.micOff} size={16} /> : <Icon d={Icons.mic} size={16} />}</button>
               <button aria-label={(activeCall as any)?.cameraOn ? 'Desligar câmera' : 'Ligar câmera'} title={(activeCall as any)?.cameraOn ? 'Desligar câmera' : 'Ligar câmera'} className="m-iconbtn" style={(activeCall as any)?.cameraOn ? { background: t.green, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e)))}><Icon d={Icons.video} size={16} /></button>
               <button className="m-btn red" style={{ padding: '9px 14px' }} onClick={() => { callManager.leave().catch((e: any) => setError(String(e?.message ?? e))) }}>Sair</button>
             </div>
-            <div style={{ fontSize: 11, color: t.muted }} role="status">rota: {callManager.getRungSummary()}</div>
-            <button onClick={() => setShowCallDiag((v) => !v)} aria-label="Diagnóstico da chamada" style={{ background: showCallDiag ? t.accent : t.input, border: `1px solid ${t.border}`, color: showCallDiag ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}>{showCallDiag ? 'Ocultar diagnóstico' : 'Diagnóstico'}</button>
+            {callPanelSize !== 'compact' && <div style={{ fontSize: 11, color: t.muted }} role="status">rota: {callManager.getRungSummary()}</div>}
+            {callPanelSize !== 'compact' && <button onClick={() => setShowCallDiag((v) => !v)} aria-label="Diagnóstico da chamada" style={{ background: showCallDiag ? t.accent : t.input, border: `1px solid ${t.border}`, color: showCallDiag ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}>{showCallDiag ? 'Ocultar diagnóstico' : 'Diagnóstico'}</button>}
             {showCallDiag && <CallDiagnostics compact />}
             {(activeCall as any)?.relayActive && (
               <div title="Áudio via relay pela sinalização — latência alta, WebRTC indisponível" style={{ fontSize: 11, fontWeight: 800, background: '#f0b232', color: '#000', padding: '4px 8px', borderRadius: 8, textAlign: 'center' }}>via relay (latência alta)</div>
             )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {callPanelSize !== 'compact' && <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <label htmlFor="m-call-quality" style={{ fontSize: 11, color: t.muted, fontWeight: 700 }}>Qualidade</label>
               <select id="m-call-quality" aria-label="Qualidade da chamada" value={(activeCall.quality as CallQuality | undefined) ?? callQuality} onChange={e => changeQuality(e.target.value as CallQuality)} style={{ background: t.input, color: t.text, border: `1px solid ${t.border}`, borderRadius: 8, padding: '6px 8px', fontSize: 12 }}>
                 <option value="480p">480p</option>
@@ -1835,25 +1858,40 @@ export default function MobileShell() {
                 <span role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }}>{qualityError ?? ((activeCall as any)?.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}</span>
               )}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} disabled={!supportsScreenShare() && !(activeCall as any)?.sharing} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: supportsScreenShare() || (activeCall as any)?.sharing ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
-            </div>
+            </div>}
             {/* Receptor view-only: tela compartilhada chega como track de vídeo — exibe igual desktop.
                 VÍDEO NATIVO (Linux): o core decodifica em Rust; a UI desenha o frame JPEG por <img>. */}
             {(() => {
-              const withVideo = ((activeCall.participants ?? []) as any[]).filter((pp: any) => { try { return !!(pp.stream as MediaStream)?.getVideoTracks?.()?.length || !!(pp as any).videoUrl } catch { return false } })
-              if (withVideo.length === 0) return null
+              const participants = [...(activeCall.participants ?? [])] as any[]
+              if (pinnedCallFp) participants.sort((a, b) => a.fp === pinnedCallFp ? -1 : b.fp === pinnedCallFp ? 1 : 0)
+              if (participants.length === 0) return null
               return (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {withVideo.map((pp: any) => (
-                    <div key={pp.fp} style={{ position: 'relative', background: '#000', borderRadius: 10, overflow: 'hidden', minHeight: 180, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      {(pp as any).videoUrl && !pp.stream
-                        ? <img src={(pp as any).videoUrl} alt="" style={{ width: '100%', maxHeight: 320, objectFit: 'contain', background: '#000' }} />
-                        : <video autoPlay playsInline muted={pp.fp===identity?.fingerprint} ref={(el: any) => attachStream(el, pp.stream)} style={{ width: '100%', maxHeight: 320, objectFit: 'contain', background: '#000' }} />}
-                      <span style={{ position: 'absolute', top: 8, left: 8, background: (activeCall as any)?.sharing && pp.fp===identity?.fingerprint ? t.green : '#5865f2', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>
-                        {(activeCall as any)?.sharing && pp.fp===identity?.fingerprint ? 'COMPARTILHANDO' : 'TELA/CÂMERA'}
-                      </span>
-                      <span style={{ position: 'absolute', bottom: 8, left: 8, fontSize: 11, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)' }}>{pp.nickname || String(pp.fp).slice(0, 8)}</span>
+                <div style={{ display: 'grid', gridTemplateColumns: pinnedCallFp && !expandedCallPin ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 8 }}>
+                  {participants.map((pp: any) => {
+                    const isPinned = pp.fp === pinnedCallFp
+                    const isMine = pp.fp === identity?.fingerprint
+                    const hasVideo = !!pp.sharing || pp.cameraOn === true || (pp.cameraOn !== false && (() => { try { return !!(pp.stream as MediaStream)?.getVideoTracks?.()?.length } catch { return false } })()) || !!pp.videoUrl
+                    const isSharing = isMine ? !!activeCall.sharing : !!pp.sharing
+                    const isMuted = isMine ? !!activeCall.muted : !!pp.muted
+                    return (
+                    <div key={pp.fp} data-call-participant={pp.fp} style={{ position: 'relative', background: '#202226', borderRadius: 10, overflow: 'hidden', height: isPinned && expandedCallPin ? '40vh' : callPanelSize === 'compact' ? 92 : isPinned ? 150 : 104, display: 'flex', alignItems: 'center', justifyContent: 'center', gridColumn: isPinned && expandedCallPin ? '1 / -1' : undefined, border: `2px solid ${pp.speaking ? t.green : isMuted ? t.red + '88' : 'transparent'}`, transition: 'height 180ms ease' }}>
+                      {hasVideo && pp.videoUrl && !pp.stream
+                        ? <img src={pp.videoUrl} alt={`Conteúdo compartilhado por ${pp.nickname || pp.fp}`} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
+                        : hasVideo
+                          ? <video autoPlay playsInline muted ref={(el: any) => attachStream(el, pp.stream)} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
+                          : <div style={{ textAlign: 'center', color: '#fff' }}><Avatar name={pp.nickname || pp.fp} fp={pp.fp} size={40} /><div style={{ fontSize: 11, marginTop: 4 }}>{pp.nickname || String(pp.fp).slice(0, 8)}</div></div>}
+                      {(hasVideo || isSharing) && <span title={isSharing ? 'Compartilhamento de tela ativo' : 'Câmera ativa'} style={{ position: 'absolute', top: 6, left: 6, background: isSharing ? t.green : '#5865f2', color: '#fff', fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>{isSharing ? 'TELA' : 'CÂMERA'}</span>}
+                      {!hasVideo && !isSharing && <span title="Câmera desligada" aria-label="Câmera desligada" style={{ position: 'absolute', top: 6, left: 6, background: '#111a', color: '#fff', fontSize: 9, padding: '2px 5px', borderRadius: 4 }}>▣̸</span>}
+                      {pp.disconnected && <span title="Conexão instável; tentando reconectar" style={{ position: 'absolute', top: 6, right: 6, background: '#111a', color: t.yellow, fontSize: 9, padding: '2px 5px', borderRadius: 4 }}>◌</span>}
+                      <div style={{ position: 'absolute', top: 6, right: pp.disconnected ? 42 : 6, display: 'flex', gap: 4 }}>
+                        <button type="button" aria-label={isPinned ? `Desafixar ${pp.nickname || pp.fp}` : `Fixar ${pp.nickname || pp.fp}`} title={isPinned ? 'Desafixar participante' : 'Fixar participante'} onClick={() => { setPinnedCallFp(isPinned ? null : pp.fp); setExpandedCallPin(false) }} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px' }}>{isPinned ? '📌' : '⌖'}</button>
+                        {isPinned && <button type="button" aria-label={expandedCallPin ? 'Recolher participante fixado' : 'Ampliar participante fixado'} title={expandedCallPin ? 'Voltar à miniatura' : 'Ampliar conteúdo fixado'} onClick={() => setExpandedCallPin(v => !v)} style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px' }}>{expandedCallPin ? '▣' : '□'}</button>}
+                      </div>
+                      {!isMine && <ParticipantAudioControls fp={pp.fp} nickname={pp.nickname || pp.fp} callDeafened={!!activeCall.deafened} />}
+                      <span style={{ position: 'absolute', bottom: 6, left: 6, fontSize: 10, fontWeight: 700, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,.7)' }}>{pp.nickname || String(pp.fp).slice(0, 8)} {isMuted && <Icon d={Icons.micOff} size={11} />}{pp.speaking && ' • falando'}</span>
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )
             })()}
@@ -2110,7 +2148,7 @@ export default function MobileShell() {
           <div className="m-sec">AMIGOS ONLINE — {onlineFriends.length}</div>
           {onlineFriends.length === 0
             ? <EmptyBlock msg="Ninguém online agora — é silencioso demais aqui." sub={<span>Um amigo que trabalha em equipe é uma coisa boa — <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{onlineFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} onOpen={openDm} onRemove={removeFriend} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{onlineFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>}
 
           <div className="m-sec">CONVERSAS RECENTES</div>
           {filteredConvs.length === 0
@@ -2255,7 +2293,7 @@ export default function MobileShell() {
                       <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
                       <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{f.fp.slice(0, 12)} · não consegue te achar</div>
                     </div>
-                    <button title="Desbloquear" aria-label="Desbloquear" className="row-icon ok" onClick={async () => { try { await services.friendRemove(f.fp); refreshFriends() } catch { /* erro mostrado no aviso */ } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M4 12l5 5L20 7" /></svg></button>
+                    <button title="Desbloquear" aria-label="Desbloquear" className="row-icon ok" onClick={async () => { try { await services.friendUnblock(f.fp); refreshFriends() } catch (err: any) { setError(String(err?.message ?? err)) } }}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M4 12l5 5L20 7" /></svg></button>
                   </div>
                 ))}
               </div>
@@ -2263,7 +2301,7 @@ export default function MobileShell() {
           ) : shownFriends.length === 0 ? (
             <EmptyBlock msg={friendsTab === 'online' ? 'Ninguém online agora — é silencioso demais aqui.' : 'Que silêncio por aqui...'} sub={<span>Um amigo que trabalha em equipe é uma coisa boa — <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column' }}>{shownFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} onOpen={openDm} onRemove={removeFriend} />)}</div>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>{shownFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>
           )}
         </>}
 
