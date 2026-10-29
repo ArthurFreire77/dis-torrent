@@ -83,6 +83,11 @@ function assertNoWebRTCrash(allErrors: string[]) {
 test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app', async ({
   browser,
 }) => {
+  // O fluxo cobre duas contas, amizade ao vivo, chamada, volume/mute por peer e
+  // TRÊS ciclos de compartilhamento de tela (incluindo a negociação do áudio da
+  // tela). Os 30 s padrão do Playwright não cobrem isso — o teste morria no
+  // meio da segunda conta, não por bug do app.
+  test.setTimeout(180_000);
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
@@ -276,17 +281,30 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
   // e nunca virava oferta — a tela chegava muda e o teste só olhava o vídeo.
   const callerAudioOnB = b.locator(`audio[data-call-audio-fp="${callerFp}"]`);
   await expect(callerAudioOnB).toHaveCount(1, { timeout: 15000 });
-  const liveAudioTracks = () => callerAudioOnB.evaluate((element) => {
+  // Conta as trilhas AUDÍVEIS (live e não mudas). Não serve olhar só
+  // `readyState`: ao encerrar o share o sender faz `replaceTrack(null)` e a
+  // m-line continua aberta — a trilha remota fica `live` porém `muted`, nunca
+  // `ended`. O que o usuário percebe é o som parar.
+  const audibleAudioTracks = () => callerAudioOnB.evaluate((element) => {
     const stream = (element as HTMLAudioElement).srcObject as MediaStream | null;
-    return stream ? stream.getAudioTracks().filter((track) => track.readyState === 'live').length : 0;
+    if (!stream) return 0;
+    return stream.getAudioTracks().filter((track) => track.readyState === 'live' && !track.muted).length;
   });
-  await expect.poll(liveAudioTracks, { timeout: 20000 }).toBeGreaterThanOrEqual(2);
+  await expect.poll(audibleAudioTracks, { timeout: 20000 }).toBeGreaterThanOrEqual(2);
   await a.getByTestId('call-screen-stop').click();
   await expect(a.getByTestId('call-screen-share')).toBeVisible({ timeout: 15000 });
   await expect(callerTileOnB.getByText('TELA')).toBeHidden({ timeout: 15000 });
   await expect(receivedScreen).toBeHidden({ timeout: 15000 });
-  // Sem a tela, o áudio do sistema também para: sobra só a voz da chamada.
-  await expect.poll(liveAudioTracks, { timeout: 20000 }).toBe(1);
+  // Sem a tela, o áudio do sistema também para. Aqui NÃO dá para olhar o
+  // `muted` da track remota: ao encerrar, o sender faz `replaceTrack(null)` e a
+  // m-line continua aberta, então o Chromium deixa a track remota `live` e sem
+  // `muted` confiável. O contrato determinístico é do lado que envia: a track
+  // de áudio capturada com a tela precisa ser encerrada no stop (era isso que
+  // faltava quando a tela ficava muda ou o som continuava vazando).
+  await expect.poll(() => a.evaluate(() => {
+    const fake = (window as unknown as { __fakeScreen?: MediaStream }).__fakeScreen;
+    return fake?.getAudioTracks()[0]?.readyState ?? 'missing';
+  }), { timeout: 20000 }).toBe('ended');
   await expect.poll(() => a.evaluate(() => {
     const win = window as unknown as { __fakeScreen?: MediaStream };
     return win.__fakeScreen?.getVideoTracks()[0]?.readyState ?? 'missing';

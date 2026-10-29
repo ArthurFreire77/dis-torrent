@@ -35,6 +35,11 @@ if ($base -notmatch '^\d+\.\d+\.\d+$') { Fail "versão não parseável em packag
 $numericVersion = "$base.0"
 
 # --- App já buildado? (o instalador empacota o .exe do Tauri) ---
+# O crate continua se chamando `distorent-cli` (nome do pacote Rust), então o
+# cargo produz `distorent-cli.exe`; o instalador e os atalhos usam
+# `distorrent.exe`. Antes esse descompasso obrigava a copiar o arquivo à mão e
+# o script morria com "binário do app não existe" numa árvore limpa.
+$cargoExe = Join-Path $root "src-tauri\target\release\distorent-cli.exe"
 $appExe = Join-Path $root "src-tauri\target\release\distorrent.exe"
 if (-not $SkipBuild) {
     $npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
@@ -48,7 +53,14 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 }
-if (-not (Test-Path $appExe)) { Fail "binário do app não existe: $appExe (rode sem -SkipBuild)." }
+if (-not (Test-Path $appExe)) {
+    if (Test-Path $cargoExe) {
+        Copy-Item $cargoExe $appExe -Force
+        Write-Host "  $([System.IO.Path]::GetFileName($cargoExe)) -> distorrent.exe" -ForegroundColor DarkGray
+    } else {
+        Fail "binário do app não existe: nem $appExe nem $cargoExe (rode sem -SkipBuild)."
+    }
+}
 
 # --- ISCC (compilador do Inno Setup) ---
 if (-not $ISCC) {
