@@ -1,6 +1,9 @@
 # ARCHITECTURE — arquitetura do motor
 
-> **DisTorrent é o Design System oficial e congelado.** `src/designs/ThemeShell.tsx` + `src/shared/icons.tsx` são imutáveis visualmente (cores, tipografia, espaçamento, ícones SVG, layout). Toda a evolução do produto acontece embaixo da UI.
+> **DisTorrent mantém identidade visual própria.** Cores, tipografia e ícones de
+> `src/designs/ThemeShell.tsx` + `src/shared/icons.tsx` seguem os tokens do app;
+> mudanças de layout podem ser feitas quando um requisito de produto pedir, como
+> manter conversa e painel de chamada visíveis ao mesmo tempo.
 
 ## 1. Estado atual — o que é REAL (verificado por testes)
 

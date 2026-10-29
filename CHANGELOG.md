@@ -2,6 +2,49 @@
 
 ## [1.1.7-pre-alpha] — 2026-10-28
 
+### Auditoria local de chamadas, rede e reações
+
+- Corrige a direção do transceiver WebRTC ao iniciar compartilhamento numa
+  chamada de voz sem câmera: `recvonly` passa a `sendrecv` antes da oferta; ao
+  parar, a câmera é restaurada ou o transceiver volta a `recvonly`. Erros de
+  renegociação por peer deixam de ser silenciosos. O sinal JSON existente inclui
+  o estado opcional de câmera para ocultar o último frame quando o share termina
+  sem uma câmera para restaurar; clientes antigos ignoram o campo adicional.
+- Acrescenta E2E do fluxo de tela dentro do app: chamada entre dois clientes,
+  captura de teste, oferta real pelo `CallManager`, track de vídeo no tile
+  remoto e parada. O E2E usa uma fonte canvas para não depender do seletor do
+  sistema; a captura real do Edge é validada separadamente em loopback P2P.
+- Liga o roster visual de canais de voz aos eventos existentes de entrada,
+  saída, mute e ensurdecimento remoto.
+- Adiciona controles reais de volume (0–100%) e mute local por participante no
+  áudio WebRTC recebido. A preferência fica salva localmente por fingerprint e
+  não altera a mídia enviada nem o que os outros participantes escutam.
+- Mantém a conversa visível ao lado do painel de chamada no desktop; adiciona
+  três tamanhos reversíveis e controles locais para fixar/ampliar um tile de
+  participante. No mobile, adapta os tamanhos à altura disponível.
+- Torna a ação de reação visível sem hover e corrige os botões de bloquear e
+  desbloquear para preservarem o estado de bloqueio.
+- Adiciona rate limit de reações no receptor, com buckets por peer, conversa,
+  mensagem e global; valida IDs/emojis e existência da mensagem na conversa,
+  usa a identidade autenticada, deduplica antes da escrita e não retransmite
+  alterações rejeitadas.
+- Ao entrar por convite, dispara conexão direta/relay e lookup do host. O token
+  só é enviado ao host correto e sua assinatura é verificada com a chave do
+  handshake antes de importar o primeiro estado da comunidade.
+- Distingue DHT ainda desconhecida de DHT desligada. O relatório de suporte
+  oculta por padrão fingerprints, apelidos, portas e endereços de rede, e a UI
+  deixa claro que broker MQTT acessível não prova encaminhamento entre peers.
+- Corrige o E2E MQTT para usar client IDs únicos por identidade.
+
+**Limites:** os testes automatizados não substituem captura e recepção em
+Windows/Linux/Android reais. Android ainda não tem ponte MediaProjection;
+Wayland ainda não mantém sessão XDG ScreenCast/PipeWire. Estado de mute em
+chamadas diretas por DM, detecção de fala, volume individual no mixer nativo,
+menu contextual/long-press, seleção de saída, prévia de câmera e soundboard
+transmitido continuam pendentes. Ver [auditoria de mídia](docs/media-engine-audit.md),
+[auditoria de conectividade](docs/connectivity-audit.md) e
+[camada de segurança](docs/SECURITY_LAYER.md).
+
 ### Correção crítica: o app Android fechava sozinho ao abrir
 
 **Sintoma.** Instalar o APK da 1.1.6, abrir o app → "o DisTorrent parou de funcionar"

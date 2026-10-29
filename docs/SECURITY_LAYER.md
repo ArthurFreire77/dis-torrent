@@ -42,6 +42,29 @@ Pré-checagem no cliente (`src/core/security/antispam.ts`): `warnBeforeSend`
 avisa link suspeito antes de enviar; `LocalRateGate` segura o dedo nervoso.
 O core decide de verdade — o cliente só melhora o feedback.
 
+### Reações recebidas
+
+`distorrent-core/src/net/reaction_limit.rs` aplica limites no receptor usando a
+fingerprint autenticada da sessão, a conversa e a mensagem. O payload não pode
+escolher a identidade do reator. O bucket por peer permite burst de 5 e repõe
+1 token/s; há buckets adicionais por conversa (burst 10, 3/s), mensagem
+(burst 2, 2/s) e global (burst 100, 50/s). Duplicatas de estado são ignoradas
+antes de consumir tokens; rejeições não são persistidas, emitidas à UI nem
+retransmitidas. Os mapas têm tetos e expiração de 60 s.
+
+Os totais persistidos também são limitados por mensagem, participante e emojis
+distintos. Antes de persistir, o receptor confirma que a mensagem existe e
+pertence ao `conv_id`. O evento continua protegido pelo handshake criptográfico
+e pela identidade da sessão; não foi adicionado um novo formato de protocolo nem
+uma migração SQLite. Se uma reação de outro participante chegar antes da
+mensagem por caminhos diferentes do mesh, ela é descartada; ainda não há fila de
+replay automático para esse caso, então o remetente precisa reenviá-la após a
+sincronização.
+
+O painel de diagnóstico de rede oferece ocultação local de fingerprints,
+apelidos, portas, endereços e detalhes de erro antes de copiar o relatório.
+Nenhum relatório é enviado automaticamente.
+
 ## 3. Nomes (usuário / servidor / canal)
 
 Validação em **tempo real na UI** (`NameField`) + **re-validação no core**

@@ -3,6 +3,53 @@
 **Estado observado em 2026-10-08.** Este documento separa o que o código faz,
 o que foi reproduzido localmente e o que ainda não foi validado.
 
+## Correções posteriores — 2026-10-28
+
+No caminho WebRTC do navegador, chamadas de voz sem câmera já têm um
+transceiver de vídeo `recvonly`. Ao iniciar compartilhamento de tela, substituir
+só a track não o promovia a envio; a oferta continuava sem vídeo. O
+`callManager` agora promove a direção para `sendrecv` antes da renegociação, e
+na parada restaura a câmera ou volta a `recvonly`. Falhas de oferta por peer
+deixam de ser descartadas em silêncio. A mesma regra de direção foi extraída
+para `src/services/callMedia.ts` e coberta por testes unitários.
+
+O painel da chamada agora permanece ao lado da conversa no desktop e ajusta o
+tamanho em três níveis; no mobile usa limites de altura equivalentes. A seleção
+local de um participante pode ser fixada e ampliada sem alterar mídia ou
+volume. Isto não implementa um pin de track de tela independente: no modelo
+atual, cada tile representa o participante e seu vídeo recebido.
+
+Nos caminhos WebRTC desktop e mobile, cada peer remoto tem um `<audio>` próprio.
+Os controles do tile aplicam ganho de 0–100% ou mute só nesse elemento e salvam
+a preferência localmente por fingerprint. A chamada ainda não oferece ganho
+individual no mixer Rust do Linux; ali a reprodução é mixada pelo motor nativo.
+Também não há menu contextual/long-press, seletor de saída ou prévia de câmera.
+
+Os indicadores de câmera/tela refletem tracks recebidas. Em chamadas de canal,
+o `CallManager` agora aplica os eventos existentes `voice_joined`,
+`voice_left` e `voice_state_changed` ao roster: o mute e o estado de
+ensurdecimento remoto atualizam sem fechar a conversa. Chamadas diretas por DM
+ainda não têm sinalização de estado de mute; atividade de fala também não é
+medida, e o campo `speaking` do protocolo de canal continua fixo em `false`.
+
+O E2E de mídia executado nesta rodada usou Edge instalado no Windows e passou:
+captura 1920×1080, codec VP8, 64 frames codificados e decodificados, perda de
+pacotes 0% e vídeo remoto não preto. É um loopback de captura + dois
+`RTCPeerConnection` reais; não passa pelo `CallManager` nem prova negociação da
+chamada do app ou interoperabilidade entre plataformas. Um E2E separado cobre o
+fluxo dentro do app: dois clientes fazem a chamada, o botão abre o `CallManager`,
+uma fonte canvas animada passa por oferta/renegociação reais e o tile remoto
+recebe frames; parar também limpa o estado de compartilhamento. Esse teste usa
+uma fonte de vídeo simulada e não abre o seletor do sistema. O mesmo E2E verifica
+que o slider/mute local altera o elemento de áudio remoto e persiste a
+configuração. Os testes validam WebRTC no Edge/Chromium, não dispositivos
+físicos nem interoperabilidade Windows/Linux/Android.
+
+O estado JSON de tela no campo de sinalização existente agora aceita o campo
+aditivo `cameraOn`. Ele informa se há câmera para restaurar ao terminar a tela,
+para o receptor não continuar exibindo o último frame como vídeo ativo. Clientes
+anteriores continuam aceitando o evento porque ignoram campos JSON adicionais.
+
 ## Fluxo atual
 
 Cada aresta do mesh usa uma sessão `(call_id, peer_fp)` e uma PeerConnection.
@@ -13,9 +60,9 @@ tasks, tracks e PeerConnection no hangup (`distorrent-core/src/net/media_voice.r
 
 | Plataforma | Captura e transporte | Recepção e reprodução |
 |---|---|---|
-| Linux desktop | Tauri encaminha voz ao `VoiceMedia` Rust. CPAL captura áudio uma vez no `AudioHub`; Opus e `webrtc-rs` enviam por RTP/SRTP. Câmera e tela usam GStreamer. | RTP de áudio passa pelo jitter buffer, Opus e CPAL. RTP de vídeo passa por GStreamer e vira JPEG para a UI nativa. |
+| Linux desktop | Tauri encaminha voz ao `VoiceMedia` Rust. CPAL captura áudio uma vez no `AudioHub`; Opus e `webrtc-rs` enviam por RTP/SRTP. Câmera e tela usam GStreamer; a tela Wayland ainda não usa sessão persistente XDG ScreenCast/PipeWire. | RTP de áudio passa pelo jitter buffer, Opus e CPAL. RTP de vídeo passa por GStreamer e vira JPEG para a UI nativa. |
 | Windows desktop | O caminho Rust nativo de vídeo não está habilitado. O frontend usa `RTCPeerConnection`, `getUserMedia` e, se oferecido pelo WebView, `getDisplayMedia`. | Tracks remotas seguem os eventos WebRTC do WebView. |
-| Android | Usa o caminho WebRTC do WebView; não há backend de mídia Android neste crate. Permissões, captura de tela e comportamento em background dependem do WebView/Activity. | Tracks remotas seguem os eventos WebRTC do WebView. Não foi feita validação em dispositivo Android nesta tarefa. |
+| Android | Usa o caminho WebRTC do WebView; não há backend de mídia Android neste crate nem ponte MediaProjection. Compartilhamento de tela não está disponível. | Tracks remotas seguem os eventos WebRTC do WebView. Não foi feita validação em dispositivo Android nesta tarefa. |
 
 No Linux, a oferta já anuncia m-lines de áudio e vídeo; ligar câmera/tela começa
 a escrever samples sem adicionar transceiver no meio da chamada. Isso evita
@@ -63,6 +110,15 @@ contadores e estado de vídeo vinham de uma entrada arbitrária do mapa de
 sessões, então a ordem interna podia fazer a UI anunciar estado incorreto.
 
 ## Verificação local
+
+No Windows desta rodada, o Chromium gerenciado falhou ao iniciar por erro de
+runtime side-by-side. Edge 156 instalado no sistema executou a captura real e
+passou. Para repetir nesse ambiente:
+
+```powershell
+$env:PLAYWRIGHT_BROWSER_CHANNEL = 'msedge'
+npm.cmd run test:e2e -- --grep 'captura a tela e transmite'
+```
 
 Esta máquina estava em X11 (`XDG_SESSION_TYPE=x11`) e tinha webcam V4L2 em
 `/dev/video0`, CPAL/PipeWire e plugins VP8 do GStreamer disponíveis.

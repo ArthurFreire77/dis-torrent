@@ -44,8 +44,10 @@ nem senha para esquecer.
   Rust (`webrtc-rs` + Opus + cpal + AEC) porque o WebKitGTK não expõe
   `RTCPeerConnection`. SDP e ICE trickle são padrão, então um peer Linux conversa
   com um peer Windows/Android/macOS sem tradutor.
-- **Compartilhamento de tela** — multi-monitor, com captura nativa no Linux
-  (X11/portal) e `getDisplayMedia` no navegador nas outras plataformas.
+- **Compartilhamento de tela** — Windows/WebView2 usa `getDisplayMedia`; Linux
+  desktop usa captura nativa (X11; em Wayland ainda não há sessão persistente
+  XDG ScreenCast/PipeWire). Android não tem ponte `MediaProjection`, então a
+  captura de tela não é oferecida nesse alvo.
 - **Arquivos em swarm** — chunks de 256 KB, hash blake3, todos os peers semeiam.
 - **Privacidade com 4 modos reais** — sem segurança / Seguro (E2E) / Seguro +
   (SOCKS5: fail-closed — sem fallback direto, inbound recusado, descoberta
