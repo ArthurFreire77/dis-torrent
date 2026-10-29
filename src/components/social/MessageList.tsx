@@ -325,32 +325,32 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   </>
                 )}
 
-                <ReactionBar reactions={rx} onToggle={e => toggleReact(m.id, e)}
-                  resolveName={fp => nameOf(fp)}
-                  onAdd={() => setPicker(picker === m.id ? null : m.id)} />
+                {/* Barra de reações + botão "reagir" no MESMO bloco relativo:
+                    o seletor abre logo abaixo das pílulas, colado na mensagem.
+                    Antes ele era anexado no fim da linha com `height: 0`, então
+                    abria deslocado (chegava a cobrir a mensagem de baixo ou o
+                    cabeçalho do canal quando a mensagem estava no topo). */}
+                <div style={{ position: 'relative' }}>
+                  <ReactionBar reactions={rx} onToggle={e => toggleReact(m.id, e)}
+                    resolveName={fp => nameOf(fp)}
+                    onAdd={() => setPicker(picker === m.id ? null : m.id)} />
 
-                {/* Seletor fora da barra `.msg-tools` (que só aceita clique em
-                    hover): aqui ele abre também pela pílula "reagir" e pelo
-                    ícone ao lado das reações, como no app do celular. */}
-                {picker === m.id && (
-                  <div style={{ position: 'relative', height: 0 }} onClick={e => e.stopPropagation()}>
-                    <ReactionPicker onPick={em => { toggleReact(m.id, em); setPicker(null) }} customEmojis={emojis} onClose={() => setPicker(null)} />
-                  </div>
-                )}
+                  {/* Reagir quando ainda não há reação — mesmo padrão do mobile:
+                      pílula pequena com ícone, sem cobrir a mensagem. */}
+                  {!grouped && rx.length === 0 && (
+                    <button
+                      onClick={() => setPicker(picker === m.id ? null : m.id)}
+                      aria-label="Reagir à mensagem"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, background: 'transparent', border: `1px solid ${T_BORDER}`, color: T_MUTED, borderRadius: 99, padding: '1px 8px 1px 5px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+                    ><Icon d={Icons.smile} size={12} /> reagir</button>
+                  )}
 
-                {/* Reagir quando ainda não há reação — mesmo padrão do mobile:
-                    pílula pequena com ícone, sem cobrir a mensagem. Precisa
-                    ficar DENTRO da linha da mensagem: o seletor abre na barra
-                    `.msg-tools`, que só aceita clique enquanto a linha está em
-                    hover/focus. Fora dela, o primeiro clique abria um seletor
-                    inerte (o "reação bugada" que o usuário via). */}
-                {!grouped && rx.length === 0 && (
-                  <button
-                    onClick={() => setPicker(picker === m.id ? null : m.id)}
-                    aria-label="Reagir à mensagem"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, background: 'transparent', border: `1px solid ${T_BORDER}`, color: T_MUTED, borderRadius: 99, padding: '1px 8px 1px 5px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
-                  ><Icon d={Icons.smile} size={12} /> reagir</button>
-                )}
+                  {picker === m.id && (
+                    <div style={{ position: 'absolute', left: 0, top: '100%', zIndex: 40 }} onClick={e => e.stopPropagation()}>
+                      <ReactionPicker placement="down" onPick={em => { toggleReact(m.id, em); setPicker(null) }} customEmojis={emojis} onClose={() => setPicker(null)} />
+                    </div>
+                  )}
+                </div>
 
                 {/* Enquetes ancoradas nas últimas mensagens. A âncora é
                     distribuída: a i-ésima enquete (das N mais recentes) fica na

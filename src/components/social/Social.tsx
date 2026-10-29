@@ -339,16 +339,25 @@ export function ReactionBar({ reactions, onToggle, onHoverList, resolveName, onA
             borderRadius: 8, padding: '3px 8px', cursor: 'pointer',
             display: 'inline-flex', alignItems: 'center',
           }}
-        ><Ic name="smile" size={14} /></button>
+        ><Ic name="smile" size={14} color={T.muted} /></button>
       )}
     </div>
   )
 }
 
-export function ReactionPicker({ onPick, customEmojis, onClose }: {
+export function ReactionPicker({ onPick, customEmojis, onClose, placement = 'up' }: {
   onPick: (e: string) => void
   customEmojis?: EmojiView[]
   onClose: () => void
+  /**
+   * Onde o painel abre em relação ao ponto de ancoragem.
+   *
+   * `up` é o padrão (mensagem no fim da lista, como o menu de contexto). Em
+   * conversas, abrir sempre para cima fazia o painel cobrir o cabeçalho do canal
+   * quando a mensagem estava no topo da tela — o usuário via o seletor solto no
+   * alto, longe da mensagem. A lista de mensagens passa `down`.
+   */
+  placement?: 'up' | 'down'
 }) {
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -358,7 +367,13 @@ export function ReactionPicker({ onPick, customEmojis, onClose }: {
   }, [onClose])
   return (
     <div ref={ref} style={{
-      position: 'absolute', bottom: '100%', right: 0, marginBottom: 6, zIndex: 40,
+      position: 'absolute', zIndex: 40,
+      // Para baixo, alinha pela ESQUERDA (embaixo da mensagem, como o mobile);
+      // para cima, pela direita, porque ali o ponto de ancoragem é a barra de
+      // ações, colada na borda direita do canal.
+      ...(placement === 'down'
+        ? { top: '100%', left: 0, marginTop: 6 }
+        : { bottom: '100%', right: 0, marginBottom: 6 }),
       background: T.sidebar, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10,
       boxShadow: '0 8px 24px rgba(0,0,0,.45)', width: 250,
     }}>
