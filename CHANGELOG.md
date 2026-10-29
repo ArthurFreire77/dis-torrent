@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## [1.1.10-pre-alpha] — 2026-10-29
+
+### Corrige o instalador que entregava o app errado
+
+- **O instalador 1.1.9 continha o binário 1.1.8.** `build-installer.ps1` só
+  copiava `distorent-cli.exe` → `distorrent.exe` quando o destino **não
+  existia**. Sobrou um `distorrent.exe` de build antigo ao lado de um
+  `distorent-cli.exe` novo; com `-SkipBuild` a cópia era pulada e o Inno
+  empacotou o app velho com rótulo novo (8,89 MB, mas `ProductVersion`
+  1.1.8). Agora a cópia acontece sempre que a origem é mais nova **ou** a
+  versão gravada no binário difere, e o script imprime a versão/data do que
+  vai empacotar — com aviso se o binário não casar com o rótulo.
+
+### Diagnóstico possível: log em arquivo
+
+- **O app não deixava rastro de erro.** Os logs iam só para o stdout; um app
+  aberto pelo atalho não tem console, então um relato de "tela branca" não
+  trazia nada para inspecionar. Agora o `tracing` grava também em
+  `com.distorrent.app/distorrent.log` (rotação em 2 MB), mantendo o console e
+  `DISTORRENT_LOG_JSON=1`. Sem segredos: mesma regra de log do console.
+
+### Tela cheia de verdade
+
+- **"Expandir" não era tela cheia**: só aumentava o quadrado dentro do painel
+  de chamada (`min(56vw, 720px)` no desktop, `52vh` no mobile). Agora a
+  transmissão escolhida abre um overlay que cobre a janela inteira, com
+  `contain` + `aspect-ratio` da fonte (máximo sem esticar nem cortar).
+- O painel continua montado atrás do overlay: trocar o painel pela tela cheia
+  desmontaria os `<audio>` remotos e a chamada ficaria muda.
+- Barra auto-oculta com mic, câmera, sair e "Recolher"; `Esc` recolhe; fecha
+  sozinha quando o stream termina.
+- **Ícones**: `📌`, `⌖`, `□` e `▣` (glifo de texto/emoji) viraram SVG de
+  `shared/icons` (`pin`, `expand`, `collapse`), com caixa 26×26.
+- Medido no navegador real (stream 1920×1080, janela 1440×900): a camada cobre
+  1440×900 e o vídeo fica 1440×810 (razão 1,778 = 1,778 da fonte).
+
 ## [1.1.9-pre-alpha] — 2026-10-29
 
 ### Chamadas: a própria câmera e a tela como quadrado independente
