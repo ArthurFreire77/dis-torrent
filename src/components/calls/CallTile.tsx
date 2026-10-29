@@ -307,9 +307,15 @@ export function CallTile({
             aria-label={pinned ? `Desafixar ${tile.label}` : `Fixar ${tile.label}`}
             title={pinned ? 'Desafixar' : 'Fixar'}
             onClick={() => onPin(tile.id)}
-            style={{ border: '1px solid #ffffff44', borderRadius: 6, background: pinned ? c.accent : '#111c', color: '#fff', padding: '4px 6px', cursor: 'pointer', fontSize: 11 }}
+            style={{
+              border: '1px solid #ffffff44', borderRadius: 6,
+              background: pinned ? c.accent : '#111c',
+              color: '#fff', cursor: 'pointer',
+              width: 26, height: 26, padding: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
           >
-            {pinned ? '📌' : '⌖'}
+            <Icon d={Icons.pin} size={13} />
           </button>
         )}
         {onExpand && (
@@ -317,14 +323,22 @@ export function CallTile({
             type="button"
             aria-label={
               expanded
-                ? (isScreen ? 'Recolher tela compartilhada' : 'Recolher participante fixado')
-                : (isScreen ? 'Expandir tela compartilhada' : pinned ? 'Ampliar participante fixado' : `Ampliar ${tile.label}`)
+                ? (isScreen ? 'Recolher tela cheia' : 'Recolher participante')
+                : (isScreen ? 'Ver tela compartilhada em tela cheia' : pinned ? 'Ampliar participante fixado' : `Ampliar ${tile.label}`)
             }
-            title={expanded ? 'Recolher' : 'Expandir'}
+            title={expanded ? 'Recolher (Esc)' : 'Tela cheia'}
             onClick={() => onExpand(tile.id)}
-            style={{ border: '1px solid #ffffff44', borderRadius: 6, background: '#111c', color: '#fff', padding: '4px 6px', cursor: 'pointer', fontSize: 11 }}
+            style={{
+              border: '1px solid #ffffff44', borderRadius: 6,
+              background: expanded ? c.accent : '#111c',
+              color: '#fff', cursor: 'pointer',
+              // Ícone SVG precisa de caixa própria: `padding` de glifo de texto
+              // deixava o botão desalinhado dos vizinhos.
+              width: 26, height: 26, padding: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
           >
-            {expanded ? '▣' : '□'}
+            <Icon d={expanded ? Icons.collapse : Icons.expand} size={13} />
           </button>
         )}
       </div>

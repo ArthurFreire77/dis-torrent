@@ -18,6 +18,7 @@ import {
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
+import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
@@ -1043,19 +1044,19 @@ export default function ThemeShell({ designId }: {designId:string}){
   ])
 
   // Fixação/expansão só valem enquanto a transmissão existir. Sem isto, parar
-  // o compartilhamento deixava `expandedTileId` apontando para um id morto e o
-  // grid ficava travado em uma coluna.
+  // o compartilhamento deixava `expandedTileId` apontando para um id morto e a
+  // tela cheia ficava aberta sobre um stream que não existe mais.
   const visibleCallTiles = useMemo(() => {
     const valid = callTiles.map((tile) => tile.id)
     const pin = pinnedTileId && valid.includes(pinnedTileId) ? pinnedTileId : null
-    const exp = expandedTileId && valid.includes(expandedTileId) ? expandedTileId : null
-    const ordered = pin ? sortTilesForPin(callTiles, pin) : callTiles
-    // Expandido ocupa a área principal; os demais viram miniaturas ao lado.
-    if (exp) {
-      return [ordered.find((x) => x.id === exp)!, ...ordered.filter((x) => x.id !== exp)]
-    }
-    return ordered
-  }, [callTiles, pinnedTileId, expandedTileId])
+    return pin ? sortTilesForPin(callTiles, pin) : callTiles
+  }, [callTiles, pinnedTileId])
+
+  /** Quadrado aberto em TELA CHEIA (null = layout normal). */
+  const stageTile = useMemo(
+    () => (expandedTileId ? callTiles.find((tile) => tile.id === expandedTileId) ?? null : null),
+    [callTiles, expandedTileId],
+  )
 
   useEffect(() => {
     if (!pinnedTileId) return
@@ -3292,27 +3293,19 @@ export default function ThemeShell({ designId }: {designId:string}){
               numa linha. Fixar/expandir é por `id` de TRANSMISSÃO (`p:<fp>` /
               `s:<fp>`), então a tela tem vida própria.
 
-              EXPANDIDO: o quadrado escolhido ocupa a maior área útil (coluna
-              principal, largura e altura completas); os demais viram uma faixa
-              de miniaturas ao lado — continuam na chamada, com áudio, sem sair
-              do estado. */}
+              TELA CHEIA NÃO acontece aqui: ela é um overlay (`ScreenStage`)
+              por cima de TUDO. Antes o "expandir" só aumentava o quadrado
+              dentro do painel (`min(56vw, 720px)`), o que não é tela cheia. */}
           <div
             style={{
               flex: 1,
               display: 'grid',
-              gridTemplateColumns: expandedTileId ? 'minmax(0, 1fr) minmax(88px, 22%)' : `repeat(${Math.min(callTiles.length, callPanelSize === 'compact' ? 1 : 2)}, minmax(0, 1fr))`,
-              gridTemplateRows: expandedTileId ? 'minmax(0, 1fr)' : undefined,
-              gridAutoRows: expandedTileId ? 'minmax(72px, 96px)' : `minmax(${callPanelSize === 'compact' ? 112 : 150}px, 1fr)`,
+              gridTemplateColumns: `repeat(${Math.min(callTiles.length, callPanelSize === 'compact' ? 1 : 2)}, minmax(0, 1fr))`,
+              gridAutoRows: `minmax(${callPanelSize === 'compact' ? 112 : 150}px, 1fr)`,
               alignContent: 'stretch',
-              // Expandido: centraliza a caixa da tela (que abraça a proporção)
-              // em vez de deixá-la colada no topo da coluna.
-              alignItems: expandedTileId ? 'center' : 'stretch',
-              justifyItems: expandedTileId ? 'center' : 'stretch',
               gap: 10,
               padding: 12,
-              // Expandido não rola: o conteúdo tem de caber na área útil. No
-              // layout normal a rolagem continua para caber muita gente.
-              overflowY: expandedTileId ? 'hidden' : 'auto',
+              overflowY: 'auto',
               background: '#1a1a1a',
               transition: 'grid-template-columns 180ms ease',
             }}
@@ -3322,11 +3315,9 @@ export default function ThemeShell({ designId }: {designId:string}){
                 key={tile.id}
                 tile={tile}
                 pinned={tile.id === pinnedTileId}
-                expanded={tile.id === expandedTileId}
-                thumbnail={!!expandedTileId && tile.id !== expandedTileId}
                 onPin={(id) => {
                   setPinnedTileId((cur) => (cur === id ? null : id))
-                  // Fixar NÃO expande e NÃO desfaz a expansão: são independentes.
+                  // Fixar NÃO abre tela cheia: são independentes.
                 }}
                 onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
                 showAudioControls
@@ -3446,7 +3437,23 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* ADICIONAR AMIGOS À CHAMADA */}
+      {/* TELA CHEIA da transmissão escolhida (tela ou câmera).
+          Fica ACIMA do painel e o painel CONTINUA MONTADO atrás — é o que
+          mantém os `<audio>` remotos tocando. Fechar com Esc, com o botão
+          "Recolher" ou quando o stream termina (o `stageTile` vira null). */}
+      {stageTile && (
+        <ScreenStage
+          tile={stageTile}
+          palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
+          onCollapse={() => setExpandedTileId(null)}
+          muted={!!activeCall?.muted}
+          onToggleMute={() => { callManager.toggleMute() }}
+          cameraOn={!!activeCall?.cameraOn}
+          onToggleCamera={() => { void callManager.toggleCamera() }}
+          onLeave={() => { void callManager.leave() }}
+          callTitle={conversations.find((c) => c.id === activeCall?.convId)?.title ?? peerTitle ?? undefined}
+        />
+      )}
       {showAddToCall && (
         <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:80 }} onClick={()=>setShowAddToCall(false)}>
           <div style={{ background:t.panel, border:`1px solid ${borderColor}`, borderRadius:12, padding:22, width:480 }} onClick={e=>e.stopPropagation()}>

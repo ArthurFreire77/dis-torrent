@@ -5,6 +5,7 @@ import { useConversations, useEngineEvents, useMessages, useNetwork } from '../a
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
+import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -793,11 +794,14 @@ export default function MobileShell() {
   const visibleCallTilesMobile = useMemo(() => {
     const valid = callTilesMobile.map((tile) => tile.id)
     const pin = pinnedTileId && valid.includes(pinnedTileId) ? pinnedTileId : null
-    const exp = expandedTileId && valid.includes(expandedTileId) ? expandedTileId : null
-    const ordered = pin ? sortTilesForPin(callTilesMobile, pin) : callTilesMobile
-    if (exp) return [ordered.find((x) => x.id === exp)!, ...ordered.filter((x) => x.id !== exp)]
-    return ordered
-  }, [callTilesMobile, pinnedTileId, expandedTileId])
+    return pin ? sortTilesForPin(callTilesMobile, pin) : callTilesMobile
+  }, [callTilesMobile, pinnedTileId])
+
+  /** Quadrado aberto em TELA CHEIA no mobile (null = layout normal). */
+  const stageTileMobile = useMemo(
+    () => (expandedTileId ? callTilesMobile.find((tile) => tile.id === expandedTileId) ?? null : null),
+    [callTilesMobile, expandedTileId],
+  )
 
   useEffect(() => {
     if (pinnedTileId && !callTilesMobile.some((tile) => tile.id === pinnedTileId)) setPinnedTileId(null)
@@ -2003,24 +2007,23 @@ export default function MobileShell() {
                 próprio; fixar/expandir vale para pessoa E para tela. */}
             {(() => {
               if (callTilesMobile.length === 0) return null
-              const expanded = !!expandedTileId
-              const cols = expanded ? 'minmax(0, 1fr)' : pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
+              const cols = pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
               return (
                 <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 8 }}>
                   {visibleCallTilesMobile.map((tile) => (
                     <div
                       key={tile.id}
                       style={{
-                        // No mobile o quadrado da tela expandido ocupa a maior
-                        // área útil que o painel permite (sem estourar a tela).
-                        height: tile.id === expandedTileId ? '52vh' : callPanelSize === 'compact' ? 92 : tile.kind === 'screen' ? 168 : 124,
+                        // TELA CHEIA é overlay (ScreenStage), não um quadrado
+                        // maior: no celular "expandir" dentro do painel de 46vh
+                        // continuava pequeno.
+                        height: callPanelSize === 'compact' ? 92 : tile.kind === 'screen' ? 168 : 124,
                         transition: 'height 180ms ease',
                       }}
                     >
                       <CallTileComponent
                         tile={tile}
                         pinned={tile.id === pinnedTileId}
-                        expanded={tile.id === expandedTileId}
                         onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
                         onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
                         callDeafened={!!activeCall.deafened}
@@ -2034,6 +2037,22 @@ export default function MobileShell() {
               )
             })()}
           </div>
+        )}
+
+        {/* TELA CHEIA no mobile: mesmo overlay do desktop. O painel (e os
+            `<audio>` remotos) continua montado atrás. */}
+        {stageTileMobile && (
+          <ScreenStage
+            tile={stageTileMobile}
+            palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
+            onCollapse={() => setExpandedTileId(null)}
+            muted={!!activeCall?.muted}
+            onToggleMute={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}
+            cameraOn={!!activeCall?.cameraOn}
+            onToggleCamera={() => { void callManager.toggleCamera() }}
+            onLeave={() => { void callManager.leave() }}
+            callTitle={peerTitle ?? channelName ?? undefined}
+          />
         )}
 
         {/* mensagens — lista flat estilo desktop */}

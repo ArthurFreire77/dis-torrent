@@ -123,6 +123,10 @@ export const Icons = {
   attach: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48',
   download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 M7 10l5 5 5-5 M12 15V3',
   screen: 'M2 4h20v12H2z M8 20h8 M12 16v4',
+  // Tela cheia: setas divergentes (expandir) e convergentes (recolher).
+  // Glifo de texto (□/▣) ficava fino e sem peso visual em botão pequeno.
+  expand: 'M8 3H5a2 2 0 0 0-2 2v3 M16 3h3a2 2 0 0 1 2 2v3 M8 21H5a2 2 0 0 1-2-2v-3 M16 21h3a2 2 0 0 0 2-2v-3',
+  collapse: 'M3 8h3a2 2 0 0 0 2-2V3 M21 8h-3a2 2 0 0 1-2-2V3 M3 16h3a2 2 0 0 1 2 2v3 M21 16h-3a2 2 0 0 0-2 2v3',
   camera: 'M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z',
   file: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8',
   pin: 'M12 17v5 M9 10.8V4h6v6.8l2.2 2.2a1 1 0 0 1-.7 1.7H7.5a1 1 0 0 1-.7-1.7z',

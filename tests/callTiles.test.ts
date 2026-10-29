@@ -231,18 +231,18 @@ test('rótulo da tela identifica quem compartilha', () => {
   assert.equal(screenTileLabel('Eu', true), 'Sua tela')
 })
 
-test('expandir a tela não remove os outros quadrados (áudio continua)', () => {
-  // Regra de layout: `visibleCallTiles` mantém TODOS os tiles, apenas reordena
-  // o expandido para a frente. Se a expansão filtrasse a lista, os `<audio>`
-  // dos remotos desmontariam e a chamada ficaria muda.
+test('tela cheia é overlay: a lista de quadrados não perde ninguém', () => {
+  // Regra de produto: abrir a tela cheia NÃO remove quadrados da lista. O
+  // overlay (`ScreenStage`) é montado por cima e o painel continua atrás, o que
+  // mantém os `<audio>` remotos vivos. Se a expansão filtrasse a lista, a
+  // chamada ficaria muda.
   const tiles = buildCallTiles({
     participants: [{ fp: ME, nickname: 'Eu' }, { fp: PEER, nickname: 'Bob', stream: fakeStream() }],
     myFp: ME,
     local: { stream: fakeStream(), screenStream: fakeStream(), cameraOn: true, sharing: true },
   })
   const screenId = screenTileId(ME)
-  const ordered = sortTilesForPin(tiles, screenId)
-  assert.equal(ordered[0].id, screenId)
-  assert.equal(ordered.length, tiles.length, 'ninguém sai da chamada ao expandir a tela')
-  assert.ok(ordered.some((t) => t.fp === PEER), 'o remoto continua na lista')
+  assert.ok(tiles.some((t) => t.id === screenId), 'o quadrado da tela existe')
+  assert.ok(tiles.some((t) => t.fp === PEER), 'o remoto continua na lista')
+  assert.equal(tiles.length, 3, 'eu + minha tela + Bob')
 })
