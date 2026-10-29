@@ -4395,20 +4395,72 @@ fn log_filter() -> tracing_subscriber::EnvFilter {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,distorrent_core=info"))
 }
 
-fn main() {
-    // Logs estruturados (JSON, 1 evento por linha) com DISTORRENT_LOG_JSON=1 —
-    // para coleta em arquivo/SIEM. Nunca logar chaves, senhas ou conteúdo
-    // de mensagens (revisar qualquer novo `tracing::` antes de mergear).
-    if std::env::var("DISTORRENT_LOG_JSON").as_deref() == Ok("1") {
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(log_filter())
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(log_filter())
-            .init();
+/// Arquivo de log do app: `%APPDATA%\com.distorrent.app\distorrent.log`
+/// (Linux: `~/.local/share/com.distorrent.app/distorrent.log`).
+///
+/// POR QUE ISSO EXISTE: o app empacotado é iniciado pelo atalho/instalador, sem
+/// console — logo o stdout do `tracing` não vai para lugar nenhum. Quando alguém
+/// relata "tela branca" (o WebView não carregou) não havia NADA para inspecionar:
+/// nem erro, nem versão, nem se o motor subiu. Com o arquivo, o usuário consegue
+/// mandar o `distorrent.log` e o diagnóstico deixa de ser adivinhação.
+/// Sem segredos: o filtro e as mensagens seguem a mesma regra do console.
+fn log_file_writer() -> Option<std::fs::File> {
+    let dir = dirs::data_dir()?.join("com.distorrent.app");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("distorrent.log");
+    // Rotação simples: acima de 2 MB, vira `.1` (uma geração basta para um
+    // relato de bug; manter histórico infinito só cresce o disco do usuário).
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 2 * 1024 * 1024 {
+            let _ = std::fs::rename(&path, path.with_extension("log.1"));
+        }
     }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()
+}
+
+fn main() {
+    // Logs em ARQUIVO + console. `DISTORRENT_LOG_JSON=1` mantém o formato JSON
+    // (1 evento por linha) para coleta; o padrão é texto legível.
+    //
+    // Sem `boxed()` de propósito: ele exigiria a feature `registry` do
+    // tracing-subscriber e mais uma dependência para um caso de 2 formatos.
+    // `if/else` com o tipo concreto resolve e o compilador continua checando.
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let json = std::env::var("DISTORRENT_LOG_JSON").as_deref() == Ok("1");
+    let registry = tracing_subscriber::registry().with(log_filter());
+    let file = log_file_writer();
+    let boot = match (file, json) {
+        (Some(f), true) => registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(f))
+                    .json(),
+            )
+            .try_init(),
+        (Some(f), false) => registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(f)),
+            )
+            .try_init(),
+        (None, true) => registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).json())
+            .try_init(),
+        // Sem arquivo (pasta indisponível): não impede o app de abrir.
+        (None, false) => registry
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .try_init(),
+    };
+    let _ = boot;
 
     // `mut` só é usado no desktop (o autostart é reatribuído); no Android o
     // bloco `#[cfg(desktop)]` some e o compilador reclamaria de `unused_mut`.
