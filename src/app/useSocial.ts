@@ -182,7 +182,10 @@ export function usePresence() {
         .catch(() => { if (alive) setMap(new Map()) })
     }
     load()
-    const t = setInterval(load, 6000)
+    // A presença é uma verificação periódica, não um fluxo instantâneo.
+    // A UI consulta a cada 30s para convergir no mesmo prazo usado pelo
+    // reaper nativo, evitando amigos presos como online por muito tempo.
+    const t = setInterval(load, 30000)
     const un = services.subscribe((ev) => {
       if (ev.type === 'presence_changed') {
         setMap((prev) => {

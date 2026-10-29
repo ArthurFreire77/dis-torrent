@@ -868,6 +868,45 @@ impl crate::storage::Store {
             )
             .optional()
             .map_err(|e| e.to_string())?;
+        let mut presence = r.unwrap_or(PresenceView {
+            fp: fp.to_string(),
+            status: "offline".into(),
+            custom: String::new(),
+            custom_emoji: String::new(),
+            updated_at: 0,
+        });
+        // Presença recebida tem validade de 30 segundos. Sem heartbeat,
+        // um peer que fechou o app não pode continuar aparecendo online.
+        if presence.status != "offline" && presence.updated_at < crate::identity::now_ms() - 30_000
+        {
+            presence.status = "offline".into();
+            presence.custom.clear();
+            presence.custom_emoji.clear();
+        }
+        Ok(presence)
+    }
+
+    /// Lê o status local sem aplicar expiração de 30 segundos.
+    /// Usado pelo heartbeat: presença local nunca deve perder `idle` ou `dnd`
+    /// apenas porque passou o período da última publicação.
+    pub fn presence_get_live(&self, fp: &str) -> Result<PresenceView, String> {
+        let conn = self.locked();
+        let r = conn
+            .query_row(
+                "SELECT fp, status, custom, custom_emoji, updated_at FROM presence WHERE fp=?1",
+                params![fp],
+                |r| {
+                    Ok(PresenceView {
+                        fp: r.get(0)?,
+                        status: r.get(1)?,
+                        custom: r.get(2)?,
+                        custom_emoji: r.get(3)?,
+                        updated_at: r.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         Ok(r.unwrap_or(PresenceView {
             fp: fp.to_string(),
             status: "offline".into(),
@@ -893,8 +932,18 @@ impl crate::storage::Store {
                 })
             })
             .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())
+        let mut rows = rows
+            .collect::<Result<Vec<PresenceView>, _>>()
+            .map_err(|e| e.to_string())?;
+        let now = crate::identity::now_ms();
+        for presence in &mut rows {
+            if presence.status != "offline" && presence.updated_at < now - 30_000 {
+                presence.status = "offline".into();
+                presence.custom.clear();
+                presence.custom_emoji.clear();
+            }
+        }
+        Ok(rows)
     }
 
     // ======================= PERFIL =======================

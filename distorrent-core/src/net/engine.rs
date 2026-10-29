@@ -6890,6 +6890,10 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     // se um frame de amizade se perdeu no relay). 5s = recupera rápido sem
     // floodar (1 frame pequeno por peer pendente).
     let mut friend_tick = interval(Duration::from_secs(5));
+    // Heartbeat da presença a cada 30s. Ele renova o updated_at local e
+    // anuncia nosso estado aos peers, permitindo que amigos antigos sejam
+    // marcados offline sem depender de um pedido manual da UI.
+    let mut presence_tick = interval(Duration::from_secs(30));
     loop {
         tokio::select! {
             Some(peer) = disc_rx.recv() => {
@@ -6953,6 +6957,25 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 // (o receptor reenvia o aceite — ver handler de FriendRequest).
                 for fp in engine.online_peer_fps() {
                     engine.retry_pending_friend_request(&fp);
+                }
+            }
+            _ = presence_tick.tick() => {
+                let me = engine.identity.fingerprint.clone();
+                if let Ok(mut presence) = engine.store.presence_get_live(&me) {
+                    let status = if presence.status.is_empty() || presence.status == "offline" {
+                        "online".to_string()
+                    } else {
+                        presence.status.clone()
+                    };
+                    presence.status = status.clone();
+                    if engine.store.presence_set(
+                        &me,
+                        &status,
+                        &presence.custom,
+                        &presence.custom_emoji,
+                    ).is_ok() {
+                        engine.announce_presence();
+                    }
                 }
             }
         }
@@ -10778,7 +10801,12 @@ async fn handle_frame(
             });
         }
         SecureFrame::PresencePing => {
-            let p = engine.store.presence_get(peer_fp).unwrap_or_default();
+            // Responde com a NOSSA presença. Antes buscava peer_fp, podendo
+            // devolver/ecoar o estado do remetente em vez do estado deste nó.
+            let p = engine
+                .store
+                .presence_get_live(&engine.identity.fingerprint)
+                .unwrap_or_default();
             let st = if p.status == "offline" {
                 "online".to_string()
             } else {

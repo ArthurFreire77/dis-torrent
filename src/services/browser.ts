@@ -282,7 +282,7 @@ function handleIncomingBroadcast(ev: EngineEvent) {
 
 // ---------- Presença (heartbeat) ----------
 const PRESENCE_PREFIX = 'distorrent:presence:'
-const PRESENCE_TTL_MS = 15000
+const PRESENCE_TTL_MS = 30000
 let heartbeatTimer: number | null = null
 
 function presenceKey(fp: string) { return PRESENCE_PREFIX + fp }

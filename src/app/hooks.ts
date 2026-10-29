@@ -42,7 +42,7 @@ export function useIdentity() {
   return { identity, loading, create, rename, setIdentity }
 }
 
-export function useNetwork(pollMs = 4000) {
+export function useNetwork(pollMs = 30000) {
   const [status, setStatus] = useState<NetworkStatusView | null>(null)
   const [peers, setPeers] = useState<PeerView[]>([])
 
