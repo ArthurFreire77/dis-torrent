@@ -53,13 +53,41 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 }
-if (-not (Test-Path $appExe)) {
-    if (Test-Path $cargoExe) {
+# A ORDEM IMPORTA: o `distorrent.exe` que o instalador empacota tem de ser o
+# binário RECÉM-COMPILADO, nunca um resto de build anterior.
+#
+# BUG REAL (1.1.9): o script só copiava quando `distorrent.exe` NÃO existia.
+# Sobrou um `distorrent.exe` de 16:34 (1.1.8) ao lado de um `distorent-cli.exe`
+# de 18:02 (1.1.9); com `-SkipBuild` a cópia era pulada e o Inno publicou um
+# instalador rotulado 1.1.9 contendo o app 1.1.8. Agora a cópia é SEMPRE feita
+# quando a origem é mais nova (ou quando a versão gravada no binário difere).
+if (Test-Path $cargoExe) {
+    $needCopy = -not (Test-Path $appExe)
+    if (-not $needCopy) {
+        $srcTime = (Get-Item $cargoExe).LastWriteTimeUtc
+        $dstTime = (Get-Item $appExe).LastWriteTimeUtc
+        $srcVer = (Get-Item $cargoExe).VersionInfo.ProductVersion
+        $dstVer = (Get-Item $appExe).VersionInfo.ProductVersion
+        if ($srcTime -gt $dstTime -or $srcVer -ne $dstVer) {
+            Write-Host "  AVISO: distorrent.exe ($dstVer) estava DESATUALIZADO — recopiando de distorent-cli.exe ($srcVer)" -ForegroundColor Yellow
+            $needCopy = $true
+        }
+    }
+    if ($needCopy) {
         Copy-Item $cargoExe $appExe -Force
         Write-Host "  $([System.IO.Path]::GetFileName($cargoExe)) -> distorrent.exe" -ForegroundColor DarkGray
-    } else {
-        Fail "binário do app não existe: nem $appExe nem $cargoExe (rode sem -SkipBuild)."
     }
+} elseif (-not (Test-Path $appExe)) {
+    Fail "binário do app não existe: nem $appExe nem $cargoExe (rode sem -SkipBuild)."
+}
+
+# Confere o que vai ser empacotado: versão e data do BINÁRIO, não do rótulo.
+$appVer = (Get-Item $appExe).VersionInfo.ProductVersion
+$appTime = (Get-Item $appExe).LastWriteTime
+Write-Host "  app empacotado: $appVer  ($appTime)" -ForegroundColor DarkGray
+if ($appVer -ne $appVersion) {
+    Write-Host "  AVISO: o binário diz '$appVer' mas o instalador será rotulado '$appVersion'." -ForegroundColor Yellow
+    Write-Host "         Rode sem -SkipBuild (ou `cargo build --release`) para casar os dois." -ForegroundColor Yellow
 }
 
 # --- Assinatura de código (opcional, best-effort) ---
