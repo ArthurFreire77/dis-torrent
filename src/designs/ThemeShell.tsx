@@ -24,6 +24,7 @@ import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CreateServerWizard from '../components/CreateServerWizard'
 import BotConfigPanel from '../components/BotConfigPanel'
+import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import ServerSettings from '../components/server/ServerSettings'
 import {
   JoinServerForm,
@@ -1961,7 +1962,11 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
-  if (phase === 'loading') return <BootScreen />
+  // ATUALIZAÇÃO ANTES DE ENTRAR — o gate roda em paralelo com o boot e só
+  // aparece quando há versão nova de verdade (ver `components/UpdateGate.tsx`).
+  const updateGate = useUpdateGate(true)
+
+  if (phase === 'loading') return (<><BootScreen /><UpdateOverlay api={updateGate} /></>)
   if (phase === 'create') return <CreateAccount onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
 

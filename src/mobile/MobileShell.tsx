@@ -9,6 +9,7 @@ import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
+import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { downloadManager } from '../services/downloadManager'
 import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
@@ -1841,7 +1842,11 @@ export default function MobileShell() {
     )
   }
 
-  if (phase === 'loading') return <BootScreen native={services.kind === 'native'} />
+  // ATUALIZAÇÃO ANTES DE ENTRAR (mesmo gate do desktop). Só aparece quando há
+  // versão nova; falha de rede não atrapalha o boot.
+  const updateGate = useUpdateGate(true)
+
+  if (phase === 'loading') return (<><BootScreen native={services.kind === 'native'} /><UpdateOverlay api={updateGate} /></>)
   if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 

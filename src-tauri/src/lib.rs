@@ -20,6 +20,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 // notificações nativas do sistema. Ver o cabeçalho do módulo para as decisões
 // de transparência (nada de processo oculto ou script de persistência).
 mod background;
+// Atualização automática pelo GitHub (checagem no boot + instalador assinado
+// por hash). Ver o cabeçalho do módulo para as decisões de segurança.
+mod updater;
 
 // Comandos do segundo plano reexportados para o `generate_handler!` abaixo.
 use background::{
@@ -4436,7 +4439,11 @@ fn main() {
     let file = log_file_writer();
     let boot = match (file, json) {
         (Some(f), true) => registry
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .json(),
+            )
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_ansi(false)
@@ -4453,7 +4460,11 @@ fn main() {
             )
             .try_init(),
         (None, true) => registry
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .json(),
+            )
             .try_init(),
         // Sem arquivo (pasta indisponível): não impede o app de abrir.
         (None, false) => registry
@@ -4566,6 +4577,15 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_version,
+            updater::update_check,
+            updater::update_download,
+            updater::update_apply,
+            updater::update_auto_get,
+            updater::update_auto_set,
+            updater::update_flag_get,
+            updater::update_flag_set,
+            updater::update_cleanup,
+            updater::open_release_page,
             identity_get,
             identity_create,
             identity_rename,

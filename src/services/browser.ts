@@ -1030,6 +1030,22 @@ export const browserServices: DisTorrentServices = {
   webrtcReport: () => Promise.resolve(),
   netDiag: () => Promise.reject(new Error('diagnóstico de rede só existe no app nativo')),
 
+  // Atualização automática SÓ no app nativo: no navegador não existe instalador
+  // para rodar. A checagem falha de propósito e a UI mostra a versão web — em
+  // vez de prometer uma atualização que não aconteceria.
+  updateCheck: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
+  updateDownload: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
+  updateApply: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
+  updateAutoGet: () => Promise.resolve(false),
+  updateAutoSet: () => Promise.resolve(),
+  updateFlagGet: () => Promise.resolve(null),
+  updateFlagSet: () => Promise.resolve(),
+  updateCleanup: () => Promise.resolve(0),
+  openReleasePage: async (url: string) => {
+    // No navegador a própria página pode abrir a aba (não há WebView a escapar).
+    window.open(url, '_blank', 'noopener,noreferrer')
+  },
+
   privacyGet: () => {
     const stored = driver.get<string>('privacy_mode') ?? 'encrypted'
     const mode = stored as PrivacyMode

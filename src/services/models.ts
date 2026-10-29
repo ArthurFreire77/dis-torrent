@@ -576,6 +576,24 @@ export interface DisTorrentServices {
   netDiag(): Promise<NetDiag>
   /** Relata ao Rust o que a página enxerga de WebRTC (diagnóstico do WebKitGTK). */
   webrtcReport(info: string): Promise<void>
+
+  // ---- Atualização automática (GitHub Releases) ----
+  //
+  // O Rust só busca/baixa; a decisão de versão é pura em `updater.ts`. O
+  // download passa por `update_download`, que confere o SHA-256 do asset antes
+  // de o arquivo poder ser executado.
+  updateCheck(): Promise<import('./updater').UpdateInfo>
+  /** Salva em `data_dir/updates` e devolve o caminho absoluto. */
+  updateDownload(url: string, name: string, digest: string): Promise<string>
+  /** Executa o instalador (Windows: Inno silencioso + reabre o app). */
+  updateApply(path: string): Promise<void>
+  updateAutoGet(): Promise<boolean>
+  updateAutoSet(enabled: boolean): Promise<void>
+  updateFlagGet(key: string): Promise<string | null>
+  updateFlagSet(key: string, value: string): Promise<void>
+  updateCleanup(): Promise<number>
+  /** Abre a página da release no navegador (fallback honesto por plataforma). */
+  openReleasePage(url: string): Promise<void>
   relayStatus(): Promise<RelayLegStatus[]>
   connectAddr(addr: string, expectedFp?: string | null): Promise<void>
   disconnectPeer(fp: string): Promise<void>
@@ -956,6 +974,15 @@ export interface VoiceMediaStats {
   video_packets_in?: number | null
   frames_in?: number | null
   frames_out?: number | null
+  /**
+   * Quantos pares da chamada estão em `connected`/total AGORA.
+   *
+   * `state` acima é o PIOR par (de propósito: o HashMap não tinha ordem
+   * estável). Sem esta contagem o consumidor tratava `failed` de UM par como
+   * "a chamada morreu" e derrubava todos — o "cai sozinho" do grupo.
+   */
+  peers_connected?: number | null
+  peers_total?: number | null
 }
 
 /**

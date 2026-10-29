@@ -65,6 +65,18 @@ export const tauriServices: DisTorrentServices = {
   netDiag: () => invoke<import('./models').NetDiag>('net_diag'),
   webrtcReport: (info: string) => invoke('webrtc_report', { info }),
 
+  // Atualização automática. A checagem é best-effort: quem chama trata o erro.
+  updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check'),
+  updateDownload: (url, name, digest) =>
+    invoke<string>('update_download', { url, name, digest }),
+  updateApply: (path) => invoke<void>('update_apply', { path }),
+  updateAutoGet: () => invoke<boolean>('update_auto_get'),
+  updateAutoSet: (enabled) => invoke<void>('update_auto_set', { enabled }),
+  updateFlagGet: (key) => invoke<string | null>('update_flag_get', { key }),
+  updateFlagSet: (key, value) => invoke<void>('update_flag_set', { key, value }),
+  updateCleanup: () => invoke<number>('update_cleanup'),
+  openReleasePage: (url) => invoke<void>('open_release_page', { url }),
+
   relayStatus: () => invoke<RelayLegStatus[]>('relay_status'),
 
   connectAddr: (addr, expectedFp) =>

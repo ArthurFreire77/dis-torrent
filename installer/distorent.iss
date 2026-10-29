@@ -72,7 +72,12 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Fecha o app aberto antes de sobrescrever o exe (senão o install falha com
 ; "arquivo em uso" e o usuário acha que o instalador está quebrado).
 CloseApplications=yes
-RestartApplications=no
+; REABRE o app depois de instalar. É o que faz a ATUALIZAÇÃO AUTOMÁTICA
+; ("atualizar antes de entrar") terminar sozinha: quando o próprio app executa
+; este setup com /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS, o Inno fecha o
+; processo antigo, instala a versão nova e abre de novo — sem o usuário ter de
+; procurar o atalho. Numa instalação manual o efeito é o mesmo (desejável).
+RestartApplications=yes
 ; Versão exibida em Aplicativos e no título do wizard é a textual
 ; ("1.1.7-pre-alpha"); o VersionInfo do .exe é numérico porque o Windows não
 ; aceita sufixo em recurso de versão.
