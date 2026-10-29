@@ -14,9 +14,16 @@ fn spawn_user(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = distorrent_core::identity::Keypair::generate();
     let engine = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
+    let relay_fp = engine.identity().fingerprint.clone();
     engine.set_relay_backend(Arc::new(MultiRelay::of(vec![
-        Arc::new(MqttRelay::new("broker.emqx.io", 1883)),
-        Arc::new(MqttRelay::new("test.mosquitto.org", 1883)),
+        // O broker expulsa a conexão anterior se dois peers usarem o mesmo
+        // client_id; espelhe a identidade por perna usada no backend de produção.
+        Arc::new(MqttRelay::new_with_fp("broker.emqx.io", 1883, &relay_fp)),
+        Arc::new(MqttRelay::new_with_fp(
+            "test.mosquitto.org",
+            1883,
+            &relay_fp,
+        )),
     ])));
     engine.start_with_discovery(false).unwrap();
     std::thread::sleep(Duration::from_millis(150));

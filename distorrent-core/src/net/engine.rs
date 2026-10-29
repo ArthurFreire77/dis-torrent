@@ -3809,7 +3809,10 @@ impl NetworkEngine {
 
     /// Entra numa comunidade via token do dono. Conecta ao host e envia JoinCommunity.
     pub fn join_community(&self, token: &str) -> Result<String> {
-        let (host_fp, cid, member_fp, exp, sig) = crate::protocol::parse_invite_token(token)?;
+        // O usuário cola o link inteiro, não apenas o payload base64url.
+        // Normalizar aqui evita o bug que ficava invisível só na UI desktop.
+        let normalized = crate::protocol::extract_invite_token(token);
+        let (host_fp, cid, member_fp, exp, sig) = crate::protocol::parse_invite_token(&normalized)?;
         if crate::identity::now_ms() > exp {
             return Err(DistorrentError::Protocol("convite expirado".into()));
         }
@@ -9689,28 +9692,52 @@ async fn handle_frame(
             community_id,
             token,
         } => {
-            // HOST: valida token assinado pelo DONO (eu, neste caso)
+            // O dono e membros conhecidos podem aceitar o join. Assim o servidor
+            // continua tendo seed enquanto o dono estiver offline: qualquer membro
+            // sincronizado pode apresentar o estado que recebeu do dono.
             let comm = engine
                 .store
                 .get_community(&community_id)?
                 .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
-            if comm.2 != engine.identity.fingerprint {
-                return Err(DistorrentError::Protocol("só o host aceita joins".into()));
-            }
             let (tok_host, _cid, member_fp, exp, sig) =
                 crate::protocol::parse_invite_token(&token)?;
             const WILDCARD: &str = "000000000000";
             let bound = member_fp == WILDCARD || member_fp == peer_fp;
-            if tok_host != engine.identity.fingerprint || _cid != community_id || !bound {
+            if _cid != community_id || !bound || comm.2 != tok_host {
                 return Err(DistorrentError::Protocol(
-                    "token não corresponde a este peer".into(),
+                    "token não corresponde ao servidor ou peer".into(),
+                ));
+            }
+            let is_owner = comm.2 == engine.identity.fingerprint;
+            if !is_owner
+                && !engine
+                    .store
+                    .list_members(&community_id)?
+                    .iter()
+                    .any(|(fp, _, _)| fp == &engine.identity.fingerprint)
+            {
+                return Err(DistorrentError::Protocol(
+                    "membro não autorizado como seed deste servidor".into(),
                 ));
             }
             if crate::identity::now_ms() > exp {
                 return Err(DistorrentError::Protocol("convite expirado".into()));
             }
+            let owner_key = if is_owner {
+                engine.keypair.public_hex()
+            } else {
+                engine
+                    .store
+                    .get_peer(&tok_host)?
+                    .map(|p| p.pubkey_hex)
+                    .ok_or_else(|| {
+                        DistorrentError::Protocol(
+                            "chave pública do dono ainda não foi sincronizada".into(),
+                        )
+                    })?
+            };
             if !Keypair::verify(
-                &engine.keypair.public_hex(),
+                &owner_key,
                 &crate::protocol::invite_sign_bytes(&community_id, &member_fp, exp),
                 &sig,
             )? {
@@ -9742,23 +9769,31 @@ async fn handle_frame(
             category,
             icon,
         } => {
-            // MEMBRO: só aceita estado vindo do HOST REAL. O `owner_fp` do
-            // frame NÃO é confiável (vem do remetente) — a autoridade é o dono
-            // GRAVADO localmente; no primeiro sync pós-join (comunidade ainda
-            // inexistente), o host deve bater com o fp assinado no convite
-            // pendente. Sem este gate, qualquer peer conectado sequestra a
-            // comunidade (full sync sobrescreve owner/canais/cargos/bots).
-            if peer_fp != owner_fp {
-                return Err(DistorrentError::Protocol(
-                    "CommunityState com owner forjado".into(),
-                ));
-            }
+            // Estado pode vir do dono ou de um seed membro conhecido. Isso permite
+            // que um servidor continue disponível quando o dono estiver offline,
+            // sem aceitar estado de um peer fora da lista do servidor.
             let allowed = match engine
                 .store
                 .get_community(&community_id)?
                 .map(|(_, _, o)| o)
             {
-                Some(stored_owner) => stored_owner == peer_fp,
+                Some(stored_owner) => {
+                    if stored_owner != owner_fp {
+                        false
+                    } else if peer_fp == owner_fp {
+                        true
+                    } else {
+                        engine
+                            .store
+                            .list_members(&community_id)
+                            .map(|members| {
+                                members
+                                    .iter()
+                                    .any(|(fp, _, _)| fp == &peer_fp && fp != &engine.identity.fingerprint)
+                            })
+                            .unwrap_or(false)
+                    }
+                }
                 None => {
                     // O handshake autentica a identidade, mas o token também
                     // precisa provar que esse host emitiu o convite. Sem esta
@@ -9780,8 +9815,8 @@ async fn handle_frame(
                     const WILDCARD: &str = "000000000000";
                     let member_bound =
                         member_fp == WILDCARD || member_fp == engine.identity.fingerprint;
-                    let host_key = engine.store.get_peer(peer_fp)?.map(|p| p.pubkey_hex);
-                    if host_fp != peer_fp
+                    let host_key = engine.store.get_peer(&host_fp)?.map(|p| p.pubkey_hex);
+                    if host_fp != owner_fp
                         || token_cid != community_id
                         || !member_bound
                         || crate::identity::now_ms() > exp

@@ -27,6 +27,8 @@ pub mod natpmp;
 /// CONTEÚDO por mensagem) e do authlimit (vault).
 pub mod netlimit;
 pub mod peer_relay;
+/// Rate limit específico de reações recebidas (independente do limite de frames).
+pub mod reaction_limit;
 pub mod relay;
 pub mod socks5;
 pub mod stun;
