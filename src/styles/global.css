@@ -20,6 +20,11 @@ button{font:inherit}
   .msg-tools{opacity:1;pointer-events:auto}
 }
 
+/* Seletor de reação: no desktop o painel abre por clique e fica ancorado na
+   mensagem. Em telas pequenas (mesma largura do shell mobile) ele precisa caber
+   sem estourar a borda — largura em `min()` com o viewport. */
+.reaction-picker{width:min(250px, calc(100vw - 32px))}
+
 /* mobile polish */
 @media (max-width: 768px){
   .hide-mobile{ display:none !important }

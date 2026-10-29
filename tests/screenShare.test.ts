@@ -362,3 +362,66 @@ test('monitores: fora do app nativo devolve lista vazia em vez de inventar', asy
   assert.ok(Array.isArray(list))
   assert.equal(list.length, 0, 'sem runtime Tauri não há monitores para listar')
 })
+
+test('Android: webview que expõe getDisplayMedia (mas lança TypeError) não promete captura', async () => {
+  const {
+    detectScreenEnvironment,
+    isAndroidRuntime,
+    buildSourceChoices,
+    supportsScreenSource,
+  } = await import('../src/services/screenShare.ts')
+
+  // Regressão real: no Android o WebView TEM `getDisplayMedia` e a chamada falha
+  // com `TypeError`. A UI prometia compartilhar tela e o usuário recebia o erro
+  // ao tocar no botão — mentira de capacidade.
+  const realNavigator = globalThis.navigator
+  const realIsSecure = (globalThis as { isSecureContext?: boolean }).isSecureContext
+  try {
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36',
+        mediaDevices: { getDisplayMedia: () => { throw new TypeError('not supported') }, getUserMedia: () => {} },
+      },
+    })
+    ;(globalThis as { isSecureContext?: boolean }).isSecureContext = true
+
+    assert.equal(isAndroidRuntime(), true, 'UA de Android é reconhecido')
+    const env = detectScreenEnvironment(false)
+    assert.equal(env.platform, 'android')
+    assert.equal(env.backend, 'none', 'Android sem captura nativa não tem backend')
+    assert.equal(env.hasDisplayMedia, false, 'a função existir não significa captura')
+    for (const kind of ['screen', 'window', 'monitor'] as const) {
+      assert.equal(supportsScreenSource(env, kind), false, `${kind} indisponível no Android`)
+    }
+    const choices = buildSourceChoices(env, 'screen')
+    assert.ok(choices.every((c) => !c.available), 'nenhuma fonte disponível')
+    assert.match(env.notes.join(' '), /não entrega captura de tela/i)
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: realNavigator })
+    ;(globalThis as { isSecureContext?: boolean }).isSecureContext = realIsSecure
+  }
+})
+
+test('Windows: backend display-media oferece janela/app e áudio do sistema', async () => {
+  const { detectScreenEnvironment, supportsScreenSource } = await import('../src/services/screenShare.ts')
+  const realNavigator = globalThis.navigator
+  try {
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+        mediaDevices: { getDisplayMedia: async () => null, getUserMedia: async () => null },
+      },
+    })
+    const env = detectScreenEnvironment(false)
+    assert.equal(env.platform, 'windows')
+    assert.equal(env.backend, 'display-media')
+    // Compartilhar POR APP exige a superfície de janela.
+    assert.equal(supportsScreenSource(env, 'window'), true, 'janela/app disponível')
+    assert.equal(supportsScreenSource(env, 'monitor'), true)
+    assert.equal(env.systemAudio, true, 'Windows entrega áudio do sistema')
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: realNavigator })
+  }
+})

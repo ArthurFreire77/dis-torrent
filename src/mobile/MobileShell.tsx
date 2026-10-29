@@ -1321,7 +1321,14 @@ export default function MobileShell() {
     }
     load()
     const h = window.setInterval(load, 15000)
-    return () => { alive = false; window.clearInterval(h) }
+    // O mobile não escutava `profile_changed`: uma foto nova levava até 15 s
+    // para aparecer e, se o poll falhasse, não aparecia nunca. Mesmo padrão do
+    // ThemeShell — a reconciliação periódica continua sendo a rede de segurança.
+    const un = services.subscribe((ev: any) => {
+      if (ev.type !== 'profile_changed') return
+      setProfilesByFp(prev => ({ ...prev, [ev.fp]: ev.profile }))
+    })
+    return () => { alive = false; window.clearInterval(h); un() }
   }, [])
   const myFp = identity?.fingerprint ?? ''
   const readState = useReadState(selConv, myFp)
@@ -1895,7 +1902,11 @@ export default function MobileShell() {
               {(((activeCall as any)?.qualityNotice as string | undefined) || qualityError) && (
                 <span role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }}>{qualityError ?? ((activeCall as any)?.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}</span>
               )}
-              <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} disabled={!supportsScreenShare() && !(activeCall as any)?.sharing} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: supportsScreenShare() || (activeCall as any)?.sharing ? 'pointer' : 'not-allowed', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
+              {/* `disabled` escondia o porquê: no Android o botão não tem
+                  getDisplayMedia, mas o usuário só descobria tentando e não
+                  acontecendo nada. Deixar clicável + mensagem honesta é melhor —
+                  é o mesmo padrão do desktop. */}
+              <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>}
             {/* Receptor view-only: tela compartilhada chega como track de vídeo — exibe igual desktop.
                 VÍDEO NATIVO (Linux): o core decodifica em Rust; a UI desenha o frame JPEG por <img>. */}
@@ -2111,7 +2122,12 @@ export default function MobileShell() {
         </div>
         {identity && (
           <button aria-label="Você" onClick={() => setTab('profile')} style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', flexShrink: 0 }}>
-            <Avatar name={identity.nickname} fp={identity.fingerprint} size={32} />
+            <Avatar
+              name={identity.nickname}
+              fp={identity.fingerprint}
+              size={32}
+              avatarB64={profilesByFp[identity.fingerprint]?.avatar_b64}
+            />
           </button>
         )}
       </div>
@@ -2121,7 +2137,12 @@ export default function MobileShell() {
         <div style={{ position: 'fixed', inset: 0, zIndex: 30, background: 'rgba(0,0,0,.5)', display: 'flex' }} onClick={() => setShowDrawer(false)}>
           <div style={{ width: 280, maxWidth: '84vw', background: t.sidebar, borderRight: `1px solid ${t.border}`, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: 16, display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${t.border}`, paddingTop: 'calc(16px + env(safe-area-inset-top))' }}>
-              {identity && <Avatar name={identity.nickname} fp={identity.fingerprint} size={40} />}
+              {identity && <Avatar
+                name={profilesByFp[identity.fingerprint]?.display_name || identity.nickname}
+                fp={identity.fingerprint}
+                size={40}
+                avatarB64={profilesByFp[identity.fingerprint]?.avatar_b64}
+              />}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{identity?.nickname}</div>
                 <div style={{ fontSize: 10, color: t.muted, fontFamily: MONO }}>{identity?.fingerprint.slice(0, 14)}</div>

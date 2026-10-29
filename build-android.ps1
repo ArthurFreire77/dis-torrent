@@ -33,11 +33,16 @@ Push-Location $PSScriptRoot
 try {
     $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
 
-    # Arquivos que o CLI gera e o git ignora (tauri.settings.gradle, app/tauri.*).
-    # Num clone limpo eles NÃO existem e o gradle falha no settings.gradle —
-    # o init do Tauri recria só o que falta e NÃO sobrescreve o que já está
-    # versionado (MainActivity.kt, build.gradle.kts). Rodar init SEMPRE seria
-    # arriscado; rodar SÓ quando falta é o caminho seguro.
+    # Os arquivos gerados pelo CLI (`tauri.settings.gradle`,
+    # `app/tauri.build.gradle.kts`) NÃO são versionados e precisam listar os
+    # módulos Kotlin dos plugins do Cargo.toml. Num clone limpo eles faltam e o
+    # Gradle quebra no settings.gradle — por isso o init roda quando faltam.
+    #
+    # NÃO rodar sempre: o init reescreve `buildSrc/**` (sem `package`, o que
+    # quebra TODO build com "Could not find implementation class RustPlugin") e
+    # injeta blocos do plugin de deep-link no AndroidManifest, que é versionado.
+    # Rodar só quando falta é o caminho seguro — e o `node_modules/.cache` do
+    # CI já cobre o caso do clone limpo.
     $needsInit = @(
         "src-tauri\gen\android\tauri.settings.gradle",
         "src-tauri\gen\android\app\tauri.properties",
@@ -47,6 +52,27 @@ try {
         Write-Host "`n[0/4] gerando arquivos do projeto Android (init)..." -ForegroundColor Yellow
         & $npm run tauri android init -- --ci
         if ($LASTEXITCODE -ne 0) { throw "tauri android init falhou" }
+        # O init espalha a lista de plugins; conferir que os módulos Kotlin dos
+        # plugins Rust entraram evita o APK que abre e fecha na hora (panic no
+        # `register_android_plugin` do setup).
+        $settings = Get-Content "src-tauri\gen\android\tauri.settings.gradle" -Raw
+        foreach ($required in @('tauri-plugin-deep-link', 'tauri-plugin-notification')) {
+            if ($settings -notmatch [regex]::Escape($required)) {
+                throw "o projeto Android não incluiu o módulo '$required' — o APK abriria e fecharia no boot (register_android_plugin falha). Rode: npm run tauri android init"
+            }
+        }
+        # O init remove o `package` destes dois arquivos (versionados); sem ele o
+        # Gradle falha com "Could not find implementation class RustPlugin".
+        foreach ($f in @(
+            "src-tauri\gen\android\buildSrc\src\main\java\com\distorrent\app\kotlin\BuildTask.kt",
+            "src-tauri\gen\android\buildSrc\src\main\java\com\distorrent\app\kotlin\RustPlugin.kt"
+        )) {
+            if (-not (Test-Path $f)) { continue }
+            $txt = Get-Content $f -Raw
+            if ($txt -notmatch '^package ') {
+                Set-Content $f -Value ("package com.distorrent.app.kotlin`n`n" + $txt) -NoNewline
+            }
+        }
     }
 
     if (-not $SkipChecks) {

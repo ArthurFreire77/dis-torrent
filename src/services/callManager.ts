@@ -308,13 +308,10 @@ export function supportsCalls(): boolean {
 export function supportsScreenShare(): boolean {
   try {
     if (typeof navigator === 'undefined') return false
-    const md: any = (navigator as any).mediaDevices
-    if (md?.getDisplayMedia) return true
-    // Caminho NATIVO (Linux/WebKitGTK): a captura e a codificação acontecem
-    // no core (xcap + GStreamer + webrtc-rs) — getDisplayMedia nem precisa
-    // existir na página. Sem isto o botão de tela ficava morto no desktop
-    // Linux mesmo com o pipeline inteiro já pronto no Rust.
-    return nativeVoiceAvailable === true
+    // Não basta a função existir: no Android o WebView expõe getDisplayMedia e
+    // ela lança `TypeError` na captura. `getScreenShareBackend` já resolve a
+    // plataforma (Android = none, salvo caminho nativo).
+    return getScreenShareBackend() !== 'none'
   } catch { return false }
 }
 
@@ -335,6 +332,14 @@ export function screenShareUnavailableReason(): string | null {
 export type ScreenShareBackend = 'display-media' | 'native' | 'none'
 export function getScreenShareBackend(): ScreenShareBackend {
   try {
+    // ANDROID PRIMEIRO: o WebView do sistema expõe `getDisplayMedia` mas ela
+    // lança `TypeError` (o wry 0.57 não mapeia display-capture). Olhar só a
+    // presença da função fazia o app oferecer "compartilhar tela" e o usuário
+    // receber "TypeError" ao tocar — mentira de capacidade, que é bug.
+    if (isAndroidRuntime()) {
+      if (nativeVoiceAvailable === true) return 'native'
+      return 'none'
+    }
     const md: any = typeof navigator !== 'undefined' ? (navigator as any).mediaDevices : null
     if (md?.getDisplayMedia) return 'display-media'
     if (nativeVoiceAvailable === true) return 'native'

@@ -194,7 +194,14 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
   else if (detectPlatformHint() === 'macos') platform = 'macos'
 
   const md = (typeof navigator !== 'undefined' ? (navigator as unknown as { mediaDevices?: Record<string, unknown> }).mediaDevices : null) ?? null
-  const hasDisplayMedia = typeof md?.getDisplayMedia === 'function'
+  // Android: o WebView do sistema EXPÕE `getDisplayMedia` (a função existe e é
+  // chamável), mas ela lança `TypeError` na hora da captura — não há
+  // MediaProjection mapeado no wry 0.57. Tratar só a presença da função fazia
+  // a UI prometer tela e o usuário receber "TypeError" ao tocar no botão.
+  // Aqui a plataforma decide antes: em Android o backend é NENHUM, a menos que
+  // exista captura nativa em Rust (não existe no Android hoje).
+  const androidNoCapture = platform === 'android' && !nativeAvailable
+  const hasDisplayMedia = !androidNoCapture && typeof md?.getDisplayMedia === 'function'
   let secureContext: boolean
   try { secureContext = typeof isSecureContext === 'undefined' ? true : !!isSecureContext } catch { secureContext = true }
 
@@ -231,8 +238,10 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
     // Chromium no Android NÃO entrega áudio do sistema (AudioPlaybackCapture
     // exigiria MediaProjection + foreground service, que o app não tem).
     surfaceSwitching = false
-    if (hasDisplayMedia) notes.push('Android: captura via MediaProjection do sistema (diálogo oficial aberto pelo app)')
-    else notes.push('Android: o WebView do sistema ainda não expõe getDisplayMedia nesta versão')
+    // O WebView do Android EXPÕE a função mas ela falha com TypeError: é
+    // exatamente por isso que a UI não pode prometer captura com base só na
+    // presença dela (era o "TypeError" que o usuário via ao tocar em "tela").
+    notes.push('Android: o WebView do sistema não entrega captura de tela (getDisplayMedia existe mas lança erro) — compartilhar tela ainda não é possível neste aparelho')
   } else if (platform === 'ios') {
     notes.push('iOS/iPadOS não oferece captura de tela para apps de terceiros')
   }
