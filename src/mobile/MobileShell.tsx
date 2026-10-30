@@ -37,6 +37,7 @@ import { activeToken } from '../shared/markdown'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { useSocialWindow, useMessageActions, usePresence, PRESENCE_COLOR, PRESENCE_LABEL, useReadState } from '../app/useSocial'
 import { BookmarksPanel } from '../components/social/Social'
+import { GroupPanel } from '../components/social/GroupPanel'
 import { shouldNotify, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
@@ -1303,6 +1304,31 @@ export default function MobileShell() {
   // fixar, resposta) via `useSocialWindow` — uma chamada em LOTE por janela.
   // canal de servidor? (definido aqui porque `messageNodes` já precisa dele)
   const isChannel = !!selCommunity
+  /** A conversa aberta é um grupo de DM? (afeta cabeçalho e painel de membros) */
+  const isGroupConv = selConvObj?.kind === 'group'
+  /**
+   * Membros do grupo aberto — vem do MOTOR.
+   *
+   * No mobile o grupo era tratado como DM: o subtítulo dizia "online/offline" e
+   * não havia como ver quem estava nele. O roster real está no SQLite
+   * (`groupMembers`), então perguntamos a ele.
+   */
+  const [groupMemberCount, setGroupMemberCount] = useState(0)
+  const [showGroupPanel, setShowGroupPanel] = useState(false)
+
+  useEffect(() => {
+    if (!selConv || !isGroupConv) { setGroupMemberCount(0); return }
+    let vivo = true
+    const ler = async () => {
+      try {
+        const mems = await services.groupMembers(selConv)
+        if (vivo) setGroupMemberCount(mems.length)
+      } catch { if (vivo) setGroupMemberCount(0) }
+    }
+    void ler()
+    const off = services.subscribe((ev) => { if (ev.type === 'group_synced') void ler() })
+    return () => { vivo = false; off() }
+  }, [selConv, isGroupConv])
 
   const social = useSocialWindow(messages, selConv)
   const actions = useMessageActions((ids) => social.refreshIds(ids))
@@ -1647,6 +1673,26 @@ export default function MobileShell() {
   function renderMobileSheets() {
     return (
       <>
+        {/* Painel do GRUPO: membros reais, renomear e remover.
+            Fica aqui porque o sheet é o mesmo padrão dos outros painéis do
+            mobile (busca, fixadas, salvas, thread). */}
+        {showGroupPanel && isGroupConv && selConv && sheetWrap(
+          selConvObj?.title || 'Grupo',
+          <GroupPanel
+            convId={selConv}
+            title={selConvObj?.title || 'Grupo'}
+            myFp={identity?.fingerprint ?? ''}
+            friends={friendsAccepted}
+            profiles={profilesByFp}
+            onClose={() => setShowGroupPanel(false)}
+            onRenamed={() => { refreshConvos() }}
+            onChanged={() => {
+              void services.groupMembers(selConv).then((m) => setGroupMemberCount(m.length)).catch(() => {})
+              refreshConvos()
+            }}
+          />,
+          () => setShowGroupPanel(false),
+        )}
         {/* BUSCA */}
         {showSearch && sheetWrap('Buscar mensagens', (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
@@ -1851,7 +1897,13 @@ export default function MobileShell() {
             : <Avatar name={peerTitle} fp={selPeerFp ?? selConv} size={26} />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 700, fontSize: 15, color: t.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{isChannel ? channelName : peerTitle}</div>
-            <div style={{ fontSize: 11, color: t.muted }}>{isChannel ? `${activeComm?.members?.length ?? 0} membros` : onlineFps.has(selPeerFp ?? '') ? 'online' : 'offline'}</div>
+            <div style={{ fontSize: 11, color: t.muted }}>
+              {isChannel
+                ? `${activeComm?.members?.length ?? 0} membros`
+                : isGroupConv
+                  ? `${groupMemberCount} ${groupMemberCount === 1 ? 'membro' : 'membros'}`
+                  : onlineFps.has(selPeerFp ?? '') ? 'online' : 'offline'}
+            </div>
           </div>
           {!isChannel && (
             <>
@@ -1868,6 +1920,9 @@ export default function MobileShell() {
           )}
           {isChannel && (
             <button aria-label="Membros" className="m-iconbtn" onClick={() => setShowMembers(v => !v)}><Icon d={Icons.users} size={17} /></button>
+          )}
+          {isGroupConv && (
+            <button aria-label="Membros do grupo" title="Membros, renomear ou remover" className="m-iconbtn" onClick={() => setShowGroupPanel(true)}><Icon d={Icons.users} size={17} /></button>
           )}
           <button aria-label="Mais opções" title="Mais" className="m-iconbtn" onClick={() => setTopMenu((v) => !v)}><span style={{ fontSize: 18, lineHeight: 1 }}>⋯</span></button>
           {topMenu && (

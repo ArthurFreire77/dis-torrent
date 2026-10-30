@@ -35,6 +35,8 @@ import {
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
 import { Modal, Notice } from '../shared/ui'
+import { WIDTHS } from '../shared/ui'
+import { GroupPanel } from '../components/social/GroupPanel'
 import { copyText } from '../shared/clipboard'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -806,6 +808,9 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [showAddToCall, setShowAddToCall] = useState(false)
   const [showCreateGroup, setShowCreateGroup] = useState(false)
+  const [showGroupPanel, setShowGroupPanel] = useState(false)
+  /** Roster REAL do grupo aberto (vem do motor, não de cache da UI). */
+  const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [groupTitle, setGroupTitle] = useState('')
   const [groupPick, setGroupPick] = useState<Set<string>>(new Set())
   const [voiceChannel, setVoiceChannel] = useState<{ communityId: string; channelId: string } | null>(null)
@@ -1264,6 +1269,26 @@ export default function ThemeShell({ designId }: {designId:string}){
   const selPeer: PeerView | null = selPeerFp ? peers.find(p => p.fp === selPeerFp) ?? null : null
   const selConvObj = conversations.find(c => c.id === selConv) ?? null
   const peerTitle = selConvObj?.title || selPeer?.nickname || selPeer?.fp || ''
+  const ehGrupo = selConvObj?.kind === 'group'
+
+  // Roster do grupo: pergunta ao MOTOR (SQLite) sempre que a conversa muda e
+  // quando chega `group_synced`. O contador antigo lia uma chave de
+  // `localStorage` que só existe no modo navegador — no app nativo dava sempre 0.
+  useEffect(() => {
+    if (!selConv || !ehGrupo) { setGroupMemberCount(0); return }
+    let vivo = true
+    const ler = async () => {
+      try {
+        const mems = await services.groupMembers(selConv)
+        if (vivo) setGroupMemberCount(mems.length)
+      } catch { if (vivo) setGroupMemberCount(0) }
+    }
+    void ler()
+    const off = services.subscribe((ev) => {
+      if (ev.type === 'group_synced') void ler()
+    })
+    return () => { vivo = false; off() }
+  }, [selConv, ehGrupo])
   // PRESENÇA HONESTA: "online" é SÓ sessão estabelecida (verde). CONECTANDO/
   // RECONECTANDO são bolinha amarela e NÃO aparecem em "AMIGOS ONLINE" —
   // era o bug de "aparecia online sem estar" (amarelo listado como online).
@@ -2488,7 +2513,26 @@ export default function ThemeShell({ designId }: {designId:string}){
           ) : selConv ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, fontWeight: 800, fontSize: 18 }}>{conversations.find(c=>c.id===selConv)?.kind==='group' ? <Icon d={Icons.users} size={18}/> : '@'}</span>
-              <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}{conversations.find(c=>c.id===selConv)?.kind==='group' ? ` • ${(() => { try{ const v=localStorage.getItem(`distorrent:extras:group_members:${selConv}`); if(v){return JSON.parse(v).length} }catch { /* silent */ } return 0})()} membros` : ''}</span>
+              {/* CONTADOR DE MEMBROS: antes lia
+                  `localStorage['distorrent:extras:group_members:<id>']` na mao -
+                  chave que so existe no MODO NAVEGADOR. No app nativo lia null e
+                  mostrava "0 membros" para sempre. Agora vem do motor, e o nome e'
+                  clicavel para abrir o painel do grupo. */}
+              {ehGrupo ? (
+                <button
+                  onClick={() => setShowGroupPanel(true)}
+                  title="Ver membros, renomear ou remover alguem"
+                  aria-label={`${peerTitle} - ${groupMemberCount} membros. Abrir painel do grupo`}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', minWidth: 0, flex: 1, color: 'inherit', textAlign: 'left' }}
+                >
+                  <span style={{ fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: muted, whiteSpace: 'nowrap' }}>
+                    {groupMemberCount} {groupMemberCount === 1 ? 'membro' : 'membros'}
+                  </span>
+                </button>
+              ) : (
+                <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
+              )}
               {/* CALL toolbar idêntico Discord — sem hard-disable: se o WebView
                   não tiver WebRTC/permissão, o clique explica o que falta em vez de
                   ser um botão morto (o snapshot de `callsSupport` é de render). */}
@@ -3436,6 +3480,36 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
           </div>
         </div>
+      )}
+
+      {/* Painel do GRUPO: membros reais, renomear e remover.
+          Abre ao clicar no nome do grupo no cabeçalho. */}
+      {showGroupPanel && ehGrupo && selConv && (
+        <Modal
+          open
+          onClose={() => setShowGroupPanel(false)}
+          title={selConvObj?.title || 'Grupo'}
+          subtitle="Membros, nome e quem pode entrar"
+          width={WIDTHS.md}
+          dialogLabel="Painel do grupo"
+        >
+          <GroupPanel
+            convId={selConv}
+            title={selConvObj?.title || 'Grupo'}
+            myFp={identity?.fingerprint ?? ''}
+            friends={friendsAccepted}
+            profiles={socialProfiles}
+            onClose={() => setShowGroupPanel(false)}
+            onRenamed={() => {
+              // A lista de conversas vem do hook; quem recarrega é o `refresh`.
+              refreshConvos()
+            }}
+            onChanged={() => {
+              void services.groupMembers(selConv).then((m) => setGroupMemberCount(m.length)).catch(() => {})
+              refreshConvos()
+            }}
+          />
+        </Modal>
       )}
 
       {/* TELA CHEIA da transmissão escolhida (tela ou câmera).

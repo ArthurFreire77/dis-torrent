@@ -2901,6 +2901,20 @@ fn group_add(conv_id: String, fp: String, state: State<AppState>) -> Result<(), 
     engine(&state)?.group_add(&conv_id, &fp).map_err(err)
 }
 
+/// Remove um integrante do grupo. O roster completo é reenviado aos que ficam
+/// pelo mesmo `GroupCreated` que a sincronização já usa (ver `group_remove` no
+/// core) — por isso não há frame novo no protocolo.
+#[tauri::command]
+fn group_remove(conv_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.group_remove(&conv_id, &fp).map_err(err)
+}
+
+/// Renomeia o grupo (título novo viaja no `GroupCreated` de sincronização).
+#[tauri::command]
+fn group_rename(conv_id: String, title: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.group_rename(&conv_id, &title).map_err(err)
+}
+
 #[tauri::command]
 async fn call_invite(
     target_fp: String,
@@ -4656,6 +4670,8 @@ fn main() {
             create_group,
             group_members,
             group_add,
+            group_remove,
+            group_rename,
             call_invite,
             call_accept,
             call_reject,

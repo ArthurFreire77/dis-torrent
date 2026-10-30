@@ -1134,6 +1134,24 @@ export const browserServices: DisTorrentServices = {
     try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
     return Promise.resolve()
   },
+  groupRemove: (cid, fp) => {
+    try {
+      const k = `distorrent:extras:group_members:${cid}`
+      const cur = JSON.parse(localStorage.getItem(k) ?? '[]') as [string, string][]
+      localStorage.setItem(k, JSON.stringify(cur.filter(([f]) => f !== fp)))
+    } catch { /* silent */ }
+    emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
+    return Promise.resolve()
+  },
+  groupRename: (cid, title) => {
+    const nome = title.trim()
+    if (!nome) return Promise.reject(new Error('título vazio'))
+    writeConvos(readConvos().map((c) => (c.id === cid ? { ...c, title: nome } : c)))
+    emit({ type: 'group_synced' as any, conv_id: cid, title: nome } as any)
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: nome }) } catch { /* ignore */ }
+    return Promise.resolve()
+  },
   callInvite: (targetFp, kind) => {
     const rand = (() => {
       try {

@@ -679,6 +679,10 @@ export interface DisTorrentServices {
   createGroup(title: string, members: string[]): Promise<Conversation>
   groupMembers(convId: string): Promise<[string,string][]>
   groupAdd(convId: string, fp: string): Promise<void>
+  /** Remove um integrante; o roster é re-sincronizado com todos do grupo. */
+  groupRemove(convId: string, fp: string): Promise<void>
+  /** Renomeia o grupo; o título novo chega aos membros pela sincronização. */
+  groupRename(convId: string, title: string): Promise<void>
 
   // Chamadas (voice/video + screen share) — mesh P2P onde todos semeiam
   callInvite(targetFp: string, kind: string): Promise<string>
