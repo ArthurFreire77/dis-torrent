@@ -1,5 +1,86 @@
 # CHANGELOG
 
+## [1.1.12-pre-alpha] — 2026-10-30
+
+### Atualização automática: a janela que abria e fechava em loop
+
+- **Corrigido o loop**: o app baixava a versão nova, instalava, reabria e
+  encontrava a MESMA atualização pendente — fechando e abrindo sem parar.
+  Três causas somadas: (1) o instalador publicava um binário rotulado com
+  versão diferente da tag, então instalar não mudava nada; (2) o app tentava
+  encerrar a si mesmo 4 s depois de aplicar, podendo derrubar a cópia que o
+  instalador acabara de abrir; (3) o Inno abria uma segunda cópia enquanto o
+  processo antigo ainda segurava o mutex de instância única.
+- **Freio por versão**: `update.applied` guarda a versão já instalada. Se o app
+  continua rodando a anterior, ele mostra "atualização já aplicada" e **não
+  tenta de novo** — o que resolve é corrigir o instalador publicado, não repetir
+  o ciclo. Versão nova depois dessa volta a ser oferecida normalmente.
+- **Instalador**: `RestartApplications=no` (o Tauri não usa
+  `RegisterApplicationRestart`, então não havia o que reiniciar) e a reabertura
+  silenciosa passou a ser do próprio instalador, que **espera o mutex
+  `com.distorrent.app-sim` cair** antes de abrir o app. Uma cópia nova que
+  chegasse antes disso morria no single-instance.
+- **Backup antes de atualizar**: snapshot do banco em
+  `backups/pre-update-<versão>-<ts>.stormvault`, cifrado com a chave derivada do
+  cofre, antes de o Windows executar o instalador. Mantém os 5 mais recentes. O
+  Inno nunca toca em `%APPDATA%`, mas o snapshot é a garantia real: se a versão
+  nova tiver um bug de migração, existe o estado anterior para voltar.
+- **Rótulo do instalador**: `update_check` compara a versão do NOME do asset com
+  a da tag e sinaliza divergência. O cartão avisa e esconde o "Atualizar agora"
+  em vez de prometer uma atualização que não existe.
+
+### Refatoração: arquivos gigantes divididos
+
+Nenhuma funcionalidade foi removida — os contratos públicos continuam os mesmos
+e os nomes exportados foram preservados por reexportação.
+
+- `src/components/social/Social.tsx` **1508 → 44 linhas** (fachada). Dividido em
+  10 módulos coesos: tema, primitivas, reações, mensagens salvas, atalhos,
+  perfil, busca/threads, moderação, canal e inbox.
+- `src/components/CreateServerWizard.tsx` **1191 → 366 linhas**. O catálogo, a
+  validação e os quatro passos saíram para `wizardModel`, `wizardSteps`,
+  `wizardChannelSteps`, `wizardChrome`, `wizardSummary` e `wizardStyles`.
+- `src/components/server/ChannelManager.tsx`: as regras puras de canal foram
+  para `channelRules.ts` (testável em Node, sem carregar React + serviços).
+- Módulos compartilhados novos em `src/shared/`: `runtime`, `base64`, `bytes`,
+  `emitter`, `clipboard`, `async`. Eles eliminaram duplicações reais:
+  - detecção Tauri/Android em **6 lugares** (que divergiam em qual flag
+    checavam) → `runtime.ts`;
+  - base64 de bytes em 3 cópias (duas estouravam a pilha em arquivo grande) →
+    `base64.ts`;
+  - formatação de tamanho em 2 implementações → `bytes.ts`;
+  - o padrão `Set<handler> + try` em 6 módulos → `emitter.ts`;
+  - cópia para a área de transferência em 3 versões (uma dizia "copiado" sem
+    copiar) → `clipboard.ts`;
+  - `sleep` em 2 módulos → `async.ts`.
+- `src/services/browser.ts`: o bloco `JSON.parse` + `try/catch` que se repetia
+  **11 vezes** virou `browserStore.ts` (`readList`/`writeJson`/`WEB_KEYS`),
+  também usado por `localExtras.ts`.
+
+### Correções encontradas durante a refatoração
+
+- **Criar servidor falhava em silêncio.** O wizard guardava o erro de
+  `createCommunity` num estado que nenhum JSX renderizava: se a criação falhasse
+  (rede, nome recusado, banco trancado), o botão voltava de "Criando…" e nada
+  aparecia. Agora o erro é exibido com `role="alert"`.
+- **Nome de servidor com duas regras diferentes.** O wizard validava com limite
+  de 60 caracteres e sem checar nomes reservados/bloqueados; o core exige 3–64 e
+  recusa os mesmos termos. O assistente aceitava e o core recusava no fim do
+  fluxo. Agora o wizard usa a mesma regra (`validateNameLocal`).
+- **Convite duplicado no servidor.** O botão "Convidar" gerava um token próprio
+  que ninguém lia, enquanto o painel mostrava outro. Ficou um caminho só (o
+  painel).
+- Oito estados e funções mortos removidos do desktop (fluxo de convite paralelo,
+  modelos de servidor do wizard antigo) e o fluxo de convite morto do mobile,
+  que o lint acusava e nenhum botão alcançava.
+
+### Verificação
+
+- `typecheck` 0 erros, `lint` 0 avisos (eram 15), **unit 227/227** (eram 207 —
+  +20 testes novos para a fundação compartilhada, o freio do loop e as regras do
+  assistente), `build` OK.
+- `cargo fmt --check` e `cargo check --lib` verdes no WSL (Linux de verdade).
+
 ## [1.1.11-pre-alpha] — 2026-10-29
 
 ### Atualização automática (pedido do dono)
