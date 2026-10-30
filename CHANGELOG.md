@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## [1.1.11-pre-alpha] — 2026-10-29
+
+### Atualização automática (pedido do dono)
+
+- O app agora **procura a versão nova antes de entrar** e, no Windows, baixa,
+  confere o SHA-256, instala e **reabre sozinho**. Falha de rede não bloqueia o
+  boot; instalador que falha é marcado para não reiniciar em loop; "pular esta
+  versão" persiste.
+- Comparação de versão é numérica (`1.1.11 > 1.1.10`). Como texto, `1.1.10` era
+  "menor" que `1.1.9` e o app se atualizaria para a versão que já tinha.
+- Só aceita download do repositório oficial e só executa com o hash batendo.
+
+### Chamada de voz em grupo — "conectado mas ninguém aparece"
+
+- **Os quadrados e o áudio remoto ficavam congelados.** Os shells memoízam os
+  tiles pela referência do array de participantes e o gerenciador mutava esse
+  array no lugar: o cabeçalho contava "3 na voz" e a grade — no desktop também
+  os `<audio>` — continuava no roster do primeiro aviso. Quem entrava depois não
+  aparecia **e não falava**; quem saía continuava na tela. Só "consertava"
+  quando alguém mexia no microfone.
+- **Quem já estava no canal não era anunciado a quem entrava** em
+  Windows/Android (o anúncio reverso existia só no Linux), e o aviso de entrada
+  era enviado uma única vez, sem retentativa. Agora há re-anúncio a cada 15 s,
+  envio na sessão nova e resposta a quem chega depois.
+- **Um participante com rota ruim derrubava a chamada de todos.** O estado
+  agregado é o pior par; agora o app só encerra quando **nenhum** par está
+  conectado.
+- **"Conectado" era fase de sinalização.** Agora o selo só fica verde com mídia
+  real; sem áudio/vídeo ele diz "Conectado sem mídia".
+- Entrar num canal vazio e esperar alguém **expulsava você em ~50 s**.
+- A lista mostrava `a3f92c` em vez do nome; agora usa o nome do membro.
+- Trocar de layout (janela abaixo de 768px / girar o tablet) escondia a chamada
+  e deixava o microfone aberto.
+- Sair da chamada com um quadrado expandido deixava uma tela cheia preta.
+
+### Mídia nativa (Linux) — por que "conectado e mudo"
+
+- A queda do ICE (`Disconnected`) era ignorada: a sessão continuava "conectada"
+  com a rota morta e os contadores subindo. Agora vira "reconectando" e tenta
+  restabelecer.
+- Sessão que falhava ao ser criada deixava o microfone preso; sessão criada
+  antes de o microfone existir ficava muda para sempre.
+- A janela de espera do frame descartava áudio atrasado, o que atrasava o
+  relógio RTP e fazia o outro lado re-bufferizar sem parar (som picado).
+- Mutar/desmutar injetava 1 s de áudio sintetizado e deixava o receptor 1 s
+  atrasado.
+- O envio podia escolher o formato errado de áudio (Opus rotulado como PCMU):
+  ruído ou silêncio para um par específico.
+- Novo diagnóstico: `speaker_error` ("o áudio chega e não sai desta máquina"),
+  `write_errors` e `packets_out` que só conta com rota viva.
+
+### Interop com o navegador
+
+- **Candidato ICE do navegador era descartado pelo lado nativo** (chegava como
+  JSON e o parser esperava texto). Chamada Linux ↔ Windows nunca fechava par e
+  caía sozinha por timeout.
+
+### Android
+
+- Chamada de vídeo mantém a câmera em segundo plano (tipo do serviço) e o app
+  não pausa mais a WebView durante a chamada — sem isso a sinalização congelava
+  e o participante "entrava e sumia".
+
+### Ferramentas
+
+- Nova skill `distorrent` (`.opencode/skills/`) com mapa do código, arquitetura
+  da voz e `run-verify.ps1`, que roda typecheck, lint, testes unitários e
+  `cargo check/test/fmt` nos dois crates.
+
 ## [1.1.10-pre-alpha] — 2026-10-29
 
 ### Corrige o instalador que entregava o app errado

@@ -1,6 +1,6 @@
 [package]
 name = "distorent-cli"
-version = "1.1.10-pre-alpha"
+version = "1.1.11-pre-alpha"
 description = "DisTorrent CLI — ferramentas de linha de comando para o ecossistema DisTorrent"
 authors = ["DisTorrent"]
 license = "MIT"
