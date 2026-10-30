@@ -13,6 +13,9 @@ import {
   spoolKey, chunkKey, swarmProgress, safeFileName, type FileMsgMeta,
 } from './fileRules'
 import { encodeFileMeta, parseFileBody } from './fileBody'
+import { isTauriRuntime, isAndroidRuntime, isTauriAndroid } from '../shared/runtime.ts'
+import { bytesToBase64, base64ToBytes } from '../shared/base64.ts'
+import { sleep } from '../shared/async.ts'
 
 // Regras puras (validação, tamanho de bloco, MIME, chaves) moram em
 // `fileRules.ts` para poderem ser testadas sem DOM/IPC. Reexportadas aqui
@@ -103,22 +106,10 @@ export interface SwarmFile {
 }
 
 function b64(bytes: Uint8Array): string {
-  // chunked para evitar stack overflow em buffers grandes
-  let s = ''
-  const CH = 8192
-  for (let i = 0; i < bytes.length; i += CH) {
-    const slice = bytes.subarray(i, i + CH)
-    let chunk = ''
-    for (let j = 0; j < slice.length; j++) chunk += String.fromCharCode(slice[j])
-    s += chunk
-  }
-  return btoa(s)
+  return bytesToBase64(bytes)
 }
 function fromB64(s: string): Uint8Array {
-  const bin = atob(s)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
+  return base64ToBytes(s)
 }
 
 /** Mensagem curta e honesta (pt-BR) a partir de qualquer erro sem vazar stack. */
@@ -128,27 +119,18 @@ function describeError(e: unknown): string {
   try { return JSON.stringify(e) } catch { return String(e) }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
 function isTauri(): boolean {
-  if (typeof window === 'undefined') return false
-  const w = window as unknown as Record<string, unknown>
-  return '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
+  return isTauriRuntime()
 }
 
 /** Android via UA — no WebView Tauri o anchor-blob NÃO dispara download. */
 export function isAndroid(): boolean {
-  try {
-    if (typeof navigator === 'undefined') return false
-    return /android/i.test(navigator.userAgent ?? '')
-  } catch { return false }
+  return isAndroidRuntime()
 }
 
 /** Tauri rodando no Android: único caminho confiável é o `save_file` nativo. */
-export function isTauriAndroid(): boolean {
-  try { return isTauri() && isAndroid() } catch { return false }
+export function isTauriAndroidRuntime(): boolean {
+  return isTauriAndroid()
 }
 
 function baseNameOf(p: string): string {

@@ -11,6 +11,8 @@ let muted = false
 let ringToken = 0
 let ringUnlisten: (() => void) | null = null
 
+import { isTauriAndroid, isTauriRuntime } from '../shared/runtime.ts'
+
 /** Liga/desliga todos os efeitos (ex.: modo silencioso do usuário). */
 export function setSfxMuted(m: boolean) { muted = m }
 export function isSfxMuted(): boolean { return muted }
@@ -75,15 +77,8 @@ export function sfxCallEnd() {
 export function sfxJoin() { if (!ensure()) return; tone(520, 0, 0.07, 'triangle', 0.08) }
 export function sfxLeave() { if (!ensure()) return; tone(380, 0, 0.09, 'triangle', 0.08) }
 
-function isTauriRuntime(): boolean {
-  try {
-    const w = window as unknown as Record<string, unknown>
-    return '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
-  } catch { return false }
-}
-
 function isAndroidRuntimeSfx(): boolean {
-  try { return isTauriRuntime() && /android/i.test(navigator.userAgent ?? '') } catch { return false }
+  return isTauriAndroid()
 }
 
 /** Um ciclo do toque (dois tons). */

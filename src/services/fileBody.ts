@@ -10,26 +10,7 @@
 // Módulo puro (sem `services`, DOM ou IPC) para poder rodar em `node --test`.
 
 import { FILE_MARKER, formatFileSize, type FileMsgMeta } from './fileRules.ts'
-
-function toBase64(bytes: Uint8Array): string {
-  // chunked para evitar stack overflow em buffers grandes
-  let s = ''
-  const CH = 8192
-  for (let i = 0; i < bytes.length; i += CH) {
-    const slice = bytes.subarray(i, i + CH)
-    let chunk = ''
-    for (let j = 0; j < slice.length; j++) chunk += String.fromCharCode(slice[j])
-    s += chunk
-  }
-  return btoa(s)
-}
-
-function fromBase64(s: string): Uint8Array {
-  const bin = atob(s)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
-}
+import { bytesToBase64 as toBase64, base64ToBytes as fromBase64 } from '../shared/base64.ts'
 
 /** Metadados que vão no corpo (nunca o conteúdo). */
 export function encodeFileMeta(meta: FileMsgMeta): string {

@@ -20,12 +20,16 @@
 // Não guarda nada em disco: convite é efêmero. O token persistido de verdade é
 // o `join.pending.*` do Rust, que sobrevive a reinício.
 
+import { createEmitter } from '../shared/emitter.ts'
+
 type Listener = (token: string) => void
 
 let pendingToken: string | null = null
 /** Últimos tokens processados — dedupe por igualdade exata. */
 const seen = new Set<string>()
-const listeners = new Set<Listener>()
+// Emissor compartilhado: isola falha de um shell e devolve cancelamento
+// idempotente (antes era um `Set` + laço próprio, igual ao de appState/notifications).
+const invites = createEmitter<string>()
 
 /**
  * Extrai o token de qualquer forma aceita: `distorrent://invite?invite=TOKEN`,
@@ -71,13 +75,7 @@ export function offerInvite(raw: string): boolean {
     if (!first.done) seen.delete(first.value)
   }
   pendingToken = token
-  for (const cb of listeners) {
-    try {
-      cb(token)
-    } catch {
-      /* um shell quebrado não pode impedir o outro */
-    }
-  }
+  invites.emit(token)
   return true
 }
 
@@ -94,15 +92,12 @@ export function consumeInvite(): string | null {
 }
 
 export function subscribeInvite(cb: Listener): () => void {
-  listeners.add(cb)
-  return () => {
-    listeners.delete(cb)
-  }
+  return invites.subscribe(cb)
 }
 
 /** Só para testes: limpa o estado do módulo entre casos. */
 export function __resetInviteForTests(): void {
   pendingToken = null
   seen.clear()
-  listeners.clear()
+  invites.clear()
 }

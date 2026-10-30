@@ -6,6 +6,7 @@
 // A regra de estados vive em downloadQueue.ts (pura e testada).
 
 import { fileSwarm } from './fileSwarm'
+import { sleep } from '../shared/async.ts'
 import {
   type DownloadItem, type DownloadMeta,
   computeProgress, deserializeQueue, nextDownloadStatus, rehydrateStatus,
@@ -421,8 +422,6 @@ class DownloadManager {
     } catch { /* ignore */ }
   }
 }
-
-function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
 
 export const downloadManager = new DownloadManager()
 try {

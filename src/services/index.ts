@@ -1,14 +1,11 @@
 import type { DisTorrentServices } from './models'
 import { tauriServices } from './tauri'
 import { browserServices } from './browser'
+import { isTauriRuntime } from '../shared/runtime.ts'
 
-// Detecta runtime Tauri (IPC disponível) vs navegador puro.
-// Tauri v2 expõe __TAURI_INTERNALS__, v1 expõe __TAURI__ — checa ambos para robustez
-function isTauriRuntime(): boolean {
-  if (typeof window === 'undefined') return false
-  const w = window as unknown as Record<string, unknown>
-  return '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
-}
+// Escolhe o backend de serviços (IPC nativo × simulação no navegador).
+// A detecção de runtime mora em `shared/runtime.ts` — esta era a primeira das
+// seis cópias e divergia das outras em qual flag global checava.
 export const services: DisTorrentServices = isTauriRuntime() ? tauriServices : browserServices
 
 export * from './models'

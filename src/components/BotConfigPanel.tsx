@@ -27,6 +27,9 @@ import {
   type BotCommandDef,
 } from '../services/botCommands'
 import { groupByCategory } from '../app/channels'
+// `copyBestEffort` vem de `shared/clipboard` (fonte única): antes esta tela tinha
+// a sua própria cópia silenciosa, que dizia "copiado" sem ter copiado.
+import { copyBestEffort as copyToClipboard } from '../shared/clipboard'
 import {
   Button,
   Card,
@@ -96,14 +99,6 @@ function nameError(name: string): string | null {
   if (!name.trim()) return 'informe um nome (ex.: clima)'
   if (/\s/.test(name.trim())) return 'sem espaços — use hífen (ex.: bom-dia)'
   return null
-}
-
-function copyBestEffort(text: string): void {
-  try {
-    void navigator.clipboard?.writeText(text)?.catch(() => {})
-  } catch {
-    /* clipboard indisponível */
-  }
 }
 
 /** Assinatura do estado editável — só para avisar "alterações não salvas". */
@@ -349,7 +344,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
   // ---- Token ----
 
   function copyToken() {
-    copyBestEffort(token)
+    copyToClipboard(token)
     setCopied(true)
     if (copyTimer.current) clearTimeout(copyTimer.current)
     copyTimer.current = setTimeout(() => setCopied(false), 1800)

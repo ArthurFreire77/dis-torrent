@@ -19,6 +19,8 @@ import { services } from './index'
 import type { NetworkState, PresenceStatus } from './models'
 import { getPrefs, setPrefs } from '../shared/prefs'
 import { derivePresence } from './notificationRules'
+import { isTauriRuntime, isAndroidRuntime } from '../shared/runtime.ts'
+import { createEmitter } from '../shared/emitter.ts'
 
 // `derivePresence` mora em `notificationRules.ts` (puro, testável em Node) e é
 // reexportado aqui para quem já importa deste módulo.
@@ -41,7 +43,9 @@ export interface AppStateSnapshot {
 
 type Listener = (s: AppStateSnapshot) => void
 
-const listeners = new Set<Listener>()
+// Emissor compartilhado (`shared/emitter.ts`): um listener quebrado não pode
+// derrubar os outros, e o cancelamento pode ser chamado duas vezes (StrictMode).
+const snapshotEmitter = createEmitter<AppStateSnapshot>()
 
 let connection: NetworkState = 'DISCONNECTED'
 let onlinePeers = 0
@@ -61,25 +65,19 @@ export function appStateSnapshot(): AppStateSnapshot {
 }
 
 export function subscribeAppState(cb: Listener): () => void {
-  listeners.add(cb)
-  return () => { listeners.delete(cb) }
+  return snapshotEmitter.subscribe(cb)
 }
 
 function emit() {
-  const snap = appStateSnapshot()
-  for (const l of listeners) {
-    try { l(snap) } catch { /* um listener quebrado não derruba os outros */ }
-  }
+  snapshotEmitter.emit(appStateSnapshot())
 }
 
 function isTauri(): boolean {
-  if (typeof window === 'undefined') return false
-  const w = window as unknown as Record<string, unknown>
-  return '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
+  return isTauriRuntime()
 }
 
 function isAndroid(): boolean {
-  try { return /android/i.test(navigator.userAgent ?? '') } catch { return false }
+  return isAndroidRuntime()
 }
 
 /** Aplica a presença derivada no motor (uma vez por transição real). */
@@ -230,7 +228,7 @@ export function shutdownAppState() {
   unsubEngine = null
   if (netTimer) { clearInterval(netTimer); netTimer = null }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-  listeners.clear()
+  snapshotEmitter.clear()
   started = false
 }
 

@@ -11,6 +11,9 @@
 
 export const CHUNK = 256 * 1024
 
+// Matemática de tamanho legível: uma implementação só (`shared/bytes.ts`).
+import { formatFileSize as formatSize } from '../shared/bytes.ts'
+
 const MAX_FILE_MB = (() => {
   const raw = (() => {
     try {
@@ -61,10 +64,13 @@ export function expectedChunkSize(index: number, chunks: number, size: number): 
   return index === chunks - 1 ? size - index * CHUNK : CHUNK
 }
 
+/**
+ * Texto de tamanho de anexo. A matemática vive em `shared/bytes.ts` (fonte
+ * única, compartilhada com o cartão de update); aqui só mantemos o nome
+ * histórico que o resto do app importa.
+ */
 export function formatFileSize(size: number): string {
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / 1024 / 1024).toFixed(2)} MB`
+  return formatSize(size)
 }
 
 /** Prefixo do corpo de mensagem de arquivo, como gerado por `encodeFileBody`. */

@@ -1,3 +1,7 @@
+import { isAndroidRuntime, isIOSRuntime } from '../shared/runtime.ts'
+
+export { isAndroidRuntime, isIOSRuntime }
+
 export type ScreenSourceKind = 'screen' | 'window' | 'monitor'
 export type ScreenAudioMode = 'none' | 'system' | 'mic' | 'system+mic'
 export type ScreenQualityKey = 'auto' | '480p' | '720p' | '1080p'
@@ -130,19 +134,6 @@ function ua(): string {
   try {
     return typeof navigator === 'undefined' ? '' : String((navigator as unknown as { userAgent?: string }).userAgent ?? '')
   } catch { return '' }
-}
-
-export function isAndroidRuntime(): boolean {
-  try {
-    return /Android/i.test(ua())
-  } catch { return false }
-}
-
-export function isIOSRuntime(): boolean {
-  try {
-    const u = ua()
-    return /iPhone|iPad|iPod/i.test(u) || (/Macintosh/i.test(u) && ((navigator as unknown as { maxTouchPoints?: number }).maxTouchPoints ?? 0) > 1)
-  } catch { return false }
 }
 
 export function isLinuxRuntime(): boolean {

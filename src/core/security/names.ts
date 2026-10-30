@@ -1,7 +1,9 @@
 // Validação de nomes (usuário/servidor/canal) — espelho TS do CORE.
 // Feedback em tempo real na UI; o Rust re-valida antes de persistir.
 
-import { sanitizeText } from './sanitize'
+// Extensão `.ts` explícita: `node --experimental-strip-types` (a suíte de unit)
+// não resolve especificador sem extensão. Era o que impedia testar `names.ts`.
+import { sanitizeText } from './sanitize.ts'
 
 export type NameKind = 'user' | 'server' | 'channel'
 

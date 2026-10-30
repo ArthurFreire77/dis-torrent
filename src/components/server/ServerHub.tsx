@@ -25,7 +25,7 @@
 //   - silenciar é preferência local de notificação: não mexe em rede.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Ic, type IconName } from '../../shared/icons'
+import { Ic } from '../../shared/icons'
 import { Button, IconButton, Modal, Notice, TextField, ui } from '../../shared/ui'
 import { isMutedServer, toggleMuteServer } from '../../shared/prefs'
 import { services } from '../../services'
@@ -78,57 +78,11 @@ export function summarize(members: MemberPairing[]): { online: number; total: nu
   return { online, total, pending }
 }
 
-/**
- * Copia texto com fallback para WebView sem Clipboard API.
- * Devolve `true` só quando a cópia realmente aconteceu — a UI não pode dizer
- * "copiado" sem ter copiado.
- */
-export async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text)
-      return true
-    }
-  } catch {
-    /* tenta o fallback legado abaixo */
-  }
-  try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.setAttribute('readonly', '')
-    ta.style.position = 'fixed'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
-  } catch {
-    return false
-  }
-}
-
-/**
- * Lê a área de transferência. `readText` exige HTTPS/gesto do usuário e pode
- * ser negado; o erro é devolvido para a UI explicar em vez de fingir.
- */
-export async function readClipboard(): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
-  try {
-    if (!navigator.clipboard?.readText) {
-      return { ok: false, reason: 'este WebView não expõe leitura da área de transferência — cole com o botão de colar do sistema' }
-    }
-    const text = await navigator.clipboard.readText()
-    if (!text || !text.trim()) return { ok: false, reason: 'a área de transferência está vazia' }
-    return { ok: true, text: text.trim() }
-  } catch (e) {
-    return {
-      ok: false,
-      reason: `não foi possível ler a área de transferência (${String(
-        (e as Error)?.message ?? e,
-      )}) — cole manualmente no campo`,
-    }
-  }
-}
+// `copyText`/`readClipboard` agora vivem em `shared/clipboard.ts` (fonte única —
+// o BotConfigPanel tinha uma terceira cópia silenciosa). Importados para uso
+// local E reexportados: os shells e o formulário de convite já importam daqui.
+import { copyText, readClipboard } from '../../shared/clipboard'
+export { copyText, readClipboard }
 
 // ---------------------------------------------------------------- lista
 
