@@ -59,6 +59,11 @@ e os nomes exportados foram preservados por reexportação.
 
 ### Correções encontradas durante a refatoração
 
+- **O assistente de servidor dependia da folha de estilo para ter ESTRUTURA.**
+  Num build que renderizou sem ela, a tela virou uma linha corrida
+  ("ServidorSem tema definido…", "1Identidade 2Canais") e o usuário ficou sem
+  saber o que era cada campo. O layout estrutural agora é inline; a folha só
+  cuida de hover/foco/mídia. `tests/wizardLayout.test.ts` trava a regressão.
 - **Criar servidor falhava em silêncio.** O wizard guardava o erro de
   `createCommunity` num estado que nenhum JSX renderizava: se a criação falhasse
   (rede, nome recusado, banco trancado), o botão voltava de "Criando…" e nada
@@ -76,9 +81,9 @@ e os nomes exportados foram preservados por reexportação.
 
 ### Verificação
 
-- `typecheck` 0 erros, `lint` 0 avisos (eram 15), **unit 227/227** (eram 207 —
-  +20 testes novos para a fundação compartilhada, o freio do loop e as regras do
-  assistente), `build` OK.
+- `typecheck` 0 erros, `lint` 0 avisos (eram 15), **unit 229/229** (eram 207 —
+  +22 testes novos para a fundação compartilhada, o freio do loop, as regras do
+  assistente e o layout dele), `build` OK.
 - `cargo fmt --check` e `cargo check --lib` verdes no WSL (Linux de verdade).
 
 ## [1.1.11-pre-alpha] — 2026-10-29
