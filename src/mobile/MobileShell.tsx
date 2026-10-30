@@ -821,6 +821,10 @@ export default function MobileShell() {
 
   useEffect(() => {
     if (pinnedTileId && !callTilesMobile.some((tile) => tile.id === pinnedTileId)) setPinnedTileId(null)
+    // Tela cheia fantasma (mesmo bug do desktop): `buildCallTiles` sintetiza o
+    // tile local mesmo sem chamada, então o id do quadrado expandido nunca
+    // "deixava de existir". Sair da chamada fecha a tela cheia aqui.
+    if (!activeCall && expandedTileId) setExpandedTileId(null)
   }, [callTilesMobile, pinnedTileId])
   useEffect(() => {
     if (expandedTileId && !callTilesMobile.some((tile) => tile.id === expandedTileId)) setExpandedTileId(null)

@@ -1064,6 +1064,18 @@ export default function ThemeShell({ designId }: {designId:string}){
     return !!localTracks?.some((t) => t?.readyState === 'live')
   }, [activeCall?.participants, (activeCall as any)?.localStream])
 
+  // TELA CHEIA FANTASMA: `buildCallTiles` sempre sintetiza o tile local quando
+  // existe fingerprint, MESMO com `participants: []` e sem chamada. Sem este
+  // gate, expandir o próprio quadrado e sair da chamada deixava uma tela cheia
+  // preta ("Tela cheia: você") cobrindo o app — e o botão Sair dela chamava
+  // `leave()` sem estado (no-op). O id do tile fantasma nunca "deixava de
+  // existir", então o efeito de limpeza não o pegava.
+  useEffect(() => {
+    if (activeCall) return
+    setExpandedTileId(null)
+    setPinnedTileId(null)
+  }, [activeCall])
+
   // Fixação/expansão só valem enquanto a transmissão existir. Sem isto, parar
   // o compartilhamento deixava `expandedTileId` apontando para um id morto e a
   // tela cheia ficava aberta sobre um stream que não existe mais.
@@ -2275,8 +2287,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                                       setCallActionBusy(true)
                                       if (voiceChannel?.channelId === ch.id) {
                                         try {
+                                          // `leaveVoice` já chama `services.voiceLeave`.
+                                          // Repetir aqui mandava DOIS frames VoiceLeave na
+                                          // rede (o outro lado processava a saída duas vezes).
                                           await callManager.leaveVoice(selCommunity!, ch.id)
-                                          await services.voiceLeave(selCommunity!, ch.id).catch(()=>{})
                                         } catch (e: any) { setError(String(e?.message ?? e)) }
                                         setVoiceChannel(null); setVoiceStates([])
                                       } else {
@@ -2405,11 +2419,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <span style={{ fontSize: 11, fontWeight: 800, color: t.green, flex: 1 }}>Voz conectada</span>
                 <span style={{ fontSize: 10, color: muted }}>/ {activeComm?.channels.find(([id])=>id===voiceChannel.channelId)?.[1] ?? voiceChannel.channelId.slice(0,8)}</span>
               </div>
-              <div style={{ fontSize: 10, color: muted }}>{voiceStates.length} na voz • {voiceStates.filter(([,m])=>!m).length} falando • todos semeiam</div>
+              <div style={{ fontSize: 10, color: muted }}>{voiceStates.length} na voz • {voiceStates.filter(([,m])=>!m).length} com mic aberto • todos semeiam</div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={() => { const nm=!isMuted; setIsMuted(nm); callManager.toggleMute(); services.voiceState(voiceChannel.communityId, voiceChannel.channelId, nm, isDeafened).catch(()=>{}) }} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ flex: 1, background: isMuted ? t.red : inputBg, color: isMuted ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={13} /> : <Icon d={Icons.mic} size={13} />}</button>
                 <button onClick={() => { const nd=!isDeafened; setIsDeafened(nd); if(nd) setIsMuted(true); callManager.toggleDeafen(); services.voiceState(voiceChannel.communityId, voiceChannel.channelId, isMuted || nd, nd).catch(()=>{}) }} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ flex: 1, background: isDeafened ? t.red : inputBg, color: isDeafened ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={13} /> : <Icon d={Icons.headphones} size={13} />}</button>
-                <button onClick={async () => { try { await callManager.leaveVoice(voiceChannel.communityId, voiceChannel.channelId); await services.voiceLeave(voiceChannel.communityId, voiceChannel.channelId).catch(()=>{}) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceChannel(null); setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
+                <button onClick={async () => { try { await callManager.leaveVoice(voiceChannel.communityId, voiceChannel.channelId) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceChannel(null); setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
               </div>
               {voiceStates.length>0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{voiceStates.map(([fp,m,d]) => <span key={fp} title={fp} style={{ fontSize: 10, background: inputBg, border: `1px solid ${borderColor}`, padding: '2px 6px', borderRadius: 99, color: m? t.red : d? t.yellow : t.green }}>{fp.slice(0,6)} {m ? <Icon d={Icons.micOff} size={10} /> : d ? <Icon d={Icons.volumeX} size={10} /> : <Icon d={Icons.mic} size={10} />}</span>)}</div>}
             </div>
