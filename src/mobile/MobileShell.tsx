@@ -7,6 +7,7 @@ import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
+import { FileCard } from '../components/FileCard'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
@@ -17,7 +18,7 @@ import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { attachStream } from '../shared/mediaAttach'
-import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize, type FileMsgMeta } from '../services/fileSwarm'
+import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import {
   InvitePanel,
@@ -44,7 +45,7 @@ import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
   notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
-  setOpenConversation, onOpenConversation,
+  setOpenConversation, onOpenConversation, onCallNotificationAction,
 } from '../services/notifications'
 import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
@@ -190,45 +191,38 @@ const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove, onBlock
 // announced) para o memo detectar mudança real de progresso; o parse do corpo
 // e o lookup no swarm acontecem 1x por mensagem no useMemo pai (antes: a cada
 // tecla digitada no composer e a cada chunk recebido).
-/** Card de arquivo (swarm): usado pela linha de mensagem e pelo preview. */
-export function FileCard({ m, mine, fmeta, pct, done, announced, previewUrl, onDownload, onRetry }: {
+//
+// O cartão mora em `components/FileCard.tsx` (MESMO componente do desktop):
+// aqui ele só ganha o enquadramento do tema do celular. Antes eram dois cards
+// que divergiam — o celular não mostrava velocidade e o desktop não mostrava
+// prévia.
+function MobileFileCard({ m, mine, fmeta, pct, speed, status, error, announced, previewUrl, onDownload, onRetry }: {
   m: StoredMessage
   mine: boolean
   fmeta: FileMsgMeta
   pct: number
-  done: boolean
+  speed: number
+  status: string
+  error?: string
   announced: boolean
   previewUrl?: string
   onDownload: (fileId: string) => void
   onRetry: (m: StoredMessage) => void
 }) {
   return (
-    <div style={{ marginTop: 6, background: t.input, border: `1px solid ${t.border}`, borderRadius: 12, padding: '10px 12px' }}>
-      {previewUrl && isVideoName(fmeta.name) && (
-        <video src={previewUrl} controls preload="metadata" style={{ width: '100%', maxHeight: 340, borderRadius: 10, display: 'block', marginBottom: 10, background: '#000' }} />
-      )}
-      {previewUrl && !isVideoName(fmeta.name) && (
-        <img src={previewUrl} alt={fmeta.name} style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 10, display: 'block', marginBottom: 10 }} />
-      )}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span style={{ display: 'flex', flexShrink: 0, color: '#8e929b' }}><Icon d={Icons.attach} size={20} /></span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: t.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmeta.name}</div>
-          <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>{formatFileSize(fmeta.size)} • {fmeta.chunks} chunks</div>
-        </div>
-      </div>
-      {announced && !done && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-          <div style={{ flex: 1, height: 6, background: t.main, borderRadius: 99, overflow: 'hidden' }}>
-            <div style={{ width: `${pct}%`, height: '100%', background: t.accent, transition: 'width .3s' }} />
-          </div>
-          <span style={{ fontSize: 11, fontWeight: 800, color: t.muted, fontFamily: MONO }}>{pct}%</span>
-        </div>
-      )}
-      <button className="m-btn" style={{ marginTop: 8, width: '100%', padding: '10px 0', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }} onClick={() => onDownload(fmeta.file_id)}><Icon d={Icons.download} size={14} /> {previewUrl ? 'Salvar' : done ? 'Baixar' : announced ? `Baixar (${pct}%)` : 'Baixar'}</button>
-      {!announced && <div style={{ fontSize: 11, color: t.muted, marginTop: 6 }}>aguardando anúncio do swarm…</div>}
-      {mine && m.status === 'failed' && (<button className="m-btn ghost" style={{ marginTop: 8, width: '100%', padding: '10px 0' }} onClick={() => onRetry(m)}>Tentar novamente</button>)}
-    </div>
+    <FileCard
+      name={fmeta.name}
+      size={fmeta.size}
+      chunks={fmeta.chunks}
+      mine={mine}
+      mstatus={m.status}
+      announced={announced}
+      previewUrl={previewUrl}
+      progress={{ pct, speed, status, error }}
+      pal={{ text: t.text, heading: t.heading, muted: t.muted, accent: t.accent, input: t.input, border: t.border, main: t.main, green: t.green, red: t.red, yellow: t.yellow }}
+      onDownload={() => onDownload(fmeta.file_id)}
+      onRetry={() => onRetry(m)}
+    />
   )
 }
 
@@ -614,6 +608,8 @@ export default function MobileShell() {
   }
   const [version, setVersion] = useState('')
   const [fileList, setFileList] = useState<any[]>([])
+  /** Fila real de downloads (progresso, velocidade, pausa, erro) por arquivo. */
+  const [dlByFile, setDlByFile] = useState<Record<string, { pct: number; speed: number; status: string; error?: string }>>({})
   /** Prévia de imagens (file_id → blob URL) renderizada inline, sem salvar. */
   const [previews, setPreviews] = useState<Record<string, string>>({})
   const previewsRef = useRef<Record<string, string>>({})
@@ -725,6 +721,16 @@ export default function MobileShell() {
     try {
       unCount = downloadManager.subscribe((items) => {
         try { setDlCount(items.filter(i => i.status === 'queued' || i.status === 'downloading' || i.status === 'verifying' || i.status === 'saving').length) } catch { /* ignore */ }
+        // Mesma assinatura alimenta o cartão de arquivo: progresso, velocidade e
+        // motivo de falha por arquivo. Antes o card só lia o bitfield do swarm e
+        // ficava congelado quando o download pausava ou falhava.
+        try {
+          const next: Record<string, { pct: number; speed: number; status: string; error?: string }> = {}
+          for (const it of items) {
+            next[it.file_id] = { pct: it.progress, speed: it.speedBps, status: it.status, error: it.error }
+          }
+          setDlByFile(next)
+        } catch { /* ignore */ }
       })
     } catch { /* sem contador */ }
     const unNotice = callManager.onCallNotice
@@ -749,6 +755,40 @@ export default function MobileShell() {
   // abre a conversa certa (id vem do shell nativo).
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
+
+  // ANDROID: "Atender"/"Recusar" tocados na notificação de chamada.
+  //
+  // A ação morria no nativo (botão só abria o app). Aqui ela vira a mesma
+  // chamada de `handleIncomingAccept`/`handleIncomingReject` — é o
+  // `callManager` quem sinaliza (SDP/ICE vive na página).
+  useEffect(() => onCallNotificationAction((callId, action) => {
+    const inc = incomingCall
+    if (!inc || inc.call_id !== callId) return
+    if (action === 'accept') {
+      void (async () => {
+        const bloqueio = callManager.canAccept(callId)
+        if (bloqueio) { setError(bloqueio); return }
+        try {
+          await services.callAccept(callId, inc.from_fp)
+          await callManager.acceptInbound(callId, (inc.kind as any) ?? 'voice', (selConv ?? callId), inc.from_fp, inc.nickname)
+          sfxRingStop()
+          markCallHandled(callId)
+          setIncomingCall(null)
+          sfxCallConnect()
+        } catch (e: any) {
+          setError(String(e?.message ?? e))
+        }
+      })()
+      return
+    }
+    if (action === 'reject') {
+      sfxRingStop()
+      markCallHandled(callId)
+      endCallNotice(callId)
+      callManager.rejectIncoming(callId, inc.from_fp)
+      setIncomingCall(null)
+    }
+  }), [incomingCall, selConv])
   useEffect(() => {
     if (!activeCall) return
     setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000))
@@ -1020,6 +1060,10 @@ export default function MobileShell() {
   const netOnline = peerCount > 0 && (netState === 'CONNECTED' || netState === 'DISCONNECTED')
   const pillColor = !nativeKind ? t.accent : netState === null ? t.yellow : netOnline ? t.green : netState === 'DISCONNECTED' ? '#80848e' : t.yellow
   const pillLabel = !nativeKind ? 'LOCAL' : netState === null ? 'INICIANDO…' : netOnline ? 'ONLINE' : stateLabel[netState as NetworkState]
+  // CONTAGEM DE PESSOAS ONLINE NA REDE (amigos E membros de servidor com sessão
+  // viva) — não "amigos online". O número aparece SEMPRE, inclusive 0: é
+  // informação honesta e é o que o usuário pediu para ver no celular.
+  const onlineLabel = `${pillLabel} · ${peerCount}`
   const privacyLabel = PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode
 
   // Callbacks estáveis (useCallback com deps estáveis) para as linhas memo
@@ -1496,12 +1540,24 @@ export default function MobileShell() {
     const fmeta = parseFileBody(m.body)
     const body = social.bodies.get(m.id) ?? m.body
     const meta = social.meta.get(m.id)
-    let pct = 0, done = false, announced = false
+    let pct = 0, announced = false, speed = 0, dlStatus = 'idle', dlError: string | undefined
     if (fmeta) {
       const sf = fileSwarm.files.get(fmeta.file_id)
       announced = !!sf
       pct = sf ? fileSwarm.progress(sf) : 0
-      done = !!sf && sf.chunks > 0 && sf.have.size === sf.chunks
+      // A fila do `downloadManager` tem o estado REAL (velocidade, pausa,
+      // erro). O bitfield do swarm só sabe "quantos blocos eu tenho" — ele não
+      // congela o número ao pausar e não explica uma falha.
+      const q = dlByFile[fmeta.file_id]
+      if (q) {
+        pct = q.pct
+        speed = q.speed
+        dlStatus = q.status
+        dlError = q.error
+      } else if (sf && sf.chunks > 0 && sf.have.size === sf.chunks) {
+        pct = 100
+        dlStatus = 'completed'
+      }
     }
     const prev = idx > 0 ? messages[idx - 1] : null
     const grouped = !!prev
@@ -1520,9 +1576,9 @@ export default function MobileShell() {
 
     const renderFile = fmeta
       ? (msg: StoredMessage) => (
-          <FileCard
+          <MobileFileCard
             m={msg} mine={mine}
-            fmeta={fmeta} pct={pct} done={done} announced={announced}
+            fmeta={fmeta} pct={pct} speed={speed} status={dlStatus} error={dlError} announced={announced}
             previewUrl={previews[fmeta.file_id]} onDownload={downloadFile} onRetry={resendMessage}
           />
         )
@@ -2271,7 +2327,7 @@ export default function MobileShell() {
           <span style={{ fontWeight: 800, fontSize: 16, color: t.heading, whiteSpace: 'nowrap' }}>DisTorrent</span>
           <span className="m-pill">
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: pillColor, boxShadow: netOnline && nativeKind ? `0 0 6px ${t.green}` : 'none', flexShrink: 0 }} />
-            {pillLabel}{status && status.online_peers > 0 ? ` • ${status.online_peers}` : ''}
+            {onlineLabel}
           </span>
         </div>
         {identity && (

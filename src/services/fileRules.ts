@@ -108,7 +108,6 @@ export function isVideoName(name: string): boolean {
 export function isMediaName(name: string): boolean {
   return isImageName(name) || isVideoName(name)
 }
-
 /**
  * Auto-prévia sem sustos: imagem ≤ 12 MB, vídeo ≤ 40 MB — acima disso o
  * usuário clica (evita baixar 500 MB sem querer no 4G).

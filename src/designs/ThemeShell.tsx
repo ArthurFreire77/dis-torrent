@@ -22,6 +22,7 @@ import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
+import { FileCard } from '../components/FileCard'
 import CreateServerWizard from '../components/CreateServerWizard'
 import BotConfigPanel from '../components/BotConfigPanel'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
@@ -45,7 +46,8 @@ import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
 import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, type CallQuality, type IncomingCall } from '../services/callManager'
-import { fileSwarm, encodeFileBody, parseFileBody, formatFileSize } from '../services/fileSwarm'
+import { fileSwarm, encodeFileBody, parseFileBody } from '../services/fileSwarm'
+import { isMediaName } from '../services/fileRules'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import { throttleTrailing } from '../shared/perf'
 import { addFolder, folderOf, isMutedServer, moveServerToFolder, removeFolder, renameFolder, shouldNotify, toggleMuteChannel, toggleMuteServer, usePrefs } from '../shared/prefs'
@@ -54,7 +56,7 @@ import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
   notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
-  setOpenConversation, onOpenConversation,
+  setOpenConversation, onOpenConversation, onCallNotificationAction,
 } from '../services/notifications'
 import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
@@ -823,7 +825,13 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   /** Painel de diagnóstico da chamada (tempo real) dentro do overlay. */
   const [showCallDiag, setShowCallDiag] = useState(false)
-  const [, setFileList] = useState<any[]>([])
+  const [fileList, setFileList] = useState<any[]>([])
+  const [dlByFile, setDlByFile] = useState<Record<string, { pct: number; speed: number; status: string; error?: string }>>({})
+  /** Prévia inline de imagem/vídeo (file_id → blob URL), igual ao celular. */
+  const [previews, setPreviews] = useState<Record<string, string>>({})
+  const previewsRef = useRef<Record<string, string>>({})
+  const previewUrlsRef = useRef<string[]>([])
+  const previewFetchingRef = useRef<Map<string, number>>(new Map())
   const swarmNotifyRef = useRef<() => void>(() => {})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -1127,6 +1135,59 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
   }, [voiceChannel])
 
+  // FILA REAL DE DOWNLOADS → barra do cartão.
+  //
+  // O desktop mostrava só `have.size / chunks` do swarm, que NÃO tem velocidade
+  // nem estado (parado/erro/salvando). Quem pausava ou falhava via um número
+  // congelado sem explicação. Aqui o card lê a fila (`downloadManager`), que é
+  // a mesma fonte do painel: progresso, KB/s e motivo do erro.
+  useEffect(() => {
+    const un = downloadManager.subscribe((items) => {
+      const next: Record<string, { pct: number; speed: number; status: string; error?: string }> = {}
+      for (const it of items) {
+        next[it.file_id] = { pct: it.progress, speed: it.speedBps, status: it.status, error: it.error }
+      }
+      setDlByFile(next)
+    })
+    return () => { try { un() } catch { /* ignore */ } }
+  }, [])
+
+  // PRÉVIA DE MÍDIA no desktop (paridade com o celular): imagem/vídeo aparece
+  // no balão, sem salvar em Downloads e sem baixar de novo o que já está no
+  // spool em disco. Antes o desktop só mostrava um cartão com "Baixar" — o
+  // mesmo arquivo que o celular já exibia.
+  const mountPreview = useCallback((fileId: string, blob: Blob) => {
+    if (previewsRef.current[fileId]) return
+    let url = ''
+    try { url = URL.createObjectURL(blob) } catch { return }
+    previewUrlsRef.current.push(url)
+    previewsRef.current[fileId] = url
+    setPreviews({ ...previewsRef.current })
+  }, [])
+  useEffect(() => {
+    for (const sf of fileSwarm.files.values()) {
+      if (!isMediaName(sf.name)) continue
+      if (previewsRef.current[sf.file_id]) continue
+      // Já montado em memória: nada a fazer (evita revogar URL viva).
+      const blob = fileSwarm.blobFor(sf.file_id)
+      if (blob) { mountPreview(sf.file_id, blob); continue }
+      // Uma tentativa por vez por arquivo; `tries` limita a repetição.
+      const tries = previewFetchingRef.current.get(sf.file_id) ?? 0
+      if (tries >= 3) continue
+      previewFetchingRef.current.set(sf.file_id, tries + 1)
+      void fileSwarm.prepareMedia(sf)
+        .then(() => {
+          const b = fileSwarm.blobFor(sf.file_id)
+          if (b) { mountPreview(sf.file_id, b); previewFetchingRef.current.delete(sf.file_id) }
+        })
+        .catch(() => { /* card mostra o motivo; a próxima varredura tenta de novo */ })
+    }
+  }, [fileList, mountPreview])
+  useEffect(() => () => {
+    for (const u of previewUrlsRef.current) { try { URL.revokeObjectURL(u) } catch { /* ignore */ } }
+    previewUrlsRef.current = []
+  }, [])
+
   useEngineEvents((ev) => {
     if (ev.type === 'state_changed' || ev.type === 'peer_online' || ev.type === 'peer_offline' || ev.type === 'peer_discovered') refreshNet()
     // mensagem em QUALQUER conversa atualiza a lista (antes só a aberta entrava e
@@ -1265,6 +1326,35 @@ export default function ThemeShell({ designId }: {designId:string}){
   // Clique na notificação → abre a conversa certa (id vem do Rust, que
   // guardou o mapa notificação→conversa).
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
+
+  // ANDROID: "Atender"/"Recusar" tocados na notificação de chamada.
+  //
+  // Sem isto o botão só abria o app e a chamada continuava tocando — a ação
+  // morria no nativo. Quem atende/recusa é o `callManager` (a sinalização vive
+  // na página), então aqui só traduzimos a escolha.
+  useEffect(() => onCallNotificationAction((callId, action) => {
+    if (action === 'accept') {
+      const inc = incomingCall
+      if (!inc || inc.call_id !== callId) return
+      void services.callAccept(callId, inc.from_fp)
+        .then(() => callManager.acceptInbound(callId, (inc.kind as any) ?? 'voice', (selConv ?? callId), inc.from_fp, inc.nickname))
+        .then(() => { markCallHandled(callId); setIncomingCall(null); sfxRingStop(); sfxCallConnect() })
+        .catch((e: any) => setError(String(e?.message ?? e)))
+      return
+    }
+    if (action === 'reject') {
+      const inc = incomingCall
+      if (inc && inc.call_id === callId) {
+        markCallHandled(callId)
+        endCallNotice(callId)
+        callManager.rejectIncoming(callId, inc.from_fp)
+        setIncomingCall(null)
+        sfxRingStop()
+      }
+      return
+    }
+    // "open": só trouxe o app à frente — a UI já mostra o modal de atender.
+  }), [incomingCall, selConv])
 
   const selPeer: PeerView | null = selPeerFp ? peers.find(p => p.fp === selPeerFp) ?? null : null
   const selConvObj = conversations.find(c => c.id === selConv) ?? null
@@ -2025,13 +2115,19 @@ export default function ThemeShell({ designId }: {designId:string}){
     const online = hasPeers && (state === 'CONNECTED' || state === 'DISCONNECTED')
     const color = online ? t.green : state === 'DISCONNECTED' ? '#80848e' : t.yellow
     const label = online ? 'ONLINE' : stateLabel[state as NetworkState]
+    // CONTAGEM DE PESSOAS ONLINE NA REDE.
+    //
+    // É o total de peers com sessão viva (amigos E membros de servidor), não
+    // "amigos online": o pedido é "quantas pessoas estão online na rede". O
+    // tooltip separa as duas coisas para ninguém achar que o número é a lista
+    // de amigos. Com 0 o número aparece: "0" é informação honesta, não sumiço.
     const tip = !hasPeers && listening
-        ? `Nó no ar em :${st?.listen_port} — 0 peers alcançáveis, adicione amigo pelo fingerprint`
-        : label
+        ? `Nó no ar em :${st?.listen_port} — 0 pessoas online na rede; adicione amigo pelo fingerprint`
+        : `${count} ${count === 1 ? 'pessoa online' : 'pessoas online'} na rede`
     return (
       <span title={tip} style={{ display: 'flex', alignItems: 'center', gap: 6, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 99, padding: '4px 10px', fontSize: 10, fontWeight: 800, letterSpacing: 0.5, color: muted }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, boxShadow: online && native ? `0 0 6px ${t.green}` : 'none' }} />
-        {label}{count > 0 ? ` • ${count}` : ''}
+        {label} · {count}
       </span>
     )
   }
@@ -2755,48 +2851,57 @@ export default function ThemeShell({ designId }: {designId:string}){
                 renderFile={(m, _grouped) => {
                   const fmeta = parseFileBody(m.body)
                   if (!fmeta) return null
-                  // O card lê o fileSwarm (sincronizado com o downloadManager,
-                  // que cuida da fila real): o progresso mostrado aqui é o mesmo
-                  // do painel. Sem isso o desktop não tinha COMO baixar arquivo
-                  // recebido — só mídia pequena vinha por auto-fetch.
+                  // O card lê o fileSwarm (bitfield = o que já temos) E a fila do
+                  // `downloadManager` (progresso, VELOCIDADE, pausa/erro reais).
+                  // Antes o desktop mostrava só `have/chunks` — um número que
+                  // congelava ao pausar e não dizia por que tinha parado.
                   const sf = fileSwarm.files.get(fmeta.file_id) ?? null
-                  const done = !!sf && sf.chunks > 0 && sf.have.size >= sf.chunks
-                  const pct = sf && sf.chunks > 0 ? Math.round((100 * sf.have.size) / sf.chunks) : 0
+                  const announced = !!sf
+                  const complete = !!sf && sf.chunks > 0 && sf.have.size >= sf.chunks
+                  // O item da fila tem prioridade (é o estado que a UI comanda);
+                  // sem item, o bitfield do swarm dá o progresso "só leitura".
+                  const queued = dlByFile[fmeta.file_id]
+                  const progress = queued ?? (announced
+                    ? {
+                        pct: complete ? 100 : sf && sf.chunks > 0 ? Math.round((100 * sf.have.size) / sf.chunks) : 0,
+                        speed: 0,
+                        status: complete ? 'completed' : 'idle',
+                      }
+                    : { pct: 0, speed: 0, status: 'idle' })
                   const baixar = async () => {
                     if (!sf) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
                     setError(null)
-                    if (done) {
+                    // Já completo no swarm: só SALVA em Downloads (o arquivo não é
+                    // rebaixado). Fila com item em andamento: retoma/tenta de novo
+                    // em vez de criar um segundo ciclo.
+                    if (complete && (!queued || queued.status === 'completed')) {
                       try { await fileSwarm.download(sf) } catch (e: any) { setError(String(e?.message ?? e)) }
                       return
                     }
+                    if (queued && queued.status === 'paused') { downloadManager.resume(fmeta.file_id); setShowDownloads(true); return }
+                    if (queued && queued.status === 'failed') { downloadManager.retry(fmeta.file_id); setShowDownloads(true); return }
                     try {
                       downloadManager.enqueue({ file_id: fmeta.file_id, name: fmeta.name, size: fmeta.size, chunks: fmeta.chunks, hash: fmeta.hash })
                       setShowDownloads(true)
                     } catch (e: any) { setError(String(e?.message ?? e)) }
                   }
                   return (
-                  <div style={{ marginTop: 6, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, padding: '10px 12px', maxWidth: 400 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <span style={{ display: 'flex', flexShrink: 0, color: muted }}><Icon d={Icons.attach} size={20} /></span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 800, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmeta.name}</div>
-                        <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>{formatFileSize(fmeta.size)} · {fmeta.chunks} {fmeta.chunks === 1 ? 'chunk' : 'chunks'}</div>
-                      </div>
-                    </div>
-                    {sf && !done && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                        <div style={{ flex: 1, height: 6, background: t.main, borderRadius: 99, overflow: 'hidden' }}>
-                          <div style={{ width: `${pct}%`, height: '100%', background: t.accent, transition: 'width .3s' }} />
-                        </div>
-                        <span style={{ fontSize: 11, fontWeight: 800, color: muted, fontFamily: 'JetBrains Mono, monospace' }}>{pct}%</span>
-                      </div>
-                    )}
-                    {!sf && <div style={{ fontSize: 11, color: muted, marginTop: 6 }}>aguardando anúncio do swarm…</div>}
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                      <button onClick={() => void baixar()} disabled={!sf} style={{ background: t.accent, color: '#fff', border: 'none', padding: '7px 12px', borderRadius: 8, cursor: sf ? 'pointer' : 'not-allowed', fontSize: 12, fontWeight: 800, opacity: sf ? 1 : 0.55, display: 'inline-flex', alignItems: 'center', gap: 6 }}><Icon d={Icons.download} size={14} /> {done ? 'Baixar' : sf ? `Baixar (${pct}%)` : 'Baixar'}</button>
-                      <button onClick={() => setShowDownloads(true)} style={{ background: 'transparent', color: muted, border: `1px solid ${borderColor}`, padding: '7px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>Painel de downloads</button>
-                    </div>
-                  </div>
+                    <FileCard
+                      name={fmeta.name}
+                      size={fmeta.size}
+                      chunks={fmeta.chunks}
+                      mine={m.direction === 'out'}
+                      mstatus={m.status}
+                      announced={announced}
+                      previewUrl={previews[fmeta.file_id]}
+                      progress={progress}
+                      pal={{ text, heading: t.heading, muted, accent: t.accent, input: inputBg, border: borderColor, main: t.main, green: t.green, red: t.red, yellow: t.yellow }}
+                      onDownload={() => void baixar()}
+                      onRetry={() => { void resendMessage(m) }}
+                      extra={(
+                        <button onClick={() => setShowDownloads(true)} style={{ background: 'transparent', color: muted, border: `1px solid ${borderColor}`, padding: '7px 12px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>Painel de downloads</button>
+                      )}
+                    />
                   )
                 }}
               />
