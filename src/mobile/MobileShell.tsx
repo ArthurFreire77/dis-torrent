@@ -13,6 +13,7 @@ import CallPhaseBadge from '../components/CallPhaseBadge'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import { downloadManager } from '../services/downloadManager'
+import { startDownload } from '../services/downloadAction'
 import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
@@ -1076,13 +1077,15 @@ export default function MobileShell() {
   // v6: a fila real mora no downloadManager (progresso/pausa/resume/validação);
   // o painel abre para acompanhar. O card continua lendo o fileSwarm (sincronizado).
   const downloadFile = useCallback((fileId: string) => {
-    try {
-      const cur = fileSwarm.files.get(fileId)
-      if (!cur) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
-      setError(null)
-      try { downloadManager.enqueue({ file_id: fileId, name: cur.name, size: cur.size, chunks: cur.chunks, hash: cur.hash }) } catch (e: any) { setError(String(e?.message ?? e)); return }
-      setShowDownloads(true)
-    } catch (e: any) { setError(String(e?.message ?? e)) }
+    // Mesma ação do desktop (`services/downloadAction`): pausa retoma, falha
+    // tenta de novo, arquivo já completo passa pela fila para verificar o hash
+    // antes de gravar. Antes cada shell decidia sozinho e eles divergiam.
+    const cur = fileSwarm.files.get(fileId)
+    if (!cur) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
+    setError(null)
+    void startDownload({ file_id: fileId, name: cur.name, size: cur.size, chunks: cur.chunks, hash: cur.hash })
+      .then(() => setShowDownloads(true))
+      .catch((e: any) => setError(String(e?.message ?? e)))
   }, [])
   // Suporte a chamadas: 'full' = WebRTC direto, 'none' = desabilita com diagnóstico.
   // Sem modo áudio-via-relay: sem WebRTC a chamada falha honesto.

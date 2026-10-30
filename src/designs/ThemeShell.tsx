@@ -42,6 +42,7 @@ import { copyText } from '../shared/clipboard'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
+import { startDownload } from '../services/downloadAction'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
@@ -2868,20 +2869,14 @@ export default function ThemeShell({ designId }: {designId:string}){
                         status: complete ? 'completed' : 'idle',
                       }
                     : { pct: 0, speed: 0, status: 'idle' })
+                  // UMA ação para os dois shells (`services/downloadAction`):
+                  // o PC salvava direto quando o arquivo já estava completo,
+                  // pulando a verificação blake3 e o aviso de conclusão que o
+                  // celular fazia. Agora ambos passam pela fila.
                   const baixar = async () => {
-                    if (!sf) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
                     setError(null)
-                    // Já completo no swarm: só SALVA em Downloads (o arquivo não é
-                    // rebaixado). Fila com item em andamento: retoma/tenta de novo
-                    // em vez de criar um segundo ciclo.
-                    if (complete && (!queued || queued.status === 'completed')) {
-                      try { await fileSwarm.download(sf) } catch (e: any) { setError(String(e?.message ?? e)) }
-                      return
-                    }
-                    if (queued && queued.status === 'paused') { downloadManager.resume(fmeta.file_id); setShowDownloads(true); return }
-                    if (queued && queued.status === 'failed') { downloadManager.retry(fmeta.file_id); setShowDownloads(true); return }
                     try {
-                      downloadManager.enqueue({ file_id: fmeta.file_id, name: fmeta.name, size: fmeta.size, chunks: fmeta.chunks, hash: fmeta.hash })
+                      await startDownload(fmeta)
                       setShowDownloads(true)
                     } catch (e: any) { setError(String(e?.message ?? e)) }
                   }
