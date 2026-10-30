@@ -1,5 +1,124 @@
 # CHANGELOG
 
+## [1.1.14-pre-alpha] — 2026-10-30
+
+### "Um amigo conecta, o outro não conecta de jeito nenhum"
+
+**Causa 1 — o pool de dials esgotava e virava silêncio.** A vaga de dial era
+adquirida no `command_loop` e guardada por TODA a vida do laço de reconexão —
+que é eterno. Cada destino descoberto (mDNS/LAN/anúncio/membro de servidor,
+inclusive endereço que muda de DHCP) segurava uma vaga para sempre; passadas 64
+(`dial_conc`), todo `ConnectTo` e `ConnectRelay` novo caía num `continue` mudo.
+Sintoma exato: um amigo conecta, o outro nunca, e só reiniciar resolvia.
+Agora a vaga vale por TENTATIVA (é o que gasta socket/CPU) e é liberada antes
+do backoff; sem vaga, o laço espera 400 ms e tenta de novo — nunca desiste.
+
+**Causa 2 — o relay ficava roteado por um intermediário que só existia de um
+lado.** O peer-relay tinha PRECEDÊNCIA sobre o MQTT público. Assim que você
+tinha UM amigo conectado direto, ele era eleito intermediário e TODO o relay —
+inclusive o anúncio de presença — ia para um broker em MEMÓRIA dele. O segundo
+amigo só recebia se elegesse o MESMO intermediário, e a eleição é pelo "menor
+fp entre os peers DIRETOS de cada lado" (conjuntos diferentes). Resultado: os
+Hellos ficavam na memória do amigo A e o amigo C consultava o MQTT público e
+nunca via nada. O relay público é o ponto de encontro COMPARTILHADO; o
+peer-relay voltou a ser a última alternativa (só quando o público não está
+disponível no modo).
+
+**Causa 3 — anúncio republicado só a cada 5 min.** O tópico não é retido pelo
+broker: quem abria o app depois de você esperava até CINCO MINUTOS para ser
+encontrado. Agora republica a cada 60 s (1 frame de ~120 B/min).
+
+### Aceite de amizade que demorava minutos para aparecer
+
+Só o `pending_out` era reenviado no tique de 5 s. Quem ACEITAVA ficava com
+`accepted` local e, se o `FriendAccept` se perdesse (sessão half-open, 4G,
+relay), nada era reenviado — o outro lado só descobria na próxima sessão NOVA
+(registro) ou quando a detecção de sessão morta chegava (RELAY_PING 20 s→120 s
++ backoff 10 s). Agora o aceite também é reenviado, a cada 15 s, e ambos os
+frames são idempotentes no receptor.
+
+### Perfil, foto e capa não chegavam
+
+`ProfileQuery` (a pergunta barata "qual é a sua revisão?") levava a MINHA
+revisão, não a do outro. Quem recebe compara com a PRÓPRIA e conclui "ele já
+está em dia, não preciso mandar nada" — então o amigo com mais edições nunca
+via o perfil de quem tinha menos. Corrigido nos dois pontos que perguntam
+(reconexão e tique de 10 min) e travado por teste.
+
+### Download no Android: "erro ao baixar" e arquivo que não aparecia
+
+O Rust gravava o rascunho em `app_data_dir()/Download`, que no Android é
+`dataDir` (`/data/data/<pkg>`) — o PAI de `files`. O plugin `downloads`
+(MediaStore) só aceita origem DENTRO de `filesDir`/`cacheDir` (trava contra
+mandar o SQLite ou o cofre para o Downloads público), então TODO download caía
+em "caminho de origem fora da área do app". Agora o rascunho vai para
+`filesDir/Download`, exatamente onde o plugin espera.
+
+### Atualização automática no Android não acontecia
+
+Dois defeitos encadeados:
+
+1. o APK era baixado em `dataDir/updates`, FORA do `FileProvider`
+   (`files-path`), então `getUriForFile` lançava e o instalador nunca abria;
+2. o fluxo devolvia `later` ANTES de baixar, para qualquer versão do Android.
+
+Agora o APK vai para `files/updates` e o Android baixa e abre o instalador como
+o Linux faz (o toque de confirmação continua obrigatório — é do sistema). A
+preferência "atualizar sozinho" continua valendo: desligada, vira cartão manual.
+
+### Notificações: só funcionavam com o app aberto
+
+O aviso dependia de um `listen()` da WebView. Com a janela escondida, o app no
+fundo no Android ou a página suspensa pelo SO, o listener não executa — daí
+"a notificação só funciona com o app aberto".
+
+- **A decisão agora é do MOTOR**: `forward_events` dispara o aviso nativo ao
+  receber `MessageNew`/`CallIncoming`, checando se a janela está visível E
+  focada. Vale com o app minimizado, na bandeja ou em segundo plano.
+- **Serviço em primeiro plano de mensageria** (`remoteMessaging`) mantém o
+  processo vivo com a tela apagada — sem ele o Android mata o app e nada chega.
+  Sobe com as notificações ligadas e é silencioso (IMPORTANCE_MIN).
+- **Canal de CHAMADA separado** (`distorrent_calls`, importância máxima).
+- **Chamada em tela cheia estilo WhatsApp**: `setFullScreenIntent` com os
+  botões **Atender** e **Recusar**, funcionando com o aparelho bloqueado. A
+  ação chega ao `callManager` por evento de plugin (app vivo) ou é drenada no
+  boot (app aberto pelo toque). A sinalização continua na página: nada é
+  aceito pelas costas do JS.
+- **O aviso mostra a MENSAGEM, não um contador.** Era "3 novas mensagens · …";
+  agora é o texto (ou "Enviou um arquivo"), respeitando "mostrar prévia".
+- **Silenciamento vale fora da tela**: canal/servidor/nível viajam para o core
+  (`notify_policy`), então "silenciar canal" e "só menções" funcionam com a
+  janela escondida.
+
+### Cartão de arquivo único, com barra, porcentagem e velocidade
+
+Desktop e celular tinham cartões diferentes: o desktop não mostrava prévia de
+imagem/vídeo, o celular não mostrava velocidade, e nenhum dos dois explicava um
+download parado. Agora é UM componente (`components/FileCard.tsx`):
+
+- prévia inline de imagem/vídeo nos dois;
+- **barra + % + velocidade** (ex.: `43% · 820 KB/s`) embaixo do envio;
+- texto do botão derivado do estado real (`Retomar`, `Tentar de novo`,
+  `Baixando 43%`, `Salvar`) — nunca "Baixar" com download ativo;
+- erro do download visível, com o motivo.
+
+O "Baixar" só salva em Downloads quando o arquivo já está completo; nada baixa
+por engano.
+
+### Contagem de pessoas online na rede
+
+A pill mostra sempre `ONLINE · N` (antes o número sumia com 0). É o total de
+peers com sessão viva — amigos E membros de servidor —, não "amigos online"; o
+tooltip deixa isso explícito.
+
+### R8 renomeava os plugins no APK de release
+
+Só o `DownloadsPlugin` estava no `proguard-rules.pro`. Os demais
+(`CallForegroundPlugin`, `UpdaterPlugin`, `CallNotificationPlugin`,
+`BgServicePlugin`, `CallActionReceiver`) são resolvidos por NOME e por reflexão
+— no release o R8 os renomeava e o registro falhava em runtime, só no aparelho.
+Todos entraram no keep, com construtor público preservado para o receiver.
+
 ## [1.1.13-pre-alpha] — 2026-10-30
 
 ### "Conectando" eterno, amigo online que some, e só voltava fechando o app
