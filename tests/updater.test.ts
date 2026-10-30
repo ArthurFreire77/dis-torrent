@@ -7,6 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  FLAG_APPLIED,
   FLAG_FAILED,
   FLAG_SKIP,
   compareVersions,
@@ -160,10 +161,51 @@ test('instalador que falha é marcado para não reiniciar em loop', async () => 
   const first = await runUpdateFlow(deps, { autoApply: true })
   assert.equal(first.kind, 'error')
   assert.equal(flags.get(FLAG_FAILED), '1.1.10-pre-alpha')
+  assert.equal(flags.get(FLAG_APPLIED), '', 'falha no instalador desfaz a marca de "aplicado"')
 
   // Segunda abertura: não tenta de novo sozinho, mas ainda oferece manual.
   const second = await runUpdateFlow(deps, { autoApply: true })
   assert.equal(second.kind, 'later')
+})
+
+test('versão já instalada que não mudou o app para de tentar (o loop da janela)', async () => {
+  // REGRESSÃO QUE ESTE TESTE TRAVA: o app baixava, instalava, reabria, encontrava
+  // a MESMA atualização pendente (porque o instalador publicado continha a
+  // versão antiga) e repetia — a janela abrindo e fechando sem parar.
+  const { deps, flags, calls } = fakeDeps()
+  flags.set(FLAG_APPLIED, '1.1.10-pre-alpha')
+
+  const out = await runUpdateFlow(deps, { autoApply: true })
+  assert.equal(out.kind, 'stalled', 'não baixa nem instala de novo')
+  assert.deepEqual(calls, ['check'], 'só consultou; nenhum download')
+
+  // Mesmo com autoApply desligado o estado é o mesmo: não é uma escolha do
+  // usuário, é um fato (o instalador não entrega a versão anunciada).
+  const manual = await runUpdateFlow(deps, { autoApply: false })
+  assert.equal(manual.kind, 'stalled')
+})
+
+test('a marca de "aplicado" é gravada ANTES de executar o instalador', async () => {
+  // O Inno encerra este processo; se a marca fosse escrita depois, o loop
+  // voltaria na próxima abertura.
+  let marcadoQuandoAplicou: string | null = null
+  const { deps, flags } = fakeDeps({
+    apply: async () => {
+      marcadoQuandoAplicou = flags.get(FLAG_APPLIED) ?? null
+    },
+  })
+  const out = await runUpdateFlow(deps, { autoApply: true })
+  assert.equal(out.kind, 'applied')
+  assert.equal(marcadoQuandoAplicou, '1.1.10-pre-alpha')
+})
+
+test('versão nova depois de uma instalada volta a ser oferecida', async () => {
+  // O freio é por VERSÃO: sair a 1.1.11 tem de funcionar normalmente.
+  const { deps, flags, calls } = fakeDeps({}, info({ latest: '1.1.11-pre-alpha' }))
+  flags.set(FLAG_APPLIED, '1.1.10-pre-alpha')
+  const out = await runUpdateFlow(deps, { autoApply: true })
+  assert.equal(out.kind, 'applied')
+  assert.ok(calls.includes('download'))
 })
 
 test('formatBytes e shortNotes não mentem nem estouram a tela', () => {

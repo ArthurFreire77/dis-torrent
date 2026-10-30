@@ -37,6 +37,7 @@ export type UpdatePhase =
   | 'downloading'
   | 'installing'
   | 'later'
+  | 'stalled'
   | 'error'
 
 export interface UpdateGateState {
@@ -140,6 +141,20 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
             progress: null,
           })
           return outcome
+        case 'stalled':
+          // Já instalamos esta versão e o app continua na anterior. Instalar de
+          // novo daria exatamente o mesmo resultado (janela fechando/abrindo em
+          // loop), então paramos e dizemos a verdade. O que resolve de fato é
+          // corrigir o instalador publicado — por isso o botão leva à release.
+          setState({
+            phase: 'stalled',
+            info: outcome.info,
+            current: outcome.info.current,
+            message:
+              'esta versão já foi instalada, mas o app continua na anterior — o instalador publicado não contém a versão que a release anuncia',
+            progress: null,
+          })
+          return outcome
         case 'error':
           // Falha de rede NÃO aparece como erro de tela cheia: o app abre.
           setState((s) =>
@@ -202,8 +217,11 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       const intervalo = setInterval(() => {
         if (!mounted.current) return
         // Só recheca quando não há nada pendente na tela: um cartão aberto (ou
-        // download em curso) não pode ser trocado por outro.
-        if (stateRef.current.phase !== 'idle' && stateRef.current.phase !== 'checking') return
+        // download em curso) não pode ser trocado por outro. `stalled` também
+        // fica de fora: aquele app JÁ instalou esta versão e reabrir o cartão a
+        // cada ciclo seria o mesmo incômodo do loop, só mais devagar.
+        const p = stateRef.current.phase
+        if (p !== 'idle' && p !== 'checking') return
         void run({ autoApply: auto, auto })
       }, 6 * 60 * 60 * 1000)
       intervalRef.current = intervalo
@@ -264,6 +282,9 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
   if (api.phase === 'idle' || api.phase === 'checking') return null
 
   const blocking = api.phase === 'downloading' || api.phase === 'installing'
+  // `stalled` é um cartão informativo, não um erro de rede: o app está bem, o
+  // instalador publicado é que não corresponde à versão anunciada.
+  const stalled = api.phase === 'stalled'
   const info = api.info
   const mode = info ? updateModeFor(info.platform) : 'link'
 
@@ -303,9 +324,11 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
         <div style={{ fontSize: 22, fontWeight: 900, marginTop: 6, color: '#fff' }}>
           {api.phase === 'error'
             ? 'não deu para atualizar'
-            : info && isNewer(info.current, info.latest)
-              ? `DisTorrent ${info.latest} disponível`
-              : 'DisTorrent'}
+            : stalled
+              ? 'atualização já aplicada'
+              : info && isNewer(info.current, info.latest)
+                ? `DisTorrent ${info.latest} disponível`
+                : 'DisTorrent'}
         </div>
 
         {info && (
@@ -341,7 +364,7 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
             style={{
               marginTop: 14,
               fontSize: 12.5,
-              color: api.phase === 'error' ? '#ff8a8f' : '#7fd1a6',
+              color: api.phase === 'error' ? '#ff8a8f' : stalled ? '#f0c264' : '#7fd1a6',
               lineHeight: 1.5,
             }}
           >
@@ -364,40 +387,25 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
         )}
 
         <div style={{ display: 'flex', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
-          {!blocking && api.phase !== 'error' && (
+          {stalled && (
+            <>
+              <button onClick={api.openPage} style={primaryBtn}>
+                Ver a versão publicada
+              </button>
+              <button onClick={api.dismiss} style={ghostBtn}>
+                Entrar assim
+              </button>
+            </>
+          )}
+
+          {!blocking && !stalled && api.phase !== 'error' && (
             <>
               {mode === 'link' ? (
-                <button
-                  onClick={api.openPage}
-                  style={{
-                    flex: 1,
-                    padding: '10px 14px',
-                    borderRadius: 9,
-                    border: 'none',
-                    background: '#4c8dff',
-                    color: '#04203f',
-                    fontWeight: 800,
-                    fontSize: 13,
-                    cursor: 'pointer',
-                  }}
-                >
+                <button onClick={api.openPage} style={primaryBtn}>
                   Abrir a página da versão
                 </button>
               ) : (
-                <button
-                  onClick={api.apply}
-                  style={{
-                    flex: 1,
-                    padding: '10px 14px',
-                    borderRadius: 9,
-                    border: 'none',
-                    background: '#4c8dff',
-                    color: '#04203f',
-                    fontWeight: 800,
-                    fontSize: 13,
-                    cursor: 'pointer',
-                  }}
-                >
+                <button onClick={api.apply} style={primaryBtn}>
                   {mode === 'auto' ? 'Atualizar agora' : 'Baixar e abrir o instalador'}
                 </button>
               )}
@@ -421,17 +429,7 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
                   if (info && mode !== 'link') api.apply()
                   else api.openPage()
                 }}
-                style={{
-                  flex: 1,
-                  padding: '10px 14px',
-                  borderRadius: 9,
-                  border: 'none',
-                  background: '#4c8dff',
-                  color: '#04203f',
-                  fontWeight: 800,
-                  fontSize: 13,
-                  cursor: 'pointer',
-                }}
+                style={primaryBtn}
               >
                 Tentar de novo
               </button>
@@ -461,5 +459,17 @@ const ghostBtn: React.CSSProperties = {
   color: '#b7c0cd',
   fontWeight: 700,
   fontSize: 12.5,
+  cursor: 'pointer',
+}
+
+const primaryBtn: React.CSSProperties = {
+  flex: 1,
+  padding: '10px 14px',
+  borderRadius: 9,
+  border: 'none',
+  background: '#4c8dff',
+  color: '#04203f',
+  fontWeight: 800,
+  fontSize: 13,
   cursor: 'pointer',
 }

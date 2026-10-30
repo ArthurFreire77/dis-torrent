@@ -72,12 +72,15 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Fecha o app aberto antes de sobrescrever o exe (senão o install falha com
 ; "arquivo em uso" e o usuário acha que o instalador está quebrado).
 CloseApplications=yes
-; REABRE o app depois de instalar. É o que faz a ATUALIZAÇÃO AUTOMÁTICA
-; ("atualizar antes de entrar") terminar sozinha: quando o próprio app executa
-; este setup com /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS, o Inno fecha o
-; processo antigo, instala a versão nova e abre de novo — sem o usuário ter de
-; procurar o atalho. Numa instalação manual o efeito é o mesmo (desejável).
-RestartApplications=yes
+; REABRE o app depois de instalar.
+;
+; BUG QUE ISTO CORRIGE (janela abrindo e fechando em loop): `RestartApplications`
+; só reinicia quem se registrou na API `RegisterApplicationRestart` do Windows —
+; e o Tauri NÃO faz isso. Na atualização automática sobravam DUAS cópias
+; disputando o mutex de instância única, e uma delas morria: a janela piscava.
+; Agora quem reabre é só o `[Code]` (modo silencioso) ou o `[Run]` (modo
+; manual), e o app não tem timer de saída. Não voltar para `yes` sem medir.
+RestartApplications=no
 ; Versão exibida em Aplicativos e no título do wizard é a textual
 ; ("1.1.7-pre-alpha"); o VersionInfo do .exe é numérico porque o Windows não
 ; aceita sufixo em recurso de versão.
@@ -111,6 +114,9 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModel
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "com.distorrent.app"
 
 [Run]
+; Abre o app UMA vez, no fim do fluxo MANUAL. Com `skipifsilent` a atualização
+; automática (`/SILENT`) não abre nada por aqui — quem a reabre é o `[Code]`,
+; depois de esperar o processo antigo morrer de verdade.
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -120,6 +126,11 @@ const
   WebView2ClientKey = 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   WebView2ClientKeyWow = 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   WebView2ClientKeyUser = 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  // Nome do mutex criado pelo `tauri-plugin-single-instance`:
+  // `<identifier>-sim` = `com.distorrent.app-sim` (a feature `semver` está
+  // DESLIGADA em src-tauri/Cargo.toml; se um dia for ligada, o nome ganha a
+  // versão e este literal precisa acompanhar).
+  AppInstanceMutex = 'com.distorrent.app-sim';
 
 function WebView2Instalado(): Boolean;
 begin
@@ -129,13 +140,47 @@ begin
     RegKeyExists(HKEY_CURRENT_USER, WebView2ClientKeyUser);
 end;
 
+// Reinício na ATUALIZAÇÃO AUTOMÁTICA (o app se auto-instala em /SILENT).
+//
+// O problema relatado: a atualização "dá certo", o app fecha, reabre e começa
+// tudo de novo. A origem era a CORRIDA entre coisas tentando abrir o app:
+//   1. `RestartApplications` (Restart Manager) — o Tauri não chama
+//      `RegisterApplicationRestart`, então quase nunca reiniciava de verdade;
+//   2. o `[Run]` do fluxo manual;
+//   3. um timer de saída no frontend (`updateRules`), que podia derrubar a
+//      cópia recém-aberta.
+// Aqui a atualização silenciosa tem UM dono do reinício, e ele espera o
+// processo antigo morrer antes de abrir o novo (abrir cedo demais é o que fazia
+// a cópia nova cair no single-instance e sumir calada).
+procedure ReiniciarAppSilencioso();
+var
+  ErrorCode: Integer;
+  tentativa: Integer;
+begin
+  for tentativa := 1 to 40 do
+  begin
+    if not CheckForMutexes(AppInstanceMutex) then
+      Break;
+    Sleep(250);
+  end;
+  // Ainda vivo depois de 10 s: NÃO abre uma segunda cópia. Ela morreria na hora
+  // (single-instance) e o usuário veria a janela piscar.
+  if CheckForMutexes(AppInstanceMutex) then
+    Exit;
+  ShellExec('open', ExpandConstant('{app}\{#AppExeName}'), '', ExpandConstant('{app}'),
+            SW_SHOWNORMAL, ewNoWait, ErrorCode);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ErrorCode: Integer;
 begin
+  if CurStep <> ssPostInstall then
+    Exit;
+
   // Erro honesto > estado falso: não fingimos instalar o WebView2. Avisamos e
   // abrimos a página oficial (o Windows 11 e o Windows 10 atualizado já têm).
-  if (CurStep = ssPostInstall) and (not WebView2Instalado()) then
+  if not WebView2Instalado() then
   begin
     if MsgBox('O DisTorrent usa o Microsoft Edge WebView2 para desenhar a interface e ele não foi encontrado neste computador.' + #13#10 + #13#10 +
               'Sem o WebView2 o app abre com a tela em branco. Quer abrir a página oficial de download agora?',
@@ -143,4 +188,9 @@ begin
       ShellExec('open', 'https://go.microsoft.com/fwlink/p/?LinkId=2124703', '', '',
                 SW_SHOWNORMAL, ewNoWait, ErrorCode);
   end;
+
+  // Só na atualização automática: no fluxo manual o `[Run]` já abre o app, e o
+  // usuário acabou de ver o wizard — abrir aqui geraria duas janelas.
+  if WizardSilent() then
+    ReiniciarAppSilencioso();
 end;

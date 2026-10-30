@@ -8,6 +8,9 @@
 // O Rust (`src-tauri/src/updater.rs`) só BUSCA e BAIXA. A decisão de "esta
 // versão é mais nova?" e "devo instalar sozinho?" mora aqui.
 
+// Formatação de bytes: uma implementação só (`shared/bytes.ts`).
+export { formatBytes } from '../shared/bytes.ts'
+
 /** Metadados devolvidos por `update_check` (Rust). */
 export interface UpdateInfo {
   current: string
@@ -20,6 +23,17 @@ export interface UpdateInfo {
   notes: string
   html_url: string
   platform: string
+  /**
+   * O nome do asset cita uma versão diferente da tag da release.
+   *
+   * Acontece quando a release é publicada reaproveitando um binário velho
+   * (`build-installer.ps1 -SkipBuild` com `distorrent.exe` antigo): instalar
+   * "a versão nova" não muda nada e o app pediria atualização para sempre. O
+   * cartão precisa dizer isso em vez de prometer uma atualização que não existe.
+   */
+  label_mismatch?: boolean
+  /** Versão citada no nome do asset, quando ele cita alguma. */
+  asset_version?: string
 }
 
 export interface ParsedVersion {
@@ -81,14 +95,6 @@ export function isNewer(current: string, latest: string): boolean {
   return compareVersions(latest, current) > 0
 }
 
-/** `"8,9 MB"` — texto do cartão de update (não inventa precisão). */
-export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '?'
-  const mb = bytes / (1024 * 1024)
-  if (mb >= 1) return `${mb.toFixed(1).replace('.', ',')} MB`
-  return `${Math.max(1, Math.round(bytes / 1024))} KB`
-}
-
 /** Só as N primeiras linhas das notas: o overlay não vira parede de texto. */
 export function shortNotes(notes: string, maxLines = 6): string {
   const lines = String(notes ?? '')
@@ -123,6 +129,7 @@ export function updateModeFor(platform: string): UpdateMode {
 export type UpdateOutcome =
   | { kind: 'none' }
   | { kind: 'later'; info: UpdateInfo }
+  | { kind: 'stalled'; info: UpdateInfo }
   | { kind: 'applied'; info: UpdateInfo; path: string }
   | { kind: 'error'; message: string }
 
@@ -132,13 +139,22 @@ export interface UpdateDeps {
   download: (info: UpdateInfo) => Promise<string>
   apply: (path: string) => Promise<void>
   quit: () => Promise<void>
-  /** Guarda "pulei esta versão" / "essa falhou". */
+  /** Guarda "pulei esta versão" / "essa falhou" / "essa eu já instalei". */
   getFlag: (key: string) => Promise<string | null>
   setFlag: (key: string, value: string) => Promise<void>
 }
 
 export const FLAG_SKIP = 'update.skip'
 export const FLAG_FAILED = 'update.failed'
+/**
+ * Versão que este app JÁ instalou e continuou rodando a antiga.
+ *
+ * É o freio do loop "atualiza → fecha → abre → atualiza de novo". Sem ele, um
+ * instalador rotulado errado (o caso clássico: release `v1.1.12` empacotando um
+ * `distorrent.exe` 1.1.11) faz o app baixar, instalar, reabrir e encontrar a
+ * MESMA atualização pendente para sempre — o usuário vê a janela piscando.
+ */
+export const FLAG_APPLIED = 'update.applied'
 
 /**
  * Fluxo completo, sem UI: verifica, decide, baixa, confere e aplica.
@@ -149,7 +165,9 @@ export const FLAG_FAILED = 'update.failed'
  *   3. Versão que JÁ falhou ao instalar não é tentada em loop automático: vira
  *      `later`, com botão manual. Sem isso, um instalador quebrado reiniciaria
  *      o app para sempre.
- *   4. Nada é aplicado sem o hash conferido (o Rust recusa; aqui só repassamos).
+ *   4. Versão que já foi INSTALADA e não mudou a versão em execução vira
+ *      `stalled` — nunca tenta sozinha outra vez (ver `FLAG_APPLIED`).
+ *   5. Nada é aplicado sem o hash conferido (o Rust recusa; aqui só repassamos).
  */
 export async function runUpdateFlow(
   deps: UpdateDeps,
@@ -173,6 +191,12 @@ export async function runUpdateFlow(
   // o botão "Baixar e instalar" — é o máximo que o Android permite.
   if (info.platform === 'android') return { kind: 'later', info }
 
+  // FREIO DO LOOP: já instalamos ESTA versão e o app continua rodando uma
+  // anterior. Instalar de novo produz exatamente o mesmo resultado — a janela
+  // fecharia e abriria para sempre. Dizemos a verdade e paramos.
+  const alreadyApplied = (await deps.getFlag(FLAG_APPLIED)) === info.latest
+  if (alreadyApplied) return { kind: 'stalled', info }
+
   const failedBefore = (await deps.getFlag(FLAG_FAILED)) === info.latest
   if (!opts.autoApply || failedBefore) return { kind: 'later', info }
 
@@ -185,19 +209,29 @@ export async function runUpdateFlow(
     return { kind: 'error', message: String((e as Error)?.message ?? e) }
   }
 
+  // Marca ANTES de executar: o instalador fecha este processo, então não há
+  // garantia de que o código abaixo rode. Se a marcação ficasse depois e o
+  // Inno matasse o app no meio, o loop voltaria na próxima abertura.
+  await deps.setFlag(FLAG_APPLIED, info.latest).catch(() => {})
+
   try {
     await deps.apply(path)
   } catch (e) {
-    // Aqui a falha é do INSTALADOR. Marcar evita reiniciar em loop.
+    // Aqui a falha é do INSTALADOR. Desfaz a marca e registra a falha para não
+    // reiniciar em loop (a marca de "aplicado" seria mentira: não aplicou).
+    await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
     await deps.setFlag(FLAG_FAILED, info.latest).catch(() => {})
     return { kind: 'error', message: String((e as Error)?.message ?? e) }
   }
 
   // Windows: o Inno fecha este processo (`/CLOSEAPPLICATIONS`) e reabre o app
-  // (`/RESTARTAPPLICATIONS`). Se nada acontecer em alguns segundos, sinaliza —
-  // mas nunca mata o processo no meio de uma chamada em andamento.
-  if (mode === 'auto') {
-    setTimeout(() => { void deps.quit().catch(() => {}) }, 4000)
-  }
+  // (`/RESTARTAPPLICATIONS` → hoje é o `[Code]` do installer/distorent.iss, que
+  // espera o mutex cair antes de abrir).
+  //
+  // NÃO existe timer de saída aqui de propósito. Existia um `setTimeout(quit,
+  // 4000)` como "reserva"; quando o Inno reabria o app antes dos 4 s, o timer
+  // da cópia ANTIGA derrubava a cópia NOVA (o processo novo herda o handle do
+  // mutex mas não o timer) — a janela abria, fechava e reabria em loop.
+  // Quem encerra este processo é o instalador, que também é quem reinicia.
   return { kind: 'applied', info, path }
 }

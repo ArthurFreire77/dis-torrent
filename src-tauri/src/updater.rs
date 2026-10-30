@@ -59,6 +59,47 @@ pub struct UpdateInfo {
     pub html_url: String,
     /// Plataforma que escolheu o asset (`windows`/`linux`/`android`/`outro`).
     pub platform: String,
+    /// `true` quando o NOME do asset cita uma versão diferente da tag.
+    ///
+    /// POR QUE ISSO EXISTE: a release pode estar rotulada `v1.1.12` e o `.exe`
+    /// publicado nela ser o de `1.1.11` (aconteceu por `-SkipBuild` reaproveitando
+    /// binário velho). O app instalaria "a versão nova" e continuaria na antiga,
+    /// pedindo atualização de novo — a janela piscando que o usuário relatou.
+    /// Aqui só sinalizamos; a decisão de instalar continua no frontend.
+    pub label_mismatch: bool,
+    /// Versão que o nome do asset declara, quando ele cita alguma.
+    pub asset_version: String,
+}
+
+/// Extrai `1.1.11` de `DisTorrent_1.1.11-pre-alpha_x64_setup.exe`.
+///
+/// Devolve vazio quando o nome não cita versão (não inventamos rótulo).
+/// Só o PRIMEIRO bloco `d+.d+.d+` conta: depois dele vem `_x64_setup`.
+fn version_in_asset_name(name: &str) -> String {
+    let mut core = String::new();
+    let mut digits = 0usize;
+    let mut dots = 0usize;
+    let mut started = false;
+    for c in name.chars() {
+        if c.is_ascii_digit() {
+            started = true;
+            core.push(c);
+            digits += 1;
+        } else if c == '.' && started {
+            core.push(c);
+            dots += 1;
+        } else if started {
+            // Terminou o bloco numérico (o `_` ou o `-` encerram).
+            break;
+        }
+    }
+    let core = core.trim_end_matches('.').to_string();
+    // Versão de verdade: três números separados por ponto.
+    if dots >= 2 && digits >= 3 {
+        core
+    } else {
+        String::new()
+    }
 }
 
 fn platform_tag() -> &'static str {
@@ -189,10 +230,27 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
         return Err(format!("asset inesperado para {platform}: {}", asset.name));
     }
 
+    let latest = release.tag_name.trim_start_matches('v').to_string();
+    let asset_version = version_in_asset_name(&asset.name);
+    // A tag é a fonte de verdade da versão; o nome do asset só serve de alerta.
+    // Comparamos só o núcleo numérico (`1.1.12` vs `1.1.12`), porque o sufixo
+    // `-pre-alpha` varia entre "tem" e "não tem" conforme o empacotador.
+    let label_mismatch = !asset_version.is_empty() && {
+        let tag_core = latest.split('-').next().unwrap_or("");
+        let asset_core = asset_version.split('-').next().unwrap_or("");
+        asset_core != tag_core
+    };
+    if label_mismatch {
+        eprintln!(
+            "update: a release {} publicou o asset {} (versão {asset_version}) — instalador rotulado com outra versão; não vou entrar em loop",
+            release.tag_name, asset.name
+        );
+    }
+
     Ok(UpdateInfo {
         current,
         // `tag_name` vem como `v1.1.10`; a comparação no frontend ignora o `v`.
-        latest: release.tag_name.trim_start_matches('v').to_string(),
+        latest,
         asset_name: asset.name.clone(),
         asset_size: asset.size,
         download_url: asset.browser_download_url.clone(),
@@ -204,6 +262,8 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
         },
         html_url: release.html_url,
         platform,
+        label_mismatch,
+        asset_version,
     })
 }
 
@@ -372,10 +432,34 @@ pub fn update_apply(_app: tauri::AppHandle, path: String) -> Result<(), String> 
         return Err("instalador não encontrado (o download falhou?)".into());
     }
     let lower = path.to_ascii_lowercase();
+
+    // BACKUP ANTES DE ATUALIZAR (Windows).
+    //
+    // O Inno só troca o `.exe` em `{app}` e nunca toca em `%APPDATA%`, mas o
+    // usuário pediu explicitamente "cuida para não perder os dados", e um
+    // snapshot é a única garantia real: se a versão nova tiver um bug de
+    // migração, existe um arquivo do estado ANTERIOR para voltar. É cifrado com
+    // a chave derivada do cofre (mesmo formato do backup automático do core),
+    // então não vira texto claro no disco.
     #[cfg(target_os = "windows")]
     {
         if !lower.ends_with(".exe") {
             return Err("só instalador .exe é executado no Windows".into());
+        }
+        match pre_update_snapshot(&_app) {
+            Ok(Some(arquivo)) => {
+                tracing::info!(?arquivo, "backup pré-atualização criado")
+            }
+            // Sem identidade/cofre ainda: não há dado de usuário para perder.
+            Ok(None) => {}
+            Err(e) => {
+                // Falhar o backup NÃO impede a atualização (o usuário pediu para
+                // atualizar e o Inno não mexe nos dados), mas fica registrado —
+                // e é honesto: não dizemos que fez backup sem ter feito.
+                eprintln!(
+                    "update: backup pré-atualização falhou ({e}) — seguindo com a atualização"
+                );
+            }
         }
         std::process::Command::new(&p)
             .args([
@@ -511,4 +595,83 @@ pub fn update_cleanup(app: tauri::AppHandle) -> Result<u32, String> {
         }
     }
     Ok(removed)
+}
+
+/// Snapshot do banco ANTES de trocar o binário (Windows).
+///
+/// Devolve `Ok(None)` quando ainda não existe identidade (nada a preservar) e
+/// `Err` quando havia dado mas o snapshot não pôde ser feito.
+///
+/// O arquivo vai para `%APPDATA%\com.distorrent.app\backups\pre-update-<versao>-<ts>.stormvault`
+/// — a MESMA pasta e o MESMO formato do backup automático do core, então
+/// `stormvault_backup_restore` já sabe restaurá-lo. Cifrado com a chave do
+/// cofre: um snapshot em texto claro ao lado do banco não protegeria nada.
+///
+/// O teto de mensagens é mais baixo que o do backup normal de propósito: isto
+/// roda no meio do boot do atualizador e não pode segurar a instalação lendo
+/// 200 mil mensagens.
+#[cfg(target_os = "windows")]
+fn pre_update_snapshot(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String> {
+    use tauri::Manager;
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("pasta de dados: {e}"))?;
+    let store = distorrent_core::storage::Store::open(&dir.join("distorrent.db"))
+        .map_err(|e| e.to_string())?;
+    let Some(_identity) = store.load_identity() else {
+        // Sem identidade não há conta para salvar (primeiro boot).
+        return Ok(None);
+    };
+    let secret = match store.load_secret_hex() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let data = distorrent_core::stormvault::collect(&store, None, Some(20_000))
+        .map_err(|e| e.to_string())?;
+    let backup_key = distorrent_core::stormvault::backup_key_for(&secret);
+    let blob = distorrent_core::stormvault::seal_with_key(&data, &backup_key)
+        .map_err(|e| e.to_string())?;
+
+    let backups = dir.join("backups");
+    std::fs::create_dir_all(&backups).map_err(|e| format!("criar pasta de backups: {e}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let version = app
+        .config()
+        .version
+        .clone()
+        .unwrap_or_else(|| "0.0.0".to_string());
+    let nome = format!("pre-update-{version}-{stamp}.stormvault");
+    let destino = backups.join(&nome);
+    // Grava em `.part` e renomeia: um snapshot pela metade (energia caindo no
+    // meio) não pode ficar com nome de backup válido.
+    let part = backups.join(format!("{nome}.part"));
+    std::fs::write(&part, &blob).map_err(|e| format!("gravar snapshot: {e}"))?;
+    std::fs::rename(&part, &destino).map_err(|e| format!("finalizar snapshot: {e}"))?;
+
+    // Mantém no máximo 5 snapshots pré-atualização: eles se acumulam a cada
+    // versão e o usuário nunca pediu uma pilha deles.
+    if let Ok(entries) = std::fs::read_dir(&backups) {
+        let mut pre: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("pre-update-") && n.ends_with(".stormvault"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        pre.sort();
+        while pre.len() > 5 {
+            let velho = pre.remove(0);
+            let _ = std::fs::remove_file(velho);
+        }
+    }
+    Ok(Some(destino))
 }

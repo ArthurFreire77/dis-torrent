@@ -40,6 +40,10 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
   const info = api.info
   const temNova = !!info && isNewer(info.current, info.latest)
   const mode = info ? updateModeFor(info.platform) : 'link'
+  // Instalador rotulado com outra versão: aplicar não resolve (o app volta na
+  // mesma versão). É melhor avisar no boot do que deixar o usuário instalar de
+  // novo e achar que o app está quebrado.
+  const rotuloErrado = !!info?.label_mismatch
   const ocupada = api.phase === 'checking' || api.phase === 'downloading' || api.phase === 'installing'
   // A tela segura o app só enquanto a checagem está em curso e não expirou.
   const prender = ocupada && !expirou
@@ -51,23 +55,27 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
         ? 'baixando a versão nova'
         : api.phase === 'installing'
           ? 'instalando'
-          : api.phase === 'error'
-            ? 'não deu para verificar'
-            : temNova
-              ? `versão ${info?.latest} disponível`
-              : 'você está na versão mais nova'
+          : api.phase === 'stalled'
+            ? 'atualização já aplicada'
+            : api.phase === 'error'
+              ? 'não deu para verificar'
+              : temNova
+                ? `versão ${info?.latest} disponível`
+                : 'você está na versão mais nova'
 
   const detalhe =
     api.message ||
-    (api.phase === 'checking'
-      ? 'conferindo o GitHub…'
-      : api.phase === 'installing'
-        ? mode === 'auto'
-          ? 'o app vai reiniciar sozinho'
-          : 'conclua no instalador do sistema'
-        : info
-          ? `instalada: ${info.current || '?'}`
-          : '')
+    (rotuloErrado
+      ? `o instalador desta release é o da ${info?.asset_version || '?'} — a release anuncia ${info?.latest || '?'}`
+      : api.phase === 'checking'
+        ? 'conferindo o GitHub…'
+        : api.phase === 'installing'
+          ? mode === 'auto'
+            ? 'o app vai reiniciar sozinho'
+            : 'conclua no instalador do sistema'
+          : info
+            ? `instalada: ${info.current || '?'}`
+            : '')
 
   // Sem nada para fazer (nenhum resultado ainda e sem versão nova): mostra o
   // boot antigo, que já avisa "ainda iniciando o nó P2P" depois de 5 s. Assim
@@ -129,8 +137,10 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
           </pre>
         )}
 
-        {/* Ações: só quando a automação não pode concluir sozinha. */}
-        {!prender && temNova && (
+        {/* Ações: só quando a automação não pode concluir sozinha. Com o rótulo
+            errado não oferecemos "Atualizar agora": instalar de novo devolveria
+            o mesmo app, e é exatamente o loop que queremos evitar. */}
+        {!prender && temNova && !rotuloErrado && (
           <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'center' }}>
             <button
               onClick={mode === 'link' ? api.openPage : api.apply}
