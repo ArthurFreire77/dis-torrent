@@ -5876,7 +5876,25 @@ impl NetworkEngine {
             }
             Err(e) => {
                 warn!("voz nativa: offer falhou para {peer_fp} ({e}) — sinalização segue no navegador");
-                if let Some(peers) = self
+                // NÃO remova o par do registro nativo se a SESSÃO AINDA EXISTE.
+                //
+                // BUG QUE ISTO CORRIGE (o "conectado mas não se ouve" mais
+                // difícil de achar): `create_offer` pode falhar num par cujo
+                // `Session` já está vivo (renegociação, offer tardia). Remover
+                // o par de `voice_calls` aqui fazia `voice_is_native` virar
+                // `false`: todo `CallOffer/CallAnswer/CallIce` passava a ir
+                // para o JS — que no Linux NÃO tem `RTCPeerConnection` e
+                // descarta em silêncio — e o drainer de sinais parava de
+                // drenar a fila da sessão viva. A UI continuava "conectado"
+                // (lia os stats da sessão), mas não havia mais troca de
+                // SDP/ICE: qualquer perda de rota virava irrecuperável.
+                let sessao_viva = self
+                    .voice_media()
+                    .map(|v| v.stats_peer(call_id, peer_fp).is_some())
+                    .unwrap_or(false);
+                if sessao_viva {
+                    warn!("voz nativa: {call_id}/{peer_fp} mantém a sessão apesar da offer falhar");
+                } else if let Some(peers) = self
                     .voice_calls
                     .lock()
                     .unwrap_or_else(|x| x.into_inner())
@@ -5964,15 +5982,21 @@ impl NetworkEngine {
         let Some(v) = self.voice_media() else {
             return false;
         };
-        let (cid, pfp, c, m) = (
-            call_id.to_string(),
-            peer_fp.to_string(),
-            cand.to_string(),
-            mid.to_string(),
-        );
+        let (cand, mid) = unwrap_wire_candidate(cand, mid);
+        let (cid, pfp) = (call_id.to_string(), peer_fp.to_string());
         let res =
-            tokio::task::spawn_blocking(move || v.add_ice_candidate(&cid, &pfp, &c, &m)).await;
+            tokio::task::spawn_blocking(move || v.add_ice_candidate(&cid, &pfp, &cand, &mid)).await;
         let ok = matches!(res, Ok(Ok(())));
+        if !ok {
+            // Antes era silencioso: o candidato do browser era recusado (JSON
+            // não desembrulhado) e a chamada mista falhava sem nenhum rastro.
+            tracing::debug!(
+                call_id = %call_id,
+                peer = %peer_fp,
+                mid = %mid,
+                "candidato ICE nativo recusado (formato do fio inválido)"
+            );
+        }
         self.voice_flush_signals(call_id, peer_fp);
         ok
     }
@@ -6522,8 +6546,24 @@ impl NetworkEngine {
             #[cfg(target_os = "linux")]
             {
                 let call_id = format!("voice-{community_id}-{channel_id}");
-                self.voice_hangup_peer(&call_id, peer_fp);
-                self.voice_forget_peer(&call_id, peer_fp);
+                // NÃO derruba a mídia se a rota está VIVA.
+                //
+                // `PeerOffline` é emitido a cada queda da sessão de
+                // TRANSPORTE (troca de rede, re-eleição de relay, backoff) —
+                // e o RTP do WebRTC é independente dela. Fechar a
+                // PeerConnection aqui fazia a voz de uma pessoa sumir por
+                // ~15 s (até o re-anúncio refazer offer/answer/ICE) mesmo com
+                // o áudio fluindo perfeitamente. Só fechamos quando a própria
+                // sessão nativa já não está conectada.
+                let rota_viva = self
+                    .voice_media()
+                    .and_then(|v| v.stats_peer(&call_id, peer_fp))
+                    .map(|s| s.state == "connected")
+                    .unwrap_or(false);
+                if !rota_viva {
+                    self.voice_hangup_peer(&call_id, peer_fp);
+                    self.voice_forget_peer(&call_id, peer_fp);
+                }
             }
             let _ = self.events.send(EngineEvent::VoiceLeft {
                 community_id,
@@ -10253,6 +10293,55 @@ fn unwrap_wire_sdp(sdp: &str) -> String {
         }
     }
     sdp.to_string()
+}
+
+/// Desembrulha o candidato ICE quando ele veio do NAVEGADOR.
+///
+/// BUG QUE ISTO CORRIGE (chamada mista Linux ↔ Windows/Android caía sozinha):
+/// `callWire.ts` define dois formatos no fio — SDP/candidato CRU do Rust e
+/// JSON do browser (`JSON.stringify(candidate)`). Para o SDP existia
+/// `unwrap_wire_sdp`, para o candidato NÃO: a string JSON inteira ia para
+/// `add_ice_candidate` como se fosse o atributo `candidate`. O `rtc-ice` faz
+/// `split_whitespace` e exige ≥ 8 tokens; o JSON vira 1 token →
+/// `AttributeTooShortIceCandidate`, erro ENGOLIDO por `matches!(res, Ok(Ok(())))`.
+///
+/// Resultado: o lado nativo nunca aprendia os candidatos do browser, o par ICE
+/// ficava em `checking` até o timeout e a chamada "caía sozinha" — sem nada no
+/// log dizendo que o candidato foi recusado.
+///
+/// Devolve `(candidate, mid_do_json)`: o `mid` do JSON é IGNORADO quando o
+/// frame já traz um (o frame é a fonte do mux), mas serve de reserva quando o
+/// campo vem vazio.
+#[cfg(target_os = "linux")]
+fn unwrap_wire_candidate(raw: &str, frame_mid: &str) -> (String, String) {
+    let t = raw.trim();
+    if !t.starts_with('{') {
+        return (raw.to_string(), frame_mid.to_string());
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else {
+        return (raw.to_string(), frame_mid.to_string());
+    };
+    let cand = v
+        .get("candidate")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // `sdpMid` e `sdpMLineIndex` existem no RTCIceCandidate; aceitamos os dois
+    // nomes de campo que aparecem no fio.
+    let mid = v
+        .get("sdpMid")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            v.get("sdpMLineIndex")
+                .and_then(|x| x.as_u64())
+                .map(|n| n.to_string())
+        })
+        .unwrap_or_else(|| frame_mid.to_string());
+    // Candidato vazio no JSON = fim do gathering; devolvemos vazio para o
+    // `add_ice_candidate` tratar como end-of-candidates, não como lixo.
+    (cand, mid)
 }
 
 async fn handle_frame(

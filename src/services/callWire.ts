@@ -28,15 +28,30 @@ export function parseWireSdp(raw: unknown, want: 'offer' | 'answer'): WireSdp | 
   return null
 }
 
-/** Aceita candidato em JSON (navegador) ou cru `candidate:…` (Rust). */
-export function parseWireCandidate(raw: unknown): RTCIceCandidateInit | null {
+/**
+ * Aceita candidato em JSON (navegador) ou cru `candidate:…` (Rust).
+ *
+ * `mid` é o m-line index/mid que veio no FRAME (`CallIce`). Ele tem de chegar
+ * ao `RTCIceCandidateInit`: o `sdpMLineIndex: 0` fixo mandava todo candidato do
+ * Rust para a primeira m-line — com `max-bundle` "funciona por acidente", mas
+ * quando o bundle é desfeito (vídeo/tela separados) o candidato da segunda
+ * m-line era aplicado na m-line errada e rejeitado em silêncio (o `catch` do
+ * `addIceCandidate` era vazio), deixando aquele par sem rota.
+ */
+export function parseWireCandidate(raw: unknown, mid?: string): RTCIceCandidateInit | null {
   if (typeof raw !== 'string') return null
   const t = raw.trimStart()
   if (t.startsWith('{')) {
     try {
       const j = JSON.parse(t)
       if (j && typeof j === 'object' && typeof j.candidate === 'string') {
-        return j as RTCIceCandidateInit
+        const out = j as RTCIceCandidateInit
+        // O JSON do browser normalmente já traz `sdpMid`; quando não traz,
+        // usamos o do frame em vez de assumir 0.
+        if (!out.sdpMid && !(typeof out.sdpMLineIndex === 'number')) {
+          if (mid) out.sdpMid = mid
+        }
+        return out
       }
       return null
     } catch {
@@ -44,6 +59,12 @@ export function parseWireCandidate(raw: unknown): RTCIceCandidateInit | null {
     }
   }
   // nativo: "candidate:…" ou string vazia (fim do gathering)
-  if (t.startsWith('candidate:') || t === '') return { candidate: raw, sdpMLineIndex: 0 }
+  if (t.startsWith('candidate:') || t === '') {
+    const numeric = mid !== undefined && /^\d+$/.test(mid)
+    return {
+      candidate: raw,
+      ...(numeric ? { sdpMLineIndex: Number(mid) } : { sdpMLineIndex: 0, ...(mid ? { sdpMid: mid } : {}) }),
+    }
+  }
   return null
 }

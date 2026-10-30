@@ -15,10 +15,21 @@ function formatDuration(nowMs: number, startAt: number): string {
   return `${mm}:${ss}`
 }
 
-export default function CallPhaseBadge({ phase, startAt, nowMs }: {
+export default function CallPhaseBadge({ phase, startAt, nowMs, mediaLive }: {
   phase: CallPhase
   startAt: number
   nowMs: number
+  /**
+   * Existe mídia REAL fluindo/chegando? `false` (ou omitido) mantém o texto de
+   * fase.
+   *
+   * POR QUE ESTE CAMPO EXISTE: a fase é de SINALIZAÇÃO e é promovida pelo
+   * primeiro par que conecta (ou pelo agregado do core). Num mesh isso pintava
+   * "Conectado" verde com metade dos participantes muda — o status mentia e o
+   * usuário concluía que o app estava quebrado "sem motivo". Com `mediaLive`
+   * falso o badge diz a verdade.
+   */
+  mediaLive?: boolean
 }) {
   if (phase === 'idle') return null
 
@@ -28,6 +39,12 @@ export default function CallPhaseBadge({ phase, startAt, nowMs }: {
   if (phase === 'connected') {
     background = t.green
     text = `Conectado • ${formatDuration(nowMs, startAt)}`
+    if (mediaLive === false) {
+      // Verde só quando há áudio/vídeo de verdade.
+      background = t.yellow
+      color = '#000'
+      text = `Conectado sem mídia • ${formatDuration(nowMs, startAt)}`
+    }
   } else if (phase === 'outgoing') {
     background = t.accent
     text = 'Chamando…'

@@ -61,10 +61,12 @@ class CallForegroundService : Service() {
       } else {
         startForeground(NOTIFICATION_ID, notification)
       }
+      isRunning = true
     } catch (e: Throwable) {
       // Sem permissão de mic declarada/concedida o Android recusa o tipo —
       // melhor parar do que ficar num estado que promete algo que não existe.
       android.util.Log.w("distorrentCallFg", "startForeground recusado: ${e.message}")
+      isRunning = false
       stopSelf()
       return START_NOT_STICKY
     }
@@ -75,6 +77,7 @@ class CallForegroundService : Service() {
   }
 
   override fun onDestroy() {
+    isRunning = false
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -136,5 +139,9 @@ class CallForegroundService : Service() {
   companion object {
     const val CHANNEL_ID = "distorrent_call"
     const val NOTIFICATION_ID = 4711
+    /** Visível para `MainActivity`: há chamada ativa (ver `onPause`). */
+    @Volatile
+    var isRunning: Boolean = false
+      private set
   }
 }

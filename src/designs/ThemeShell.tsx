@@ -1034,6 +1034,10 @@ export default function ThemeShell({ designId }: {designId:string}){
       nativeMedia: !!(activeCall as any).nativeMedia,
     } : null,
   }), [
+    // A REFERÊNCIA muda a cada emissão porque o `callManager` clona o roster
+    // no `onUpdate` (ver o comentário lá). Sem esse clone, `push`/`splice`
+    // in-place deixavam este memo "congelado" no roster do primeiro emit: o
+    // cabeçalho contava 3 e só existia tile de 1.
     activeCall?.participants,
     activeCall?.sharing,
     activeCall?.cameraOn,
@@ -1043,6 +1047,22 @@ export default function ThemeShell({ designId }: {designId:string}){
     (activeCall as any)?.nativeMedia,
     identity?.fingerprint,
   ])
+
+  // MÍDIA REAL, não fase de sinalização. O badge só fica verde quando existe
+  // track viva (áudio/vídeo remoto ou local) — a fase é promovida pelo primeiro
+  // par que conecta e mentia "Conectado" num mesh com metade das pessoas muda.
+  const mediaLive = useMemo(() => {
+    if (!activeCall) return false
+    const parts = (activeCall.participants ?? []) as any[]
+    for (const p of parts) {
+      if (p?.videoUrl) return true
+      const tracks = p?.stream?.getTracks?.() as any[] | undefined
+      if (tracks?.some((t) => t?.readyState === 'live')) return true
+    }
+    const local = (activeCall as any).localStream
+    const localTracks = local?.getTracks?.() as any[] | undefined
+    return !!localTracks?.some((t) => t?.readyState === 'live')
+  }, [activeCall?.participants, (activeCall as any)?.localStream])
 
   // Fixação/expansão só valem enquanto a transmissão existir. Sem isto, parar
   // o compartilhamento deixava `expandedTileId` apontando para um id morto e a
@@ -3235,7 +3255,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <span style={{ display: 'block', fontWeight: 800, color: t.heading, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{conversations.find(c=>c.id===activeCall.convId)?.title ?? peerTitle ?? 'Chamada'}</span>
                 {/* v6: fase da chamada (chamando/conectando/reconectando…) com elapsed */}
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
-                  <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} />
+                  <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} />
                   {/* Cronômetro já conectado. Antes ficava grudado no título e
                       sumia quando o badge virava "Conectado • MM:SS". */}
                   <span style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{fmtDuration(callDuration)}</span>

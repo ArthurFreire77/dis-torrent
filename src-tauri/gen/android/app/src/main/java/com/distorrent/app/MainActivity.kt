@@ -72,6 +72,25 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  /**
+   * WebView pausado = JS congelado, mídia continua no processo do browser.
+   *
+   * O `WryActivity` chama `mWebView.onPause()` em `onPause`, e TODA a
+   * sinalização, o roster e os watchdogs da chamada vivem em JS. Com o FGS
+   * ligado, o processo (e o áudio) sobrevive, mas a página para de processar
+   * `call_offer`/`call_answer`/`voice_joined` — do ponto de vista dos outros,
+   * o participante "entrou e sumiu". Durante uma chamada ativa NÃO pausamos o
+   * WebView; fora dela o comportamento é o de sempre (economia de bateria).
+   */
+  override fun onPause() {
+    if (CallForegroundService.isRunning) {
+      // Não chama super.onPause(): é ele que pausa o WebView. O ciclo do
+      // Activity (foco, visibilidade) não é usado pelo app.
+      return
+    }
+    super.onPause()
+  }
+
   // Nota (removido): existia aqui um `hasMediaPermissions()` que checava
   // READ_MEDIA_IMAGES/VIDEO/AUDIO e READ_EXTERNAL_STORAGE — permissões que o
   // manifest NÃO declara mais (foi o que fazia o Play Protect bloquear o APK).

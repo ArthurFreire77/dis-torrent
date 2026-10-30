@@ -348,6 +348,10 @@ pub mod audio {
         mic: Mutex<Option<MicStream>>,
         spk: Mutex<Option<SpkStream>>,
         mic_error: Mutex<Option<String>>,
+        /// Último erro de ABERTURA do alto-falante. Sem isto a recepção podia
+        /// estar muda com métricas saudáveis (`packets_in` crescendo,
+        /// `plc_frames` em 0) e o app não tinha como dizer por quê.
+        spk_error: Mutex<Option<String>>,
         has_capture: AtomicBool,
         mic_attempted: AtomicBool,
         next_sub_id: Mutex<u64>,
@@ -367,6 +371,7 @@ pub mod audio {
                 mic: Mutex::new(None),
                 spk: Mutex::new(None),
                 mic_error: Mutex::new(None),
+                spk_error: Mutex::new(None),
                 has_capture: AtomicBool::new(false),
                 mic_attempted: AtomicBool::new(false),
                 next_sub_id: Mutex::new(1),
@@ -386,6 +391,11 @@ pub mod audio {
 
         pub fn mic_error(&self) -> Option<String> {
             self.inner.mic_error.lock().unwrap().clone()
+        }
+
+        /// Último erro de abertura do ALTO-FALANTE (`None` = tocando).
+        pub fn speaker_error(&self) -> Option<String> {
+            self.inner.spk_error.lock().unwrap().clone()
         }
 
         /// Abre o microfone se ainda nao abriu. Sem microfone a sessao AINDA funciona,
@@ -623,7 +633,12 @@ pub mod audio {
             if self.inner.spk.lock().unwrap().is_some() {
                 return Ok(());
             }
-            self.open_speaker()
+            let r = self.open_speaker();
+            // Guarda o motivo em vez de descartar: `let _ = ensure_speaker()`
+            // no build da sessão engolia "nenhum alto-falante utilizável" e a
+            // recepção ficava muda sem nenhum diagnóstico.
+            *self.inner.spk_error.lock().unwrap() = r.as_ref().err().cloned();
+            r
         }
 
         fn open_speaker(&self) -> Result<(), String> {
@@ -978,6 +993,12 @@ const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
 /// CPU sem recuperar audio.
 const MAX_PLC_BURST: u32 = 50;
 
+/// Buraco (`seq` pulado) acima disto NÃO é perda de rede: é mute/desmute do
+/// remetente, troca de SSRC ou parada momentânea — o remetente deixa de
+/// escrever RTP enquanto está mudo. Acima do teto, re-sincroniza o contador
+/// sem sintetizar áudio (10 frames = 200 ms).
+const PLC_RESYNC_GAP: u32 = 10;
+
 // ---------------------------------------------------------------- API publica
 
 /// Sinal de sinalizacao que a aplicacao deve encaminhar ao outro lado.
@@ -995,6 +1016,10 @@ pub struct VoiceStats {
     pub jitter_depth_ms: u32,
     pub packets_in: u64,
     pub packets_out: u64,
+    /// Escritas na track que falharam (`write_sample`). `packets_out` alto com
+    /// `write_errors` alto = problema desta máquina, não do outro lado.
+    #[serde(default)]
+    pub write_errors: u64,
     pub plc_frames: u64, // frames mascarados por perda
     pub decode_errors: u64,
     pub rtt_ms: Option<u64>,
@@ -1003,6 +1028,10 @@ pub struct VoiceStats {
     /// em vez de "conectando" mudo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_error: Option<String>,
+    /// Último erro de ABERTURA do alto-falante. `Some` com `packets_in`
+    /// crescendo = o áudio chega e não sai desta máquina.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_error: Option<String>,
     /// "off" | "starting" | "live" | "failed". "live" com `frames_out == 0`
     /// NAO e' sinal de saude: e' encoder que subiu sem produzir. O watchdog de
     /// 15s converte isso em "failed" com o motivo.
@@ -1045,6 +1074,9 @@ type Key = (String, String);
 struct Shared {
     packets_in: AtomicU64,
     packets_out: AtomicU64,
+    /// Escritas na track que FALHARAM (`write_sample` devolveu Err). Sem este
+    /// contador, `packets_out` mentia: subia mesmo com a track fechada.
+    write_errors: AtomicU64,
     plc_frames: AtomicU64,
     decode_errors: AtomicU64,
     jitter_depth_ms: AtomicU32,
@@ -1106,6 +1138,7 @@ impl Shared {
         Self {
             packets_in: AtomicU64::new(0),
             packets_out: AtomicU64::new(0),
+            write_errors: AtomicU64::new(0),
             plc_frames: AtomicU64::new(0),
             decode_errors: AtomicU64::new(0),
             jitter_depth_ms: AtomicU32::new(JITTER_DEPTH.as_millis() as u32),
@@ -1148,10 +1181,11 @@ impl Shared {
             jitter_depth_ms: self.jitter_depth_ms.load(Ordering::Relaxed),
             packets_in: self.packets_in.load(Ordering::Relaxed),
             packets_out: self.packets_out.load(Ordering::Relaxed),
-            plc_frames: self.plc_frames.load(Ordering::Relaxed),
+            write_errors: self.write_errors.load(Ordering::Relaxed),
             decode_errors: self.decode_errors.load(Ordering::Relaxed),
             rtt_ms: *self.rtt_ms.lock().unwrap(),
             mic_error: self::audio::hub().mic_error(),
+            speaker_error: self::audio::hub().speaker_error(),
             video_state: Some(self.video_state.lock().unwrap().clone()),
             video_codec: self.video_codec.lock().unwrap().clone(),
             video_source: self.video_source.lock().unwrap().clone(),
@@ -1217,8 +1251,14 @@ impl H {
         let sh = self.sh.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await; // flap curto se resolve sozinho
-            if sh.state.lock().unwrap().as_str() != "failed" {
-                return;
+                                                              // `reconnecting` também conta: é o estado de `Disconnected`, que
+                                                              // agora dispara restart. Se o flap se resolveu sozinho nesse
+                                                              // segundo, o estado já voltou a "connected" e saímos aqui.
+            {
+                let atual = sh.state.lock().unwrap().clone();
+                if atual != "failed" && atual != "reconnecting" {
+                    return;
+                }
             }
             if sh.remote_sdp.lock().unwrap().is_none() {
                 return; // nunca negociou: não há o que reiniciar
@@ -1266,13 +1306,39 @@ impl PeerConnectionEventHandler for H {
                 self.sh.connected.notify_waiters();
             }
             RTCPeerConnectionState::Connecting => self.sh.set_state("connecting"),
-            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+            RTCPeerConnectionState::Disconnected => {
+                // ROTA CAIU (ICE sem atividade por ~5 s).
+                //
+                // BUG QUE ISTO CORRIGE: `Disconnected` caía no `_ => {}` e a
+                // sessão CONTINUAVA "connected". Como `packets_out` era
+                // incrementado na escrita da track (que aceita tudo, o ICE
+                // descarta depois), o painel mostrava pacotes crescendo com a
+                // rota morta — exatamente o "aparece conectado mas não se
+                // ouve". Pior: o ICE restart só era agendado em `Failed`, que
+                // pode levar 25 s (ou nunca chegar, se alternar
+                // Disconnected↔Connected). Aqui tratamos como estado
+                // recuperável e agendamos o restart; o teto de 3 tentativas
+                // em `schedule_ice_restart` evita rajada.
+                self.sh.connected_flag.store(false, Ordering::SeqCst);
+                self.sh.set_state("reconnecting");
+                self.sh.connected.notify_waiters();
+                self.schedule_ice_restart();
+            }
+            RTCPeerConnectionState::Failed => {
+                self.sh.connected_flag.store(false, Ordering::SeqCst);
                 self.sh.set_state("failed");
                 self.sh.connected.notify_waiters();
                 self.schedule_ice_restart();
             }
+            RTCPeerConnectionState::Closed => {
+                // FECHAMOS DE PROPÓSITO (`close_key`/hangup). NÃO agendar ICE
+                // restart aqui: a task detached dormia 1 s, via `state ==
+                // "failed"`, e criava uma offer numa PC JÁ FECHADA — log falso
+                // ("nova offer na fila") em todo hangup normal e estado final
+                // sobrescrito para "failed" em vez de "idle".
+                self.sh.connected_flag.store(false, Ordering::SeqCst);
+            }
             RTCPeerConnectionState::New => self.sh.set_state("idle"),
-            _ => {}
         }
     }
 
@@ -1936,6 +2002,7 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
         }
         out.packets_in = out.packets_in.saturating_add(peer.packets_in);
         out.packets_out = out.packets_out.saturating_add(peer.packets_out);
+        out.write_errors = out.write_errors.saturating_add(peer.write_errors);
         out.plc_frames = out.plc_frames.saturating_add(peer.plc_frames);
         out.decode_errors = out.decode_errors.saturating_add(peer.decode_errors);
     }
@@ -2002,6 +2069,8 @@ mod stats_aggregation_tests {
             video_packets_in: Some(4),
             frames_in: Some(5),
             frames_out: Some(frames_out),
+            peers_connected: None,
+            peers_total: None,
         }
     }
 
@@ -2045,6 +2114,45 @@ mod stats_aggregation_tests {
         assert_eq!(stats.state, "failed");
         assert_eq!(stats.packets_in, 11, "cada peer conta uma vez só");
         assert_eq!(stats.packets_out, 22);
+    }
+
+    #[test]
+    fn aggregate_counts_connected_peers_so_one_bad_peer_does_not_kill_the_call() {
+        // O "cai sozinho" do grupo: `state` agregado é o PIOR par, então um
+        // único peer atrás de NAT simétrico reportava `failed` e o frontend
+        // derrubava a chamada inteira. `peers_connected` é o que permite ao
+        // consumidor distinguir "um par caiu" de "a chamada acabou".
+        let mut a = peer("off", None, 0);
+        a.state = "connected".into();
+        let mut b = peer("off", None, 0);
+        b.state = "failed".into();
+        let mut c = peer("off", None, 0);
+        c.state = "connected".into();
+
+        let stats = aggregate_stats([a, b, c]).expect("três sessões produzem stats");
+        assert_eq!(
+            stats.state, "failed",
+            "o pior par continua mandando no estado"
+        );
+        assert_eq!(stats.peers_connected, Some(2));
+        assert_eq!(stats.peers_total, Some(3));
+    }
+
+    #[test]
+    fn aggregate_reports_zero_connected_only_when_nobody_is_up() {
+        let mut a = peer("off", None, 0);
+        a.state = "failed".into();
+        let mut b = peer("off", None, 0);
+        b.state = "connecting".into();
+
+        let stats = aggregate_stats([a, b]).expect("duas sessões produzem stats");
+        assert_eq!(stats.peers_connected, Some(0));
+        assert_eq!(stats.peers_total, Some(2));
+    }
+
+    #[test]
+    fn aggregate_of_nothing_is_none_and_does_not_invent_zero_of_zero() {
+        assert!(aggregate_stats(Vec::<VoiceStats>::new()).is_none());
     }
 }
 
@@ -2204,6 +2312,35 @@ async fn build_session(
     // Caixa de playout. Falha no alto-falante nao impede a sessao: so nao ha audio
     // saindo no host.
     let inbox_id = hub.register_inbox();
+    // GUARDA DE LIMPEZA do caminho de falha.
+    //
+    // BUG QUE ISTO CORRIGE: `build_session` registra a inbox e assina o mic
+    // ANTES dos `await` de rede (`pc.build`, `add_track`). Se qualquer um
+    // falhasse, o `?` saía sem desfazer: a inbox ficava em `shared.inboxes`
+    // para sempre (o callback de playout seguia dando lock nela) e a assinatura
+    // de mic nunca era liberada — o microfone parecia "ocupado" e o diagnóstico
+    // de `subscriber_count` nunca voltava a zero.
+    struct LimpezaNoErro<'a> {
+        hub: &'a Arc<audio::AudioHub>,
+        inbox_id: Option<u64>,
+        mic_id: u64,
+    }
+    impl Drop for LimpezaNoErro<'_> {
+        fn drop(&mut self) {
+            // `armed` implícito: os campos viram `None`/0 no fim do sucesso.
+            if self.mic_id != 0 {
+                self.hub.unsubscribe(self.mic_id);
+            }
+            if let Some(id) = self.inbox_id {
+                self.hub.unregister_inbox(id);
+            }
+        }
+    }
+    let mut limpeza = LimpezaNoErro {
+        hub: &hub,
+        inbox_id: Some(inbox_id),
+        mic_id: 0,
+    };
     let inbox = hub
         .inbox(inbox_id)
         .ok_or_else(|| "inbox nao registrado".to_string())?;
@@ -2240,6 +2377,7 @@ async fn build_session(
             }
         }
     };
+    limpeza.mic_id = mic_id;
 
     let codec = RTCRtpCodec {
         mime_type: "audio/opus".to_owned(),
@@ -2336,6 +2474,9 @@ async fn build_session(
         tasks.push(spawn_send_loop(sess.clone()));
         tasks.push(spawn_stats_loop(sess.clone()));
     }
+    // Sessão entregue com sucesso: o guard NÃO deve desfazer os registros.
+    limpeza.inbox_id = None;
+    limpeza.mic_id = 0;
     Ok(sess)
 }
 
@@ -2426,7 +2567,23 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 return;
             }
             let pt = match sess.tx.sender.get_parameters().await {
-                Ok(p) => p.rtp_parameters.codecs.first().map(|c| c.payload_type),
+                Ok(p) => {
+                    // PRIORIZA o Opus negociado.
+                    //
+                    // `codecs` vem ordenado por match EXATO primeiro, depois
+                    // parcial. Se o Opus do peer tiver um `fmtp` divergente
+                    // (useinbandfec/stereo), ele cai no balde parcial e aparece
+                    // DEPOIS de PCMU/PCMA/G722 (que sempre casam exato). O
+                    // `.first()` então escolhia PT=0 e escrevíamos bitstream
+                    // Opus rotulado como PCMU: ruído alto ou silêncio no
+                    // receptor, com `packets_out` subindo normalmente.
+                    p.rtp_parameters
+                        .codecs
+                        .iter()
+                        .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))
+                        .or_else(|| p.rtp_parameters.codecs.first())
+                        .map(|c| c.payload_type)
+                }
                 Err(e) => {
                     tracing::debug!("[voice] get_parameters ainda nao pronto: {e}");
                     None
@@ -2458,9 +2615,33 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
 
         let mut mic_rx = sess.mic_sub.lock().unwrap().take();
         if mic_rx.is_none() {
-            // Sessao so-recebe: sem microfone nao ha o que enviar, e enviar
-            // pacote nenhum seria melhor que enviar silencio.
-            return;
+            // Sessão só-recebe (mic ainda não abriu). ANTES: `return` imediato —
+            // e `retry_mic()` reabre o DEVICE mas não re-assinava as sessões já
+            // criadas, então quem entrava na chamada antes do microfone ficar
+            // pronto (PipeWire subindo, device ocupado) ficava MUDO a chamada
+            // inteira, com `state = "connected"` e `packets_out = 0`.
+            // Agora ficamos tentando assinar por até 60 s; o loop dorme, então
+            // não gira CPU.
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if let Some(rx) = hub.subscribe().ok() {
+                    mic_rx = Some(rx);
+                    eprintln!(
+                        "[voice] {}/{}: microfone passou a existir — envio liberado",
+                        sess.call_id, sess.peer_fp
+                    );
+                    break;
+                }
+            }
+            if mic_rx.is_none() {
+                // Honesto: a sessão continua recebendo, mas ninguém vai nos
+                // ouvir. O `mic_error` já é publicado em `VoiceStats`.
+                eprintln!(
+                    "[voice] {}/{}: segue só recebendo (sem microfone)",
+                    sess.call_id, sess.peer_fp
+                );
+                return;
+            }
         }
         // `idx` conta PACOTES ESCRITOS (nao frames gerados): o packetizer so
         // avanca o timestamp RTP quando um sample entra.
@@ -2533,7 +2714,17 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             };
             // Espera o proximo frame; 20 ms e' a janela normal, e estourar ela
             // significa que o mic nao entregou nada nesse periodo.
-            let Ok(Some(frame)) = tokio::time::timeout(FRAME, rx.recv()).await else {
+            //
+            // BUG CORRIGIDO: a janela era EXATAMENTE o periodo de captura
+            // (20 ms). Um frame que chegasse 0,5 ms atrasado era descartado e
+            // ficava na fila; como o packetizer avança o timestamp RTP por
+            // PACOTE ESCRITO (960 ticks, nunca por tempo real), o relogio
+            // passava a andar mais devagar que o de parede — o jitter buffer do
+            // par re-bufferizava sem parar (+50 ms de silencio a cada
+            // esvaziada) e o audio ficava picado sob carga sem nenhum erro nos
+            // contadores. 1,5x absorve o jitter de agendamento; o frame
+            // atrasado entra no proximo ciclo (o `wait` seguinte ja e zero).
+            let Ok(Some(frame)) = tokio::time::timeout(FRAME + FRAME / 2, rx.recv()).await else {
                 continue;
             };
             let at = frame.captured_at;
@@ -2582,7 +2773,7 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             if let Some(link) = *sess.out_link.lock().unwrap() {
                 sess.probe.stamp_capture(link, idx, at);
             }
-            let _ = sess
+            let write_res = sess
                 .tx
                 .track
                 .sample_writer(ssrc, pt)
@@ -2604,7 +2795,34 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 );
             }
             idx += 1;
-            sess.sh.packets_out.fetch_add(1, Ordering::Relaxed);
+            // `packets_out` só conta o que REALMENTE entrou na track.
+            //
+            // Antes o `Result` era descartado e o contador subia sempre: o
+            // painel mostrava "enviando" com a escrita falhando (track fechada
+            // por hangup, PT inválido) — e o diagnóstico concluía que o
+            // problema era sempre do outro lado.
+            match write_res {
+                Ok(()) => {
+                    // Só conta com ROTA VIVA. Durante `reconnecting`/`failed` a
+                    // track aceita a escrita e o ICE descarta depois; somar ali
+                    // fazia o painel mostrar "pacotes saindo" numa sessão que
+                    // não entrega nada — a mentira que o `Disconnected` acima
+                    // existe para evitar.
+                    if sess.sh.connected_flag.load(Ordering::Relaxed) {
+                        sess.sh.packets_out.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(e) => {
+                    sess.sh.write_errors.fetch_add(1, Ordering::Relaxed);
+                    if idx <= 3 {
+                        tracing::warn!(
+                            call_id = %sess.call_id,
+                            peer = %sess.peer_fp,
+                            "[voice] write_sample falhou: {e}"
+                        );
+                    }
+                }
+            }
 
             // Alinha o proximo envio no RELOGIO DE CAPTURA: o frame seguinte
             // nasce em `at + FRAME`. E' o que mantem o ritmo em 50 pacotes/s sem
@@ -2683,18 +2901,31 @@ fn spawn_recv(
             let ext = extend_seq(expected, seq);
             if let Some(e) = expected {
                 if ext > e {
-                    let lost = (ext - e).min(MAX_PLC_BURST);
-                    for _ in 0..lost {
-                        // PLC de verdade: payload vazio faz o Opus gerar
-                        // concealment a partir do estado interno do decoder.
-                        match dec.decode(&[], &mut pcm, false) {
-                            Ok(n) => {
-                                sh.plc_frames.fetch_add(1, Ordering::Relaxed);
-                                push_pcm(&sh, &pcm, n, None);
-                            }
-                            Err(e) => {
-                                sh.decode_errors.fetch_add(1, Ordering::Relaxed);
-                                eprintln!("[voice] PLC falhou: {e:?}");
+                    // BURACO LONGO = MUTE/SSRC NOVO, NÃO PERDA.
+                    //
+                    // O mute do remetente PARA de escrever RTP, então o `seq`
+                    // salta N. Sintetizar `min(N, 50)` frames de concealment
+                    // (1 s) empurrava 1 s de áudio inventado na inbox de uma
+                    // vez e deixava o receptor 1 s atrasado até drenar — o
+                    // "embaralha/some quando alguém desmuta".
+                    // Acima de ~200 ms é silêncio honesto: re-sincroniza sem
+                    // fabricar áudio.
+                    let gap = ext - e;
+                    if gap > PLC_RESYNC_GAP {
+                        sh.plc_frames.fetch_add(u64::from(gap), Ordering::Relaxed);
+                    } else {
+                        for _ in 0..gap {
+                            // PLC de verdade: payload vazio faz o Opus gerar
+                            // concealment a partir do estado interno do decoder.
+                            match dec.decode(&[], &mut pcm, false) {
+                                Ok(n) => {
+                                    sh.plc_frames.fetch_add(1, Ordering::Relaxed);
+                                    push_pcm(&sh, &pcm, n, None);
+                                }
+                                Err(e) => {
+                                    sh.decode_errors.fetch_add(1, Ordering::Relaxed);
+                                    eprintln!("[voice] PLC falhou: {e:?}");
+                                }
                             }
                         }
                     }
@@ -2766,7 +2997,16 @@ const VIDEO_STALL: Duration = Duration::from_secs(15);
 /// laco que puxa pacotes RTP e escreve na track, com watchdog de 15 s.
 async fn video_send_task(sess: Arc<Session>, want_source: String) {
     let sh = sess.sh.clone();
-    let Some((_, want_monitor)) = sh.video_want.lock().unwrap().clone() else {
+    // ORDEM DE LOCK ÚNICA (state → want).
+    //
+    // Antes isto era um `let-else` que segurava o guard de `video_want`
+    // enquanto pegava `video_state` — INVERTENDO a ordem usada por
+    // `video_start`/`video_stop`/`video_purge_source` (state → want). Com
+    // `video_start` rodando na main thread, um entrelaçamento travava a UI.
+    // Clonar o valor antes elimina a inversão sem depender da ordem de drop
+    // dos temporários do `let-else`.
+    let want = sh.video_want.lock().unwrap().clone();
+    let Some((_, want_monitor)) = want else {
         *sh.video_state.lock().unwrap() = "off".to_string();
         return;
     };
@@ -3329,6 +3569,8 @@ mod aggregate_priority_tests {
             video_packets_in: None,
             frames_in: None,
             frames_out: None,
+            peers_connected: None,
+            peers_total: None,
         }
     }
 

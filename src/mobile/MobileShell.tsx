@@ -782,6 +782,9 @@ export default function MobileShell() {
       nativeMedia: !!(activeCall as any).nativeMedia,
     } : null,
   }), [
+    // Ver o comentário do `onUpdate` no callManager: o roster é clonado para
+    // que este memo veja `push`/`splice`. Sem isso, quem entra depois não
+    // ganhava tile (e no desktop, sem tile, não há `<audio>` = silêncio).
     activeCall?.participants,
     activeCall?.sharing,
     activeCall?.cameraOn,
@@ -791,6 +794,18 @@ export default function MobileShell() {
     (activeCall as any)?.nativeMedia,
     identity?.fingerprint,
   ])
+
+  // Idem desktop: verde só com mídia de verdade (ver CallPhaseBadge).
+  const mediaLiveMobile = useMemo(() => {
+    if (!activeCall) return false
+    for (const p of ((activeCall as any).participants ?? []) as any[]) {
+      if (p?.videoUrl) return true
+      const tracks = p?.stream?.getTracks?.() as any[] | undefined
+      if (tracks?.some((t) => t?.readyState === 'live')) return true
+    }
+    const tracks = (activeCall as any).localStream?.getTracks?.() as any[] | undefined
+    return !!tracks?.some((t) => t?.readyState === 'live')
+  }, [activeCall?.participants, (activeCall as any)?.localStream])
 
   const visibleCallTilesMobile = useMemo(() => {
     const valid = callTilesMobile.map((tile) => tile.id)
@@ -1977,7 +1992,7 @@ export default function MobileShell() {
                 >nÃ£o anÃ´nima</span>
               )}
               {/* v6: fase (chamando/conectando/reconectando…) com elapsed */}
-              <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} />
+              <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} />
               <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'compact' ? t.muted : t.text, opacity: callPanelSize === 'compact' ? 0.5 : 1 }}>↑</button>
               <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'expanded' ? t.muted : t.text, opacity: callPanelSize === 'expanded' ? 0.5 : 1 }}>↓</button>
               <button aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} title={isMuted ? 'Ativar microfone' : 'Silenciar'} className="m-iconbtn" style={isMuted ? { background: t.red, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}>{isMuted ? <Icon d={Icons.micOff} size={16} /> : <Icon d={Icons.mic} size={16} />}</button>

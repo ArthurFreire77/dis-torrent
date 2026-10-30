@@ -1182,6 +1182,17 @@ export class CallManager {
   private quality: CallQuality = getStoredQuality()
   private qualityNotice: string | null = null
   private statsTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Timer de RECONCILIAÇÃO do roster de canal.
+   *
+   * Eventos de roster (`voice_joined`/`voice_left`) são frames e podem se
+   * perder (link subindo, fila de eventos da UI com `Lagged`, app suspenso no
+   * Android). Sem reconciliação, o painel da chamada ficava divergente para
+   * sempre: a barra lateral (lê o SQLite) mostrava 3 e o painel mostrava 1.
+   * Aqui o SQLite — que o re-anúncio de 15 s do core mantém atualizado — volta
+   * a ser a fonte de verdade a cada 10 s.
+   */
+  private rosterTimer: ReturnType<typeof setInterval> | null = null
   private badWindows = 0
   private prevLost = new Map<string, number>()
   /** UI pode assinar para exibir toast além do CallState.qualityNotice. */
@@ -1241,6 +1252,20 @@ export class CallManager {
           if (withScreen.localStream !== (this.localStream ?? null)) {
             withScreen.localStream = this.localStream ?? null
           }
+          // INVALIDA A REFERÊNCIA DO ROSTER A CADA EMISSÃO.
+          //
+          // BUG QUE ISTO CORRIGE (o mais grave do "conectado mas não vejo
+          // ninguém"): os dois shells memoízam os tiles com
+          // `useMemo(..., [activeCall?.participants])`, e o manager MUTAVA
+          // esse array in-place (`push`/`splice`) emitindo `{ ...st }`. Cópia
+          // rasa = MESMA referência de array = `useMemo` não recalcula. Efeito
+          // medido no relato: o cabeçalho contava "3 na voz" (lê `.length` ao
+          // vivo) enquanto os quadrados — e, no desktop, os elementos
+          // `<audio>` — ficavam presos no roster do primeiro emit. Quem entrava
+          // DEPOIS não aparecia e não falava; quem saía continuava na tela.
+          // Só "consertava" quando outra dep mudava (mute/câmera), o que
+          // explica o "às vezes aparece".
+          withScreen.participants = (withScreen.participants ?? []).map((p) => ({ ...p }))
         } catch { /* estado sem o campo: nunca derruba o bus */ }
       }
       cb(s)
@@ -1424,6 +1449,21 @@ export class CallManager {
       })
     } catch { this.iceRecoveredOff = null }
     this.ensureRelayTransport()
+    // REPÕE O ESTADO ATUAL NO NOVO ASSINANTE.
+    //
+    // BUG QUE ISTO CORRIGE: abaixo de 768px o `App` troca `ThemeShell` por
+    // `MobileShell` (e vice-versa) — desmonta um, monta o outro, e o novo faz
+    // `bind()` com `activeCall = null`. Como `bind` não reemitia nada, a
+    // chamada continuava viva (PCs, microfone aberto, timers) mas a UI nova
+    // não mostrava NADA: overlay e tiles sumiam, o áudio remoto era desligado
+    // junto com os `<audio>`, e o outro lado seguia ouvindo você. Era a
+    // "chamada fantasma" ao girar o tablet / arrastar a janela.
+    try {
+      // Via `onUpdate` e NÃO `cb` direto: o wrapper repõe os streams locais e
+      // clona o roster (senão a UI nova herdaria a mesma referência de array e
+      // os tiles memoizados nunca atualizariam).
+      if (this.state) this.onUpdate({ ...this.state } as CallState)
+    } catch { /* replay é conveniência: nunca derruba o bind */ }
   }
 
   unbind() {
@@ -1609,6 +1649,24 @@ export class CallManager {
         }
       }
       if (anyAlive) return
+      // CANAL VAZIO NÃO É FALHA.
+      //
+      // Quem entra num canal de voz sozinho e espera alguém era EXPULSO em
+      // ~50 s ("reconexão falhou"): sem nenhum PC para conectar, o watchdog
+      // tratava a sala vazia como ICE travado. Sala vazia é ociosa, não
+      // quebrada — reagenda e continua no canal. O teto (3 postergações)
+      // mantém a honestidade: com gente na sala e sem rota, ainda avisa.
+      if (this.pcs.size === 0 && st.callId.startsWith('voice-')) {
+        if (this.connectWatchdogGrants < 3) {
+          this.connectWatchdogGrants++
+          this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
+          return
+        }
+        // Mesmo teto atingido: avisa, mas NÃO sai do canal sozinho. Sair é
+        // decisão do usuário; a sala continua disponível para quem chegar.
+        this.setFailureCause('ninguém conectou a mídia ainda — o canal segue aberto aguardando participantes')
+        return
+      }
       // Se algum PC ainda está COLETANDO candidatos, NÃO force nada: em 4G a
       // alocação no TURN leva segundos e um restart aqui jogaria fora o
       // gathering em andamento — trocando "demorou" por "nunca fecha". Dá mais
@@ -1688,6 +1746,24 @@ export class CallManager {
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) return // não é desta chamada
       p.disconnected = true
+      // TRANSPORTE ≠ MÍDIA.
+      //
+      // `peer_offline` é emitido a cada queda de SESSÃO DE TRANSPORTE (troca de
+      // rede, re-eleição de relay, backoff) — e a mídia WebRTC pode continuar
+      // fluindo por ICE, que é independente. Antes isso promovia a chamada
+      // inteira para `ice-failed` → `reconnecting` → 30 s → `leave()`: flapping
+      // de rede móvel encerrava chamada viva. Agora só marcamos o avatar como
+      // "reconectando" e deixamos o watchdog de mídia decidir pelo PC real.
+      const pc = this.pcs.get(fp)
+      const midiaViva = !!pc && (
+        pc.iceConnectionState === 'connected' ||
+        pc.iceConnectionState === 'completed' ||
+        pc.connectionState === 'connected'
+      )
+      if (midiaViva) {
+        this.onUpdate({ ...st })
+        return
+      }
       if (st.phase === 'connected') this.applyPhase('ice-failed') // → reconnecting
       else this.onUpdate({ ...st })
     } catch { /* ignore */ }
@@ -1706,11 +1782,15 @@ export class CallManager {
       if (!p) return
       p.disconnected = false
       const pc = this.pcs.get(fp)
+      // `disconnected` do ICE é TRANSITÓRIO (o próprio navegador volta sozinho
+      // em poucos segundos, sem renegociar). Tratá-lo como "morto" aqui
+      // recriava a PC inteira a cada soluço de rede — renegociação completa e
+      // novo glare, que era parte do "cai e volta do nada". Só `closed` e
+      // `failed` exigem PC nova.
       const dead = !pc
         || pc.connectionState === 'closed'
         || pc.iceConnectionState === 'failed'
         || pc.iceConnectionState === 'closed'
-        || pc.iceConnectionState === 'disconnected'
       if (dead && isCallPhaseActive(st.phase)) {
         try { pc?.close() } catch { /* ignore */ }
         this.pcs.delete(fp)
@@ -1754,11 +1834,14 @@ export class CallManager {
       // MESH NO CAMINHO NAVEGADOR: quem entra DEPOIS de mim precisa abrir a
       // mídia do meu lado também. Antes `voice_joined` só mexia no roster e a
       // PC só nascia no joiner (`joinVoice`) — quando o anúncio do outro lado
-      // se perdia (link ainda subindo), os dois apareciam "conectados" e não
-      // havia RTP nenhum entre eles.
+      // se perdia (link ainda subindo) ou quando os dois entravam no MESMO
+      // instante (cada um lia `voiceStates` antes do outro gravar), ninguém
+      // oferecia e o canal ficava mudo: os dois "conectados", nenhum áudio.
       //
       // REGRA DETERMINÍSTICA: só o lado de fingerprint MAIOR oferece — a mesma
-      // do mesh nativo (`voice_mesh_maybe_offer`). Evita offer contra offer.
+      // do mesh nativo (`voice_mesh_maybe_offer`), para não gerar offer contra
+      // offer. O lado menor espera a offer (que agora sempre vem, porque o
+      // maior reage ao `voice_joined`).
       if (
         !(st as any).nativeMedia &&
         !this.pcs.has(fp) &&
@@ -1775,6 +1858,9 @@ export class CallManager {
     try {
       const st = this.state
       if (!st || st.callId !== callId || !fp || fp === this.myFp) return
+      // Offer retida de quem saiu nunca vai ser aplicada: sem isto ela ficava
+      // em memória para sempre (e podia ser aplicada numa geração seguinte).
+      this.pendingOffers.delete(fp)
       if (!removeVoiceParticipant(st.participants, fp)) return
       try { this.pcs.get(fp)?.close() } catch { /* encerra apenas a mídia deste participante */ }
       this.pcs.delete(fp)
@@ -2050,6 +2136,8 @@ export class CallManager {
           }
         }
       } catch { /* roster best-effort: os eventos ainda chegam */ }
+      // Reconciliador: eventos perdidos não deixam mais o painel divergente.
+      this.startRosterReconcile(callId, communityId, channelId)
       this.startNativeVoiceMonitor(callId)
       this.onUpdate({ ...this.state })
       return this.state
@@ -2093,6 +2181,23 @@ export class CallManager {
         try { await this.createPC(fp, callId, true) } catch { /* par best-effort */ }
       }
     } catch { /* lista best-effort: voice_joined still wires latecomers */ }
+    // Origem de verdade contínua para o roster (ver startRosterReconcile).
+    this.startRosterReconcile(callId, communityId, channelId)
+    // DRENA offers retidas durante o `getLocalMedia`/`voiceJoin`.
+    //
+    // BUG QUE ISTO CORRIGE: o estado só nasce no fim do `joinVoice`, mas um par
+    // pode oferecer ANTES disso (entrou no canal no mesmo instante). A offer
+    // ficava em `pendingOffers` e o único dreno era `acceptInbound` — que só
+    // roda em chamada recebida por toque. Resultado: participante "na lista" e
+    // sem áudio, para sempre.
+    try {
+      for (const fp of [...this.pendingOffers.keys()]) {
+        const pend = this.pendingOffers.get(fp)
+        if (!pend || pend.callId !== callId) continue
+        this.pendingOffers.delete(fp)
+        await this.handleOffer(fp, pend.callId, pend.sdp).catch(() => { /* par best-effort */ })
+      }
+    } catch { /* offer pendente nunca derruba o join */ }
     // Entrada direta em `connecting` (sem passar por applyPhase): arma o
     // watchdog aqui — senão "Conectando…" infinito se o ICE nunca fechar.
     this.startConnectWatchdog()
@@ -2322,12 +2427,40 @@ export class CallManager {
     // "funcionar meio" — antes ele ficava preso em 'connecting' para sempre,
     // que era o sintoma reportado no celular.
     await this.ensureMediaOnAllPCs()
+    // DRENA TODAS AS OFFERS RETIDAS — não só a de quem tocou o telefone.
+    //
+    // BUG QUE ISTO CORRIGE (o "conectado mas não se ouve" do grupo): em
+    // chamada com 3+ pessoas, o convidado recebe offer do host E dos outros
+    // membros (o host faz `callAddParticipant` para todos) antes de clicar em
+    // Aceitar. Todas ficavam em `pendingOffers`, mas o aceite só aplicava a do
+    // `fromFp`. As demais nunca geravam answer: conectava com quem ligou e
+    // ficava mudo com o resto — exatamente o relato.
+    //
+    // `fromFp` vai PRIMEIRO para preservar a ordem histórica (o ring é do
+    // host); os outros entram em seguida, um por vez, para não concorrer com
+    // a mesma `RTCPeerConnection`.
     try {
-      const pend = this.pendingOffers.get(fromFp)
-      if (pend && pend.callId === callId) {
-        this.pendingOffers.delete(fromFp)
-        await this.handleOffer(fromFp, pend.callId, pend.sdp)
+      const alvos = [fromFp, ...this.pendingOffers.keys()].filter(
+        (fp, i, arr) => fp && arr.indexOf(fp) === i,
+      )
+      for (const fp of alvos) {
+        const pend = this.pendingOffers.get(fp)
+        if (!pend || pend.callId !== callId) continue
+        this.pendingOffers.delete(fp)
+        await this.handleOffer(fp, pend.callId, pend.sdp).catch((e) => {
+          console.warn(`[call] offer retida de ${fp.slice(0, 8)} falhou ao aplicar: ${(e as Error)?.message ?? e}`)
+        })
       }
+      // Offers de OUTRAS chamadas ficam para a chamada delas — mas as desta
+      // chamada para participantes que não estão no roster entram nele, senão
+      // o tile delas não aparece.
+      for (const fp of alvos) {
+        if (!fp || fp === me.fingerprint) continue
+        if (!this.state.participants.some((p: any) => p.fp === fp)) {
+          this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
+        }
+      }
+      this.onUpdate({ ...this.state })
     } catch { /* offer pendente nunca derruba o accept */ }
     this.startCallForeground()
     return this.state
@@ -2840,6 +2973,11 @@ export class CallManager {
         return 'voz nativa: mídia do Rust ainda sem sessão para esta chamada (offer nativa ainda não criada ou sem VoiceMedia)'
       }
       const io = `saída=${s.packets_out ?? 0} entrada=${s.packets_in ?? 0} plc=${s.plc_frames ?? 0} erros=${s.decode_errors ?? 0}`
+      // Erros de DEVICE vêm antes do estado: "conectado" com o alto-falante
+      // fechado ou o mic sem abrir é exatamente o "conectado e mudo" que não
+      // tinha explicação nenhuma na tela.
+      if (s.speaker_error) return `voz nativa: o alto-falante não abriu (${s.speaker_error}) - o áudio chega mas não sai desta máquina`
+      if (s.mic_error && (s.packets_out ?? 0) === 0) return `voz nativa: o microfone não abriu (${s.mic_error}) - este lado está só recebendo`
       if (s.state === 'connected') return `voz nativa conectada via ${s.route} (${io})`
       if (s.state === 'failed') return `voz nativa: rota perdida (${s.route}; ${io}) — NAT/CGNAT sem TURN válido ou peer caiu`
       // connecting/idle: distingue "peer não responde" de "rede sem rota".
@@ -3234,6 +3372,41 @@ export class CallManager {
     try { if (this.nativeVideoTimer) clearInterval(this.nativeVideoTimer) } catch { /* ignore */ }
     this.nativeVideoTimer = null
     this.nativeVideoSeqs.clear()
+  }
+
+  /**
+   * Reconcilia o roster do canal com o estado real do core a cada 10 s.
+   *
+   * Só ADICIONA (e atualiza mute) — nunca remove: ausência no SQLite pode ser
+   * só um `VoiceJoin` que ainda não chegou, e remover por ausência criaria o
+   * efeito oposto (participante piscando). Remoção continua exclusiva do
+   * `voice_left`, que é um evento explícito.
+   */
+  private startRosterReconcile(callId: string, communityId: string, channelId: string) {
+    this.stopRosterReconcile()
+    const tick = () => {
+      const st = this.state
+      if (!st || st.callId !== callId) { this.stopRosterReconcile(); return }
+      void services.voiceStates(communityId, channelId).then((states) => {
+        const cur = this.state
+        if (!cur || cur.callId !== callId) return
+        let changed = false
+        for (const [fp, muted, deafened] of states) {
+          if (!fp || fp === this.myFp) continue
+          if (addVoiceParticipant(cur.participants, fp)) changed = true
+          if (updateVoiceParticipantState(cur.participants, fp, !!muted, !!deafened)) changed = true
+        }
+        if (changed) this.onUpdate({ ...cur })
+      }).catch(() => { /* reconciliação best-effort */ })
+    }
+    try {
+      this.rosterTimer = setInterval(tick, 10_000)
+    } catch { this.rosterTimer = null }
+  }
+
+  private stopRosterReconcile() {
+    try { if (this.rosterTimer) clearInterval(this.rosterTimer) } catch { /* ignore */ }
+    this.rosterTimer = null
   }
 
   /**
@@ -4403,6 +4576,18 @@ export class CallManager {
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
     // Medidor: registra os iceServers efetivos (o que foi tentado de verdade).
     try { this.iceServersUsed = getIceServers() } catch { this.iceServersUsed = null }
+    // FECHA o PC anterior deste par antes de substituir no mapa.
+    //
+    // Antes `this.pcs.set(fp, pc)` sobrescrevia sem `close()`: chamado de
+    // vários caminhos (start, joinVoice, onParticipantAdded, addParticipant)
+    // isso deixava dois RTCPeerConnection com o MESMO peer enviando o mesmo
+    // microfone — RTP duplicado (eco) — e o antigo ficava inalcançável no Map,
+    // nunca fechado até reiniciar o app. O `ontrack` do PC morto também
+    // continuava alimentando o tile (imagem congelada).
+    const anterior = this.pcs.get(fp)
+    if (anterior && anterior !== undefined) {
+      try { anterior.close() } catch { /* já fechado */ }
+    }
     const pc = newPeerConnection()
     this.pcs.set(fp, pc)
     this.wirePC(pc, fp, callId)
@@ -4473,6 +4658,11 @@ export class CallManager {
       try { pc.close() } catch { /* ignore */ }
       this.pcs.delete(fromFp)
       this.localIce.delete(fromFp)
+      // `pendingIce` é da geração de ICE ANTERIOR (ufrag antigo). Deixá-lo
+      // aqui fazia o PC novo receber candidatos que nunca seriam aceitos
+      // (rejeitados em silêncio) — em rede ruim o ICE restart podia nunca
+      // completar e a chamada caía por timeout.
+      this.pendingIce.delete(fromFp)
       pc = undefined
     }
     if (!pc) {
@@ -4576,7 +4766,11 @@ export class CallManager {
       }
     } catch { /* nunca derruba o bus */ }
     const pc = this.pcs.get(fromFp)
-    const cand = parseWireCandidate(candidateStr)
+    // O `mid` do frame é necessário para o candidato do lado NATIVO: o Rust
+    // envia o candidato cru e o `mid` separado (`CallIce{mid}`). Sem repassar,
+    // `parseWireCandidate` devolvia `sdpMLineIndex: 0` fixo e candidatos de
+    // m-lines diferentes eram aplicados na primeira — rejeitados em silêncio.
+    const cand = parseWireCandidate(candidateStr, mid)
     if (!cand) return
     // Sem PC ou sem remoteDescription: GUARDA (não descarta). O flush acontece
     // quando a offer/answer for aplicada — trickle ICE sobre relay chega antes.
@@ -4604,7 +4798,16 @@ export class CallManager {
       return
     }
     if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
-    try { await pc.addIceCandidate(cand) } catch { /* candidato tardio/inválido: ignora */ }
+    try {
+      await pc.addIceCandidate(cand)
+    } catch (e) {
+      // Antes era `catch {}` puro: um candidato recusado sumia sem rastro e o
+      // diagnóstico mostrava "ICE connected" com a malha muda. Log curto, só
+      // o suficiente para provar o formato/`mid` errado.
+      console.debug(
+        `[call] candidato ICE recusado (${cand.sdpMid ?? cand.sdpMLineIndex ?? '?'}): ${(e as Error)?.message ?? e}`,
+      )
+    }
   }
 
   /** Despeja (em ordem) os candidatos ICE guardados antes da remoteDescription. */
@@ -4660,6 +4863,9 @@ export class CallManager {
     // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
     if (expectedCallId && this.state?.callId !== expectedCallId) return
     this.stopCallForeground()
+    // O roster é da chamada que está terminando: sem parar o timer, ele
+    // continuaria consultando um canal do qual já saímos.
+    this.stopRosterReconcile()
     // Captura NATIVA (câmera/tela) antes de qualquer coisa: o `leave` já pede,
     // mas `cleanup` também é alcançado por outros caminhos e um encoder
     // `ximagesrc`/`v4l2src` aberto segura o device até reiniciar o app — e a

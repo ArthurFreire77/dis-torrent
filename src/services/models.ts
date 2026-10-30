@@ -965,6 +965,9 @@ export interface VoiceMediaStats {
   /** Último erro de abertura do microfone (cpal) — Some com packets_out 0
    *  = este lado não envia áudio. */
   mic_error?: string | null
+  /** Último erro de ABERTURA do alto-falante (Linux nativo). `Some` com
+   *  pacotes chegando = o áudio chega e não sai desta máquina. */
+  speaker_error?: string | null
   /** Vídeo nativo: "off" | "starting" | "live" | "failed". */
   video_state?: string | null
   video_codec?: string | null

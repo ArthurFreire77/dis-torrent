@@ -16,6 +16,27 @@ export function addVoiceParticipant(participants: CallParticipantView[], fp: str
   return true
 }
 
+/**
+ * Atualiza o apelido real de um participante.
+ *
+ * POR QUE ISTO EXISTE: todo participante de canal nascia com
+ * `nickname: fp.slice(0, 6)` — a lista mostrava `a3f92c`, `7c1b04`. Para o
+ * usuário, "fulano não apareceu": ele aparece, mas sem nome. O frontend já tem
+ * a lista de membros do servidor (`communityMembers`), então resolve o nome
+ * localmente, sem mexer no protocolo (nenhum frame novo no fio).
+ */
+export function setParticipantNickname(
+  participants: CallParticipantView[],
+  fp: string,
+  nickname: string,
+): boolean {
+  if (!fp || !nickname) return false
+  const participant = participants.find((item) => item.fp === fp)
+  if (!participant || participant.nickname === nickname) return false
+  participant.nickname = nickname
+  return true
+}
+
 export function removeVoiceParticipant(participants: CallParticipantView[], fp: string): boolean {
   const index = participants.findIndex((participant) => participant.fp === fp)
   if (index < 0) return false
