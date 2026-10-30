@@ -118,10 +118,19 @@ describe('decisão de aviso de mensagem', () => {
     assert.ok(!d.body.includes('tudo bem'))
   })
 
-  it('agrega contagem quando há várias na mesma conversa', () => {
+  it('a segunda mensagem da conversa NÃO mostra contador — mostra o texto', () => {
+    // O usuário pediu explicitamente: "não quero 'você tem tantas mensagens',
+    // quero saber o que a pessoa mandou". O contador continua no badge/não-lidas.
     const d = decideMessageNotice({ ...base, count: 3 })
-    assert.match(d.body, /^3 novas mensagens/)
-    assert.match(d.body, /tudo bem/)
+    assert.equal(d.show, true)
+    assert.equal(d.body, 'oi, tudo bem?')
+    assert.ok(!d.body.includes('novas mensagens'))
+  })
+
+  it('sem prévia, várias mensagens também não viram contador', () => {
+    const d = decideMessageNotice({ ...base, count: 3, previewEnabled: false })
+    assert.equal(d.show, true)
+    assert.equal(d.body, 'Nova mensagem')
   })
 
   it('silenciado não mostra nem conta', () => {

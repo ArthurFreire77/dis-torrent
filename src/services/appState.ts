@@ -17,7 +17,7 @@
 
 import { services } from './index'
 import type { NetworkState, PresenceStatus } from './models'
-import { getPrefs, setPrefs } from '../shared/prefs'
+import { getPrefs, setPrefs, subscribePrefs, notificationPolicyJson } from '../shared/prefs'
 import { derivePresence } from './notificationRules'
 import { isTauriRuntime, isAndroidRuntime } from '../shared/runtime.ts'
 import { createEmitter } from '../shared/emitter.ts'
@@ -59,6 +59,8 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 let lastAnnounced: PresenceStatus | null = null
 let lastTrayLabel = ''
 let lastTrayUnread = -1
+/** Assinatura do espelho de preferências de aviso (desfeita no shutdown). */
+let prefsUnsub: (() => void) | null = null
 
 export function appStateSnapshot(): AppStateSnapshot {
   return { connection, onlinePeers, activity, desiredPresence, presence, backgroundSupported }
@@ -194,8 +196,7 @@ export function initAppState() {
 
   // Preferências de segundo plano reais (bandeja/autostart) — só no desktop
   // nativo. No navegador puro isso é tudo indisponível, e a UI diz isso.
-  if (services.kind === 'native' && !isAndroid()) {
-    void services.backgroundPrefs()
+  if (services.kind === 'native' && !isAndroid()) {    void services.backgroundPrefs()
       .then((p) => { backgroundSupported = p.tray; emit(); pushTray() })
       .catch(() => { backgroundSupported = false })
     // O Rust precisa saber ANTES do primeiro fechamento de janela: quem guarda
@@ -219,6 +220,40 @@ export function initAppState() {
       .catch(() => { /* sem autostart nesta plataforma: a UI diz isso */ })
   }
 
+  // ESPELHO DAS PREFERÊNCIAS DE AVISO NO CORE.
+  //
+  // O aviso nativo (Windows toast / notificação do Android) é disparado pelo
+  // MOTOR Rust: é ele quem recebe o frame de mensagem/chamada mesmo com a
+  // janela escondida ou o app em segundo plano no Android — o listener do
+  // WebView não roda nesses casos. O motor não enxerga o localStorage da
+  // página, então sem este espelho desligar "notificações do sistema" na UI
+  // não teria efeito nenhum fora da tela.
+  if (services.kind === 'native') {
+    const p = getPrefs()
+    void services
+      .notifyPrefsSet(p.notifySystem, p.notifyPreview, notificationPolicyJson())
+      .catch(() => {})
+    // E a cada mudança do checkbox (o usuário liga/desliga com o app aberto;
+    // o motor precisa do novo valor ANTES de a janela ser escondida).
+    const offPrefs = subscribePrefs(() => {
+      const cur = getPrefs()
+      void services
+        .notifyPrefsSet(cur.notifySystem, cur.notifyPreview, notificationPolicyJson())
+        .catch(() => {})
+    })
+    prefsUnsub = () => { try { offPrefs() } catch { /* ignore */ } }
+
+    // ANDROID: serviço em primeiro plano que mantém o processo vivo.
+    //
+    // Sem ele o Android congela/mata o processo assim que a tela apaga e
+    // nenhuma mensagem ou chamada chega — "a notificação só funciona com o app
+    // aberto". Só sobe com as notificações do sistema ligadas (se o usuário não
+    // quer aviso, não faz sentido gastar bateria para ficar conectado).
+    if (isAndroid()) {
+      void services.backgroundServiceSet(p.notifySystem).catch(() => {})
+    }
+  }
+
   syncPresence()
 }
 
@@ -226,6 +261,8 @@ export function initAppState() {
 export function shutdownAppState() {
   unsubEngine?.()
   unsubEngine = null
+  prefsUnsub?.()
+  prefsUnsub = null
   if (netTimer) { clearInterval(netTimer); netTimer = null }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
   snapshotEmitter.clear()

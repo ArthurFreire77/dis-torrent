@@ -118,11 +118,19 @@ test('versão pulada pelo usuário não é oferecida de novo', async () => {
   assert.equal(out.kind, 'none')
 })
 
-test('android mostra o cartão sem baixar sozinho (o sistema exige um toque)', async () => {
-  // Agora o Android SABE instalar (baixa o APK e abre o instalador), mas o
-  // download de ~40 MB não acontece sem o usuário pedir.
+test('android baixa o APK e abre o instalador (atualização automática de verdade)', async () => {
+  // Antes o Android NUNCA se atualizava sozinho: o fluxo devolvia `later`
+  // antes de baixar, então quem não tocasse no cartão ficava semanas numa
+  // build antiga. Agora baixa e abre o instalador, igual ao Linux.
   const { deps, calls } = fakeDeps({}, info({ platform: 'android', asset_name: 'a.apk' }))
   const out = await runUpdateFlow(deps, { autoApply: true })
+  assert.equal(out.kind, 'applied')
+  assert.deepEqual(calls, ['check', 'download', 'apply'])
+})
+
+test('android com "atualizar sozinho" desligado: só o cartão', async () => {
+  const { deps, calls } = fakeDeps({}, info({ platform: 'android', asset_name: 'a.apk' }))
+  const out = await runUpdateFlow(deps, { autoApply: false })
   assert.equal(out.kind, 'later')
   assert.deepEqual(calls, ['check'])
 })

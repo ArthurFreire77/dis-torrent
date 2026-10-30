@@ -79,9 +79,15 @@ export interface MessageDecision {
  */
 export function decideMessageNotice(i: MessageDecisionInput): MessageDecision {
   const counts = levelAllows(i.level, i.mentioned)
+  // Corpo = a MENSAGEM, não um contador.
+  //
+  // Antes, a segunda mensagem da mesma conversa virava "3 novas mensagens ·
+  // …" — o usuário pedia justamente o contrário: "não quero 'você tem tantas
+  // mensagens', quero ver o que a pessoa mandou". O contador continua existindo
+  // onde ele serve (badge da bandeja / não-lidas), não no aviso do SO.
   const body = !i.previewEnabled
-    ? (i.count > 1 ? `${i.count} novas mensagens` : 'Nova mensagem')
-    : (i.count > 1 ? `${i.count} novas mensagens · ${truncate(i.preview)}` : truncate(i.preview))
+    ? 'Nova mensagem'
+    : (i.preview.trim() ? truncate(i.preview) : 'Nova mensagem')
 
   if (!counts) return { show: false, body, counts: false }
   if (i.activity === 'active') return { show: false, body, counts: true }

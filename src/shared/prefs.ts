@@ -126,6 +126,19 @@ export function usePrefs(): Prefs {
   )
 }
 
+/**
+ * Assina QUALQUER mudança de preferência (sem React).
+ *
+ * Existe porque o espelho das preferências de notificação no core Rust precisa
+ * acompanhar o checkbox da UI: o aviso nativo é disparado pelo motor (que não
+ * lê o localStorage), então desligar "notificações do sistema" só vale fora da
+ * tela se o valor chegar lá.
+ */
+export function subscribePrefs(cb: () => void): () => void {
+  listeners.add(cb)
+  return () => { listeners.delete(cb) }
+}
+
 export function isMutedServer(id: string): boolean {
   return state.mutedServers.includes(id)
 }
@@ -199,4 +212,34 @@ export function moveServerToFolder(serverId: string, folderId: string | null) {
 
 export function folderOf(serverId: string): string | null {
   return state.serverFolders.find(f => f.servers.includes(serverId))?.id ?? null
+}
+
+/**
+ * Política de silenciamento em JSON, para o motor Rust.
+ *
+ * O aviso de mensagem é disparado pelo MOTOR (é ele quem recebe o frame com a
+ * janela escondida/app no fundo no Android). O motor não lê o `localStorage`,
+ * então o "silenciar canal", o "só menções" e o "silenciar servidor" precisam
+ * viajar para lá — senão a preferência só valeria com a janela na frente, que
+ * é justamente quando NADA é notificado.
+ *
+ * Forma: `{ default, channels: {conv: level}, servers: [community] }`.
+ */
+export function notificationPolicyJson(): string {
+  const mutedServers = state.mutedServers.slice(0, 2000)
+  const channels: Record<string, NotifLevel> = {}
+  let n = 0
+  for (const [id, lvl] of Object.entries(state.channelLevel)) {
+    if (n++ >= 5000) break
+    channels[id] = lvl
+  }
+  for (const id of state.mutedChannels) {
+    if (n++ >= 5000) break
+    channels[id] = 'none'
+  }
+  try {
+    return JSON.stringify({ default: state.notifDefault, channels, servers: mutedServers })
+  } catch {
+    return '{"default":"all","channels":{},"servers":[]}'
+  }
 }

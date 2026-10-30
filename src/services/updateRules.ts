@@ -186,10 +186,6 @@ export async function runUpdateFlow(
   const mode = updateModeFor(info.platform)
   // `link` só quando a plataforma não sabe instalar sozinha (macOS).
   if (mode === 'link') return { kind: 'later', info }
-  // ANDROID: baixar sem o usuário pedir seria um download de ~40 MB na rede
-  // dele e ainda exige a confirmação do sistema. O cartão aparece sempre, com
-  // o botão "Baixar e instalar" — é o máximo que o Android permite.
-  if (info.platform === 'android') return { kind: 'later', info }
 
   // FREIO DO LOOP: já instalamos ESTA versão e o app continua rodando uma
   // anterior. Instalar de novo produz exatamente o mesmo resultado — a janela
@@ -199,6 +195,18 @@ export async function runUpdateFlow(
 
   const failedBefore = (await deps.getFlag(FLAG_FAILED)) === info.latest
   if (!opts.autoApply || failedBefore) return { kind: 'later', info }
+
+  // ANDROID: baixa e abre o instalador do sistema IGUAL ao Linux.
+  //
+  // Antes este `return` acontecia antes de tudo e o Android NUNCA atualizava
+  // sozinho: o app checava, mostrava o cartão e ficava por isso mesmo — quem
+  // não tocasse no botão passava semanas numa build antiga (protocolo P2P
+  // diferente degrada a rede toda).
+  //
+  // O download de ~40 MB é o mesmo que o Windows faz. O toque de confirmação
+  // do instalador continua OBRIGATÓRIO e é do sistema: nenhum app fora da
+  // loja instala APK sem ele. O `autoApply` respeita a preferência "atualizar
+  // sozinho" — desligada, vira cartão manual, como nas outras plataformas.
 
   let path: string
   try {

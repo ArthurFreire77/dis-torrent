@@ -30,7 +30,7 @@ use background::{
     autostart_mark_decided, autostart_set, background_prefs_get, background_prefs_set,
     background_set_connection, call_ring_start, call_ring_stop, notification_cancel,
     notification_cancel_all, notification_permission_state, notification_request_permission,
-    notification_show,
+    notification_show, notify_prefs_set,
 };
 
 /// Plugin `downloads` — só existe no Android.
@@ -645,10 +645,19 @@ fn restart_engine(app: &AppHandle, state: &State<AppState>) -> Result<(), String
 fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
     let mut rx = engine.subscribe();
     let handle = app.clone();
+    // Clone para as notificações nativas: o pump de eventos nunca pode
+    // depender de a WebView estar viva (era o defeito do aviso no Android —
+    // "só aparece com o app aberto").
+    let notify_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
+                    // AVISO NATIVO antes de emitir: se a janela está em segundo
+                    // plano (bandeja, minimizada, app no fundo) ou se a WebView
+                    // foi suspensa, o JS não roda e a notificação nunca sairia.
+                    // Aqui o Rust decide com o estado REAL da janela.
+                    native_notice(&notify_handle, &ev);
                     if let Err(e) = handle.emit("distorrent://event", &ev) {
                         tracing::warn!("emit falhou: {e}");
                     }
@@ -665,6 +674,231 @@ fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
             }
         }
     });
+}
+
+/// A janela está em primeiro plano AGORA?
+///
+/// Lido do estado do SO a cada chamada (barato) em vez de um cache: um cache
+/// defasado é justamente o que produzia aviso dobrado (toast do SO + overlay) ou
+/// aviso nenhum (achava que o app estava na frente). No Android, `focused` fica
+/// `false` com o app no fundo — que é quando o aviso é obrigatório.
+fn janela_em_primeiro_plano(app: &AppHandle) -> bool {
+    match app.get_webview_window("main") {
+        Some(w) => {
+            let visivel = w.is_visible().unwrap_or(false);
+            let focado = w.is_focused().unwrap_or(false);
+            visivel && focado
+        }
+        None => false,
+    }
+}
+
+/// Mostra o aviso do SISTEMA para mensagem/chamada, decidido no Rust.
+///
+/// ## Por que aqui e não no JS
+///
+/// O aviso dependia de um `listen()` do WebView. Com a janela escondida, o app
+/// no fundo no Android ou a página suspensa pelo SO, o listener não executa —
+/// o resultado era "notificação só funciona com o app aberto", exatamente o
+/// relato. O motor continua rodando (é ele quem recebe o frame), então o ponto
+/// correto de decisão é este.
+///
+/// ## Regras
+///
+/// - só notifica o que o motor REALMENTE recebeu (`MessageNew`, `CallIncoming`);
+/// - primeiro plano (janela visível E focada) → nada: a UI já mostra;
+/// - 1 aviso por conversa: o id é estável, então a mensagem nova SUBSTITUI o
+///   aviso anterior em vez de empilhar (o texto atualiza com a última prévia);
+/// - chamada usa canal/prioridade de CHAMADA e id próprio por `call_id`.
+fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
+    use distorrent_core::EngineEvent as E;
+
+    // Preferências: desligado no SO = nem tenta (nada de aviso fantasma).
+    let store_for_prefs = app.try_state::<AppState>().and_then(|s| {
+        distorrent_core::storage::Store::open(&s.data_dir.join("distorrent.db")).ok()
+    });
+    let prefs = store_for_prefs
+        .as_ref()
+        .map(|st| {
+            (
+                st.kv_get("notify.system").as_deref() != Some("0"),
+                st.kv_get("notify.preview").as_deref() != Some("0"),
+            )
+        })
+        .unwrap_or((true, true));
+    if !prefs.0 {
+        return;
+    }
+
+    match ev {
+        E::MessageNew(m) => {
+            // Mensagem do PRÓPRIO usuário (sincronização/eco) nunca avisa.
+            if let Some(eu) = store_for_prefs
+                .as_ref()
+                .and_then(|st| st.load_identity().map(|i| i.fingerprint))
+            {
+                if eu == m.author_fp {
+                    return;
+                }
+            }
+            if janela_em_primeiro_plano(app) {
+                return;
+            }
+            // POLÍTICA de silenciamento (canal/servidor/nível) espelhada pelo
+            // frontend: com o app no fundo a UI não decide nada, então o
+            // motor precisa respeitar o "silenciado" e o "só menções".
+            {
+                let level = store_for_prefs
+                    .as_ref()
+                    .and_then(|st| st.kv_get("notify.policy"))
+                    .map(|raw| nivel_do_canal(&raw, &m.conv_id, &store_for_prefs));
+                if let Some(lv) = level {
+                    if lv == "none" {
+                        return;
+                    }
+                    if lv == "mentions" {
+                        // Menção = o meu fingerprint aparece no corpo.
+                        let eu = store_for_prefs
+                            .as_ref()
+                            .and_then(|st| st.load_identity().map(|i| i.fingerprint))
+                            .unwrap_or_default();
+                        if eu.is_empty() || !m.body.contains(&eu) {
+                            return;
+                        }
+                    }
+                }
+            }
+            let store = store_for_prefs;
+            // Nome de quem mandou (ou do canal): "Ana" é reconhecível, um fp não.
+            let autor = m.author_fp.clone();
+            let conv = store
+                .as_ref()
+                .and_then(|st| st.get_conversation(&m.conv_id).ok().flatten());
+            let titulo = conv
+                .as_ref()
+                .and_then(|c| {
+                    if c.kind == "dm" {
+                        store
+                            .as_ref()
+                            .and_then(|st| st.get_peer(&autor).ok().flatten())
+                            .map(|p| p.nickname)
+                    } else {
+                        Some(c.title.clone())
+                    }
+                })
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| autor.chars().take(8).collect());
+            let corpo = if prefs.1 {
+                resumo_mensagem(&m.body)
+            } else {
+                "Nova mensagem".to_string()
+            };
+            let id = background::notification_id_for(&format!("conv:{}", m.conv_id));
+            let _ = background::notification_show_inner(
+                app,
+                id,
+                titulo,
+                corpo,
+                Some(m.conv_id.clone()),
+                false,
+                false,
+            );
+        }
+        E::CallIncoming {
+            call_id, from_fp, ..
+        } => {
+            if janela_em_primeiro_plano(app) {
+                return;
+            }
+            let store = app.try_state::<AppState>().and_then(|s| {
+                distorrent_core::storage::Store::open(&s.data_dir.join("distorrent.db")).ok()
+            });
+            let quem = store
+                .as_ref()
+                .and_then(|st| st.get_peer(from_fp).ok().flatten())
+                .map(|p| p.nickname)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| from_fp.chars().take(8).collect());
+            let id = background::notification_id_for(&format!("call:{call_id}"));
+            let _ = background::notification_show_inner(
+                app,
+                id,
+                format!("{quem} está ligando"),
+                "Toque para abrir e atender".to_string(),
+                None,
+                true, // chamada: canal/prioridade de chamada
+                false,
+            );
+        }
+        E::CallEnded { call_id, .. } => {
+            // Fim da sinalização: o aviso de chamada não pode ficar na tela.
+            let id = background::notification_id_for(&format!("call:{call_id}"));
+            background::notification_cancel_inner(app, id);
+        }
+        _ => {}
+    }
+}
+
+/// Texto curto para o aviso. Mensagem de arquivo vira "enviou um arquivo"
+/// (o corpo carrega base64 dos metadados — não vai para a tela de bloqueio).
+fn resumo_mensagem(body: &str) -> String {
+    if body.starts_with('\u{1F4CE}') {
+        return "Enviou um arquivo".to_string();
+    }
+    if body.starts_with("__DISTORRENT_FILE__") {
+        return "Enviou um arquivo".to_string();
+    }
+    let limpo = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if limpo.is_empty() {
+        return "Nova mensagem".to_string();
+    }
+    let mut out: String = limpo.chars().take(140).collect();
+    if limpo.chars().count() > 140 {
+        out.push('…');
+    }
+    out
+}
+
+/// Nível de aviso efetivo de uma conversa, lido da política espelhada.
+///
+/// Formato do `notify.policy` (produzido pelo frontend):
+/// `{ "default": "all"|"mentions"|"none", "channels": {"<conv>": "<level>"},
+///    "servers": ["<community>"] }`
+/// Devolve `None` quando a política não pôde ser lida (aí o motor não
+/// silencia nada — na dúvida, avisar é menos grave que perder a mensagem).
+fn nivel_do_canal(
+    raw: &str,
+    conv_id: &str,
+    store: &Option<distorrent_core::storage::Store>,
+) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return "all".to_string();
+    };
+    if let Some(lvl) = v
+        .get("channels")
+        .and_then(|c| c.get(conv_id))
+        .and_then(|x| x.as_str())
+    {
+        return lvl.to_string();
+    }
+    // Canal de servidor silenciado: o servidor inteiro silencia.
+    if let Some(srv) = store
+        .as_ref()
+        .and_then(|st| st.channel_community(conv_id).ok().flatten())
+    {
+        let muted = v
+            .get("servers")
+            .and_then(|s| s.as_array())
+            .map(|arr| arr.iter().any(|x| x.as_str() == Some(srv.as_str())))
+            .unwrap_or(false);
+        if muted {
+            return "none".to_string();
+        }
+    }
+    v.get("default")
+        .and_then(|x| x.as_str())
+        .unwrap_or("all")
+        .to_string()
 }
 
 // ---------------- rede ----------------
@@ -3536,14 +3770,10 @@ fn save_file(
         {
             // Scoped storage (Android 10+): gravar direto em
             // /storage/emulated/0/Download é NEGADO. Grava na área do app
-            // (sempre gravável) e o frontend chama `navigator.share` (intent)
-            // pra salvar onde o usuário quiser. Antes o write falhava aqui.
-            let base = app
-                .path()
-                .app_data_dir()
-                .or_else(|_| app.path().app_local_data_dir())
-                .map_err(|e| format!("save_file: pasta do app indisponível: {e}"))?;
-            base.join("Download")
+            // (sempre gravável) e o frontend chama `plugin:downloads|save`
+            // (MediaStore) pra entregar no Downloads real. A pasta TEM de ficar
+            // dentro de `filesDir` — ver `android_private_download_dir`.
+            android_private_download_dir(&app)?
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -3689,12 +3919,12 @@ fn save_file_stream(
     let downloads = {
         #[cfg(target_os = "android")]
         {
-            let base = app
-                .path()
-                .app_data_dir()
-                .or_else(|_| app.path().app_local_data_dir())
-                .map_err(|e| format!("save_file_stream: pasta do app indisponível: {e}"))?;
-            base.join("Download")
+            // Mesma razão do `save_file`: o plugin `downloads` (MediaStore) só
+            // aceita origem dentro de `filesDir`/`cacheDir`. `app_data_dir()` no
+            // Android é `dataDir` (pai de `files`) — a origem caía FORA da área
+            // permitida e TODO download era recusado com "caminho de origem
+            // fora da área do app".
+            android_private_download_dir(&app)?
         }
         #[cfg(not(target_os = "android"))]
         {
@@ -4045,18 +4275,44 @@ async fn stormvault_export(
 fn export_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
-        let base = app
-            .path()
-            .app_data_dir()
-            .or_else(|_| app.path().app_local_data_dir())
-            .map_err(|e| format!("pasta do app indisponível: {e}"))?;
-        Ok(base.join("Download"))
+        let _ = app;
+        android_private_download_dir(app)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
         resolve_downloads_dir()
     }
+}
+
+/// Pasta gravável do app no Android, DEBAIXO de `filesDir`.
+///
+/// Por que não `app_data_dir()` direto: no Android o Tauri resolve
+/// `app_data_dir()` para `dataDir` (`/data/data/<pkg>`) — o PAI de `files`.
+/// Duas coisas dependem de estar DENTRO de `files`:
+///
+/// 1. o plugin `downloads` (Kotlin) só aceita copiar origem dentro de
+///    `filesDir`/`cacheDir`/`noBackupFilesDir` (trava contra mandar o SQLite
+///    ou o cofre para o Downloads público). Rascunho em `dataDir/Download` =
+///    TODO download recusado com "caminho de origem fora da área do app";
+/// 2. o `FileProvider` do auto-update declara `files-path path="."`, então um
+///    APK em `dataDir/updates` NÃO é servível por `content://` — o instalador
+///    nunca abria e a atualização no Android simplesmente não acontecia.
+#[cfg(target_os = "android")]
+fn android_files_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .or_else(|_| app.path().app_local_data_dir())
+        .map_err(|e| format!("pasta do app indisponível: {e}"))?;
+    // `dataDir/files` é exatamente o `filesDir` que o Kotlin enxerga.
+    Ok(base.join("files"))
+}
+
+/// Pasta de rascunho dos downloads no Android (dentro de `filesDir`).
+#[cfg(target_os = "android")]
+fn android_private_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(android_files_dir(app)?.join("Download"))
 }
 
 /// Importa um `.stormvault`: instala a identidade em device limpo (a senha do
@@ -4799,6 +5055,7 @@ fn main() {
             notification_cancel_all,
             notification_permission_state,
             notification_request_permission,
+            notify_prefs_set,
             app_show_window,
             app_hide_to_tray,
             app_quit,

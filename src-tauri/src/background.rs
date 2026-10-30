@@ -245,27 +245,64 @@ pub fn autostart_mark_decided(state: State<AppState>, enabled: bool) -> Result<(
     Ok(())
 }
 
+/// Id estável e positivo por chave (mesma fórmula do `notificationRules.ts` do
+/// frontend: `notificationIdFor`). Repetir a conta aqui é o que permite o Rust
+/// SUBSTITUIR o aviso da conversa que o JS criou, e vice-versa — sem dois avisos
+/// para a mesma conversa.
+pub fn notification_id_for(key: &str) -> i32 {
+    let mut h: i32 = 5381;
+    for b in key.as_bytes() {
+        h = ((h << 5).wrapping_add(h)).wrapping_add(*b as i32);
+    }
+    (h.unsigned_abs() % 2_000_000_000) as i32 + 1
+}
+
 /// Mostra a notificação do sistema. `id` é estável por conversa (quem chama
 /// calcula), então a mensagem nova SUBSTITUI a anterior em vez de empilhar.
 #[tauri::command]
 pub fn notification_show(
     app: AppHandle,
-    bg: State<Background>,
+    _bg: State<Background>,
     id: i32,
     title: String,
     body: String,
     conversation: Option<String>,
     silent: bool,
 ) -> Result<(), String> {
-    bg.remember_target(id, conversation.as_deref());
+    notification_show_inner(&app, id, title, body, conversation, silent, false)
+}
+
+/// Versão sem `State` — usada pelo pump de eventos do motor, que precisa
+/// notificar mesmo quando a UI nunca chamou nada (janela escondida/Android).
+pub fn notification_show_inner(
+    app: &AppHandle,
+    id: i32,
+    title: String,
+    body: String,
+    conversation: Option<String>,
+    silent: bool,
+    is_call: bool,
+) -> Result<(), String> {
+    if let Some(bg) = app.try_state::<Background>() {
+        bg.remember_target(id, conversation.as_deref());
+    }
     let mut builder = app.notification().builder().id(id).title(title).body(body);
-    // Android: canal próprio (mensagens) — o usuário silencia um canal sem
-    // silenciar o outro nas configurações do sistema.
+    // Android: canais SEPARADOS (mensagem × chamada) — o usuário silencia um
+    // sem silenciar o outro nas configurações do sistema.
     #[cfg(target_os = "android")]
     {
-        // O toque no aviso remove a notificação na hora (no Android dá para
-        // cancelar de verdade; no Windows, não — ver docs/background-notifications.md).
-        builder = builder.channel_id("distorrent_messages").auto_cancel();
+        // O toque no aviso remove a notificação na hora.
+        builder = builder
+            .channel_id(if is_call {
+                "distorrent_calls"
+            } else {
+                "distorrent_messages"
+            })
+            .auto_cancel();
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = is_call;
     }
     if silent {
         builder = builder.silent();
@@ -273,10 +310,53 @@ pub fn notification_show(
     builder.show().map_err(|e| e.to_string())
 }
 
+/// Cancela um aviso pelo id (usado quando a chamada termina).
+pub fn notification_cancel_inner(app: &AppHandle, id: i32) {
+    if let Some(bg) = app.try_state::<Background>() {
+        bg.forget_target(id);
+    }
+    let _ = app.notification().remove_active(vec![id]);
+}
+
 #[tauri::command]
 pub fn notification_cancel(app: AppHandle, bg: State<Background>, id: i32) {
     bg.forget_target(id);
     let _ = app.notification().remove_active(vec![id]);
+}
+
+/// Espelha no Rust as preferências de aviso que vivem no `localStorage`.
+///
+/// O aviso nativo é disparado pelo MOTOR (para funcionar com a janela
+/// escondida), e o motor não tem acesso ao `localStorage` da WebView. Sem este
+/// espelho, "silenciar canal"/"desligar notificações" na UI não teria efeito
+/// com o app no fundo — o usuário desligaria e continuaria recebendo.
+///
+/// `policy` é o JSON produzido por `notificationPolicyJson()` no frontend:
+/// `{ "default": "all|mentions|none", "channels": {id: level}, "servers": [id] }`.
+#[tauri::command]
+pub fn notify_prefs_set(
+    state: State<AppState>,
+    system: bool,
+    preview: bool,
+    policy: Option<String>,
+) -> Result<(), String> {
+    let store = distorrent_core::storage::Store::open(&state.data_dir.join("distorrent.db"))
+        .map_err(|e| e.to_string())?;
+    store
+        .kv_set("notify.system", if system { "1" } else { "0" })
+        .map_err(|e| e.to_string())?;
+    store
+        .kv_set("notify.preview", if preview { "1" } else { "0" })
+        .map_err(|e| e.to_string())?;
+    if let Some(p) = policy {
+        // Teto defensivo: é um mapa de ids curtos; acima disso é lixo/ataque.
+        if p.len() <= 256 * 1024 {
+            store
+                .kv_set("notify.policy", &p)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -669,17 +749,27 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Android: canal de notificação. Criar de novo é idempotente (o Android
+    // Android: canais de notificação. Criar de novo é idempotente (o Android
     // preserva as escolhas de som/importância do usuário).
     #[cfg(mobile)]
     {
         use tauri_plugin_notification::{Channel, Importance};
         let messages = Channel::builder("distorrent_messages", "Mensagens")
-            .description("Novas mensagens e chamadas recebidas")
+            .description("Novas mensagens recebidas")
             .importance(Importance::High)
             .build();
         if let Err(e) = app.notification().create_channel(messages) {
             tracing::warn!("canal de mensagens não criado: {e}");
+        }
+        // Canal SEPARADO de chamada: prioridade máxima + som de toque. Sem ele,
+        // a chamada caía no canal de mensagem (importância alta, mas sem o
+        // tratamento de "ligação") e o Android podia agrupar silenciosamente.
+        let calls = Channel::builder("distorrent_calls", "Chamadas")
+            .description("Chamadas de voz e vídeo recebidas")
+            .importance(Importance::High)
+            .build();
+        if let Err(e) = app.notification().create_channel(calls) {
+            tracing::warn!("canal de chamadas não criado: {e}");
         }
     }
 

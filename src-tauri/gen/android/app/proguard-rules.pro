@@ -5,14 +5,35 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# DownloadsPlugin é resolvido por NOME via register_android_plugin
-# ("com.distorrent.app.DownloadsPlugin") e os @Command por reflexão. O R8 renomeia
-# classes/métodos em release (isMinifyEnabled = true) e o registro passaria a
-# falhar em runtime — só no aparelho, só na release, só quando alguém baixa
-# um arquivo. Mantemos classe e membros annotated.
+# Plugins nativos são resolvidos por NOME via `register_android_plugin` /
+# `PluginManager.load` ("com.distorrent.app.DownloadsPlugin", "...CallForegroundPlugin",
+# "...UpdaterPlugin", "...CallNotificationPlugin", "...BgServicePlugin") e os
+# `@Command` por REFLEXÃO. O R8 renomeia classes/métodos no release
+# (`isMinifyEnabled = true`) e o registro passaria a falhar em runtime — só no
+# aparelho, só na release e só quando alguém baixa um arquivo, recebe uma
+# chamada ou tenta atualizar. Cada plugin novo PRECISA entrar nesta lista.
 -keep class com.distorrent.app.DownloadsPlugin { *; }
--keepclassmembers class com.distorrent.app.DownloadsPlugin {
+-keep class com.distorrent.app.CallForegroundPlugin { *; }
+-keep class com.distorrent.app.CallForegroundService { *; }
+-keep class com.distorrent.app.UpdaterPlugin { *; }
+-keep class com.distorrent.app.CallNotificationPlugin { *; }
+-keep class com.distorrent.app.CallActionReceiver { *; }
+-keep class com.distorrent.app.BackgroundConnectionService { *; }
+-keep class com.distorrent.app.BgServicePlugin { *; }
+-keep class com.distorrent.app.MainActivity { *; }
+
+# `@Command`/`@TauriPlugin` são lidos por anotação em runtime.
+-keepclassmembers class com.distorrent.app.** {
     @app.tauri.annotation.Command <methods>;
+}
+-keepattributes *Annotation*
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations
+
+# O `CallActionReceiver` é instanciado pelo ANDROID a partir do manifesto:
+# sem o construtor preservado, o broadcast de "Atender"/"Recusar" levanta
+# InstantiationException com o app em segundo plano (justo quando importa).
+-keepclassmembers class com.distorrent.app.CallActionReceiver {
+    public <init>();
 }
 
 # If your project uses WebView with JS, uncomment the following

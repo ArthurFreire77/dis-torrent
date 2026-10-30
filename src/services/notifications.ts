@@ -166,6 +166,12 @@ export function notifyIncomingCall(a: { callId: string; title: string }): boolea
   const body = getPrefs().notifyPreview
     ? 'Chamada recebida — abra o DisTorrent para atender ou recusar'
     : 'Chamada recebida'
+  // ANDROID: notificação de CHAMADA própria (tela cheia + Atender/Recusar).
+  // O aviso genérico não tem full-screen intent nem botões — era o "não
+  // aparece / fica uma merdinha" do relato. Falha cai no aviso comum.
+  void services
+    .callNotifyShow(a.callId, a.title, body)
+    .catch(() => {})
   return show({
     id: notificationIdFor(`call:${a.callId}`),
     title: a.title,
@@ -177,6 +183,11 @@ export function notifyIncomingCall(a: { callId: string; title: string }): boolea
 /** Atendeu/recusou na UI: não é mais "perdida". */
 export function markCallHandled(callId: string) {
   callsInFlight.delete(callId)
+  if (services.kind === 'native') {
+    // O aviso de chamada do Android continua na tela se o usuário atendeu por
+    // dentro do app (o overlay), não pela notificação.
+    void services.callNotifyCancel(callId).catch(() => {})
+  }
 }
 
 /** Fim da sinalização: cancela o aviso e, se ninguém atendeu, avisa perdida. */
@@ -185,6 +196,8 @@ export function endCallNotice(callId: string) {
   callsInFlight.delete(callId)
   if (services.kind === 'native') {
     void services.notificationCancel(notificationIdFor(`call:${callId}`)).catch(() => {})
+    // A notificação de chamada do Android (full-screen + botões) some junto.
+    void services.callNotifyCancel(callId).catch(() => {})
   }
   if (!was) return
   if (missedNotified.has(callId)) return
@@ -237,6 +250,54 @@ export function initNotifications() {
       },
     ))
     .catch(() => { /* shell sem o evento: clique só foca a janela */ })
+
+  // ANDROID — "Atender"/"Recusar" tocados na notificação de chamada.
+  //
+  // Dois caminhos:
+  //  1. app JÁ estava vivo → o Kotlin publica o evento `action` do plugin;
+  //  2. app foi ABERTO pelo toque (boot a frio) → a intenção ficou guardada e
+  //     é drenada UMA vez em `pendingAction`.
+  // Sem o caminho 2, tocar em "Atender" com o processo morto só abria o app e a
+  // chamada continuava tocando.
+  void import('@tauri-apps/api/core')
+    .then(async ({ addPluginListener }) => {
+      await addPluginListener<{ call_id?: string; action?: string }>(
+        'callnotif',
+        'action',
+        (p) => dispatchCallAction(p?.call_id ?? '', p?.action ?? 'open'),
+      )
+    })
+    .catch(() => { /* desktop/shell sem o plugin: nada a fazer */ })
+
+  // Boot a frio (uma vez): pequeno atraso para o shell montar o listener.
+  setTimeout(() => {
+    void services
+      .callPendingAction()
+      .then((r) => {
+        if (r.action || r.call_id) dispatchCallAction(r.call_id, r.action || 'open')
+      })
+      .catch(() => {})
+  }, 1200)
+}
+
+// ---------- ação de chamada vinda da notificação ----------
+type CallActionHandler = (callId: string, action: string) => void
+const callActionHandlers = new Set<CallActionHandler>()
+
+/**
+ * Registra quem sabe atender/recusar uma chamada a partir da notificação.
+ * Usado pelos shells (que têm o `callManager` e a navegação).
+ */
+export function onCallNotificationAction(cb: CallActionHandler): () => void {
+  callActionHandlers.add(cb)
+  return () => { callActionHandlers.delete(cb) }
+}
+
+function dispatchCallAction(callId: string, action: string) {
+  if (!callId) return
+  for (const h of callActionHandlers) {
+    try { h(callId, action) } catch { /* handler quebrado não impede os outros */ }
+  }
 }
 
 /** Permissão do SO (Android 13+ pergunta; desktop é sempre concedida). */

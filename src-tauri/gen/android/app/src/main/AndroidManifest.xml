@@ -37,6 +37,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- Serviço de mensageria em segundo plano (receber com o app fechado). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Atualização automática: o app baixa o APK e abre o instalador do
          sistema. Desde o Android 8 esta permissão é OBRIGATÓRIA para disparar
@@ -48,6 +50,13 @@
          chamada, nem de mensagem). É pedida em runtime (NotificationPrompt /
          tela de configurações), nunca no boot. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Chamada em TELA CHEIA (estilo WhatsApp) com o aparelho bloqueado: o
+         Android 14+ exige esta permissão de uso especial para aceitar
+         `setFullScreenIntent`. Sem ela o aviso vira só banner na gaveta — e a
+         chamada "não aparece" com o app em segundo plano. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Despertar a tela quando a chamada chega com o aparelho bloqueado. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Compartilhamento de TELA no Android: NÃO existe hoje.
          `CAPTURE_VIDEO_OUTPUT` é permissão de nível `signature` (só apps
@@ -99,6 +108,35 @@
             android:name=".CallForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone|camera" />
+
+        <!-- Serviço que mantém o app conectado com a tela apagada (receber
+             mensagem/chamada com o app fechado). `remoteMessaging` é o tipo que
+             o Android define para mensageria — diferente de `dataSync`, que no
+             Android 15 tem teto de horas por dia. -->
+        <service
+            android:name=".BackgroundConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <!-- Atender/Recusar tocados na notificação de chamada. Precisa de
+             receiver PRÓPRIO (não de `PendingIntent.getActivity`): com o app em
+             segundo plano/bloqueado, tocar no botão abriria a tela de bloqueio
+             em vez de aplicar a escolha. `exported="false"` — só o nosso
+             PendingIntent dispara. -->
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.distorrent.app.CALL_ACCEPT" />
+                <action android:name="com.distorrent.app.CALL_REJECT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Permissão de chamada em tela cheia (Android 14+ exige declarar o
+             uso; sem ela o `setFullScreenIntent` é rebaixado a banner). -->
+        <meta-data
+            android:name="android.app.role.DIALER_USES_FULL_SCREEN_INTENT"
+            android:value="true" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

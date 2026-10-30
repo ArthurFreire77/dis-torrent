@@ -1608,6 +1608,13 @@ export const browserServices: DisTorrentServices = {
   notificationCancelAll: async () => {},
   notificationPermission: async () => 'unsupported',
   notificationRequestPermission: async () => 'unsupported',
+  // Modo navegador não tem aviso nativo do motor: nada a espelhar.
+  notifyPrefsSet: async () => {},
+  // Sem Android de verdade, não há serviço em primeiro plano nem full-screen.
+  backgroundServiceSet: async () => false,
+  callPendingAction: async () => ({ action: '', call_id: '' }),
+  callNotifyShow: async () => {},
+  callNotifyCancel: async () => {},
   appShowWindow: async () => {},
   appHideToTray: async () => {},
   appQuit: async () => {},

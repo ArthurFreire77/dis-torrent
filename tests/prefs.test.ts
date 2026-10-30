@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   getPrefs, setPrefs, toggleMuteServer, toggleMuteChannel, levelFor,
   shouldNotify, setNote, getNote, addFolder, moveServerToFolder, folderOf,
-  removeFolder,
+  removeFolder, notificationPolicyJson,
 } from '../src/shared/prefs.ts'
 
 beforeEach(() => {
@@ -55,5 +55,31 @@ describe('prefs folders', () => {
     assert.equal(folderOf('srv1'), null)
     removeFolder(id)
     assert.equal(getPrefs().serverFolders.length, 0)
+  })
+})
+
+describe('política de notificação espelhada no motor', () => {
+  it('leva o nível por canal e os servidores silenciados', () => {
+    setPrefs({
+      notifDefault: 'all',
+      channelLevel: { c1: 'mentions' },
+      mutedChannels: ['c2'],
+      mutedServers: ['s1'],
+    })
+    const p = JSON.parse(notificationPolicyJson())
+    assert.equal(p.default, 'all')
+    assert.equal(p.channels.c1, 'mentions')
+    // Canal silenciado entra como 'none', sem precisar de entrada em
+    // `channelLevel` — é a mesma decisão de `levelFor`.
+    assert.equal(p.channels.c2, 'none')
+    assert.deepEqual(p.servers, ['s1'])
+  })
+
+  it('é JSON válido com a política vazia (o motor nunca cai em "sem política")', () => {
+    setPrefs({ notifDefault: 'mentions', channelLevel: {}, mutedChannels: [], mutedServers: [] })
+    const p = JSON.parse(notificationPolicyJson())
+    assert.equal(p.default, 'mentions')
+    assert.deepEqual(p.channels, {})
+    assert.deepEqual(p.servers, [])
   })
 })

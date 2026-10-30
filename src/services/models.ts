@@ -808,6 +808,22 @@ export interface DisTorrentServices {
   notificationCancelAll(): Promise<void>
   notificationPermission(): Promise<string>
   notificationRequestPermission(): Promise<string>
+  /**
+   * Espelha no core as preferências de aviso (sistema/prévia/política).
+   *
+   * O aviso nativo é disparado pelo motor Rust — ele precisa saber que o
+   * usuário DESLIGOU as notificações (ou silenciou um canal), mesmo com a
+   * janela escondida, senão o checkbox da UI não teria efeito nenhum fora da
+   * tela. `policy` é o JSON de `notificationPolicyJson()`.
+   */
+  notifyPrefsSet(system: boolean, preview: boolean, policy?: string | null): Promise<void>
+  /** Sobe/derruba o serviço que mantém o app conectado com a tela apagada. */
+  backgroundServiceSet(on: boolean): Promise<boolean>
+  /** Ação tocada na notificação de chamada com o app FECHADO (drenada 1x). */
+  callPendingAction(): Promise<{ action: string; call_id: string }>
+  /** Mostra a notificação de CHAMADA (tela cheia + Atender/Recusar). */
+  callNotifyShow(callId: string, title: string, body: string): Promise<void>
+  callNotifyCancel(callId: string): Promise<void>
   appShowWindow(): Promise<void>
   appHideToTray(): Promise<void>
   appQuit(): Promise<void>

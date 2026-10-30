@@ -303,11 +303,7 @@ pub async fn update_download(
         return Err("nome de arquivo inválido".into());
     }
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("pasta de dados: {e}"))?
-        .join("updates");
+    let dir = updates_dir(&app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("criar pasta de updates: {e}"))?;
     let final_path = dir.join(&file_name);
     let part_path = dir.join(format!("{file_name}.part"));
@@ -517,6 +513,37 @@ pub fn update_apply(_app: tauri::AppHandle, path: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Pasta dos instaladores baixados.
+///
+/// No Android ela PRECISA ficar dentro de `filesDir`: o `FileProvider` do
+/// manifesto declara `files-path path="."`, e o instalador só abre com
+/// `content://` apontando para um arquivo coberto por ele. Com o APK em
+/// `dataDir/updates` (o que `app_data_dir()` devolve no Android) o
+/// `getUriForFile` lançava `IllegalArgumentException`, o plugin recusava e a
+/// atualização **nunca** acontecia — o sintoma era "no Android não está
+/// atualizando automático".
+fn updates_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    #[cfg(target_os = "android")]
+    {
+        let base = app
+            .path()
+            .app_data_dir()
+            .or_else(|_| app.path().app_local_data_dir())
+            .map_err(|e| format!("pasta de dados: {e}"))?;
+        // `dataDir/files` == `filesDir` que o Kotlin/FileProvider enxerga.
+        return Ok(base.join("files").join("updates"));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("pasta de dados: {e}"))?;
+        Ok(dir.join("updates"))
+    }
+}
+
 /// Preferência persistida de "atualizar sozinho". Vive no kv do SQLite (mesmo
 /// lugar das outras preferências do app) para não criar um arquivo solto.
 #[tauri::command]
@@ -579,12 +606,7 @@ fn write_kv(app: &tauri::AppHandle, key: &str, value: &str) -> Result<(), String
 /// quando o usuário adia por várias versões). Falha aqui nunca é fatal.
 #[tauri::command]
 pub fn update_cleanup(app: tauri::AppHandle) -> Result<u32, String> {
-    use tauri::Manager;
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("pasta de dados: {e}"))?
-        .join("updates");
+    let dir = updates_dir(&app)?;
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(0);
     };

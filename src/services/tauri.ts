@@ -3,6 +3,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { isAndroidRuntime } from '../shared/runtime.ts'
 import type {
   RelayLegStatus,
   AuditEntry,
@@ -393,6 +394,45 @@ export const tauriServices: DisTorrentServices = {
   notificationCancelAll: () => invoke<void>('notification_cancel_all'),
   notificationPermission: () => invoke<string>('notification_permission_state'),
   notificationRequestPermission: () => invoke<string>('notification_request_permission'),
+  // Espelha no Rust as preferências de aviso que vivem no localStorage. O
+  // aviso nativo é disparado pelo MOTOR (funciona com a janela escondida e no
+  // Android em segundo plano), e o motor não lê o localStorage da WebView.
+  notifyPrefsSet: (system, preview, policy) =>
+    invoke<void>('notify_prefs_set', { system, preview, policy: policy ?? null }),
+  // Android: serviço em primeiro plano que mantém o processo vivo com a tela
+  // apagada. Devolve o estado REAL do serviço (não um "ok" otimista).
+  backgroundServiceSet: async (on: boolean) => {
+    if (!isAndroidRuntime()) return false
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const r = await invoke<{ rodando?: boolean }>(
+        on ? 'plugin:bgservice|start' : 'plugin:bgservice|stop',
+      )
+      return !!r?.rodando
+    } catch {
+      return false
+    }
+  },
+  callPendingAction: async () => {
+    if (!isAndroidRuntime()) return { action: '', call_id: '' }
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const r = await invoke<{ action?: string; call_id?: string }>('plugin:callnotif|pendingAction')
+      return { action: r?.action ?? '', call_id: r?.call_id ?? '' }
+    } catch {
+      return { action: '', call_id: '' }
+    }
+  },
+  callNotifyShow: async (callId: string, title: string, body: string) => {
+    if (!isAndroidRuntime()) return
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('plugin:callnotif|show', { callId, title, body })
+  },
+  callNotifyCancel: async (callId: string) => {
+    if (!isAndroidRuntime()) return
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('plugin:callnotif|cancel', { callId })
+  },
   appShowWindow: () => invoke<void>('app_show_window'),
   appHideToTray: () => invoke<void>('app_hide_to_tray'),
   appQuit: () => invoke<void>('app_quit'),

@@ -7,10 +7,12 @@
   instalador de APK do auto-update precisam entregar um arquivo ao sistema por
   `content://`.
 
-  `files-path` cobre `data_dir/updates/` — é onde o Rust grava o APK baixado
-  (`app_data_dir()` do Tauri = `filesDir` no Android). Sem esta linha o
-  `FileProvider.getUriForFile` lança IllegalArgumentException e o instalador
-  nunca abre.
+  `files-path` cobre `data_dir/files/updates/` — é onde o Rust grava o APK
+  baixado, DENTRO de `filesDir` (o `app_data_dir()` do Tauri no Android é
+  `dataDir`, o PAI de `files`; gravar em `dataDir/updates` deixava o APK fora
+  do FileProvider e o instalador nunca abria). Sem esta linha o
+  `FileProvider.getUriForFile` lança IllegalArgumentException e a atualização
+  no Android simplesmente não acontece.
 -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
   <files-path name="updates" path="." />
