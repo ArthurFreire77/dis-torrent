@@ -1,459 +1,53 @@
-// Assistente de criação de servidor.
+// ASSISTENTE DE CRIAÇÃO DE SERVIDOR.
 //
-// Este arquivo foi reescrito do zero. A versão anterior tinha quatro problemas
-// que não eram de estilo, eram de produto:
+// ## Por que este arquivo é pequeno agora
 //
-//   1. Largura de 560px: o passo de identidade (nome, descrição, ícone) era a
-//      decisão mais importante do fluxo e cabia num vão de 560 que espremia
-//      tudo. Agora são WIDTHS.wizard (940) com conteúdo em 1fr e resumo em 280.
-//   2. Os "ícones" eram emoji (rocket, gamepad...). Emoji como ícone de interface
-//      é a regra que a casa já quebrou em `icons.tsx`: o ícone é SVG, o emoji é
-//      conteúdo de mensagem. Além disso o emoji não carregava informação — oito
-//      figurinhas sem rótulo. Agora são categorias COM NOME e descrição do que
-//      costuma ser um servidor assim.
-//   3. Cinco passos com o mais importante (identidade) sendo o mais raso: o
-//      nome era validado com `trim().length >= 2` e nada mais.
-//   4. Os botões de navegação eram texto puro, sem ícone, sem estado de foco.
+// Ele tinha 1191 linhas e fazia cinco trabalhos: catálogo de modelos/ícones,
+// validação de nome (com limite 60 divergente do core, que usa 64), os quatro
+// passos de formulário, o resumo lateral e a criação. Era impossível testar
+// qualquer regra e qualquer mudança no passo 3 arriscava o passo 1.
 //
-// O que NÃO mudou, deliberadamente: o contrato `onCreated(id: string)`. O
-// chamador em `ThemeShell.tsx` faz `setSelCommunity(id)`, então o callback
-// recebe o id como string. Passar `{ id, name, token }` quebraria o shell.
+// Agora:
+//   - `wizardModel.ts`      → dados + regras PURAS (testadas em Node);
+//   - `wizardSteps.tsx`     → passo 1 (identidade);
+//   - `wizardChannelSteps.tsx` → passos 2-4 (canais, cargos, regras);
+//   - `wizardSummary.tsx`   → resumo lateral;
+//   - este arquivo          → estado da sessão, navegação e criação.
 //
-// Regras estruturais deste arquivo:
-//   - zero emoji (ícone de UI é sempre `Ic` de `shared/icons`);
-//   - cada passo é um `role="group"` com `aria-label` do passo, para que o
-//     leitor de tela anuncie a troca de contexto;
-//   - o botão Continuar fica desabilitado quando o passo é inválido, mas a
-//     pendência é escrita na tela. Botão morto sem explicação é pior que erro.
+// ## Contrato que NÃO pode mudar (o shell depende)
+//   - `onCreated(communityId)` é chamado UMA vez, e só depois de o servidor
+//     existir de verdade;
+//   - reabrir o modal reseta tudo;
+//   - o modal não fecha enquanto `busy`;
+//   - o convite é wildcard (`000000000000`) para valer em qualquer aparelho.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
 import { Ic, type IconName } from '../shared/icons'
-import { Tooltip } from '../shared/Tooltip'
+import { Modal, Notice, ui } from '../shared/ui'
+import { WIDTHS } from '../shared/ui'
 import { LocalLink } from '../shared/LocalLink'
-import {
-  Button,
-  IconButton,
-  Modal,
-  Notice,
-  Select,
-  TextArea,
-  TextField,
-  WIDTHS,
-  ui,
-} from '../shared/ui'
-import { CATEGORIAS_PADRAO, validateChannelName } from './server/ChannelManager'
 import { services } from '../services'
-import type { ChannelMeta } from '../services/models'
-import { PERMS, PERM_LABELS } from '../services/models'
-
-// ---------- css local ----------
-//
-// `hover`, `focus-visible` e `@media` não se expressam em `style` inline —
-// precisam de seletor. O mesmo caminho que `BotConfigPanel` usa.
-
-const css = `
-/* ==========================================================================
-   Assistente de criação de servidor
-   --------------------------------------------------------------------------
-   Estrutura: [conteúdo 1fr] [resumo 300px]. O resumo fica STICKY porque é ele
-   que confirma o que está sendo criado — em um formulário longo, perder o
-   resumo de vista obriga a pessoa a rolar de volta para conferir o nome.
-   ========================================================================== */
-.csw-cols{ display:grid; grid-template-columns:minmax(0,1fr) 268px; gap:${ui.lg}px; align-items:start }
-/* grid-template-columns com minmax(0,1fr) é obrigatório: com 1fr puro o
-   mínimo automático da coluna é o conteúdo, e o grid devolvia 534px de 558
-   disponíveis (medido) — sobrava espaço e os cards ficavam estreitos. */
-.csw-cols > *{ min-width:0 }
-.csw-side{ position:sticky; top:0; min-width:0 }
-.csw-main{ min-width:0; display:flex; flex-direction:column; gap:${ui.lg}px }
-/* Filhos do flex precisam width:100%: sem isso um DIV com grid dentro
-   encolhe para o conteúdo (medido: csw-cats ocupava 534px de 858px e os cards
-   ficavam com 263px, cortando a descrição). */
-.csw-main > *{ width:100% }
-
-/* ---- cabeçalho do passo ------------------------------------------------- */
-.csw-step-head{ display:flex; align-items:flex-start; gap:${ui.md}px; padding-bottom:${ui.md}px; border-bottom:1px solid ${ui.border} }
-.csw-step-num{ width:34px; height:34px; border-radius:10px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.16); color:${ui.accent}; font-size:14px; font-weight:900 }
-.csw-step-title{ font-size:15px; font-weight:800; color:${ui.heading}; line-height:1.3 }
-.csw-step-sub{ font-size:12px; color:${ui.muted}; line-height:1.5; margin-top:3px }
-
-/* ---- modelos (atalhos) -------------------------------------------------- */
-.csw-models{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:${ui.sm}px }
-.csw-model{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:12px 13px; color:${ui.text}; display:flex; flex-direction:column; gap:6px; min-width:0; transition:background .15s, border-color .15s, transform .12s }
-.csw-model:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.csw-model:active:not(:disabled){ background:${ui.elevated}; transform:translateY(1px) }
-.csw-model:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.csw-model[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-model-row{ display:flex; align-items:center; gap:8px; min-width:0 }
-.csw-model-t{ display:block; font-size:13px; font-weight:800; color:${ui.heading}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-model-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; min-width:0 }
-
-/* ---- categorias de ícone -------------------------------------------------
-   Título e descrição são elementos de BLOCO: como spans inline eles saíam
-   grudados ("ServidorSem tema definido…"), defeito que já apareceu em build
-   publicado. min-width:0 é o que deixa o ellipsis funcionar no card.
-   -------------------------------------------------------------------------- */
-.csw-cats{ display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:${ui.sm}px; align-items:stretch }
-.csw-cat{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; color:${ui.text}; display:flex; gap:10px; align-items:flex-start; min-width:0; min-height:76px; transition:background .15s, border-color .15s, transform .12s }
-.csw-cat:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.csw-cat:active:not(:disabled){ background:${ui.elevated}; transform:translateY(1px) }
-.csw-cat:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.csw-cat[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-cat-ic{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; background:${ui.input}; color:${ui.muted}; flex-shrink:0; transition:background .15s, color .15s }
-.csw-cat[aria-pressed="true"] .csw-cat-ic{ background:rgba(88,101,242,.26); color:#fff }
-.csw-cat-body{ min-width:0; flex:1 }
-.csw-cat-t{ display:block; font-size:12px; font-weight:800; color:${ui.heading}; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-cat-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; margin-top:2px }
-
-/* ---- canais ------------------------------------------------------------- */
-.csw-chan{ display:grid; grid-template-columns:24px minmax(0,1fr) 96px 160px 32px; gap:${ui.sm}px; align-items:start; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px; transition:border-color .15s }
-.csw-chan:focus-within{ border-color:${ui.borderStrong} }
-.csw-chan[data-bad="true"]{ border-color:${ui.danger} }
-.csw-chan-ic{ color:${ui.muted}; display:flex; justify-content:center; padding-top:10px }
-.csw-chan > div > div:last-child{ margin-bottom:0 !important }
-
-/* ---- cargos ------------------------------------------------------------- */
-.csw-role{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; transition:opacity .15s, border-color .15s }
-.csw-role:focus-within{ border-color:${ui.borderStrong} }
-.csw-role[data-on="false"]{ opacity:.6 }
-.csw-role-top{ display:flex; align-items:center; gap:10px }
-/* O campo de nome ocupa a linha inteira e o text-field padrão tem altura de
-   formulário; em uma lista de 3 cargos isso vira três caixas gigantes. Aqui ele
-   fica compacto, sem label, alinhado ao checkbox. */
-.csw-role-name{ flex:1; min-width:0 }
-.csw-role-name input{ height:32px; padding:5px 9px; font-size:13px; font-weight:700 }
-.csw-role-top input[type="checkbox"]{ appearance:none; -webkit-appearance:none; margin:0; width:18px; height:18px; flex-shrink:0; cursor:pointer; border-radius:5px; border:1.5px solid ${ui.borderStrong}; background:${ui.input}; position:relative; transition:background .15s, border-color .15s }
-.csw-role-top input[type="checkbox"]:checked{ background:${ui.accent}; border-color:${ui.accent} }
-.csw-role-top input[type="checkbox"]:checked::after{ content:""; position:absolute; left:5px; top:2px; width:5px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg) }
-.csw-role-top input[type="checkbox"]:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.csw-role-dot{ width:11px; height:11px; border-radius:50%; flex-shrink:0; box-shadow:0 0 0 3px rgba(255,255,255,.05) }
-/* A descrição alinha com o NOME (não com o checkbox): padding-left = checkbox
-   (18) + gaps (10+10). Sem isso o texto ficava deslocado à esquerda. */
-.csw-role-why{ font-size:11px; color:${ui.muted}; line-height:1.5; margin-top:7px; padding-left:38px }
-.csw-check{ display:flex; align-items:center; gap:8px; font-size:12px; color:${ui.text}; cursor:pointer; padding:5px 7px; border-radius:6px; transition:background .15s }
-.csw-check:hover{ background:${ui.surfaceHover} }
-.csw-check input{ margin:0; width:15px; height:15px; flex-shrink:0; cursor:pointer; accent-color:${ui.accent} }
-.csw-check:focus-within{ box-shadow:0 0 0 2px ${ui.accent}66 }
-.csw-perms{ display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:2px; margin-top:10px; padding-top:10px; border-top:1px solid ${ui.border} }
-
-/* ---- barra de etapas ---------------------------------------------------- */
-.csw-seg{ appearance:none; cursor:pointer; background:transparent; border:0; padding:0; display:flex; flex-direction:column; gap:7px; min-width:0; text-align:left; font:inherit }
-.csw-seg-bar{ height:3px; border-radius:99px; background:${ui.input}; transition:background .18s; width:100% }
-.csw-seg:hover:not(:disabled) .csw-seg-bar{ background:${ui.borderStrong} }
-.csw-seg[data-state="done"] .csw-seg-bar{ background:${ui.success} }
-.csw-seg[data-state="now"] .csw-seg-bar{ background:${ui.accent} }
-.csw-seg:focus-visible{ outline:2px solid ${ui.link}; outline-offset:3px; border-radius:4px }
-.csw-seg:disabled{ cursor:default }
-.csw-seg-l{ display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:${ui.muted}; min-width:0; transition:color .15s }
-.csw-seg[data-state="now"] .csw-seg-l{ color:${ui.heading} }
-.csw-seg[data-state="done"] .csw-seg-l{ color:${ui.text} }
-.csw-seg-n{ width:17px; height:17px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; flex-shrink:0; background:${ui.input}; color:${ui.muted}; transition:background .15s, color .15s }
-.csw-seg[data-state="done"] .csw-seg-n{ background:rgba(35,165,89,.22); color:#a5e5bd }
-.csw-seg[data-state="now"] .csw-seg-n{ background:var(--csw-accent, ${ui.accent}); color:#fff }
-.csw-seg-t{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-
-/* ---- utilitários -------------------------------------------------------- */
-.csw-cap{ font-size:11px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin:0 0 ${ui.sm}px }
-.csw-falta{ font-size:12px; color:#ffe0a3; line-height:1.5; display:flex; gap:7px; align-items:flex-start }
-.csw-prev{ display:flex; align-items:center; gap:${ui.md}px; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:12px; padding:13px 14px; margin-bottom:${ui.md}px }
-.csw-prev-ic{ width:44px; height:44px; border-radius:13px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.2); color:#fff }
-.csw-prev-body{ min-width:0; flex:1 }
-.csw-prev-n{ display:block; font-size:14px; font-weight:800; color:${ui.heading}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-prev-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; margin-top:3px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical }
-.csw-count{ font-size:11px; color:${ui.muted}; text-align:right; margin-top:6px; font-variant-numeric:tabular-nums }
-.csw-done{ display:flex; flex-direction:column; align-items:center; text-align:center; gap:${ui.md}px; padding:${ui.lg}px 0 ${ui.xl}px }
-.csw-done-ic{ width:68px; height:68px; border-radius:22px; display:flex; align-items:center; justify-content:center; background:rgba(35,165,89,.18); color:#a5e5bd }
-.csw-side-box{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:12px; padding:13px 14px; margin-bottom:${ui.md}px }
-.csw-side-t{ font-size:10px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin-bottom:9px; display:flex; align-items:center; gap:6px }
-.csw-tag{ display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; border-radius:99px; padding:3px 9px; background:${ui.input}; border:1px solid ${ui.border}; color:${ui.text} }
-.csw-list{ display:flex; flex-direction:column; gap:5px }
-.csw-li{ display:flex; align-items:center; gap:7px; font-size:12px; color:${ui.text}; min-width:0 }
-.csw-li span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-li-i{ color:${ui.muted}; flex-shrink:0; display:flex }
-.csw-empty{ font-size:12px; color:${ui.muted}; line-height:1.5 }
-
-/* Abaixo de 860px a coluna de 300px rouba a largura do conteúdo: o resumo desce
-   para baixo (order:2) em vez de sumir, porque é ele que mostra a contagem de
-   canais e cargos que a pessoa está criando. */
-@media (max-width: 860px) {
-  .csw-cols{ grid-template-columns:minmax(0,1fr); gap:${ui.lg}px }
-  .csw-side{ position:static; order:2 }
-  .csw-models{ grid-template-columns:minmax(0,1fr) }
-}
-/* 560px: 4 colunas de canal não cabem. Tipo e categoria descem para a linha de
-   baixo; o nome fica com o espaço que sobrar. */
-@media (max-width: 560px) {
-  .csw-chan{ grid-template-columns:24px minmax(0,1fr) 32px }
-  .csw-chan-ic{ grid-row:1 }
-  .csw-chan-name{ grid-column:2 / 4 }
-  .csw-chan-kind{ grid-column:1 / 2 }
-  .csw-chan-cat{ grid-column:1 / 3 }
-  .csw-chan-del{ grid-column:3; grid-row:1 }
-  .csw-cats{ grid-template-columns:minmax(0,1fr) }
-  .csw-perms{ grid-template-columns:minmax(0,1fr) }
-  .csw-seg-t{ display:none }
-  .csw-step-head{ gap:${ui.sm}px }
-}
-`
-
-// ---------- dados ----------
-
-type ChannelKind = 'text' | 'voice' | 'video'
-
-interface WizardChannel {
-  name: string
-  kind: ChannelKind
-  category: string
-}
-
-interface RolePreset {
-  key: string
-  name: string
-  color: string
-  permissions: number
-  hoist: boolean
-  mentionable: boolean
-  enabled: boolean
-  /** Uma linha explicando o que o cargo FAZ. É o que o resumo mostra. */
-  why: string
-}
-
-interface IconCategory {
-  id: IconName
-  label: string
-  desc: string
-}
-
-/**
- * Categorias de ícone. Substituem os oito emoji: cada uma tem nome e diz o que
- * costuma ser um servidor daquele tipo, que é a informação que o emoji tentava
- * dar de jeito.
- */
-const ICON_CATEGORIES: IconCategory[] = [
-  { id: 'server', label: 'Servidor', desc: 'Sem tema definido. Serve para qualquer coisa.' },
-  { id: 'users', label: 'Comunidade', desc: 'Grupos de pessoas, eventos e bate-papo.' },
-  { id: 'terminal', label: 'Tecnologia', desc: 'Infraestrutura, deploys, logs e suporte.' },
-  { id: 'code', label: 'Desenvolvimento', desc: 'Código, projetos, revisão e bugs.' },
-  { id: 'sparkle', label: 'Criativo', desc: 'Arte, música, escrita e ideias.' },
-  { id: 'crown', label: 'Jogos', desc: 'Partidas, torneios e sala de jogo.' },
-  { id: 'plug', label: 'Integrações', desc: 'Bots, webhooks e automação.' },
-  { id: 'shield', label: 'Privado', desc: 'Equipe restrita, staff e moderação.' },
-  { id: 'globe', label: 'Público', desc: 'Comunidade aberta, vários idiomas.' },
-  { id: 'mic', label: 'Áudio', desc: 'Gravação, música, podcast e locução.' },
-]
-
-/**
- * Três modelos que PRÉ-PREENCHEM descrição, ícone e canais. Não pule de passo:
- * a pessoa pode ignorar e escrever tudo à mão. O que o modelo faz é oferecer um
- * ponto de partida que já é coerente.
- */
-const MODELOS: {
-  id: string
-  label: string
-  desc: string
-  icon: IconName
-  description: string
-  channels: { name: string; kind: ChannelKind }[]
-}[] = [
-  {
-    id: 'comunidade',
-    label: 'Comunidade',
-    desc: 'Bate-papo, eventos e gente nova',
-    icon: 'users',
-    description: 'Espaço para conversar, combinar o que fazer e manter todo mundo por perto.',
-    channels: [
-      { name: 'geral', kind: 'text' },
-      { name: 'apresentacoes', kind: 'text' },
-      { name: 'encontros', kind: 'voice' },
-    ],
-  },
-  {
-    id: 'estudo',
-    label: 'Estudo',
-    desc: 'Aulas, avisos e materiais',
-    icon: 'code',
-    description: 'Grupo de estudos: avisos de aula, materiais compartilhados e dúvidas.',
-    channels: [
-      { name: 'geral', kind: 'text' },
-      { name: 'avisos', kind: 'text' },
-      { name: 'materiais', kind: 'text' },
-      { name: 'sala-de-estudo', kind: 'voice' },
-    ],
-  },
-  {
-    id: 'trabalho',
-    label: 'Trabalho',
-    desc: 'Projetos, tarefas e reunião',
-    icon: 'terminal',
-    description: 'Equipe de trabalho: andamento de projetos, tarefas abertas e reunião rápida.',
-    channels: [
-      { name: 'geral', kind: 'text' },
-      { name: 'projetos', kind: 'text' },
-      { name: 'tarefas', kind: 'text' },
-      { name: 'reuniao', kind: 'voice' },
-    ],
-  },
-]
-
-const STEP_LABELS = ['Identidade', 'Canais', 'Cargos', 'Regras'] as const
-const PASSO_REGRAS = 3
-const PASSO_CONCLUIDO = 4
-
-const LIMITE_NOME = 60
-const LIMITE_REGRAS = 2000
-
-const KIND_ICON: Record<ChannelKind, IconName> = { text: 'hash', voice: 'speaker', video: 'video' }
-const KIND_LABEL: Record<ChannelKind, string> = { text: 'Texto', voice: 'Voz', video: 'Vídeo' }
-
-const KIND_OPCOES = (Object.keys(KIND_LABEL) as ChannelKind[]).map((k) => ({
-  value: k,
-  label: KIND_LABEL[k],
-}))
-
-function categoryFor(kind: ChannelKind): string {
-  if (kind === 'voice') return CATEGORIAS_PADRAO[1]
-  if (kind === 'video') return CATEGORIAS_PADRAO[2]
-  return CATEGORIAS_PADRAO[0]
-}
-
-function initialRoles(): RolePreset[] {
-  return [
-    {
-      key: 'membro',
-      name: 'Membro',
-      color: '#57f287',
-      permissions: PERMS.SEND_MESSAGES | PERMS.VIEW_CHANNEL | PERMS.EMBED_LINKS,
-      hoist: false,
-      mentionable: false,
-      enabled: true,
-      why: 'Padrão de quem acabou de entrar: conversa, vê os canais e compartilha links.',
-    },
-    {
-      key: 'moderador',
-      name: 'Moderador',
-      color: '#f0b232',
-      permissions:
-        PERMS.KICK_MEMBERS | PERMS.MANAGE_CHANNELS | PERMS.SEND_MESSAGES
-        | PERMS.VIEW_CHANNEL | PERMS.MENTION_EVERYONE,
-      hoist: true,
-      mentionable: false,
-      enabled: true,
-      why: 'Cuida do dia a dia: expulsa quem atrapalha, organiza canais e anuncia.',
-    },
-    {
-      key: 'admin',
-      name: 'Administrador',
-      color: '#f23f42',
-      permissions:
-        PERMS.ADMINISTRATOR | PERMS.MANAGE_CHANNELS | PERMS.MANAGE_ROLES
-        | PERMS.KICK_MEMBERS | PERMS.BAN_MEMBERS | PERMS.MANAGE_BOT,
-      hoist: true,
-      mentionable: false,
-      enabled: true,
-      why: 'Poder total: cria cargos, bane, gerencia canais e controla os bots.',
-    },
-  ]
-}
-
-function initialChannels(): WizardChannel[] {
-  return [{ name: 'geral', kind: 'text', category: categoryFor('text') }]
-}
-
-function slugChannel(v: string): string {
-  return v
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '-')
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '')
-}
-
-// ---------- validação ----------
-
-interface NameCheck {
-  error: string | null
-  warning: string | null
-}
-
-/**
- * Validação de verdade do nome, em tempo real.
- *
- * Três coisas, não uma: existence, tamanho ebounded e uma checagem de "isso
- * parece nome de pessoa". A terceira é a que mais importa aqui: o erro de
- * criação mais comum não é nome inválido, é a pessoa colar o próprio nome e o
- * servidor ficarACHADO no rail. O aviso não bloqueia — é conselho, não regra.
- */
-function checkName(raw: string): NameCheck {
-  const n = raw.trim()
-  if (!n) return { error: null, warning: null }
-  if (/\s{2,}/.test(n)) {
-    return { error: 'Espaço duplo no meio do nome. Um espaço só já basta.', warning: null }
-  }
-  if (n.length < 2) {
-    return { error: 'Muito curto. Use pelo menos 2 caracteres.', warning: null }
-  }
-  if (n.length > LIMITE_NOME) {
-    return { error: `Máximo de ${LIMITE_NOME} caracteres. Agora são ${n.length}.`, warning: null }
-  }
-  return { error: null, warning: pareceNomeDePessoa(n) ? AVISO_NOME_PESSOA : null }
-}
-
-const AVISO_NOME_PESSOA =
-  'Isso parece o nome de uma pessoa. Se for, considere um tema: é mais fácil achar o servidor depois e o nome não fica ambíguo no rail.'
-
-/**
- * Heurística de "nome de pessoa": UMA palavra, sem dígito, capitalizada,
- * comprimento de nome de gente. Deliberadamente rasa — o custo de um falso
- * positivo é um aviso que a pessoa ignora; o custo de um falso negativo é o
- * servidor chamado "Arthur" para sempre.
- */
-function pareceNomeDePessoa(nome: string): boolean {
-  if (/\s/.test(nome)) return false
-  if (/\d/.test(nome)) return false
-  if (nome.length < 3 || nome.length > 14) return false
-  return /^[A-ZÀ-Ý][a-zà-ÿ]+$/.test(nome)
-}
-
-function nomeVazio(v: string): boolean {
-  return v.trim().length < 2
-}
-
-// ---------- peças pequenas ----------
-
-function StepCap({ children }: { children: ReactNode }) {
-  return <div className="csw-cap">{children}</div>
-}
-
-/** Rótulo + dica de uma linha, usado nos blocos do resumo lateral. */
-/** Título + explicação do passo. Cabeçalho dentro do CONTEÚDO (abaixo da barra
- *  de etapas) para que o texto mude junto com o passo, e não só no modal. */
-function StepHead({ step, title, sub }: { step: number; title: string; sub: string }) {
-  return (
-    <div className="csw-step-head">
-      <span className="csw-step-num" aria-hidden>{step}</span>
-      <div style={{ minWidth: 0 }}>
-        <div className="csw-step-title">{title}</div>
-        <div className="csw-step-sub">{sub}</div>
-      </div>
-    </div>
-  )
-}
-
-function SideBox({ icon, title, children }: { icon: IconName; title: string; children: ReactNode }) {
-  return (
-    <div className="csw-side-box">
-      <div className="csw-side-t">
-        <Ic name={icon} size={12} />
-        {title}
-      </div>
-      {children}
-    </div>
-  )
-}
-
-// ---------- componente ----------
+import { isTauriRuntime } from '../shared/runtime'
+import {
+  MODELOS,
+  PASSO_CONCLUIDO,
+  PASSO_REGRAS,
+  categoryFor,
+  channelErrorsOf,
+  checkServerName,
+  initialChannels,
+  initialRoles,
+  nomeVazio,
+  slugChannel,
+  type ChannelKind,
+  type RolePreset,
+  type WizardChannel,
+} from './server/wizardModel'
+import { StepIdentity } from './server/wizardSteps'
+import { StepChannels, StepRoles, StepRules } from './server/wizardChannelSteps'
+import { WizardSummary } from './server/wizardSummary'
+import { WizardFooter, WizardStepper } from './server/wizardChrome'
+import { css } from './server/wizardStyles'
 
 export default function CreateServerWizard({
   open,
@@ -513,31 +107,13 @@ export default function CreateServerWizard({
     setVisited((v) => (next > v ? next : v))
   }, [])
 
-  const nomeCheck = useMemo(() => checkName(name), [name])
-
-  /** Canais como `ChannelMeta` — o que `validateChannelName` espera. */
-  const channelsAsMeta = useMemo<ChannelMeta[]>(
-    () =>
-      channels.map((c, i) => ({
-        id: String(i),
-        name: c.name,
-        category: c.category,
-        position: i,
-        kind: c.kind,
-      })),
-    [channels],
-  )
-
-  /** Erro por canal, no mesmo índice. `null` = válido. */
-  const channelErrors = useMemo(
-    () =>
-      channels.map((c, i) => validateChannelName(c.name, channelsAsMeta, String(i))),
-    [channels, channelsAsMeta],
-  )
+  const nomeCheck = useMemo(() => checkServerName(name), [name])
+  const channelErrors = useMemo(() => channelErrorsOf(channels), [channels])
 
   const canaisTexto = channels.filter((c) => c.kind === 'text').length
   const canaisVoz = channels.filter((c) => c.kind === 'voice' || c.kind === 'video').length
   const cargosAtivos = roles.filter((r) => r.enabled)
+  const validosCount = channels.length - channelErrors.filter((e) => e !== null).length
 
   /**
    * O que impede de seguir. Não é só um booleano: a lista é o que aparece na
@@ -560,15 +136,14 @@ export default function CreateServerWizard({
     return []
   }, [step, name, nomeCheck.error, channelErrors, canaisTexto])
 
-  const bloqueado = pendencias.length > 0
   const concluido = step === PASSO_CONCLUIDO
 
-  // ---------- modelos ----------
+  // ---------- mutações ----------
 
   /**
-   * Modelo pré-preenche descrição, ícone e canais. NÃO mexe no nome: o nome é a
-   * única coisa que a pessoa necessariamente escreveu sozinha, e sobrescrever o
-   * texto que ela digitou é o pior que um botão de "atalho" pode fazer.
+   * Modelo preenche descrição, ícone e canais. NÃO mexe no nome: é a única
+   * coisa que a pessoa necessariamente escreveu sozinha, e sobrescrever o que
+   * ela digitou é o pior que um botão de "atalho" pode fazer.
    */
   function aplicarModelo(id: string) {
     const m = MODELOS.find((x) => x.id === id)
@@ -595,29 +170,29 @@ export default function CreateServerWizard({
   }
 
   function addChannel() {
-    setChannels((prev) => {
-      const n = prev.length + 1
-      return [
-        ...prev,
-        { name: `canal-${n}`, kind: 'text' as ChannelKind, category: categoryFor('text') },
-      ]
-    })
+    setChannels((prev) => [
+      ...prev,
+      { name: `canal-${prev.length + 1}`, kind: 'text' as ChannelKind, category: categoryFor('text') },
+    ])
   }
 
   function removeChannel(i: number) {
-    setChannels((prev) => prev.filter((_, idx) => idx !== i))
+    // Guarda de 1 já está no botão; repetir aqui protege contra clique duplo.
+    setChannels((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
   }
 
   function toggleRole(key: string) {
-    setRoles((prev) =>
-      prev.map((r) => (r.key === key ? { ...r, enabled: !r.enabled } : r)),
-    )
+    setRoles((prev) => prev.map((r) => (r.key === key ? { ...r, enabled: !r.enabled } : r)))
   }
 
-  function togglePerm(roleKey: string, bit: number) {
+  function renameRole(key: string, nome: string) {
+    setRoles((prev) => prev.map((r) => (r.key === key ? { ...r, name: nome } : r)))
+  }
+
+  function togglePerm(key: string, bit: number) {
     setRoles((prev) =>
       prev.map((r) => {
-        if (r.key !== roleKey) return r
+        if (r.key !== key) return r
         const has = (r.permissions & bit) !== 0
         return { ...r, permissions: has ? r.permissions & ~bit : r.permissions | bit }
       }),
@@ -628,8 +203,9 @@ export default function CreateServerWizard({
 
   async function createServer() {
     setError(null)
-    if (nomeVazio(name)) {
+    if (nomeVazio(name) || nomeCheck.error) {
       setStep(0)
+      setError(nomeCheck.error ?? 'O nome do servidor precisa de pelo menos 2 caracteres.')
       return
     }
     setBusy(true)
@@ -640,7 +216,7 @@ export default function CreateServerWizard({
         .map(({ c }) => c)
 
       const id = await services.createCommunity(
-        name.trim(),
+        nomeCheck.normalized || name.trim(),
         validos.map((c) => c.name),
         {
           description: description.trim() || undefined,
@@ -665,11 +241,11 @@ export default function CreateServerWizard({
       // O wildcard é o formato já aceito pelo Rust e pelo modo navegador.
       const token = await services.makeInvite(id, '000000000000')
       setCreatedId(id)
-      const w = window as unknown as Record<string, unknown>
-      const isTauri = '__TAURI_INTERNALS__' in w || '__TAURI__' in w || '__TAURI_IPC__' in w
-      setInviteUrl(isTauri
-        ? `distorrent://invite?invite=${encodeURIComponent(token)}`
-        : `${window.location.origin}/invite/${encodeURIComponent(token)}`)
+      setInviteUrl(
+        isTauriRuntime()
+          ? `distorrent://invite?invite=${encodeURIComponent(token)}`
+          : `${window.location.origin}/invite/${encodeURIComponent(token)}`,
+      )
       setStep(PASSO_CONCLUIDO)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'não foi possível criar o servidor')
@@ -678,341 +254,49 @@ export default function CreateServerWizard({
     }
   }
 
-  // ---------- rodapé ----------
+  // ---------- conteúdo ----------
 
-  const footer = (
-    <div style={{ width: '100%' }}>
-      {step < PASSO_CONCLUIDO && pendencias.length > 0 && (
-        <div
-          className="csw-falta"
-          style={{ marginBottom: ui.md }}
-          // `status` e não `alert`: isto é Orientação de preenchimento, não
-          // erro. Um alert dispara a leitura imediata a cada tecla digitada.
-          role="status"
-        >
-          <span style={{ flexShrink: 0, marginTop: 1 }}>
-            <Ic name="info" size={14} />
-          </span>
-          <span>
-            <strong style={{ color: ui.heading }}>Falta:</strong> {pendencias.join(' ')}
-          </span>
-        </div>
-      )}
-      <div style={{ display: 'flex', gap: ui.sm, flexWrap: 'wrap', alignItems: 'center' }}>
-        {step > 0 && !concluido && (
-          <Button icon="chevronLeft" onClick={() => goTo(step - 1)} disabled={busy}>
-            Voltar
-          </Button>
-        )}
-        <div style={{ flex: 1 }} />
-        {concluido ? (
-          <>
-            <Button
-              variant="primary"
-              icon="check"
-              onClick={() => {
-                onCreated(createdId)
-                onClose()
-              }}
-            >
-              Concluir
-            </Button>
-          </>
-        ) : step === PASSO_REGRAS ? (
-          <Button
-            variant="success"
-            icon="check"
-            busy={busy}
-            disabled={bloqueado}
-            onClick={() => void createServer()}
-          >
-            {busy ? 'Criando servidor' : 'Criar servidor'}
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            icon="chevronRight"
-            disabled={bloqueado}
-            onClick={() => goTo(step + 1)}
-            title={bloqueado ? pendencias[0] : undefined}
-          >
-            Continuar
-          </Button>
-        )}
-      </div>
-    </div>
-  )
-
-  // ---------- conteúdo do passo ----------
-
-  // Contagem de canais válidos, usada no texto final (evita "3 canais" quando
-  // um deles está com nome inválido e não vai ser criado).
-  const validosCount = channels.length - channelErrors.filter((e) => e !== null).length
-
-
-  const conteudo = ((): ReactNode => {
+  const conteudo = ((): React.ReactNode => {
     if (step === 0) {
       return (
-        <>
-          <StepHead step={1} title="Identidade" sub="Como o servidor aparece na lista e para quem pensa em entrar." />
-
-          <div>
-            <StepCap>Comece por um modelo (opcional)</StepCap>
-            <div className="csw-models">
-              {MODELOS.map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  className="csw-model"
-                  aria-pressed={modeloId === m.id}
-                  onClick={() => aplicarModelo(m.id)}
-                >
-                  <span className="csw-model-row">
-                    <span style={{ color: modeloId === m.id ? ui.accent : ui.muted, display: 'flex' }}>
-                      <Ic name={m.icon} size={15} />
-                    </span>
-                    <span className="csw-model-t">{m.label}</span>
-                  </span>
-                  <span className="csw-model-d">{m.desc}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          {modeloId && (
-            <Notice tone="info" icon="info">
-              O modelo preencheu a descrição, o ícone e os canais abaixo. Pode trocar
-              qualquer um deles — inclusive escolher outro modelo.
-            </Notice>
-          )}
-
-          <div>
-            <TextField
-              label="Nome do servidor"
-              value={name}
-              onChange={setName}
-              maxLength={LIMITE_NOME + 20}
-              placeholder="ex.: Prefeitura de Vila Nova"
-              ariaLabel="Nome do servidor"
-              error={nomeCheck.error}
-              hint={`${name.trim().length}/${LIMITE_NOME} caracteres. Esse é o nome que a pessoa vê no rail.`}
-            />
-            {nomeCheck.warning && !nomeCheck.error && (
-              <div style={{ marginTop: ui.sm }}>
-                <Notice tone="warning" icon="info">
-                  {nomeCheck.warning}
-                </Notice>
-              </div>
-            )}
-          </div>
-
-          <TextArea
-            label="Descrição (opcional)"
-            value={description}
-            onChange={setDescription}
-            rows={2}
-            placeholder="do que é este servidor, em uma frase"
-            ariaLabel="Descrição do servidor"
-            hint="Aparece para quem está pensando em entrar. Uma linha basta."
-          />
-
-          <div>
-            <StepCap>Ícone — {ICON_CATEGORIES.find((c) => c.id === iconId)?.label ?? 'Servidor'}</StepCap>
-            <div className="csw-cats" role="group" aria-label="Ícone do servidor">
-              {ICON_CATEGORIES.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  className="csw-cat"
-                  aria-pressed={iconId === c.id}
-                  onClick={() => setIconId(c.id)}
-                >
-                  <span className="csw-cat-ic">
-                    <Ic name={c.id} size={16} />
-                  </span>
-                  <span className="csw-cat-body">
-                    <span className="csw-cat-t">{c.label}</span>
-                    <span className="csw-cat-d">{c.desc}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </>
+        <StepIdentity
+          modeloId={modeloId}
+          name={name}
+          description={description}
+          iconId={iconId}
+          nomeCheck={nomeCheck}
+          onModelo={aplicarModelo}
+          onName={setName}
+          onDescription={setDescription}
+          onIcon={setIconId}
+        />
       )
     }
-
     if (step === 1) {
       return (
-        <>
-          <StepHead
-            step={2}
-            title="Canais"
-            sub="O que a pessoa vê ao entrar. Precisa de pelo menos um canal de texto."
-          />
-          <div className="csw-cap" style={{ marginBottom: 0 }}>
-            {channels.length} {channels.length === 1 ? 'canal' : 'canais'}
-            {validosCount !== channels.length && (
-              <span style={{ color: ui.danger, marginLeft: 6 }}>
-                • {channels.length - validosCount} com problema
-              </span>
-            )}
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
-            {channels.map((c, i) => (
-              <div key={i} className="csw-chan" data-bad={channelErrors[i] !== null}>
-                <span className="csw-chan-ic">
-                  <Ic name={KIND_ICON[c.kind]} size={16} />
-                </span>
-                <div className="csw-chan-name">
-                  <TextField
-                    value={c.name}
-                    onChange={(v) => updateChannel(i, { name: slugChannel(v) })}
-                    placeholder="nome-do-canal"
-                    ariaLabel={`Nome do canal ${i + 1}`}
-                    error={channelErrors[i]}
-                    hint="letras minúsculas, números e hífen"
-                  />
-                </div>
-                <div className="csw-chan-kind">
-                  <Select
-                    value={c.kind}
-                    onChange={(v) => updateChannel(i, { kind: v as ChannelKind })}
-                    options={KIND_OPCOES}
-                    ariaLabel={`Tipo do canal ${i + 1}`}
-                  />
-                </div>
-                <div className="csw-chan-cat">
-                  <Select
-                    value={c.category}
-                    onChange={(v) => updateChannel(i, { category: v })}
-                    options={CATEGORIAS_PADRAO.map((c2) => ({ value: c2, label: c2 }))}
-                    ariaLabel={`Categoria do canal ${i + 1}`}
-                  />
-                </div>
-                <div className="csw-chan-del" style={{ paddingTop: 4 }}>
-                  <Tooltip label={channels.length <= 1 ? 'O servidor precisa de um canal' : `Remover ${c.name}`}>
-                    <span>
-                      <IconButton
-                        icon="trash"
-                        label={`Remover canal ${c.name || i + 1}`}
-                        onClick={() => removeChannel(i)}
-                        disabled={channels.length <= 1}
-                      />
-                    </span>
-                  </Tooltip>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div>
-            <Button icon="plus" onClick={addChannel}>
-              Adicionar canal
-            </Button>
-          </div>
-        </>
+        <StepChannels
+          channels={channels}
+          errors={channelErrors}
+          onUpdate={updateChannel}
+          onAdd={addChannel}
+          onRemove={removeChannel}
+        />
       )
     }
-
     if (step === 2) {
       return (
-        <>
-          <StepHead
-            step={3}
-            title="Cargos"
-            sub="Quem pode fazer o quê. Os três abaixo vêm prontos — pode deixar como está."
-          />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
-            {roles.map((r) => {
-              const aberto = expandedRole === r.key
-              return (
-                <div key={r.key} className="csw-role" data-on={r.enabled}>
-                  <div className="csw-role-top">
-                    <input
-                      type="checkbox"
-                      checked={r.enabled}
-                      onChange={() => toggleRole(r.key)}
-                      aria-label={`Criar cargo ${r.name}`}
-                      style={{ margin: 0, width: 16, height: 16, cursor: 'pointer', accentColor: ui.accent }}
-                    />
-                    <span className="csw-role-dot" style={{ background: r.color }} />
-                    <div className="csw-role-name">
-                      <TextField
-                        value={r.name}
-                        onChange={(v) =>
-                          setRoles((prev) =>
-                            prev.map((p) => (p.key === r.key ? { ...p, name: v } : p)),
-                          )
-                        }
-                        ariaLabel={`Nome do cargo ${r.name}`}
-                      />
-                    </div>
-                    <Tooltip label={aberto ? 'Fechar permissões' : 'Ajustar permissões deste cargo'}>
-                      <span>
-                        <IconButton
-                          icon={aberto ? 'chevronDown' : 'chevronRight'}
-                          label={`Permissões do cargo ${r.name}`}
-                          active={aberto}
-                          onClick={() => setExpandedRole(aberto ? null : r.key)}
-                        />
-                      </span>
-                    </Tooltip>
-                  </div>
-                  <div className="csw-role-why">{r.why}</div>
-                  {aberto && (
-                    <div className="csw-perms">
-                      {(Object.keys(PERMS) as (keyof typeof PERMS)[]).map((key) => {
-                        const bit = PERMS[key]
-                        const pl = (PERM_LABELS as Record<number, string>)[bit] ?? key
-                        return (
-                          <label key={key} className="csw-check">
-                            <input
-                              type="checkbox"
-                              checked={(r.permissions & bit) !== 0}
-                              onChange={() => togglePerm(r.key, bit)}
-                            />
-                            {pl}
-                          </label>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-          {cargosAtivos.length === 0 && (
-            <Notice tone="warning" icon="warn">
-              Nenhum cargo marcado. O servidor funciona assim mesmo — todo mundo entra
-              com o mesmo nível, e você pode criar cargos depois.
-            </Notice>
-          )}
-        </>
+        <StepRoles
+          roles={roles}
+          expanded={expandedRole}
+          onToggleRole={toggleRole}
+          onRenameRole={renameRole}
+          onTogglePerm={togglePerm}
+          onExpand={setExpandedRole}
+        />
       )
     }
-
     if (step === PASSO_REGRAS) {
-      return (
-        <>
-          <StepHead
-            step={4}
-            title="Regras"
-            sub="Opcional. Aparece para quem está pensando em entrar."
-          />
-          <TextArea
-            label="Regras do servidor (opcional)"
-            value={rulesText}
-            onChange={setRulesText}
-            rows={8}
-            maxLength={LIMITE_REGRAS}
-            placeholder={'1. Respeite todo mundo.\n2. Nada de spam nem link quebrado.\n3. Duvida? Pergunta no canal geral.'}
-            ariaLabel="Regras do servidor"
-            hint="Uma regra por linha. Elas aparecem para quem está pensando em entrar."
-          />
-          <div className="csw-count">
-            {rulesText.length}/{LIMITE_REGRAS}
-          </div>
-        </>
-      )
+      return <StepRules value={rulesText} onChange={setRulesText} />
     }
 
     // Passo concluído
@@ -1044,12 +328,9 @@ export default function CreateServerWizard({
     )
   })()
 
-  // Título do modal: STÁVEL ("Criar servidor") em todos os passos, para o
-  // diálogo não trocar de nome a cada etapa. Quem dá o contexto do passo é o
-  // `StepHead` dentro do conteúdo (com número + explicação) — antes o subtítulo
-  // do modal duplicava essa informação e competia com o formulário.
-  const titulo = 'Criar servidor'
-  const subtitulo = step === PASSO_CONCLUIDO ? 'Pronto. O convite está abaixo.' : 'Leva menos de um minuto.'
+  // Título STÁVEL em todos os passos, para o diálogo não trocar de nome a cada
+  // etapa. Quem dá o contexto é o `StepHead` dentro do conteúdo.
+  const subtitulo = concluido ? 'Pronto. O convite está abaixo.' : 'Leva menos de um minuto.'
 
   return (
     <>
@@ -1057,120 +338,58 @@ export default function CreateServerWizard({
       <Modal
         open={open}
         onClose={busy ? () => {} : onClose}
-        title={titulo}
+        title="Criar servidor"
         subtitle={subtitulo}
         width={WIDTHS.wizard}
         labelId="csw-title"
         dialogLabel="Criar servidor"
-        footer={footer}
+        footer={
+          <WizardFooter
+            step={step}
+            busy={busy}
+            error={error}
+            pendencias={pendencias}
+            onBack={() => goTo(step - 1)}
+            onNext={() => goTo(step + 1)}
+            onCreate={() => void createServer()}
+            onConclude={() => {
+              onCreated(createdId)
+              onClose()
+            }}
+          />
+        }
       >
-        {/* Indicador de passos: 4 segmentos. Clicar só volta para passo já
-            alcançado — pular direto para cargos deixaria canais vazios. */}
-        <nav
-          aria-label="Etapas da criação"
-          style={{ display: 'flex', gap: 6, marginBottom: ui.xl }}
-        >
-          {STEP_LABELS.map((label, i) => {
-            const state = step === PASSO_CONCLUIDO || i < step ? 'done' : i === step ? 'now' : 'todo'
-            const podeIr = i <= visited && step !== PASSO_CONCLUIDO && !busy
-            return (
-              <button
-                key={label}
-                type="button"
-                className="csw-seg"
-                data-state={state}
-                disabled={!podeIr}
-                aria-current={i === step ? 'step' : undefined}
-                aria-label={`Etapa ${i + 1}: ${label}${state === 'done' ? ', concluída' : state === 'now' ? ', atual' : ''}`}
-                onClick={() => goTo(i)}
-              >
-                <span className="csw-seg-bar" />
-                <span className="csw-seg-l">
-                  <span className="csw-seg-n">
-                    {state === 'done' ? <Ic name="check" size={9} stroke={3} /> : i + 1}
-                  </span>
-                  <span className="csw-seg-t">{label}</span>
-                </span>
-              </button>
-            )
-          })}
-        </nav>
+        <WizardStepper step={step} visited={visited} busy={busy} onGo={goTo} />
 
         <div className="csw-cols" ref={mainRef}>
-          {/* Conteúdo do passo. `role="group"` + `aria-label` para que o leitor
-              de tela anuncie a troca de contexto, não só a troca de texto. */}
+          {/* `role="group"` + `aria-label` para o leitor de tela anunciar a troca
+              de contexto, não só a troca de texto. */}
           <div
             className="csw-main"
             role="group"
-            aria-label={concluido ? `Servidor criado: ${titulo}` : `Passo ${step + 1} de 4: ${titulo}`}
+            aria-label={concluido ? 'Servidor criado' : `Passo ${step + 1} de 4: Criar servidor`}
           >
             {conteudo}
           </div>
 
           {!concluido && (
-            <aside className="csw-side" aria-label="Resumo do servidor">
-              <div className="csw-prev">
-                <span className="csw-prev-ic">
-                  <Ic name={iconId} size={20} />
-                </span>
-                <span className="csw-prev-body">
-                  <span className="csw-prev-n">
-                    {name.trim() || 'Sem nome ainda'}
-                  </span>
-                  <span className="csw-prev-d">
-                    {description.trim() || 'Sem descrição'}
-                  </span>
-                </span>
-              </div>
-
-              <SideBox icon="hash" title="Canais">
-                <div className="csw-list">
-                  {channels.length === 0 && <div className="csw-empty">nenhum</div>}
-                  {channels.map((c, i) => (
-                    <div key={i} className="csw-li">
-                      <span className="csw-li-i">
-                        <Ic name={KIND_ICON[c.kind]} size={13} />
-                      </span>
-                      <span style={{ color: channelErrors[i] ? '#ff9c9c' : undefined }}>
-                        {c.name || '(sem nome)'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop: 9, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <span className="csw-tag">{canaisTexto} texto</span>
-                  {canaisVoz > 0 && <span className="csw-tag">{canaisVoz} voz</span>}
-                </div>
-              </SideBox>
-
-              <SideBox icon="shield" title="Cargos">
-                {cargosAtivos.length === 0 ? (
-                  <div className="csw-empty">nenhum cargo marcado</div>
-                ) : (
-                  <div className="csw-list">
-                    {cargosAtivos.map((r) => (
-                      <div key={r.key} className="csw-li">
-                        <span className="csw-role-dot" style={{ background: r.color }} />
-                        <span>{r.name.trim() || r.key}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </SideBox>
-
-              <SideBox icon="file" title="Regras">
-                {rulesText.trim() ? (
-                  <div style={{ fontSize: 12, color: ui.text, lineHeight: 1.5, whiteSpace: 'pre-wrap', maxHeight: 88, overflowY: 'auto' }}>
-                    {rulesText.trim()}
-                  </div>
-                ) : (
-                  <div className="csw-empty">nenhuma — opcional</div>
-                )}
-              </SideBox>
-            </aside>
+            <WizardSummary
+              iconId={iconId}
+              name={name}
+              description={description}
+              channels={channels}
+              channelErrors={channelErrors}
+              canaisTexto={canaisTexto}
+              canaisVoz={canaisVoz}
+              cargosAtivos={cargosAtivos}
+              rulesText={rulesText}
+            />
           )}
         </div>
       </Modal>
     </>
   )
 }
+
+/** Reexportado para quem já importava o slug daqui. */
+export { slugChannel }

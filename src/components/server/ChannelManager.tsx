@@ -9,6 +9,7 @@
 
 import { useMemo, useState } from 'react'
 import type { ChannelMeta } from '../../services/models'
+import { CATEGORIAS_PADRAO, normChannelName as norm, validateChannelName } from './channelRules'
 import { groupByCategory } from '../../app/channels'
 import { Ic } from '../../shared/icons'
 import {
@@ -23,30 +24,9 @@ import {
   ui,
 } from '../../shared/ui'
 
-export const CATEGORIAS_PADRAO = ['CANAIS DE TEXTO', 'CANAIS DE VOZ', 'CANAIS DE VÍDEO']
-
-export function validateChannelName(
-  nome: string,
-  existentes: ChannelMeta[],
-  editandoId?: string | null,
-): string | null {
-  const n = nome.trim()
-  if (!n) return 'Dê um nome ao canal.'
-  if (!/^[a-z0-9-]+$/.test(n.toLowerCase()))
-    return 'Use apenas letras minúsculas, números e hífen. Ex.: geracao-antiga'
-  if (n.length < 2) return 'O nome precisa ter pelo menos 2 caracteres.'
-  if (n.length > 40) return 'O nome pode ter no máximo 40 caracteres.'
-  const dup = existentes.some(
-    (c) => c.id !== editandoId && norm(c.name) === norm(n),
-  )
-  if (dup) return 'Já existe um canal com esse nome.'
-  return null
-}
-
-function norm(s: string): string {
-  return s.trim().toLowerCase().replace(/\s+/g, '-')
-}
-
+// Categorias e validação de nome agora vivem em `channelRules.ts` — módulo puro,
+// sem React/serviços. Reexportados aqui para não quebrar quem já importava daqui.
+export { CATEGORIAS_PADRAO, validateChannelName }
 // ---------- criar / editar canal ----------
 
 export function ChannelEditor({

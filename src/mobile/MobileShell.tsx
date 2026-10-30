@@ -70,14 +70,9 @@ interface AutoItemMobile {
   fp?: string
 }
 
-/** Nome de arquivo de imagem (para renderizar prévia inline). */
-function isImageName(name: string): boolean {
-  return /\.(png|jpe?g|gif|webp|bmp|avif|svg)$/i.test(name)
-}
-/** Nome de arquivo de vídeo (player inline no card). */
-function isVideoName(name: string): boolean {
-  return /\.(mp4|webm|mov|m4v|mkv|ogv)$/i.test(name)
-}
+// `isImageName`/`isVideoName` vêm de `fileRules` (fonte única): a lista de
+// extensões era copiada aqui e já divergia do desktop (faltava `heic`/`ico`).
+import { isImageName, isVideoName } from '../services/fileRules'
 // Os tetos de auto-carregamento (12MB imagem / 40MB vídeo) vivem em
 // `mediaAutoFetchCap` no fileSwarm — é lá que o `prepareMedia` decide, e o
 // desktop usa a MESMA constante. Duplicar aqui fazia os dois divergirem.
@@ -656,8 +651,6 @@ export default function MobileShell() {
   // link de convite público (?invite=TOKEN)
   const [showInvite, setShowInvite] = useState(false)
   const [inviteInput, setInviteInput] = useState('')
-  const [inviteBusy, setInviteBusy] = useState(false)
-  const [inviteError, setInviteError] = useState<string | null>(null)
   /** Pareamento REAL dos membros do servidor selecionado. */
   const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
   const [showServerDetails, setShowServerDetails] = useState(false)
@@ -686,14 +679,12 @@ export default function MobileShell() {
     const token = consumeInvite() ?? peekInvite()
     if (!token) return
     setInviteInput(token)
-    setInviteError(null)
     setShowInvite(true)
   }, [phase])
 
   useEffect(() => {
     return subscribeInvite((token) => {
       setInviteInput(token)
-      setInviteError(null)
       setShowInvite(true)
       setTab('servers')
     })
@@ -1298,36 +1289,11 @@ export default function MobileShell() {
     e.target.value = ''
   }
 
-  async function joinInvite() {
-    const tok = inviteInput.trim()
-    if (!tok || inviteBusy) return
-    setInviteBusy(true); setInviteError(null)
-    try {
-      const id = await services.joinCommunity(tok)
-      // "Validado" ≠ "membro": o dono ainda precisa confirmar. Fechar o modal
-      // e dizer "entrou" era o que fazia o usuário acreditar que o servidor
-      // existia quando o host estava offline. O pedido fica persistido no
-      // core e o `community_joined` abre o servidor quando chegar.
-      await refreshCommunities()
-      setShowInvite(false)
-      setInviteInput('')
-      setTab('servers')
-      if (id) {
-        const list = await services.communitiesList().catch(() => [] as CommunityView[])
-        const joined = (list ?? []).some((c) => c.id === id)
-        if (joined) {
-          setSelCommunity(id); setSelConv(null); setSelPeerFp(null)
-        } else {
-          setNotice('Convite validado. Assim que o dono confirmar, o servidor aparece aqui — o pedido continua mesmo se você fechar o app.')
-          window.setTimeout(() => setNotice(null), 8000)
-        }
-      }
-    } catch (e: any) {
-      setInviteError(String(e?.message ?? e).replace(/^protocol:\s*/, ''))
-    } finally {
-      setInviteBusy(false)
-    }
-  }
+  // Entrada por convite: fluxo ÚNICO pelo `JoinServerForm` (mesmo componente do
+  // desktop) dentro do sheet de convite. Havia aqui um segundo caminho
+  // (`joinInvite` + `inviteBusy` + `inviteError`) que nenhum botão alcançava e
+  // cujas mensagens de erro nunca eram renderizadas. Removido: o sheet já
+  // mostra o erro real, e "validado ≠ membro" continua explicado no formulário.
 
   // Nós de mensagem memoizados: parse do corpo + lookup no swarm rodam 1x por
   // mensagem quando messages/fileList mudam (fileList atualiza no máx 1x/300ms
@@ -2296,7 +2262,7 @@ export default function MobileShell() {
               <div style={{ height: 1, background: t.border, margin: '10px 0' }} />
               <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: t.muted, padding: '4px 8px' }}>REDE</div>
               <div style={{ fontSize: 12, color: t.muted, padding: '4px 8px' }}>{peers.length} peers • {communities.length} servidores</div>
-              <button className="link-btn" style={{ fontSize: 13, padding: '6px 8px', textAlign: 'left' }} onClick={() => { setShowDrawer(false); setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button>
+              <button className="link-btn" style={{ fontSize: 13, padding: '6px 8px', textAlign: 'left' }} onClick={() => { setShowDrawer(false); setInviteInput(''); setShowInvite(true) }}>Entrar com convite</button>
             </div>
             <div style={{ padding: 10, background: t.footer, borderTop: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: pillColor, flexShrink: 0 }} />
@@ -2349,7 +2315,7 @@ export default function MobileShell() {
 
           <div className="m-sec">SEUS SERVIDORES — {filteredComms.length}</div>
           {filteredComms.length === 0
-            ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button></span>} />
+            ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setShowInvite(true) }}>Entrar com convite</button></span>} />
             : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
         </>}
 
@@ -2376,7 +2342,7 @@ export default function MobileShell() {
                   esconder o botão sem esconder a rota era o bug anterior. */}
               <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                 <button
-                  onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}
+                  onClick={() => { setInviteInput(''); setShowInvite(true) }}
                   aria-label="Entrar em servidor com convite"
                   style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, background: t.accent, border: 'none', color: '#fff', borderRadius: 8, padding: '10px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 800 }}
                 >
@@ -2399,7 +2365,7 @@ export default function MobileShell() {
               </div>
 
               {summaries.length === 0
-                ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setInviteError(null); setShowInvite(true) }}>Entrar com convite</button></span>} />
+                ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setShowInvite(true) }}>Entrar com convite</button></span>} />
                 : (
                   <ServerList
                     servers={summaries}

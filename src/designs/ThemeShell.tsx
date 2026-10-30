@@ -28,9 +28,6 @@ import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import ServerSettings from '../components/server/ServerSettings'
 import {
-  JoinServerForm,
-  ServerDetails,
-  ServerList,
   ServerHubModal,
   InvitePanel,
   summarize,
@@ -38,6 +35,7 @@ import {
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
 import { Modal, Notice } from '../shared/ui'
+import { copyText } from '../shared/clipboard'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
@@ -80,14 +78,10 @@ const stateLabel: Record<NetworkState, string> = {
   CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
 }
 
-// Modelos de servidor — espelham o fluxo "Crie seu próprio servidor" do Discord original.
-const SERVER_TEMPLATES = [
-  { id: 'own', icon: 'M12 5v14 M5 12h14', label: 'Criar meu próprio', desc: 'Comece do zero, do seu jeito.', channels: 'geral' },
-  { id: 'games', icon: 'M3 3h7v7H3z M14 3h7v7h-7z M14 14h7v7h-7z M3 14h7v7H3z', label: 'Jogos', desc: 'Partidas, clipes e papo solto.', channels: 'geral, partidas, clipes' },
-  { id: 'school', icon: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 7a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75', label: 'Clube escolar', desc: 'Aulas, avisos e trabalhos.', channels: 'geral, avisos, tarefas' },
-  { id: 'study', icon: 'M4 9h16 M4 15h16 M10 3L8 21 M16 3l-2 12', label: 'Grupo de estudos', desc: 'Materiais, dúvidas e resumos.', channels: 'geral, materiais, dúvidas' },
-  { id: 'friends', icon: 'M3 8h18 M3 12h18 M3 16h18', label: 'Amigos', desc: 'Só vocês, sem complicação.', channels: 'geral' },
-]
+// Modelos de servidor agora vivem DENTRO do `CreateServerWizard` (é lá que o
+// usuário escolhe, com ícone/descrição/canais aplicados de uma vez). A lista
+// `SERVER_TEMPLATES`/`pickTemplate` que existia aqui era o resquício do wizard
+// legado: nada a consumia e o botão de modelo não fazia o que prometia.
 
 
 function avatarColor(fp: string): string {
@@ -649,8 +643,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [selCommunity, setSelCommunity] = useState<string | null>(null)
   const [view, setView] = useState<'amigos'|'servidores'>('amigos')
   const [showInvite, setShowInvite] = useState(false)
-  const [inviteToken, setInviteToken] = useState('')
-  const [inviteBusy, setInviteBusy] = useState(false)
   const [showCreateServer, setShowCreateServer] = useState(false)
   // v6 — assistente de servidor, fila de downloads e config de bot (modais raiz).
   const [showDownloads, setShowDownloads] = useState(false)
@@ -674,9 +666,10 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [newPollQ, setNewPollQ] = useState('')
   const [newPollOpts, setNewPollOpts] = useState('')
   const [showPollForm, setShowPollForm] = useState(false)
-  const [serverName, setServerName] = useState('')
-  // v6: o assistente (CreateServerWizard) tem o próprio formulário; estes
-  // estados legados do passo 'create' antigo foram removidos.
+  // v6: o assistente (CreateServerWizard) tem o próprio formulário; os estados
+  // legados do passo 'create' antigo (`createdServerId`, `createdServerToken`)
+  // foram removidos — nada os lia e manter os setters dava a impressão de que
+  // o fluxo antigo ainda existia.
   const [serverFlow, setServerFlow] = useState<'choose'|'create'|'join'|'invite'>('choose')
   const [friendsTab, setFriendsTab] = useState<'online'|'todos'|'pendentes'|'bloqueados'|'adicionar'>('online')
   const [unreadServers, setUnreadServers] = useState<Set<string>>(new Set())
@@ -684,14 +677,16 @@ export default function ThemeShell({ designId }: {designId:string}){
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const lastTypingSent = useRef(0)
   const [serverMenuOpen, setServerMenuOpen] = useState(false)
-  const [createdServerToken, setCreatedServerToken] = useState('')
-  const [createdServerId, setCreatedServerId] = useState<string | null>(null)
   /** Erro próprio do modal de convite. Antes caía no `error` global, que fica
    * atrás do modal — o usuário via o botão falhar sem explicação. */
   const [inviteTokenError, setInviteTokenError] = useState<string | null>(null)
-  const [joinToken, setJoinToken] = useState('')
-  const [joinBusy, setJoinBusy] = useState(false)
-  /** Token recebido por deep link, aguardando o shell estar pronto. */
+  /**
+   * Token recebido por deep link OU colado no modal de convite, aguardando o
+   * shell estar pronto. Uma variável só: `joinToken`/`joinBusy`/`submitJoinInvite`
+   * eram um segundo fluxo paralelo e inalcançável (o `ServerHubModal` já faz a
+   * entrada por convite), e manter os dois fazia o botão do modal antigo falhar
+   * em silêncio.
+   */
   const [inviteFromLink, setInviteFromLink] = useState<string | null>(null)
   /** Pareamento REAL por servidor selecionado (não derivado de lista). */
   const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
@@ -703,7 +698,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (phase !== 'app') return
     const token = consumeInvite() ?? peekInvite()
     if (!token) return
-    setJoinToken(token)
     setInviteFromLink(token)
     setServerFlow('join')
     setShowCreateServer(true)
@@ -711,7 +705,6 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   useEffect(() => {
     return subscribeInvite((token) => {
-      setJoinToken(token)
       setInviteFromLink(token)
       setServerFlow('join')
       setShowCreateServer(true)
@@ -899,22 +892,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       setCommunities(list)
     } catch { /* engine indisponível */ }
   }
-  async function submitJoinInvite() {
-    const token = joinToken.trim()
-    if (!token || joinBusy) return
-    setJoinBusy(true)
-    try {
-      const cid = await services.joinCommunity(token)
-      setJoinToken('')
-      closeServerModal()
-      setSelCommunity(cid as string)
-      await refreshCommunities()
-    } catch (e: any) {
-      setError(String(e?.message ?? e))
-    } finally {
-      setJoinBusy(false)
-    }
-  }
+
   // carregar canais/cargos/bots extras quando muda servidor selecionado
   async function refreshExtras(cid: string | null) {
     if (!cid) { setExtraChannels([]); setRoles([]); setBots([]); setMemberRolesCache({}); return }
@@ -1286,14 +1264,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const selPeer: PeerView | null = selPeerFp ? peers.find(p => p.fp === selPeerFp) ?? null : null
   const selConvObj = conversations.find(c => c.id === selConv) ?? null
   const peerTitle = selConvObj?.title || selPeer?.nickname || selPeer?.fp || ''
-  // link público de convite — abre o app direto no fluxo "Entrar com convite"
-  const inviteLink = inviteToken
-    ? (((window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
-      || (window as unknown as Record<string, unknown>).__TAURI__
-      || (window as unknown as Record<string, unknown>).__TAURI_IPC__)
-      ? `distorrent://invite?invite=${encodeURIComponent(inviteToken)}`
-      : `${window.location.origin}/invite/${encodeURIComponent(inviteToken)}`)
-    : ''
   // PRESENÇA HONESTA: "online" é SÓ sessão estabelecida (verde). CONECTANDO/
   // RECONECTANDO são bolinha amarela e NÃO aparecem em "AMIGOS ONLINE" —
   // era o bug de "aparecia online sem estar" (amarelo listado como online).
@@ -1816,41 +1786,35 @@ export default function ThemeShell({ designId }: {designId:string}){
    * Agora: sem `memberFp` = convite aberto, e erro é erro (sem fallback
    * mentiroso). Quem não é dono recebe a mensagem do core.
    */
-  async function generateToken(communityId: string): Promise<string> {
-    return services.makeInvite(communityId)
-  }
-
-  async function openInviteModal() {
+  // O `InvitePanel` (dentro do modal) gera, mostra e copia o convite — ele é a
+  // fonte única. Aqui só abrimos o modal: gerar um token antes criava um
+  // segundo convite que ninguém lia, e era isso que deixava o botão "Convidar"
+  // assinando um token diferente do que o painel mostrava.
+  function openInviteModal() {
     if (!selCommunity) return
     setServerMenuOpen(false)
-    setShowInvite(true)
-    setInviteToken('')
     setInviteTokenError(null)
-    setInviteBusy(true)
-    try { setInviteToken(await generateToken(selCommunity)) }
-    catch (e: any) { setInviteTokenError(String(e?.message ?? e)) }
-    finally { setInviteBusy(false) }
+    setShowInvite(true)
   }
 
+  /** Atalho do menu do servidor: copia um convite sem abrir o modal. */
   async function copyServerToken() {
     if (!selCommunity) return
     setServerMenuOpen(false)
     try {
-      const tok = await generateToken(selCommunity)
-      const ok = await (
-        navigator.clipboard?.writeText
-          ? navigator.clipboard.writeText(tok).then(() => true).catch(() => false)
-          : Promise.resolve(false)
-      )
+      const tok = await services.makeInvite(selCommunity)
+      const ok = await copyText(tok)
       if (ok) setNotice('Token copiado — envie por qualquer mensageiro')
-      else { setInviteToken(tok); setShowInvite(true); setError('não foi possível copiar automaticamente — copie o token do painel') }
+      else {
+        // Sem permissão de clipboard: abre o painel, que tem o token e um botão
+        // de copiar próprio. Não inventamos "copiado".
+        setShowInvite(true)
+        setError('não foi possível copiar automaticamente — copie o token do painel')
+      }
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
   // v6: o modelo é escolhido DENTRO do assistente; aqui só abrimos o passo 'create'.
-  function pickTemplate(_id: string) {
-    setServerFlow('create')
-  }
 
   // v6: criação legada removida — o CreateServerWizard (raiz) cria com
   // canais/cargos/meta/regras via services.createCommunity(name, nomes, opts).
@@ -1858,10 +1822,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   function closeServerModal() {
     setShowCreateServer(false)
     setServerFlow('choose')
-    setCreatedServerId(null)
-    setCreatedServerToken('')
-    setServerName('')
-    setJoinToken('')
+    setInviteFromLink(null)
   }
 
   // ----------efeitos da camada social ----------
