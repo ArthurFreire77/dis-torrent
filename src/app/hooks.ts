@@ -46,8 +46,20 @@ export function useNetwork(pollMs = 30000) {
   const [status, setStatus] = useState<NetworkStatusView | null>(null)
   const [peers, setPeers] = useState<PeerView[]>([])
 
-  const refresh = useCallback(async () => {
-    if (typeof document !== 'undefined' && document.hidden) return
+  /**
+   * Lê o estado real do motor.
+   *
+   * O `document.hidden` bloqueava TODA leitura com a janela escondida — e é
+   * exatamente a situação de quem minimiza para a bandeja. Resultado: o app
+   * continuava conectado e trocando mensagens, mas o último estado lido ficava
+   * congelado na tela (o clássico "diz CONECTANDO mas meu amigo recebeu a
+   * mensagem"). Agora só o POLL é pausado quando oculto; um evento do motor
+   * (`peer_online`, `state_changed`) sempre força a leitura, porque nesse caso
+   * há mudança real para mostrar e o custo é uma chamada.
+   */
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
+    const oculto = typeof document !== 'undefined' && document.hidden
+    if (oculto && !opts?.force) return
     try {
       const [s, p] = await Promise.all([services.networkStatus(), services.peersList()])
       setStatus(s)
@@ -65,13 +77,21 @@ export function useNetwork(pollMs = 30000) {
     safe()
     if (pollMs <= 0) return () => { alive = false }
     const t = setInterval(safe, pollMs)
-    return () => { alive = false; clearInterval(t) }
+    // Ao voltar para a frente, relê na hora: durante a ausência o poll foi
+    // pulado, e o primeiro número que o usuário vê precisa ser o atual.
+    const onVis = () => { if (!document.hidden) void refresh({ force: true }) }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVis)
+    return () => {
+      alive = false
+      clearInterval(t)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVis)
+    }
   }, [refresh, pollMs])
 
   // Push-only: atualiza na hora via eventos, sem esperar o poll (0 delay percebido).
   useEffect(() => services.subscribe((ev) => {
     if (ev.type === 'state_changed' || ev.type === 'peer_online' || ev.type === 'peer_offline' || ev.type === 'peer_discovered') {
-      refresh()
+      void refresh({ force: true })
     }
   }), [refresh])
 

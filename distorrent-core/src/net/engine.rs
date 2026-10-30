@@ -5526,6 +5526,62 @@ impl NetworkEngine {
         Ok(())
     }
 
+    /// Remove um membro do grupo e reenvia o roster completo aos que ficaram.
+    ///
+    /// POR QUE REENVIAR `GroupCreated` EM VEZ DE CRIAR UM FRAME NOVO: o
+    /// protocolo já trata `GroupCreated` como "estado COMPLETO do grupo" e o
+    /// receptor faz `upsert_group_state`, que dá `DELETE` no roster e reinsere
+    /// (ver `storage::upsert_group_state`). Ou seja: remover membro é o mesmo
+    /// caminho de sincronização que já existe, sem frame novo e sem risco de
+    /// compatibilidade entre versões.
+    ///
+    /// NÃO REMOVE A SI MESMO: o criador é a autoridade do grupo; sem ele na
+    /// lista o receptor recusa (`GroupCreated sem o criador na lista`) e o
+    /// grupo fica órfão.
+    pub fn group_remove(&self, conv_id: &str, fp: &str) -> Result<()> {
+        let conv = self
+            .store
+            .get_conversation(conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
+        if conv.kind != "group" {
+            return Err(DistorrentError::Protocol("não é grupo".into()));
+        }
+        if fp == self.identity.fingerprint {
+            return Err(DistorrentError::Protocol(
+                "o criador não pode sair do próprio grupo".into(),
+            ));
+        }
+        self.store.remove_group_member(conv_id, fp)?;
+        self.broadcast_group_created(conv_id);
+        Ok(())
+    }
+
+    /// Renomeia o grupo e propaga o novo título no `GroupCreated`.
+    ///
+    /// O título novo viaja no mesmo frame de sincronização (o receptor faz
+    /// `UPDATE conversations SET title` quando o campo não é vazio), então
+    /// renomear não exige frame novo nem negociação.
+    pub fn group_rename(&self, conv_id: &str, title: &str) -> Result<()> {
+        let nome = crate::names::sanitize_text(title, 64).trim().to_string();
+        if nome.is_empty() {
+            return Err(DistorrentError::Protocol("título vazio".into()));
+        }
+        let conv = self
+            .store
+            .get_conversation(conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
+        if conv.kind != "group" {
+            return Err(DistorrentError::Protocol("não é grupo".into()));
+        }
+        self.store.update_conversation_title(conv_id, &nome)?;
+        self.broadcast_group_created(conv_id);
+        let _ = self.events.send(EngineEvent::GroupSynced {
+            conv_id: conv_id.to_string(),
+            title: nome,
+        });
+        Ok(())
+    }
+
     pub fn call_invite(self: &Arc<Self>, target_fp: &str, kind: &str) -> Result<String> {
         let short = self
             .identity
@@ -8412,7 +8468,14 @@ fn parse_relay_hello(frame: &[u8]) -> Option<String> {
 /// curso) — o maintain dorme e tenta depois, em vez de abrir 2 handshakes com
 /// eph distintos (transcripts diferentes confundem o Ack/HelloOk e viram
 /// half-open). Entrada obsoleta (receiver morto) é limpa e o dial prossegue.
-fn relay_dial_stream(engine: &Arc<NetworkEngine>, peer_fp: &str) -> Option<RelayStream> {
+///
+/// Devolve também o sender da entrada criada: quem chama PRECISA liberá-la
+/// quando o handshake terminar (`liberar_entrada_relay`). Sem isso a trava fica
+/// para sempre e o peer nunca mais é discado — o "CONECTANDO eterno".
+fn relay_dial_stream(
+    engine: &Arc<NetworkEngine>,
+    peer_fp: &str,
+) -> Option<(RelayStream, mpsc::UnboundedSender<Vec<u8>>)> {
     {
         let mut map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = map.get(peer_fp) {
@@ -8427,7 +8490,7 @@ fn relay_dial_stream(engine: &Arc<NetworkEngine>, peer_fp: &str) -> Option<Relay
         .relay_in
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(peer_fp.to_string(), in_tx);
+        .insert(peer_fp.to_string(), in_tx.clone());
     let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let backend = active_relay_backend(engine);
     tokio::spawn(relay_post_loop(
@@ -8436,7 +8499,31 @@ fn relay_dial_stream(engine: &Arc<NetworkEngine>, peer_fp: &str) -> Option<Relay
         peer_fp.to_string(),
         out_rx,
     ));
-    Some(RelayStream::new(in_rx, out_tx))
+    Some((RelayStream::new(in_rx, out_tx), in_tx))
+}
+
+/// Remove a entrada de `relay_in` do peer — mas SÓ se ainda for a nossa.
+///
+/// `relay_in` acumula duas responsabilidades: ponta de entrada do handshake e
+/// trava anti-duplicação do dial. A entrada criada pelo dial precisa ser
+/// liberada quando a sessão termina; caso contrário `relay_dial_stream` vê
+/// `!tx.is_closed()` para sempre e devolve `None` em todo ciclo, deixando o peer
+/// preso em CONECTANDO até o app reiniciar.
+///
+/// A comparação por canal é obrigatória: um RESPONDENTE pode ter substituído a
+/// entrada (mesmo peer, sentido inverso). Nesse caso o canal não é o nosso e
+/// removê-lo mataria a sessão dele.
+fn liberar_entrada_relay(
+    engine: &Arc<NetworkEngine>,
+    fp: &str,
+    meu: &mpsc::UnboundedSender<Vec<u8>>,
+) {
+    let mut map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(tx) = map.get(fp) {
+        if tx.same_channel(meu) {
+            map.remove(fp);
+        }
+    }
 }
 
 /// Disca via relay com maintain+backoff (espelho do connect_and_maintain).
@@ -8469,7 +8556,7 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
             debug!(%fp, "relay: discando (sem porta aberta)");
             // Métrica de primeiro contato: t0 do dial até o online.
             let dial_t0 = std::time::Instant::now();
-            let Some(stream) = relay_dial_stream(&engine, &fp) else {
+            let Some((stream, my_in_tx)) = relay_dial_stream(&engine, &fp) else {
                 debug!(%fp, "relay: handshake já em curso — aguarda");
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(10));
@@ -8503,6 +8590,15 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                         hs.peer_proto_v,
                     )
                     .await;
+                    // A SESSÃO TERMINOU. `relay_dial_stream` usa `relay_in` como
+                    // trava de "handshake em curso": enquanto o sender daquela
+                    // entrada viver, todo dial novo devolve None e o maintain
+                    // gira em backoff para sempre — a UI fica em CONECTANDO e só
+                    // sai disso quando o app reinicia (reiniciar zera o mapa).
+                    // Era o sintoma relatado. Liberar a entrada aqui é o que
+                    // permite o próximo ciclo (inclusive a reconexão depois de
+                    // tempo parado) funcionar sem reiniciar.
+                    liberar_entrada_relay(&engine, &fp, &my_in_tx);
                     set_link_state(&engine, &fp, PeerLinkState::Reconnecting);
                 }
                 Ok(Ok(hs)) => {
@@ -8512,11 +8608,16 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                         &format!("relay respondeu fp estranho ({})", hs.peer_fp),
                     );
                     engine.note_dial_failure(&fp);
+                    liberar_entrada_relay(&engine, &fp, &my_in_tx);
                 }
                 Ok(Err(e)) => {
                     debug!(%fp, "relay dial falhou ({e}) — tenta de novo no backoff");
                     engine.diag_record_relay_err(&fp, &format!("relay handshake: {e}"));
                     engine.note_dial_failure(&fp);
+                    // Mesmo caso do sucesso: handshake que falhou também deixa a
+                    // ponta de entrada registrada. Sem liberar, o peer nunca mais
+                    // é discado nesta execução.
+                    liberar_entrada_relay(&engine, &fp, &my_in_tx);
                 }
                 Err(_) => {
                     debug!(%fp, "relay dial timeout — peer offline? tenta de novo no backoff");
@@ -8525,6 +8626,7 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                         "sem resposta no relay — peer offline ou relay bloqueado",
                     );
                     engine.note_dial_failure(&fp);
+                    liberar_entrada_relay(&engine, &fp, &my_in_tx);
                 }
             }
         } else {
@@ -13634,6 +13736,71 @@ mod tests {
 }
 
 #[cfg(test)]
+/// Regressão do "CONECTANDO eterno" (relato de campo: o app só voltava a
+/// ficar ONLINE depois de fechar e abrir de novo).
+///
+/// Causa: `relay_dial_stream` usa `relay_in` como trava anti-duplicação do
+/// handshake. A entrada era criada e NUNCA removida quando a sessão terminava;
+/// a trava então via `!tx.is_closed()` em todo ciclo, devolvia `None` e o
+/// maintain girava em backoff para sempre. Reiniciar o app zerava o mapa e
+/// "consertava" — exatamente o comportamento observado em campo.
+mod relay_lock_tests {
+    use super::*;
+
+    /// Engine isolado — o `mk_engine` do outro módulo de testes é privado.
+    fn mk(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
+        let kp = Keypair::generate();
+        let e = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
+        (e, dir)
+    }
+
+    /// A entrada criada pelo dial é REMOVIDA quando o handshake termina.
+    ///
+    /// Sem essa remoção a trava de `relay_dial_stream` ficava eterna: o mapa
+    /// seguia com o sender vivo e todo dial novo devolvia `None`, deixando o
+    /// peer em CONECTANDO até o app reiniciar. É o bug de campo relatado.
+    #[tokio::test]
+    async fn liberar_entrada_relay_remove_a_entrada() {
+        let (engine, _dir) = mk("relay-lock");
+        let fp = "aa11bb22cc33";
+
+        let (_stream, meu) = relay_dial_stream(&engine, fp).expect("primeiro dial cria stream");
+        {
+            let mapa = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(mapa.get(fp).is_some(), "o dial registra a ponta de entrada");
+        }
+
+        liberar_entrada_relay(&engine, fp, &meu);
+
+        let mapa = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            mapa.get(fp).is_none(),
+            "depois de liberar, a trava some e o peer volta a ser discavel"
+        );
+    }
+
+    /// Liberar com um sender que NAO e o dono da entrada nao pode remove-la:
+    /// um respondente substitui a entrada, e apagar mataria a sessao dele.
+    #[tokio::test]
+    async fn liberar_nao_remove_entrada_de_outro_dono() {
+        let (engine, _dir) = mk("relay-lock2");
+        let fp = "dd44ee55ff66";
+
+        let (_stream, _meu) = relay_dial_stream(&engine, fp).expect("cria stream");
+
+        let (outro, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        liberar_entrada_relay(&engine, fp, &outro);
+
+        let mapa = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            mapa.get(fp).is_some(),
+            "a entrada de outro dono tem de sobreviver"
+        );
+    }
+}
+
 mod call_queue_tests {
     use super::*;
     use crate::protocol::SecureFrame;
