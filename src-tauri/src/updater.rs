@@ -339,11 +339,11 @@ pub fn open_release_page(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "android")]
     {
-        // No Android o app é atualizado pelo APK; o link da release é aberto no
-        // próprio gerenciador. Sem plugin de intent aqui, devolvemos o caminho
-        // honesto: o frontend mostra a URL para copiar.
+        // No Android o update é o APK; o link da release é só o fallback
+        // (ex.: usuário quer baixar por fora). Sem plugin de intent aqui,
+        // devolvemos o caminho honesto: o frontend mostra a URL para copiar.
         let _ = url;
-        return Err("no Android abra o link da release no navegador".into());
+        return Err("no Android a atualização é pelo APK (veja o cartão de atualização)".into());
     }
     Ok(())
 }
@@ -359,8 +359,14 @@ pub fn open_release_page(url: String) -> Result<(), String> {
 /// Linux: `.deb`/`.AppImage` não podem ser instalados sem root; abrimos o
 /// arquivo com o instalador gráfico do sistema (`xdg-open`) e o frontend avisa
 /// que o app precisa ser reaberto. Nada é executado como root por aqui.
+///
+/// Android: chama `plugin:updater|installApk`, que entrega o APK ao instalador
+/// do sistema por `content://` (FileProvider). O usuário confirma no Android —
+/// nenhum app fora da loja pode instalar sem esse toque; prometer o contrário
+/// seria mentira. O app NÃO é encerrado aqui: se o usuário cancelar, ele
+/// continua na versão atual.
 #[tauri::command]
-pub fn update_apply(path: String) -> Result<(), String> {
+pub fn update_apply(_app: tauri::AppHandle, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
     if !p.is_file() {
         return Err("instalador não encontrado (o download falhou?)".into());
@@ -401,7 +407,25 @@ pub fn update_apply(path: String) -> Result<(), String> {
             .spawn()
             .map_err(|e| format!("não consegui abrir o instalador: {e}"))?;
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
+    #[cfg(target_os = "android")]
+    {
+        // No Android quem abre o instalador é o plugin Kotlin
+        // (`plugin:updater|installApk`), chamado pelo frontend — o mesmo padrão
+        // do `plugin:callfg|start`. Aqui só validamos a extensão; devolver erro
+        // é o caminho honesto se alguém chamar `update_apply` direto.
+        if !lower.ends_with(".apk") {
+            return Err("esperava um APK para atualizar no Android".into());
+        }
+        return Err(
+            "no Android a instalação é feita pelo plugin nativo (updater|installApk)".into(),
+        );
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "android"
+    )))]
     {
         let _ = (&p, &lower);
         return Err("atualização automática não disponível nesta plataforma".into());

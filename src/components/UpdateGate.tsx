@@ -81,11 +81,17 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
   const started = React.useRef(false)
   const mounted = React.useRef(true)
   const depsRef = React.useRef(nativeUpdateDeps())
+  /** Último estado, para o timer periódico decidir sem depender do closure. */
+  const stateRef = React.useRef(state)
+  stateRef.current = state
+  const intervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
 
   React.useEffect(() => {
     mounted.current = true
     return () => {
       mounted.current = false
+      if (intervalRef.current) clearInterval(intervalRef.current)
+      intervalRef.current = null
     }
   }, [])
 
@@ -95,24 +101,24 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
   }, [])
 
   const run = React.useCallback(
-    async (opts: { autoApply: boolean; auto: boolean }) => {
+    async (opts: { autoApply: boolean; auto: boolean }): Promise<UpdateOutcome | null> => {
       const deps = depsRef.current
-      if (!deps) return
+      if (!deps) return null
       set({ phase: 'checking', message: 'verificando se há versão nova…' })
       let outcome: UpdateOutcome
       try {
         outcome = await runUpdateFlow(deps, { autoApply: opts.autoApply })
       } catch (e) {
-        if (!mounted.current) return
+        if (!mounted.current) return { kind: 'error', message: String((e as Error)?.message ?? e) }
         setState({ ...IDLE, phase: 'error', message: String((e as Error)?.message ?? e) })
-        return
+        return { kind: 'error', message: String((e as Error)?.message ?? e) }
       }
-      if (!mounted.current) return
+      if (!mounted.current) return outcome
       switch (outcome.kind) {
         case 'none':
           // Sem update: volta para idle e o boot continua sem overlay.
           setState(IDLE)
-          return
+          return outcome
         case 'later':
           setState({
             phase: 'later',
@@ -121,7 +127,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
             message: '',
             progress: null,
           })
-          return
+          return outcome
         case 'applied':
           setState({
             phase: 'installing',
@@ -133,7 +139,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
                 : 'instalador aberto — conclua e abra o app de novo',
             progress: null,
           })
-          return
+          return outcome
         case 'error':
           // Falha de rede NÃO aparece como erro de tela cheia: o app abre.
           setState((s) =>
@@ -141,7 +147,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
               ? { ...s, phase: 'error', message: outcome.message }
               : { ...IDLE, phase: 'error', message: outcome.message },
           )
-          return
+          return outcome
       }
     },
     [set],
@@ -165,7 +171,42 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       } catch {
         auto = false
       }
-      await run({ autoApply: auto, auto })
+
+      // CHECAGEM NO BOOT, COM RETENTATIVA.
+      //
+      // O pedido é "sempre procurar atualização ao iniciar". Uma falha de rede
+      // no instante do login (VPN subindo, Wi-Fi associando, Tor ainda sem
+      // circuito) não pode deixar o app sem checar a sessão inteira — era o
+      // caso antes: `started` já estava marcado e nada tentava de novo.
+      // Aqui insistimos algumas vezes com backoff enquanto o app está no boot.
+      let outcome = await run({ autoApply: auto, auto })
+      for (let tentativa = 1; tentativa <= 3 && outcome?.kind === 'error'; tentativa++) {
+        await new Promise((r) => setTimeout(r, 4000 * tentativa))
+        if (!mounted.current) return
+        outcome = await run({ autoApply: auto, auto })
+      }
+
+      // Depois da checagem, se nada foi encontrado a tela de boot sai. Sem isto
+      // ela ficaria presa em "verificando" durante a checagem toda (até 15 s de
+      // timeout do Rust) — o usuário veria a tela parada mesmo com tudo certo.
+      if (mounted.current && stateRef.current.phase === 'checking') {
+        // `run` já deixa `later`/`error`/`applied`; só o `none` não muda nada.
+        // Aqui garantimos que a tela não fique presa.
+        setState((s) => (s.phase === 'checking' ? { ...s, phase: 'idle' } : s))
+      }
+
+      // AINDA COM O APP ABERTO: confere de tempos em tempos. Uma sessão de
+      // trabalho longa não deve exigir fechar e abrir o app para receber uma
+      // correção — especialmente porque protocolo diferente entre versões
+      // degrada a chamada de voz.
+      const intervalo = setInterval(() => {
+        if (!mounted.current) return
+        // Só recheca quando não há nada pendente na tela: um cartão aberto (ou
+        // download em curso) não pode ser trocado por outro.
+        if (stateRef.current.phase !== 'idle' && stateRef.current.phase !== 'checking') return
+        void run({ autoApply: auto, auto })
+      }, 6 * 60 * 60 * 1000)
+      intervalRef.current = intervalo
     })()
   }, [enabled, run])
 

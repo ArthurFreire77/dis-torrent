@@ -26,10 +26,11 @@ mod updater;
 
 // Comandos do segundo plano reexportados para o `generate_handler!` abaixo.
 use background::{
-    app_hide_to_tray, app_quit, app_show_window, autostart_get, autostart_set,
-    background_prefs_get, background_prefs_set, background_set_connection, call_ring_start,
-    call_ring_stop, notification_cancel, notification_cancel_all, notification_permission_state,
-    notification_request_permission, notification_show,
+    app_hide_to_tray, app_quit, app_show_window, autostart_ensure, autostart_get,
+    autostart_mark_decided, autostart_set, background_prefs_get, background_prefs_set,
+    background_set_connection, call_ring_start, call_ring_stop, notification_cancel,
+    notification_cancel_all, notification_permission_state, notification_request_permission,
+    notification_show,
 };
 
 /// Plugin `downloads` — só existe no Android.
@@ -4775,6 +4776,8 @@ fn main() {
             background_prefs_set,
             autostart_get,
             autostart_set,
+            autostart_ensure,
+            autostart_mark_decided,
             notification_show,
             notification_cancel,
             notification_cancel_all,

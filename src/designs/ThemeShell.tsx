@@ -25,6 +25,7 @@ import DownloadsPanel from '../components/DownloadsPanel'
 import CreateServerWizard from '../components/CreateServerWizard'
 import BotConfigPanel from '../components/BotConfigPanel'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
+import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import ServerSettings from '../components/server/ServerSettings'
 import {
   JoinServerForm,
@@ -873,7 +874,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         else setPhase('app')
       }).catch(() => setPhase('create'))
     })
-    services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {})
+    void services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {})
   }, [])
 
   async function refreshFriends() {
@@ -1998,7 +1999,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   // aparece quando há versão nova de verdade (ver `components/UpdateGate.tsx`).
   const updateGate = useUpdateGate(true)
 
-  if (phase === 'loading') return (<><BootScreen /><UpdateOverlay api={updateGate} /></>)
+  if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen />} /><UpdateOverlay api={updateGate} /></>)
   if (phase === 'create') return <CreateAccount onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
 

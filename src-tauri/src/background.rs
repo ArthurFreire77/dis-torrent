@@ -47,6 +47,9 @@ use crate::AppState;
 const KV_CLOSE_TO_TRAY: &str = "ui.close_to_tray";
 /// Preferência: abrir já minimizado (bandeja) na inicialização automática.
 const KV_START_MINIMIZED: &str = "ui.start_minimized";
+/// O usuário já decidiu sobre abrir junto com o Windows? (ver `autostart_ensure`).
+/// Sem esta marca o app religaria a cada boot o que ele próprio desligou.
+const KV_AUTOSTART_DECIDED: &str = "ui.autostart_decided";
 
 /// Estado do segundo plano do desktop. Um único `manage()` no setup.
 pub struct Background {
@@ -194,9 +197,52 @@ pub fn autostart_get(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn autostart_set(app: AppHandle, enabled: bool) -> Result<bool, String> {
+pub fn autostart_set(
+    app: AppHandle,
+    state: State<AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
     autostart_apply(&app, enabled)?;
+    // Decisão explícita: o boot deixa de mexer nisso.
+    kv_set_bool(&state, KV_AUTOSTART_DECIDED, true);
     autostart_is_enabled(&app)
+}
+
+/// Ligamento automático do autostart + estado REAL do SO.
+///
+/// O ligamento em si acontece uma vez no `init` do segundo plano; este comando
+/// repete a regra de forma idempotente para a UI pedir o estado já reconciliado
+/// (útil quando o `init` rodou antes do `AppState` existir). Depois de
+/// `autostart_set` nada mais é automático.
+#[tauri::command]
+pub fn autostart_ensure(app: AppHandle, state: State<AppState>) -> Result<bool, String> {
+    if kv_bool(&state, KV_AUTOSTART_DECIDED, false) {
+        return autostart_is_enabled(&app);
+    }
+    if autostart_is_enabled(&app).unwrap_or(false) {
+        return Ok(true);
+    }
+    match autostart_apply(&app, true) {
+        Ok(()) => {
+            tracing::info!("autostart ligado (DisTorrent abre junto com o Windows)");
+            Ok(autostart_is_enabled(&app).unwrap_or(false))
+        }
+        Err(e) => {
+            // Honesto: não finge que ligou. O usuário ainda pode ligar na UI.
+            tracing::warn!(error = %e, "não consegui ligar o autostart");
+            Ok(false)
+        }
+    }
+}
+
+/// Marca que o usuário tomou uma decisão sobre o autostart.
+///
+/// Sem isto o `autostart_ensure` religaria a cada boot o que ele desligou —
+/// um checkbox impossível de desmarcar.
+#[tauri::command]
+pub fn autostart_mark_decided(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    kv_set_bool(&state, KV_AUTOSTART_DECIDED, enabled);
+    Ok(())
 }
 
 /// Mostra a notificação do sistema. `id` é estável por conversa (quem chama
@@ -582,6 +628,34 @@ pub fn init(app: &AppHandle) {
                 kv_bool(&state, KV_START_MINIMIZED, false),
                 Ordering::Relaxed,
             );
+        }
+    }
+
+    // ABRIR JUNTO COM O WINDOWS (padrão LIGADO).
+    //
+    // Um mensageiro que só recebe quando o usuário lembra de abrir não serve:
+    // sem autostart, mensagem/ligação chega enquanto o app está fechado e o
+    // peer cai no relay até o timeout. O `autostart_ensure` liga só no
+    // PRIMEIRO boot (ou enquanto o usuário nunca mexeu no checkbox) e respeita
+    // a decisão dele depois — ver `KV_AUTOSTART_DECIDED`.
+    //
+    // Silencioso de propósito: falhar aqui (política de máquina, sandbox) não
+    // pode impedir o app de abrir; a UI mostra o estado REAL do SO.
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let ja_ligado = app.autolaunch().is_enabled().unwrap_or(false);
+        let decidido = app
+            .try_state::<AppState>()
+            .map(|s| kv_bool(&s, KV_AUTOSTART_DECIDED, false))
+            .unwrap_or(false);
+        if !decidido && !ja_ligado {
+            match app.autolaunch().enable() {
+                Ok(()) => {
+                    tracing::info!("autostart ligado (DisTorrent abre junto com o Windows)")
+                }
+                Err(e) => tracing::warn!(error = %e, "não consegui ligar o autostart"),
+            }
         }
     }
 

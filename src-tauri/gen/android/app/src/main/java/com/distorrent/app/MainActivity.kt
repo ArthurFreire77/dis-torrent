@@ -70,6 +70,19 @@ class MainActivity : TauriActivity() {
     } catch (e: Throwable) {
       android.util.Log.w("distorrentCallFg", "plugin callfg não registrado: ${e.message}")
     }
+    // Auto-update no Android: abre o instalador do sistema para o APK que o
+    // Rust baixou e verificou. Sem este registro o `plugin:updater|installApk`
+    // falhava em silêncio e o usuário tinha que baixar o APK à mão.
+    try {
+      app.tauri.plugin.PluginManager.load(
+        webView,
+        "updater",
+        UpdaterPlugin(this),
+        "{}"
+      )
+    } catch (e: Throwable) {
+      android.util.Log.w("distorrentUpdater", "plugin updater não registrado: ${e.message}")
+    }
   }
 
   /**

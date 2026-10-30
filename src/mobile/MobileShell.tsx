@@ -10,6 +10,7 @@ import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
+import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import { downloadManager } from '../services/downloadManager'
 import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
@@ -1865,7 +1866,7 @@ export default function MobileShell() {
   // versão nova; falha de rede não atrapalha o boot.
   const updateGate = useUpdateGate(true)
 
-  if (phase === 'loading') return (<><BootScreen native={services.kind === 'native'} /><UpdateOverlay api={updateGate} /></>)
+  if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen native={services.kind === 'native'} />} /><UpdateOverlay api={updateGate} /></>)
   if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 

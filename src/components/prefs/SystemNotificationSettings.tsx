@@ -81,6 +81,8 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
       const on = await services.autostartSet(!autostart)
       setAutostart(on)
       setPrefs({ autostart: on })
+      // O Rust já gravou a decisão (`autostart_set` marca); nada automático
+      // sobrescreve mais esse checkbox a cada boot.
       if (on !== !autostart) setNote('O sistema não permitiu alterar a inicialização automática.')
     } catch (e) {
       setNote(String((e as Error)?.message ?? e))

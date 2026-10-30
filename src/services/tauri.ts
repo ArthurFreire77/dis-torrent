@@ -376,6 +376,10 @@ export const tauriServices: DisTorrentServices = {
   }),
   autostartGet: () => invoke<boolean>('autostart_get'),
   autostartSet: (enabled) => invoke<boolean>('autostart_set', { enabled }),
+  // Liga o autostart no primeiro boot (padrão "abre com o Windows") e devolve
+  // o estado REAL do SO. Só no desktop nativo; no Android a UI mostra que não
+  // existe inicialização automática.
+  autostartEnsure: () => invoke<boolean>('autostart_ensure'),
   notificationShow: (a) => invoke<void>('notification_show', {
     id: a.id,
     title: a.title,

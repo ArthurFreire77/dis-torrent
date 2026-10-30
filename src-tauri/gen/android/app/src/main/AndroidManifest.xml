@@ -38,6 +38,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Atualização automática: o app baixa o APK e abre o instalador do
+         sistema. Desde o Android 8 esta permissão é OBRIGATÓRIA para disparar
+         um `ACTION_VIEW` de APK; sem ela o instalador nem abre (falha muda).
+         Ela NÃO permite instalar sozinho: o usuário confirma no instalador do
+         Android, que é o máximo que um app fora da loja pode fazer. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Android 13+: sem isto o sistema NÃO mostra notificação nenhuma (nem de
          chamada, nem de mensagem). É pedida em runtime (NotificationPrompt /
          tela de configurações), nunca no boot. -->

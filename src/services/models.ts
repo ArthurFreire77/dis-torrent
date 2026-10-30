@@ -791,6 +791,8 @@ export interface DisTorrentServices {
   backgroundPrefsSet(patch: { closeToTray?: boolean; startMinimized?: boolean }): Promise<void>
   autostartGet(): Promise<boolean>
   autostartSet(enabled: boolean): Promise<boolean>
+  /** Liga o autostart no primeiro boot (padrão "abre com o Windows"). */
+  autostartEnsure(): Promise<boolean>
   notificationShow(args: {
     id: number
     title: string

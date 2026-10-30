@@ -87,10 +87,12 @@ test('pré-release mais nova que a base anterior, final mais nova que pré-relea
   assert.equal(isNewer('1.2.0', '1.2.0-pre-alpha'), false)
 })
 
-test('updateModeFor: windows instala sozinho, linux abre instalador, resto link', () => {
+test('updateModeFor: windows instala sozinho, linux e android abrem instalador, resto link', () => {
   assert.equal(updateModeFor('windows'), 'auto')
   assert.equal(updateModeFor('linux'), 'manual')
-  assert.equal(updateModeFor('android'), 'link')
+  // Android baixa o APK e abre o instalador do sistema (exige um toque do
+  // usuário, mas é instalação de verdade — não é mais "só o link").
+  assert.equal(updateModeFor('android'), 'manual')
   assert.equal(updateModeFor('outro'), 'link')
 })
 
@@ -115,8 +117,17 @@ test('versão pulada pelo usuário não é oferecida de novo', async () => {
   assert.equal(out.kind, 'none')
 })
 
-test('android/macOS nunca instalam sozinhos (só link)', async () => {
+test('android mostra o cartão sem baixar sozinho (o sistema exige um toque)', async () => {
+  // Agora o Android SABE instalar (baixa o APK e abre o instalador), mas o
+  // download de ~40 MB não acontece sem o usuário pedir.
   const { deps, calls } = fakeDeps({}, info({ platform: 'android', asset_name: 'a.apk' }))
+  const out = await runUpdateFlow(deps, { autoApply: true })
+  assert.equal(out.kind, 'later')
+  assert.deepEqual(calls, ['check'])
+})
+
+test('macOS não tem instalador para baixar: só o link', async () => {
+  const { deps, calls } = fakeDeps({}, info({ platform: 'outro', asset_name: 'x.dmg' }))
   const out = await runUpdateFlow(deps, { autoApply: true })
   assert.equal(out.kind, 'later')
   assert.deepEqual(calls, ['check'])

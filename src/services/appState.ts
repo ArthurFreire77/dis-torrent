@@ -208,6 +208,17 @@ export function initAppState() {
       closeToTray: p.closeToTray,
       startMinimized: p.startMinimized,
     }).catch(() => {})
+    // ABRIR JUNTO COM O WINDOWS.
+    //
+    // O Rust liga no boot (uma vez, respeitando a decisão do usuário). Aqui só
+    // espelhamos o estado REAL do SO na preferência local — a UI nunca mostra
+    // "ligado" se o Windows recusou (política de máquina/antivírus).
+    void services.autostartEnsure()
+      .then((on) => {
+        const cur = getPrefs()
+        if (cur.autostart !== on) setPrefs({ autostart: on })
+      })
+      .catch(() => { /* sem autostart nesta plataforma: a UI diz isso */ })
   }
 
   syncPresence()

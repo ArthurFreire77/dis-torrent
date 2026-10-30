@@ -1592,6 +1592,9 @@ export const browserServices: DisTorrentServices = {
   backgroundPrefsSet: async () => {},
   autostartGet: async () => false,
   autostartSet: async () => false,
+  // No navegador não existe "abrir junto com o Windows": devolver `false` é a
+  // verdade, e a UI não mostra um botão que não faria nada.
+  autostartEnsure: async () => false,
   notificationShow: async () => {},
   notificationCancel: async () => {},
   notificationCancelAll: async () => {},

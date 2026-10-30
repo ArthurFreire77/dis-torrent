@@ -30,7 +30,18 @@ export function nativeUpdateDeps(): UpdateDeps | null {
   return {
     check: () => s.updateCheck!(),
     download: (info) => s.updateDownload!(info.download_url, info.asset_name, info.digest),
-    apply: (path) => s.updateApply!(path),
+    apply: async (path) => {
+      // ANDROID: quem abre o instalador é o plugin Kotlin (`updater|installApk`),
+      // porque desde o Android 7 o APK precisa sair por `content://` (FileProvider)
+      // e desde o 8 exige REQUEST_INSTALL_PACKAGES. O Rust só baixa e confere o
+      // hash; chamar `update_apply` aqui devolveria erro.
+      if (/android/i.test(navigator.userAgent ?? '')) {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('plugin:updater|installApk', { path })
+        return
+      }
+      await s.updateApply!(path)
+    },
     quit: () => s.appQuit(),
     // Flags vivem no kv do SQLite (mesmo lugar das outras preferências).
     // Falha de leitura devolve `null` — nunca inventa "já pulei".

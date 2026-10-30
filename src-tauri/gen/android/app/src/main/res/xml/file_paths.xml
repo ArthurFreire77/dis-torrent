@@ -1,5 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Caminhos que podem sair por content:// para outro app.
+
+  POR QUE ISSO EXISTE: desde o Android 7 (N) passar `file://` para outro app
+  lança FileUriExposedException. O `save_file`/plugin de downloads e, agora, o
+  instalador de APK do auto-update precisam entregar um arquivo ao sistema por
+  `content://`.
+
+  `files-path` cobre `data_dir/updates/` — é onde o Rust grava o APK baixado
+  (`app_data_dir()` do Tauri = `filesDir` no Android). Sem esta linha o
+  `FileProvider.getUriForFile` lança IllegalArgumentException e o instalador
+  nunca abre.
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-  <external-path name="my_images" path="." />
-  <cache-path name="my_cache_images" path="." />
+  <files-path name="updates" path="." />
+  <cache-path name="cache" path="." />
+  <external-path name="external" path="." />
 </paths>

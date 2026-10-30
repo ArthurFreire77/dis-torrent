@@ -101,18 +101,21 @@ export function shortNotes(notes: string, maxLines = 6): string {
 /**
  * Como o update é aplicado nesta plataforma.
  *
- * - `auto`: baixa e executa o instalador sozinho, e o instalador reabre o app
- *   (Windows/Inno). É o caso do pedido: "sempre atualizar antes de entrar".
- * - `manual`: baixa e abre o instalador do sistema, mas o usuário conclui e
- *   reabre (Linux: `.deb`/`.AppImage` não têm install silencioso sem root).
- * - `link`: não há como instalar sozinho; mostra o link da release (Android
- *   fora de loja exige permissão de "instalar apps desconhecidos").
+ * - `auto`: baixa, confere o hash e **executa** o instalador; o app reabre
+ *   sozinho. É o Windows (Inno com `/RESTARTAPPLICATIONS`).
+ * - `manual`: baixa e **abre o instalador do sistema**; o usuário conclui e o
+ *   app reabre. Linux (`.deb`/`.AppImage` exigem root para instalar) e Android
+ *   (o sistema exige um toque de confirmação — nenhum app fora da loja pode
+ *   instalar silenciosamente).
+ * - `link`: não há instalador para baixar (macOS sem bundle assinado).
  */
 export type UpdateMode = 'auto' | 'manual' | 'link'
 
 export function updateModeFor(platform: string): UpdateMode {
   if (platform === 'windows') return 'auto'
   if (platform === 'linux') return 'manual'
+  // Android: o Rust baixa o APK e o plugin nativo abre o instalador.
+  if (platform === 'android') return 'manual'
   return 'link'
 }
 
@@ -163,8 +166,12 @@ export async function runUpdateFlow(
   if ((await deps.getFlag(FLAG_SKIP)) === info.latest) return { kind: 'none' }
 
   const mode = updateModeFor(info.platform)
-  // Android/macOS: não dá para instalar sozinho — a UI mostra o link.
+  // `link` só quando a plataforma não sabe instalar sozinha (macOS).
   if (mode === 'link') return { kind: 'later', info }
+  // ANDROID: baixar sem o usuário pedir seria um download de ~40 MB na rede
+  // dele e ainda exige a confirmação do sistema. O cartão aparece sempre, com
+  // o botão "Baixar e instalar" — é o máximo que o Android permite.
+  if (info.platform === 'android') return { kind: 'later', info }
 
   const failedBefore = (await deps.getFlag(FLAG_FAILED)) === info.latest
   if (!opts.autoApply || failedBefore) return { kind: 'later', info }
