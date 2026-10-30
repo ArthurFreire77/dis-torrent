@@ -4681,13 +4681,24 @@ impl NetworkEngine {
     /// É a via BARATA: `ProfileQuery` tem 3 campos, o peer só responde com o
     /// `ProfileSet` (que carrega avatar/banner) se tiver revisão maior que a
     /// nossa. Chamada no boot, na reconexão e a cada `PROFILE_SYNC_INTERVAL_SECS`.
+    ///
+    /// ## O `known_rev` é a revisão do OUTRO, não a minha
+    ///
+    /// BUG REAL (perfil, foto e capa "não eram transmitidos"): aqui ia
+    /// `profile_get(&me).rev` — a MINHA revisão. Quem recebe compara com a
+    /// PRÓPRIA revisão (`if p.rev > known_rev`) e conclui "ele já tem algo mais
+    /// novo, não preciso mandar nada". Resultado: quem editou o perfil MENOS
+    /// vezes nunca era recebido pelo outro lado — o amigo com 5 edições nunca
+    /// via a foto de quem tinha 1. O valor correto é o que EU conheço DAQUELE
+    /// peer (0 quando não conheço nada), que é justamente o que ele compara.
     pub fn sync_profiles_with_peers(&self) {
         let me = self.identity.fingerprint.clone();
-        let known_rev = self.store.profile_get(&me).map(|p| p.rev).unwrap_or(0);
         for fp in self.online_peer_fps() {
             if fp == me {
                 continue;
             }
+            // Revisão do perfil DESTE peer que já temos em disco.
+            let known_rev = self.store.profile_get(&fp).map(|p| p.rev).unwrap_or(0);
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
                     fp,
@@ -5381,24 +5392,38 @@ impl NetworkEngine {
         }
     }
 
-    /// Rede de segurança da amizade (chamada no tick de 15s): reenvia o pedido
-    /// ainda `pending_out` a um peer ONLINE. Se o 1º FriendRequest (ou o
-    /// FriendAccept da volta) se perdeu no relay/4G, o outro lado re-sincroniza
-    /// sozinho; o usuário não precisa recomeçar. O receptor trata como
-    /// idempotente (ver handler de FriendRequest).
-    fn retry_pending_friend_request(&self, peer_fp: &str) {
-        if let Some((_, status)) = self.store.get_friend(peer_fp).ok().flatten() {
-            if status == "pending_out" {
-                self.cmd_tx
-                    .send(EngineCmd::SendToPeer(
-                        peer_fp.into(),
-                        SecureFrame::FriendRequest {
-                            nickname: self.identity.nickname.clone(),
-                        },
-                    ))
-                    .ok();
-            }
-        }
+    /// Rede de segurança da amizade (chamada a cada 5s): reenvia o estado REAL
+    /// do relacionamento a um peer ONLINE.
+    ///
+    /// - `pending_out` → `FriendRequest` (o aceite da volta pode ter se perdido);
+    /// - `accepted` → `FriendAccept` (o NOSSO aceite pode ter se perdido).
+    ///
+    /// BUG REAL ("o cursor de adicionado demora minutos para aparecer"): só o
+    /// `pending_out` era reenviado aqui. Quem ACEITAVA ficava com `accepted`
+    /// local e, se o `FriendAccept` se perdesse (sessão half-open, 4G, relay),
+    /// NADA era reenviado — o outro lado continuava em `pending_out` e a
+    /// amizade só aparecia na próxima sessão NOVA (`flush_friend_requests`, que
+    /// roda no registro) ou quando a detecção de sessão morta chegava
+    /// (RELAY_PING 20s→120s + backoff 10s ⇒ minutos). Ambos os frames são
+    /// idempotentes no receptor (gates em `handle_frame`), então reenviar é
+    /// seguro e barato (1 frame pequeno por peer a cada 5s).
+    fn retry_pending_friend_request(&self, peer_fp: &str, incluir_aceite: bool) {
+        let Some((_, status)) = self.store.get_friend(peer_fp).ok().flatten() else {
+            return;
+        };
+        let frame = match status.as_str() {
+            "pending_out" => SecureFrame::FriendRequest {
+                nickname: self.identity.nickname.clone(),
+            },
+            "accepted" if incluir_aceite => SecureFrame::FriendAccept {
+                nickname: self.identity.nickname.clone(),
+            },
+            // `pending_in` é decisão do USUÁRIO (aceitar/recusar): não insiste.
+            _ => return,
+        };
+        self.cmd_tx
+            .send(EngineCmd::SendToPeer(peer_fp.into(), frame))
+            .ok();
     }
 
     fn link_tx(&self, fp: &str) -> Option<mpsc::UnboundedSender<(u8, SecureFrame)>> {
@@ -7775,6 +7800,9 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     // se um frame de amizade se perdeu no relay). 5s = recupera rápido sem
     // floodar (1 frame pequeno por peer pendente).
     let mut friend_tick = interval(Duration::from_secs(5));
+    // Contador do tick de amizade: o aceite só é reenviado a cada 3 tiques
+    // (15s) — o pedido pendente continua a cada 5s.
+    let mut friend_retry_tick: u32 = 0;
     // Manutenção de SERVIDORES: re-sincroniza estado e redispara joins
     // pendentes. Roda no motor (não na UI), então continua valendo com a janela
     // minimizada, o shell desmontado ou a tela de servidores fechada — que era
@@ -7847,11 +7875,15 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
             }
             _ = friend_tick.tick() => {
-                // Auto-cura da amizade: reenvia pedidos 'pending_out' a peers
-                // online. Cobre perda do FriendRequest OU do FriendAccept de volta
-                // (o receptor reenvia o aceite — ver handler de FriendRequest).
+                // Auto-cura da amizade: reenvia o estado REAL do relacionamento
+                // a peers online (pedido pendente E aceite já dado). Cobre a
+                // perda do `FriendRequest`/`FriendAccept` no relay ou no 4G.
+                // O aceite é reenviado a cada 15s (3 tiques) para não gerar
+                // tráfego/eventos desnecessários; o pedido pendente, a cada 5s.
+                friend_retry_tick = friend_retry_tick.wrapping_add(1);
+                let reaceita = friend_retry_tick % 3 == 0;
                 for fp in engine.online_peer_fps() {
-                    engine.retry_pending_friend_request(&fp);
+                    engine.retry_pending_friend_request(&fp, reaceita);
                 }
             }
             _ = community_tick.tick() => {
@@ -7905,25 +7937,22 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
     while let Some(cmd) = rx.recv().await {
         match cmd {
             EngineCmd::ConnectTo(addr, expected_fp) => {
-                // Teto de dials outbound concorrentes (antes do dedup!): sem
-                // isto, uma descoberta em rede grande disparava centenas de
-                // laços de dial simultâneos (fd/CPU). Sem vaga: NÃO insere a
-                // chave de dedup — o próximo tick de descoberta re-engatilha.
+                // Teto de dials outbound concorrentes: a vaga é adquirida
+                // DENTRO do laço, por TENTATIVA (ver `connect_and_maintain`).
                 //
-                // POR QUE NÃO É SÓ `continue`: o dial de MEMBRO DE SERVIDOR é
-                // pedido pelo `maintain_communities` a cada 15 s, mas com
-                // throttle de 120 s por fingerprint. Se o comando caísse aqui
-                // (pool de 64 cheio), a vaga negada era silenciosa E o
-                // throttle já tinha sido marcado — o membro só seria tentado
-                // de novo 2 minutos depois. Em servidor com muita gente isso
-                // virava "ninguém entra no canal e só reiniciar resolve".
-                let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
-                    tracing::debug!(
-                        %addr,
-                        "sem vaga de dial — o pedido volta no próximo tick"
-                    );
-                    continue;
-                };
+                // BUG REAL (o peer que "nunca conecta" mesmo com o outro lado
+                // online): a vaga do pool era adquirida AQUI e guardada por
+                // TODA a vida do laço — e o laço é ETERNO (reconecta para
+                // sempre). Cada destino descoberto (mDNS/LAN/anúncio/servidor,
+                // inclusive addr que muda de DHCP) segurava uma vaga para
+                // sempre; passadas 64 vagas (`dial_conc`), TODO `ConnectTo` e
+                // `ConnectRelay` novo caía no `continue` mudo abaixo. O
+                // sintoma era exatamente "um amigo conecta, o outro não
+                // conecta de jeito nenhum" — e só reiniciar o app resolvia.
+                //
+                // Agora o teto limita TENTATIVAS simultâneas (é o que gasta
+                // fd/CPU); laço dormindo em backoff não segura vaga.
+                //
                 // Dedup por destino: 1 laço direto por `fp@addr`. Sem isto, a
                 // descoberta (mDNS/bootstrap/announce) re-engatilhava N laços
                 // concorrentes para o mesmo peer (vazamento de tarefas + redial).
@@ -7941,22 +7970,19 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 if fresh {
                     let engine = engine.clone();
                     tokio::spawn(async move {
-                        let _dial_slot = dial_slot; // vaga segura até o fim do laço (eterno)
                         connect_and_maintain(engine, ConnTarget::Addr(addr), expected_fp).await
                     });
                 }
-                // !fresh: laço vivo já existe (e já segura uma vaga) — o
-                // slot caído aqui libera a vaga no fim da iteração.
+                // !fresh: laço vivo já existe para este destino.
             }
             EngineCmd::ConnectHost {
                 host,
                 port,
                 expected_fp,
             } => {
-                // Mesmo teto do ConnectTo (é o mesmo tipo de laço eterno).
-                let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
-                    continue;
-                };
+                // Mesmo modelo do ConnectTo: a vaga é por tentativa, dentro do
+                // laço. Adquiri-la aqui (e segurá-la num laço eterno) esgotava
+                // o pool e matava todo dial novo com `continue` silencioso.
                 let key = format!("{}@{host}:{port}", expected_fp.as_deref().unwrap_or(""));
                 let fresh = {
                     let mut set = engine
@@ -7971,7 +7997,6 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 if fresh {
                     let engine = engine.clone();
                     tokio::spawn(async move {
-                        let _dial_slot = dial_slot;
                         connect_and_maintain(engine, ConnTarget::Host(host, port), expected_fp)
                             .await
                     });
@@ -7980,10 +8005,9 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
             EngineCmd::ConnectRelay(fp) => {
                 // Idempotente: um maintain eterno por peer (bootstrap insiste a
                 // cada 5s; disconnect remove o link mas o maintain velho segue).
-                // Mesmo teto de dials: laço relay é o mesmo custo (task+poll).
-                let Some(dial_slot) = engine.netlimiter.try_dial_slot() else {
-                    continue;
-                };
+                // A vaga de dial é por TENTATIVA (dentro do laço) — segurá-la
+                // aqui esgotava o pool de 64 e o peer seguinte nunca era
+                // discado pelo relay, sem erro nenhum na UI.
                 let fresh = engine
                     .relay_maintains
                     .lock()
@@ -7991,10 +8015,7 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     .insert(fp.clone());
                 if fresh {
                     let engine = engine.clone();
-                    tokio::spawn(async move {
-                        let _dial_slot = dial_slot;
-                        connect_relay_and_maintain(engine, fp).await
-                    });
+                    tokio::spawn(async move { connect_relay_and_maintain(engine, fp).await });
                 }
             }
             EngineCmd::LookupAnnounce(fp) => {
@@ -8172,6 +8193,13 @@ async fn resolve_and_connect(host: &str, port: u16) -> Result<TcpStream> {
 }
 
 /// Conecta, mantém e reconecta com backoff exponencial (1s→15s). Loop eterno.
+///
+/// A VAGA DE DIAL é adquirida por iteração e liberada ANTES do `sleep` de
+/// backoff: o teto (`dial_conc`) existe para limitar sockets/tentativas
+/// SIMULTÂNEOS, não o número de peers que o app tenta alcançar. Antes a vaga
+/// era tomada no `command_loop` e ficava presa no laço eterno — 64 destinos
+/// esgotavam o pool e todo dial novo virava `continue` silencioso (o peer
+/// "nunca conecta" e só reiniciar o app resolvia).
 async fn connect_and_maintain(
     engine: Arc<NetworkEngine>,
     target: ConnTarget,
@@ -8183,6 +8211,15 @@ async fn connect_and_maintain(
         if cancelled(&cancel) {
             return;
         }
+        // Sem vaga agora: espera curta e tenta de novo. NUNCA desiste do peer
+        // (era o que acontecia no `continue` do command_loop).
+        let dial_slot = match engine.netlimiter.try_dial_slot() {
+            Some(g) => g,
+            None => {
+                sleep(Duration::from_millis(400)).await;
+                continue;
+            }
+        };
         if let Some(fp) = &expected_fp {
             set_link_state(&engine, fp, PeerLinkState::Connecting);
         }
@@ -8349,6 +8386,9 @@ async fn connect_and_maintain(
                 }
             }
         }
+        // Libera a vaga ANTES de dormir: em backoff o laço não ocupa socket, e
+        // segurar a vaga aqui recriaria o esgotamento do pool.
+        drop(dial_slot);
         sleep(backoff).await;
         backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
     }
@@ -8381,10 +8421,33 @@ fn relay_allowed(engine: &Arc<NetworkEngine>) -> bool {
     }
 }
 
-/// Backend de relay em uso AGORA: o peer-relay (se houver intermediário
-/// selecionado e permitido) ou o backend configurado. Preserva o backend
-/// injetado por testes (`relay_backend_custom`).
+/// Backend de relay em uso AGORA.
+///
+/// ORDEM (corrigida): relay CONFIGURADO (MQTT público / injetado por teste)
+/// primeiro; o peer-relay só entra quando o relay público não está disponível
+/// neste modo (kill-switch, `proxy`/`full` sem túnel SOCKS5) ou quando não há
+/// backend nenhum.
+///
+/// BUG REAL (o "segundo amigo não conecta de jeito nenhum"): antes o peer-relay
+/// tinha PRECEDÊNCIA. Assim que você tinha UM amigo conectado direto, ele era
+/// eleito intermediário e TODO o relay — inclusive o anúncio de presença —
+/// passava a ir para um broker em MEMÓRIA dele. O outro amigo só recebia se
+/// elegesse o MESMO intermediário (a eleição é "menor fp entre os peers
+/// DIRETOS de cada lado", e os dois lados têm conjuntos diferentes). Resultado:
+/// os Hellos eram guardados na memória do amigo A, o amigo C consultava o MQTT
+/// público e nunca via nada — 0 peers, sem erro na UI. O relay público é o
+/// ponto de encontro COMPARTILHADO; o peer-relay é a última alternativa, não
+/// o caminho preferido.
 fn active_relay_backend(engine: &Arc<NetworkEngine>) -> Arc<dyn RelayBackend> {
+    let configured = engine
+        .relay_backend
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    // Relay público utilizável neste modo → ele é o rendezvous comum.
+    if relay_allowed(engine) {
+        return configured;
+    }
     if engine.peer_relay_enabled() {
         let selected = engine
             .peer_relay
@@ -8397,11 +8460,7 @@ fn active_relay_backend(engine: &Arc<NetworkEngine>) -> Arc<dyn RelayBackend> {
             }
         }
     }
-    engine
-        .relay_backend
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    configured
 }
 
 fn is_online(engine: &Arc<NetworkEngine>, fp: &str) -> bool {
@@ -8552,6 +8611,16 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
         }
         engine.refresh_peer_relay();
         if relay_allowed(&engine) || engine.peer_relay_fp().is_some() {
+            // Vaga de dial POR TENTATIVA (ver `connect_and_maintain`): segurar
+            // no laço eterno esgotava o pool e o peer seguinte nunca era
+            // discado — "um amigo conecta, o outro nunca".
+            let dial_slot = match engine.netlimiter.try_dial_slot() {
+                Some(g) => g,
+                None => {
+                    sleep(Duration::from_millis(400)).await;
+                    continue;
+                }
+            };
             set_link_state(&engine, &fp, PeerLinkState::Connecting);
             debug!(%fp, "relay: discando (sem porta aberta)");
             // Métrica de primeiro contato: t0 do dial até o online.
@@ -8629,6 +8698,9 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                     liberar_entrada_relay(&engine, &fp, &my_in_tx);
                 }
             }
+            // Vaga de dial liberada antes do backoff (ver `connect_and_maintain`):
+            // segurá-la durante o sono recriaria o esgotamento do pool.
+            drop(dial_slot);
         } else {
             // Nem relay utilizável nem intermediário: degrau 2 esgotado —
             // alimenta a corrente de fallback (degrau 3).
@@ -9120,6 +9192,11 @@ async fn register_and_run(
     // editávamos o perfil nunca recebeu o `ProfileSet`. Perguntar a revisão
     // agora custa um frame e resolve o caso "B abre o app depois de A trocar a
     // foto" sem esperar o tique de 10 minutos.
+    //
+    // O `known_rev` é a revisão DESTE peer que temos em disco (não a nossa!):
+    // o receptor compara com a dele e só responde se tiver algo mais novo.
+    // Mandar a nossa fazia ele achar que já estávamos em dia e nunca enviar —
+    // era o perfil/foto que não chegava.
     engine
         .cmd_tx
         .send(EngineCmd::SendToPeer(
@@ -9127,7 +9204,7 @@ async fn register_and_run(
             SecureFrame::ProfileQuery {
                 known_rev: engine
                     .store
-                    .profile_get(&engine.identity.fingerprint)
+                    .profile_get(peer_fp)
                     .map(|p| p.rev)
                     .unwrap_or(0),
             },
@@ -9780,10 +9857,13 @@ pub const PROFILE_BANNER_MAX_BYTES: usize = PROFILE_BANNER_B64_MAX * 3 / 4;
 ///
 /// O tópico `distorrent_a_<fp>` NÃO é retido pelo broker: reaparecer só no boot
 /// fazia um peer que entrasse depois nunca descobrir quem já estava rodando
-/// (sintoma "0 peers conhecidos" com o app aberto há horas). 5 min é o
-/// equilíbrio entre ser descobrível e não abusar da infra pública — o loop de
-/// descoberta roda a cada 30 s e essa guarda limita a publicação.
-const ANNOUNCE_REPUBLISH_MS: i64 = 5 * 60 * 1000;
+/// (sintoma "0 peers conhecidos" com o app aberto há horas).
+///
+/// 60s (era 5 min): com 5 min, quem abria o app depois de você esperava até
+/// CINCO MINUTOS para ser descoberto — era exatamente o "meu amigo adicionou e
+/// demorou uma eternidade". É 1 frame pequeno (≈120 B) em 1 tópico por minuto:
+/// o mesmo ritmo do announce da DHT e barato para qualquer broker público.
+const ANNOUNCE_REPUBLISH_MS: i64 = 60 * 1000;
 
 /// Teto do `FileAnnounce` (2 GB) — espelha `MAX_STREAM_FILE_BYTES` da casca e
 /// o `VITE_DISTORRENT_MAX_FILE_MB` do frontend. Sem ele, "size: 500 GB" num
@@ -11791,8 +11871,11 @@ async fn handle_frame(
                 debug!(%peer_fp, "peer-relay: PeerRelayData ignorado (não é o intermediário)");
                 return Ok(());
             }
-            let backend = active_relay_backend(engine);
-            if !backend.deliver_peer_relay(req_id, bodies) {
+            // A entrega vai SEMPRE para o backend do intermediário eleito —
+            // não para o `active_relay_backend`, que pode ser o relay público
+            // (preferido para post/poll desde a correção do rendezvous).
+            let backend = engine.peer_relay_backend_for(peer_fp);
+            if !backend.deliver(req_id, bodies) {
                 debug!("peer-relay: PeerRelayData órfão (req_id={req_id})");
             }
         }
@@ -13712,6 +13795,62 @@ mod tests {
             }
         }
         assert!(enviou, "peer desatualizado precisa receber o ProfileSet");
+    }
+
+    /// O `ProfileQuery` que NÓS mandamos precisa levar a revisão DO OUTRO.
+    ///
+    /// BUG REAL: `sync_profiles_with_peers` mandava `profile_get(&me).rev` — a
+    /// nossa revisão. O receptor compara com a dele e, se a nossa for >= à dele,
+    /// não responde NADA. Quem tinha revisão maior nunca recebia o perfil de
+    /// quem tinha revisão menor (foto e "sobre" não chegavam).
+    #[test]
+    fn profile_query_leva_a_revisao_do_peer_e_nao_a_minha() {
+        let (e, _d) = mk_engine("perfil-known-rev");
+        let me = e.identity.fingerprint.clone();
+        let peer = "peer-alvo".to_string();
+
+        // Meu perfil: rev 3. Perfil do peer que já temos em disco: rev 1.
+        // Cada edição muda o conteúdo — `profile_set_local` é idempotente e
+        // conteúdo igual não cria revisão nova.
+        for i in 0..3 {
+            let _ =
+                e.store
+                    .profile_set_local(&me, "eu", &format!("bio {i}"), "", "", "", false, false);
+        }
+        let _ = e
+            .store
+            .profile_set_local(&peer, "amigo", "bio do amigo", "", "", "", false, false);
+        assert_eq!(e.store.profile_get(&me).unwrap().rev, 3);
+        assert_eq!(e.store.profile_get(&peer).unwrap().rev, 1);
+
+        // Link "online" fake só para o peer entrar na lista de alvos.
+        let (tx, _rx) = mpsc::unbounded_channel::<(u8, SecureFrame)>();
+        e.links.lock().unwrap().insert(
+            peer.clone(),
+            Arc::new(PeerLink {
+                state: StdMutex::new(PeerLinkState::Online),
+                tx: Some(tx),
+                drop_notify: Notify::new(),
+                via_relay: false,
+            }),
+        );
+
+        let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
+        e.sync_profiles_with_peers();
+        let mut known = None;
+        while let Ok(cmd) = commands.try_recv() {
+            if let EngineCmd::SendToPeer(dest, SecureFrame::ProfileQuery { known_rev }) = cmd {
+                if dest == peer {
+                    known = Some(known_rev);
+                }
+            }
+        }
+        assert_eq!(
+            known,
+            Some(1),
+            "a pergunta deve citar a revisão DO PEER (1), nunca a minha (3) — \
+             com a minha o peer não responde e o perfil/foto nunca chega"
+        );
     }
 
     #[test]
