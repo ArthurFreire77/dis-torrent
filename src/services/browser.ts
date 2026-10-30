@@ -43,6 +43,7 @@ import { profileContentHash } from './profileRevision'
 import { SessionDriver } from '../core/storage/sessionDriver'
 import { IdentityStore } from '../core/storage/identityStore'
 import * as LX from './localExtras'
+import { WEB_KEYS, readList, writeJson, writeString } from './browserStore'
 
 const sharedDriver = new LocalDriver()
 const identityDriver = new SessionDriver()
@@ -165,14 +166,14 @@ function emit(ev: EngineEvent) {
 
 function isChannelMessageId(convId: string): boolean {
   try {
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    const list = JSON.parse(raw) as any[]
-    for (const c of list) if (c.channels?.some(([cid]: any) => cid === convId)) return true
+    for (const c of readList<{ channels?: [string, string][] }>(WEB_KEYS.communities)) {
+      if (c.channels?.some(([cid]) => cid === convId)) return true
+    }
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i) ?? ''
       if (k.startsWith('distorrent:extras:channels:')) {
-        const arr = JSON.parse(localStorage.getItem(k) ?? '[]') as any[]
-        if (arr.some((x: any) => x.id === convId)) return true
+        const arr = readList<{ id?: string }>(k)
+        if (arr.some((x) => x.id === convId)) return true
       }
     }
   } catch { /* ignore */ }
@@ -690,14 +691,11 @@ export const browserServices: DisTorrentServices = {
     Promise.reject(new Error('cofre disponível no app nativo')),
 
   communitiesList: () => {
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    try { return Promise.resolve(JSON.parse(raw)) } catch { return Promise.resolve([]) }
+    return Promise.resolve(readList<import('./models').CommunityView>(WEB_KEYS.communities))
   },
 
   createCommunity: (name, channels, opts) => {
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    let list: import('./models').CommunityView[] = []
-    try { list = JSON.parse(raw) } catch { /* browser mode */ }
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const cid = `local-${Math.random().toString(36).slice(2, 10)}`
     // wizard: canais com tipo/categoria quando opts.channelsMeta veio; senão CSV simples (compat)
     const seeds: { name: string; kind: 'text' | 'voice' | 'video'; category: string }[] = opts?.channelsMeta?.length
@@ -712,7 +710,7 @@ export const browserServices: DisTorrentServices = {
       is_owner: true,
     }
     list.push(cv)
-    localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
+    writeJson(WEB_KEYS.communities, list)
     // materializa canais com kind/categoria para o sidebar/voice funcionarem.
     // Reaproveita o MESMO id da tupla acima, senão o canal aparece duplicado.
     seeds.forEach((c, i) => {
@@ -722,8 +720,8 @@ export const browserServices: DisTorrentServices = {
     for (const r of opts?.roles ?? []) LX.createLocalRole(cid, r)
     LX.saveCommunityMeta(cid, { description: opts?.description, category: opts?.category, icon: opts?.icon })
     if (opts?.rulesText) {
-      try { localStorage.setItem(`distorrent:rules:${cid}`, JSON.stringify({ community_id: cid, spam_level: 'medium', banned_words: [], blocked_domains: [], moderators: [], shadow_banned: [], updated_at: Date.now() })) } catch { /* ignore */ }
-      try { localStorage.setItem(`distorrent:rules:text:${cid}`, opts.rulesText) } catch { /* ignore */ }
+      writeJson(WEB_KEYS.rules(cid), { community_id: cid, spam_level: 'medium', banned_words: [], blocked_domains: [], moderators: [], shadow_banned: [], updated_at: Date.now() })
+      writeString(WEB_KEYS.rulesText(cid), opts.rulesText)
     }
     emit({ type: 'community_joined', community_id: cid, name } as any)
     try { bc?.postMessage({ type: 'community_joined', community_id: cid, name }) } catch { /* ignore */ }
@@ -731,9 +729,7 @@ export const browserServices: DisTorrentServices = {
   },
 
   communitySetMeta: (communityId, patch) => {
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    let list: import('./models').CommunityView[] = []
-    try { list = JSON.parse(raw) } catch { /* browser mode */ }
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const idx = list.findIndex(c => c.id === communityId)
     if (idx < 0) return Promise.reject(new Error('comunidade não encontrada'))
     list[idx] = {
@@ -742,7 +738,7 @@ export const browserServices: DisTorrentServices = {
       category: patch.category ?? list[idx].category ?? '',
       icon: patch.icon ?? list[idx].icon ?? '',
     }
-    localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
+    writeJson(WEB_KEYS.communities, list)
     LX.saveCommunityMeta(communityId, patch)
     return Promise.resolve()
   },
@@ -750,13 +746,11 @@ export const browserServices: DisTorrentServices = {
   communityRename: (communityId, name) => {
     const trimmed = name.trim()
     if (!trimmed) return Promise.reject(new Error('nome vazio'))
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    let list: import('./models').CommunityView[] = []
-    try { list = JSON.parse(raw) } catch { /* browser mode */ }
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const idx = list.findIndex(c => c.id === communityId)
     if (idx < 0) return Promise.reject(new Error('comunidade não encontrada'))
     list[idx] = { ...list[idx], name: trimmed }
-    localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
+    writeJson(WEB_KEYS.communities, list)
     emit({ type: 'community_joined', community_id: communityId, name: trimmed } as any)
     try { bc?.postMessage({ type: 'community_joined', community_id: communityId, name: trimmed }) } catch { /* ignore */ }
     return Promise.resolve()
@@ -777,9 +771,7 @@ export const browserServices: DisTorrentServices = {
   // Modo navegador: não há rede, então o único estado honesto é "eu conectado"
   // e os demais membros offline. Inventar "relay" aqui seria mentira.
   communityMembers: (cid) => {
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    let list: import('./models').CommunityView[] = []
-    try { list = JSON.parse(raw) } catch { /* browser mode */ }
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const me = store.load()
     const cv = list.find(c => c.id === cid)
     if (!cv) return Promise.resolve([])
@@ -812,9 +804,7 @@ export const browserServices: DisTorrentServices = {
     const cid = m[1]
     // modo navegador (dev local, sem rede): cria o espelho local do servidor
     // para o fluxo de convite funcionar 100% dentro do escopo local honesto
-    const raw = localStorage.getItem('distorrent:extras:communities') ?? '[]'
-    let list: import('./models').CommunityView[] = []
-    try { list = JSON.parse(raw) } catch { /* browser mode */ }
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     if (!list.some(c => c.id === cid)) {
       const me = store.load()
       const chanId = `${cid}-geral`
@@ -826,7 +816,7 @@ export const browserServices: DisTorrentServices = {
         members: me ? [[me.fingerprint, me.nickname, 'member']] : [],
       }
       list.push(cv)
-      localStorage.setItem('distorrent:extras:communities', JSON.stringify(list))
+      writeJson(WEB_KEYS.communities, list)
       emit({ type: 'community_joined', community_id: cid, name: cv.name } as any)
       try { bc?.postMessage({ type: 'community_joined', community_id: cid, name: cv.name }) } catch { /* ignore */ }
     }

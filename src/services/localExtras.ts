@@ -4,6 +4,7 @@
 
 import type { BotView, ChannelMeta, RoleView } from './models'
 import { DEFAULT_ROLE_COLORS, PERMS, BOT_AVATARS } from './models'
+import { readString, writeJson } from './browserStore'
 
 const LS_PREFIX = 'distorrent:extras:'
 
@@ -11,15 +12,20 @@ function key(kind: string, communityId: string) {
   return `${LS_PREFIX}${kind}:${communityId}`
 }
 
+// `load`/`save` vinham duplicados aqui e em `browser.ts` (que tinha o mesmo
+// bloco copiado 11 vezes). Agora existe uma implementação só — com a mesma
+// semântica: JSON corrompido cai no `fallback` e gravação bloqueada não lança.
 function load<T>(k: string, fallback: T): T {
+  const raw = readString(k)
+  if (raw === null) return fallback
   try {
-    const v = localStorage.getItem(k)
-    if (!v) return fallback
-    return JSON.parse(v) as T
-  } catch { return fallback }
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
 }
 function save<T>(k: string, v: T) {
-  try { localStorage.setItem(k, JSON.stringify(v)) } catch { /* browser only */ }
+  writeJson(k, v)
 }
 
 // ---------- Comunidades (meta do wizard: descrição/categoria/ícone) ----------
