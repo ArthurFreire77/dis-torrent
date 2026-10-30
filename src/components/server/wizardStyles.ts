@@ -1,153 +1,471 @@
-// CSS do assistente de criação de servidor.
+// Estilo do assistente de criação de servidor.
 //
-// `hover`, `focus-visible` e `@media` não se expressam em `style` inline —
-// precisam de seletor. Mesmo caminho que o `BotConfigPanel` usa. Ficava dentro
-// do componente (145 das 1191 linhas); separado aqui, o componente volta a ser
-// só lógica de tela.
+// ## Duas camadas, de propósito
+//
+// `layout` (inline) contém TODA a estrutura: grid, espaçamentos, cards, cores.
+// Style inline sempre se aplica — não depende de `<style>` ser injetado, de CSP,
+// nem de a folha global continuar carregada.
+//
+// `css` (folha) contém SÓ o que é impossível escrever inline: `:hover`,
+// `:focus-visible` e `@media`. Se esse bloco não for aplicado (WebView que
+// descarta `<style>`, CSP restritiva, preview de terceiros), a tela fica com
+// aparência simples — **mas continua legível e utilizável**.
+//
+// POR QUE ISSO IMPORTA: um build anterior renderizava o wizard sem a folha e o
+// resultado era o pior possível — rótulo e descrição grudados sem espaço
+// ("ServidorSem tema definido…"), cards virando uma linha corrida de texto,
+// etapas colando ("1Identidade 2Canais"). O usuário ficou sem saber o que era
+// cada campo. O layout não pode depender do estilo "extra".
 
+import type { CSSProperties } from 'react'
 import { ui } from '../../shared/ui'
 
+// ---------------------------------------------------------------------------
+// Camada 1: layout inline (sempre aplicado)
+// ---------------------------------------------------------------------------
+
+export const layout = {
+  /** Duas colunas no desktop; a folha troca para uma só abaixo de 860px. */
+  cols: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(0, 1fr) 268px',
+    gap: ui.lg,
+    alignItems: 'start',
+  } satisfies CSSProperties,
+
+  /** Coluna de conteúdo. `minWidth: 0` impede o filho de estourar o grid. */
+  main: {
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: ui.lg,
+  } satisfies CSSProperties,
+
+  side: {
+    position: 'sticky',
+    top: 0,
+    minWidth: 0,
+  } satisfies CSSProperties,
+
+  stepHead: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: ui.md,
+    paddingBottom: ui.md,
+    borderBottom: `1px solid ${ui.border}`,
+  } satisfies CSSProperties,
+
+  stepNum: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(88,101,242,.16)',
+    color: ui.accent,
+    fontSize: 14,
+    fontWeight: 900,
+  } satisfies CSSProperties,
+
+  stepTitle: {
+    fontSize: 15,
+    fontWeight: 800,
+    color: ui.heading,
+    lineHeight: 1.3,
+  } satisfies CSSProperties,
+
+  stepSub: {
+    fontSize: 12,
+    color: ui.muted,
+    lineHeight: 1.5,
+    marginTop: 3,
+  } satisfies CSSProperties,
+
+  /** Grade dos modelos: 3 colunas, cai para 1 em telas estreitas (na folha). */
+  models: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    gap: ui.sm,
+  } satisfies CSSProperties,
+
+  /** Card clicável (modelo/ícone). `aria-pressed` decide o realce. */
+  card: (selected: boolean): CSSProperties => ({
+    appearance: 'none',
+    textAlign: 'left',
+    cursor: 'pointer',
+    background: selected ? 'rgba(88,101,242,.14)' : ui.surface,
+    border: `1px solid ${selected ? ui.accent : ui.border}`,
+    borderRadius: 10,
+    padding: '12px 13px',
+    color: ui.text,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    minWidth: 0,
+    font: 'inherit',
+  }),
+
+  /** Grade de ícones: colunas de 200px, quantas couberem. */
+  cats: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+    gap: ui.sm,
+    alignItems: 'stretch',
+  } satisfies CSSProperties,
+
+  catCard: (selected: boolean): CSSProperties => ({
+    appearance: 'none',
+    textAlign: 'left',
+    cursor: 'pointer',
+    background: selected ? 'rgba(88,101,242,.14)' : ui.surface,
+    border: `1px solid ${selected ? ui.accent : ui.border}`,
+    borderRadius: 10,
+    padding: '11px 12px',
+    color: ui.text,
+    display: 'flex',
+    gap: 10,
+    alignItems: 'flex-start',
+    minWidth: 0,
+    minHeight: 76,
+    font: 'inherit',
+  }),
+
+  catIcon: (selected: boolean): CSSProperties => ({
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: selected ? 'rgba(88,101,242,.26)' : ui.input,
+    color: selected ? '#fff' : ui.muted,
+    flexShrink: 0,
+  }),
+
+  /** Linha de canal: ícone | nome | tipo | categoria | remover. */
+  chanRow: (bad: boolean): CSSProperties => ({
+    display: 'grid',
+    gridTemplateColumns: '24px minmax(0, 1fr) 96px 160px 32px',
+    gap: ui.sm,
+    alignItems: 'start',
+    background: ui.surface,
+    border: `1px solid ${bad ? ui.danger : ui.border}`,
+    borderRadius: 10,
+    padding: '10px 11px',
+  }),
+
+  chanIcon: {
+    color: ui.muted,
+    display: 'flex',
+    justifyContent: 'center',
+    paddingTop: 10,
+  } satisfies CSSProperties,
+
+  roleCard: (on: boolean): CSSProperties => ({
+    background: ui.surface,
+    border: `1px solid ${ui.border}`,
+    borderRadius: 10,
+    padding: '11px 12px',
+    opacity: on ? 1 : 0.6,
+  }),
+
+  roleTop: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+  } satisfies CSSProperties,
+
+  roleDot: (color: string): CSSProperties => ({
+    width: 11,
+    height: 11,
+    borderRadius: '50%',
+    flexShrink: 0,
+    background: color,
+    boxShadow: '0 0 0 3px rgba(255,255,255,.05)',
+  }),
+
+  /** Descrição do cargo alinhada ao NOME (checkbox 18 + gaps 10+10). */
+  roleWhy: {
+    fontSize: 11,
+    color: ui.muted,
+    lineHeight: 1.5,
+    marginTop: 7,
+    paddingLeft: 38,
+  } satisfies CSSProperties,
+
+  perms: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))',
+    gap: 2,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTop: `1px solid ${ui.border}`,
+  } satisfies CSSProperties,
+
+  check: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    fontSize: 12,
+    color: ui.text,
+    cursor: 'pointer',
+    padding: '5px 7px',
+    borderRadius: 6,
+  } satisfies CSSProperties,
+
+  /** Barra de etapas (4 segmentos). */
+  segWrap: {
+    display: 'flex',
+    gap: 6,
+    marginBottom: ui.xl,
+  } satisfies CSSProperties,
+
+  seg: (_state: 'done' | 'now' | 'todo'): CSSProperties => ({
+    appearance: 'none',
+    cursor: 'pointer',
+    background: 'transparent',
+    border: 0,
+    padding: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 7,
+    minWidth: 0,
+    textAlign: 'left',
+    font: 'inherit',
+    flex: 1,
+  }),
+
+  segBar: (state: 'done' | 'now' | 'todo'): CSSProperties => ({
+    height: 3,
+    borderRadius: 99,
+    width: '100%',
+    background: state === 'done' ? ui.success : state === 'now' ? ui.accent : ui.input,
+  }),
+
+  segLabel: (state: 'done' | 'now' | 'todo'): CSSProperties => ({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: 11,
+    fontWeight: 700,
+    color: state === 'now' ? ui.heading : state === 'done' ? ui.text : ui.muted,
+    minWidth: 0,
+  }),
+
+  segNum: (state: 'done' | 'now' | 'todo'): CSSProperties => ({
+    width: 17,
+    height: 17,
+    borderRadius: '50%',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 9,
+    fontWeight: 800,
+    flexShrink: 0,
+    background: state === 'done' ? 'rgba(35,165,89,.22)' : state === 'now' ? ui.accent : ui.input,
+    color: state === 'done' ? '#a5e5bd' : state === 'now' ? '#fff' : ui.muted,
+  }),
+
+  segText: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  } satisfies CSSProperties,
+
+  cap: {
+    fontSize: 11,
+    fontWeight: 800,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    color: ui.muted,
+    margin: `0 0 ${ui.sm}px`,
+  } satisfies CSSProperties,
+
+  /** Aviso "Falta: …" / erro de criação. */
+  notice: {
+    fontSize: 12,
+    color: '#ffe0a3',
+    lineHeight: 1.5,
+    display: 'flex',
+    gap: 7,
+    alignItems: 'flex-start',
+  } satisfies CSSProperties,
+
+  /** Prévia do servidor no topo do resumo. */
+  prev: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: ui.md,
+    background: ui.surface,
+    border: `1px solid ${ui.border}`,
+    borderRadius: 12,
+    padding: '13px 14px',
+    marginBottom: ui.md,
+  } satisfies CSSProperties,
+
+  prevIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 13,
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(88,101,242,.2)',
+    color: '#fff',
+  } satisfies CSSProperties,
+
+  prevName: {
+    display: 'block',
+    fontSize: 14,
+    fontWeight: 800,
+    color: ui.heading,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  } satisfies CSSProperties,
+
+  prevDesc: {
+    display: '-webkit-box',
+    fontSize: 11,
+    color: ui.muted,
+    lineHeight: 1.45,
+    marginTop: 3,
+    overflow: 'hidden',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+  } satisfies CSSProperties,
+
+  count: {
+    fontSize: 11,
+    color: ui.muted,
+    textAlign: 'right',
+    marginTop: 6,
+    fontVariantNumeric: 'tabular-nums',
+  } satisfies CSSProperties,
+
+  sideBox: {
+    background: ui.surface,
+    border: `1px solid ${ui.border}`,
+    borderRadius: 12,
+    padding: '13px 14px',
+    marginBottom: ui.md,
+  } satisfies CSSProperties,
+
+  sideTitle: {
+    fontSize: 10,
+    fontWeight: 800,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    color: ui.muted,
+    marginBottom: 9,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  } satisfies CSSProperties,
+
+  tag: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    fontSize: 11,
+    fontWeight: 700,
+    borderRadius: 99,
+    padding: '3px 9px',
+    background: ui.input,
+    border: `1px solid ${ui.border}`,
+    color: ui.text,
+  } satisfies CSSProperties,
+
+  list: { display: 'flex', flexDirection: 'column', gap: 5 } satisfies CSSProperties,
+
+  listItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 7,
+    fontSize: 12,
+    color: ui.text,
+    minWidth: 0,
+  } satisfies CSSProperties,
+
+  ellipsis: {
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    minWidth: 0,
+  } satisfies CSSProperties,
+
+  listIcon: { color: ui.muted, flexShrink: 0, display: 'flex' } satisfies CSSProperties,
+
+  empty: { fontSize: 12, color: ui.muted, lineHeight: 1.5 } satisfies CSSProperties,
+
+  done: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    textAlign: 'center',
+    gap: ui.md,
+    padding: `${ui.lg}px 0 ${ui.xl}px`,
+  } satisfies CSSProperties,
+
+  doneIcon: {
+    width: 68,
+    height: 68,
+    borderRadius: 22,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(35,165,89,.18)',
+    color: '#a5e5bd',
+  } satisfies CSSProperties,
+} as const
+
+// ---------------------------------------------------------------------------
+// Camada 2: folha — SÓ o que não existe inline
+// ---------------------------------------------------------------------------
+
 export const css = `
-/* ==========================================================================
-   Assistente de criação de servidor
-   --------------------------------------------------------------------------
-   Estrutura: [conteúdo 1fr] [resumo 268px]. O resumo fica STICKY porque é ele
-   que confirma o que está sendo criado — em um formulário longo, perder o
-   resumo de vista obriga a pessoa a rolar de volta para conferir o nome.
-   ========================================================================== */
-.csw-cols{ display:grid; grid-template-columns:minmax(0,1fr) 268px; gap:${ui.lg}px; align-items:start }
-/* grid-template-columns com minmax(0,1fr) é obrigatório: com 1fr puro o
-   mínimo automático da coluna é o conteúdo, e o grid devolvia 534px de 558
-   disponíveis (medido) — sobrava espaço e os cards ficavam estreitos. */
-.csw-cols > *{ min-width:0 }
-.csw-side{ position:sticky; top:0; min-width:0 }
-.csw-main{ min-width:0; display:flex; flex-direction:column; gap:${ui.lg}px }
-/* Filhos do flex precisam width:100%: sem isso um DIV com grid dentro
-   encolhe para o conteúdo (medido: csw-cats ocupava 534px de 858px e os cards
-   ficavam com 263px, cortando a descrição). */
-.csw-main > *{ width:100% }
+/* Realce/estado que não se expressa em style inline. Tudo o mais (estrutura,
+   espacos, cores, grades) esta em \`layout\`, aplicado inline. Se esta folha nao
+   carregar, a tela continua legivel e utilizavel. */
 
-/* ---- cabeçalho do passo ------------------------------------------------- */
-.csw-step-head{ display:flex; align-items:flex-start; gap:${ui.md}px; padding-bottom:${ui.md}px; border-bottom:1px solid ${ui.border} }
-.csw-step-num{ width:34px; height:34px; border-radius:10px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.16); color:${ui.accent}; font-size:14px; font-weight:900 }
-.csw-step-title{ font-size:15px; font-weight:800; color:${ui.heading}; line-height:1.3 }
-.csw-step-sub{ font-size:12px; color:${ui.muted}; line-height:1.5; margin-top:3px }
+.csw-card:hover:not(:disabled){ background:${ui.surfaceHover} !important; border-color:${ui.borderStrong} !important }
+.csw-card:active:not(:disabled){ transform:translateY(1px) }
+.csw-card:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
 
-/* ---- modelos (atalhos) -------------------------------------------------- */
-.csw-models{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:${ui.sm}px }
-.csw-model{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:12px 13px; color:${ui.text}; display:flex; flex-direction:column; gap:6px; min-width:0; transition:background .15s, border-color .15s, transform .12s }
-.csw-model:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.csw-model:active:not(:disabled){ background:${ui.elevated}; transform:translateY(1px) }
-.csw-model:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.csw-model[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-model-row{ display:flex; align-items:center; gap:8px; min-width:0 }
-.csw-model-t{ display:block; font-size:13px; font-weight:800; color:${ui.heading}; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-model-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; min-width:0 }
+.csw-seg:hover:not(:disabled){ opacity:.92 }
+.csw-seg:focus-visible{ outline:2px solid ${ui.link}; outline-offset:3px; border-radius:4px }
+.csw-seg:disabled{ cursor:default; opacity:.75 }
 
-/* ---- categorias de ícone -------------------------------------------------
-   Título e descrição são elementos de BLOCO: como spans inline eles saíam
-   grudados ("ServidorSem tema definido…"), defeito que já apareceu em build
-   publicado. min-width:0 é o que deixa o ellipsis funcionar no card.
-   -------------------------------------------------------------------------- */
-.csw-cats{ display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:${ui.sm}px; align-items:stretch }
-.csw-cat{ appearance:none; text-align:left; cursor:pointer; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; color:${ui.text}; display:flex; gap:10px; align-items:flex-start; min-width:0; min-height:76px; transition:background .15s, border-color .15s, transform .12s }
-.csw-cat:hover:not(:disabled){ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.csw-cat:active:not(:disabled){ background:${ui.elevated}; transform:translateY(1px) }
-.csw-cat:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.csw-cat[aria-pressed="true"]{ border-color:${ui.accent}; background:rgba(88,101,242,.14) }
-.csw-cat-ic{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; background:${ui.input}; color:${ui.muted}; flex-shrink:0; transition:background .15s, color .15s }
-.csw-cat[aria-pressed="true"] .csw-cat-ic{ background:rgba(88,101,242,.26); color:#fff }
-.csw-cat-body{ min-width:0; flex:1 }
-.csw-cat-t{ display:block; font-size:12px; font-weight:800; color:${ui.heading}; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-cat-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; margin-top:2px }
+.csw-check:hover{ background:${ui.surfaceHover} }
+.csw-check:focus-within{ box-shadow:0 0 0 2px ${ui.accent}66 }
 
-/* ---- canais ------------------------------------------------------------- */
-.csw-chan{ display:grid; grid-template-columns:24px minmax(0,1fr) 96px 160px 32px; gap:${ui.sm}px; align-items:start; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:10px 11px; transition:border-color .15s }
-.csw-chan:focus-within{ border-color:${ui.borderStrong} }
-.csw-chan[data-bad="true"]{ border-color:${ui.danger} }
-.csw-chan-ic{ color:${ui.muted}; display:flex; justify-content:center; padding-top:10px }
-.csw-chan > div > div:last-child{ margin-bottom:0 !important }
-
-/* ---- cargos ------------------------------------------------------------- */
-.csw-role{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:10px; padding:11px 12px; transition:opacity .15s, border-color .15s }
-.csw-role:focus-within{ border-color:${ui.borderStrong} }
-.csw-role[data-on="false"]{ opacity:.6 }
-.csw-role-top{ display:flex; align-items:center; gap:10px }
-/* O campo de nome ocupa a linha inteira e o text-field padrão tem altura de
-   formulário; em uma lista de 3 cargos isso vira três caixas gigantes. Aqui ele
-   fica compacto, sem label, alinhado ao checkbox. */
+.csw-role:focus-within{ border-color:${ui.borderStrong} !important }
 .csw-role-name{ flex:1; min-width:0 }
 .csw-role-name input{ height:32px; padding:5px 9px; font-size:13px; font-weight:700 }
-.csw-role-top input[type="checkbox"]{ appearance:none; -webkit-appearance:none; margin:0; width:18px; height:18px; flex-shrink:0; cursor:pointer; border-radius:5px; border:1.5px solid ${ui.borderStrong}; background:${ui.input}; position:relative; transition:background .15s, border-color .15s }
+.csw-role-top input[type="checkbox"]{ appearance:none; -webkit-appearance:none; margin:0; width:18px; height:18px; flex-shrink:0; cursor:pointer; border-radius:5px; border:1.5px solid ${ui.borderStrong}; background:${ui.input}; position:relative }
 .csw-role-top input[type="checkbox"]:checked{ background:${ui.accent}; border-color:${ui.accent} }
 .csw-role-top input[type="checkbox"]:checked::after{ content:""; position:absolute; left:5px; top:2px; width:5px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg) }
 .csw-role-top input[type="checkbox"]:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.csw-role-dot{ width:11px; height:11px; border-radius:50%; flex-shrink:0; box-shadow:0 0 0 3px rgba(255,255,255,.05) }
-/* A descrição alinha com o NOME (não com o checkbox): padding-left = checkbox
-   (18) + gaps (10+10). Sem isso o texto ficava deslocado à esquerda. */
-.csw-role-why{ font-size:11px; color:${ui.muted}; line-height:1.5; margin-top:7px; padding-left:38px }
-.csw-check{ display:flex; align-items:center; gap:8px; font-size:12px; color:${ui.text}; cursor:pointer; padding:5px 7px; border-radius:6px; transition:background .15s }
-.csw-check:hover{ background:${ui.surfaceHover} }
-.csw-check input{ margin:0; width:15px; height:15px; flex-shrink:0; cursor:pointer; accent-color:${ui.accent} }
-.csw-check:focus-within{ box-shadow:0 0 0 2px ${ui.accent}66 }
-.csw-perms{ display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:2px; margin-top:10px; padding-top:10px; border-top:1px solid ${ui.border} }
 
-/* ---- barra de etapas ---------------------------------------------------- */
-.csw-seg{ appearance:none; cursor:pointer; background:transparent; border:0; padding:0; display:flex; flex-direction:column; gap:7px; min-width:0; text-align:left; font:inherit }
-.csw-seg-bar{ height:3px; border-radius:99px; background:${ui.input}; transition:background .18s; width:100% }
-.csw-seg:hover:not(:disabled) .csw-seg-bar{ background:${ui.borderStrong} }
-.csw-seg[data-state="done"] .csw-seg-bar{ background:${ui.success} }
-.csw-seg[data-state="now"] .csw-seg-bar{ background:${ui.accent} }
-.csw-seg:focus-visible{ outline:2px solid ${ui.link}; outline-offset:3px; border-radius:4px }
-.csw-seg:disabled{ cursor:default }
-.csw-seg-l{ display:flex; align-items:center; gap:6px; font-size:11px; font-weight:700; color:${ui.muted}; min-width:0; transition:color .15s }
-.csw-seg[data-state="now"] .csw-seg-l{ color:${ui.heading} }
-.csw-seg[data-state="done"] .csw-seg-l{ color:${ui.text} }
-.csw-seg-n{ width:17px; height:17px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; flex-shrink:0; background:${ui.input}; color:${ui.muted}; transition:background .15s, color .15s }
-.csw-seg[data-state="done"] .csw-seg-n{ background:rgba(35,165,89,.22); color:#a5e5bd }
-.csw-seg[data-state="now"] .csw-seg-n{ background:var(--csw-accent, ${ui.accent}); color:#fff }
-.csw-seg-t{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-
-/* ---- utilitários -------------------------------------------------------- */
-.csw-cap{ font-size:11px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin:0 0 ${ui.sm}px }
-.csw-falta{ font-size:12px; color:#ffe0a3; line-height:1.5; display:flex; gap:7px; align-items:flex-start }
-.csw-prev{ display:flex; align-items:center; gap:${ui.md}px; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:12px; padding:13px 14px; margin-bottom:${ui.md}px }
-.csw-prev-ic{ width:44px; height:44px; border-radius:13px; flex-shrink:0; display:flex; align-items:center; justify-content:center; background:rgba(88,101,242,.2); color:#fff }
-.csw-prev-body{ min-width:0; flex:1 }
-.csw-prev-n{ display:block; font-size:14px; font-weight:800; color:${ui.heading}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-prev-d{ display:block; font-size:11px; color:${ui.muted}; line-height:1.45; margin-top:3px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical }
-.csw-count{ font-size:11px; color:${ui.muted}; text-align:right; margin-top:6px; font-variant-numeric:tabular-nums }
-.csw-done{ display:flex; flex-direction:column; align-items:center; text-align:center; gap:${ui.md}px; padding:${ui.lg}px 0 ${ui.xl}px }
-.csw-done-ic{ width:68px; height:68px; border-radius:22px; display:flex; align-items:center; justify-content:center; background:rgba(35,165,89,.18); color:#a5e5bd }
-.csw-side-box{ background:${ui.surface}; border:1px solid ${ui.border}; border-radius:12px; padding:13px 14px; margin-bottom:${ui.md}px }
-.csw-side-t{ font-size:10px; font-weight:800; letter-spacing:.6px; text-transform:uppercase; color:${ui.muted}; margin-bottom:9px; display:flex; align-items:center; gap:6px }
-.csw-tag{ display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:700; border-radius:99px; padding:3px 9px; background:${ui.input}; border:1px solid ${ui.border}; color:${ui.text} }
-.csw-list{ display:flex; flex-direction:column; gap:5px }
-.csw-li{ display:flex; align-items:center; gap:7px; font-size:12px; color:${ui.text}; min-width:0 }
-.csw-li span{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.csw-li-i{ color:${ui.muted}; flex-shrink:0; display:flex }
-.csw-empty{ font-size:12px; color:${ui.muted}; line-height:1.5 }
-
-/* Abaixo de 860px a coluna de 268px rouba a largura do conteúdo: o resumo desce
-   para baixo (order:2) em vez de sumir, porque é ele que mostra a contagem de
-   canais e cargos que a pessoa está criando. */
-@media (max-width: 860px) {
-  .csw-cols{ grid-template-columns:minmax(0,1fr); gap:${ui.lg}px }
-  .csw-side{ position:static; order:2 }
-  .csw-models{ grid-template-columns:minmax(0,1fr) }
+/* Abaixo de 860px a coluna de 268px rouba a largura do conteúdo. O resumo desce
+   (order:2) em vez de sumir: é ele que mostra a contagem de canais e cargos. */
+@media (max-width: 860px){
+  .csw-cols{ grid-template-columns:minmax(0,1fr) !important }
+  .csw-side{ position:static !important; order:2 }
+  .csw-models{ grid-template-columns:minmax(0,1fr) !important }
 }
-/* 560px: 4 colunas de canal não cabem. Tipo e categoria descem para a linha de
-   baixo; o nome fica com o espaço que sobrar. */
-@media (max-width: 560px) {
-  .csw-chan{ grid-template-columns:24px minmax(0,1fr) 32px }
-  .csw-chan-ic{ grid-row:1 }
+/* 560px: 4 colunas de canal não cabem. Tipo e categoria descem. */
+@media (max-width: 560px){
+  .csw-chan{ grid-template-columns:24px minmax(0,1fr) 32px !important }
   .csw-chan-name{ grid-column:2 / 4 }
   .csw-chan-kind{ grid-column:1 / 2 }
   .csw-chan-cat{ grid-column:1 / 3 }
   .csw-chan-del{ grid-column:3; grid-row:1 }
-  .csw-cats{ grid-template-columns:minmax(0,1fr) }
-  .csw-perms{ grid-template-columns:minmax(0,1fr) }
+  .csw-cats{ grid-template-columns:minmax(0,1fr) !important }
+  .csw-perms{ grid-template-columns:minmax(0,1fr) !important }
   .csw-seg-t{ display:none }
-  .csw-step-head{ gap:${ui.sm}px }
 }
 `

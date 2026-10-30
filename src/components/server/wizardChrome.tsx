@@ -1,11 +1,13 @@
 // Rodapé e barra de etapas do assistente.
 //
-// Eram ~120 linhas de JSX dentro do componente principal. Ficam aqui porque são
-// puramente visuais: recebem a decisão já tomada (`bloqueado`, `pendencias`,
-// `concluido`) e não conhecem `services`, estado nem criação.
+// Puramente visuais: recebem a decisão já tomada (`busy`, `error`, `pendencias`,
+// `step`) e não conhecem `services`, estado nem criação. Layout inline para não
+// depender da folha (os 4 segmentos colavam como "1Identidade 2Canais" quando o
+// `<style>` não era aplicado).
 
 import { Ic } from '../../shared/icons'
 import { Button, ui } from '../../shared/ui'
+import { layout } from './wizardStyles'
 import { PASSO_CONCLUIDO, PASSO_REGRAS, STEP_LABELS } from './wizardModel'
 
 /**
@@ -40,12 +42,8 @@ export function WizardFooter({
 
   return (
     <div style={{ width: '100%' }}>
-      {/* FALHA REAL DA CRIAÇÃO. Antes o `setError` existia mas nada renderizava:
-          se `createCommunity` falhasse (rede caiu, nome recusado pelo core,
-          banco trancado), o botão voltava de "Criando…" e NADA aparecia — o
-          usuário clicava de novo achando que o app tinha ignorado. */}
       {error && (
-        <div className="csw-falta" style={{ marginBottom: ui.md }} role="alert">
+        <div style={{ ...layout.notice, marginBottom: ui.md }} role="alert">
           <span style={{ flexShrink: 0, marginTop: 1 }}>
             <Ic name="info" size={14} />
           </span>
@@ -55,7 +53,7 @@ export function WizardFooter({
         </div>
       )}
       {!concluido && bloqueado && (
-        <div className="csw-falta" style={{ marginBottom: ui.md }} role="status">
+        <div style={{ ...layout.notice, marginBottom: ui.md }} role="status">
           <span style={{ flexShrink: 0, marginTop: 1 }}>
             <Ic name="info" size={14} />
           </span>
@@ -112,7 +110,7 @@ export function WizardStepper({
   onGo: (i: number) => void
 }) {
   return (
-    <nav aria-label="Etapas da criação" style={{ display: 'flex', gap: 6, marginBottom: ui.xl }}>
+    <nav aria-label="Etapas da criação" style={layout.segWrap}>
       {STEP_LABELS.map((label, i) => {
         const state = step === PASSO_CONCLUIDO || i < step ? 'done' : i === step ? 'now' : 'todo'
         const podeIr = i <= visited && step !== PASSO_CONCLUIDO && !busy
@@ -121,18 +119,18 @@ export function WizardStepper({
             key={label}
             type="button"
             className="csw-seg"
-            data-state={state}
+            style={layout.seg(state)}
             disabled={!podeIr}
             aria-current={i === step ? 'step' : undefined}
             aria-label={`Etapa ${i + 1}: ${label}${state === 'done' ? ', concluída' : state === 'now' ? ', atual' : ''}`}
             onClick={() => onGo(i)}
           >
-            <span className="csw-seg-bar" />
-            <span className="csw-seg-l">
-              <span className="csw-seg-n">
+            <span style={layout.segBar(state)} />
+            <span className="csw-seg-l" style={layout.segLabel(state)}>
+              <span style={layout.segNum(state)}>
                 {state === 'done' ? <Ic name="check" size={9} stroke={3} /> : i + 1}
               </span>
-              <span className="csw-seg-t">{label}</span>
+              <span className="csw-seg-t" style={layout.segText}>{label}</span>
             </span>
           </button>
         )

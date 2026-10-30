@@ -1,14 +1,14 @@
 // Passos 2, 3 e 4 do assistente: canais, cargos e regras.
 //
-// Mesmo contrato do passo de identidade: só apresentação + callbacks. As regras
-// (validação de nome de canal, ícones por tipo, categorias) vêm de
-// `wizardModel`/`ChannelManager`, que são as fontes únicas.
+// Mesmo contrato do passo de identidade: só apresentação + callbacks, e o
+// layout estrutural vem de `layout` (inline) para nunca depender da folha.
 
 import { Ic } from '../../shared/icons'
 import { Button, IconButton, Notice, Select, TextArea, TextField, ui } from '../../shared/ui'
 import { Tooltip } from '../../shared/Tooltip'
-import { CATEGORIAS_PADRAO } from './ChannelManager'
+import { CATEGORIAS_PADRAO } from './channelRules'
 import { PERMS, PERM_LABELS } from '../../services/models'
+import { layout } from './wizardStyles'
 import {
   KIND_ICON,
   KIND_LABEL,
@@ -43,7 +43,7 @@ export function StepChannels({
         title="Canais"
         sub="O que a pessoa vê ao entrar. Precisa de pelo menos um canal de texto."
       />
-      <div className="csw-cap" style={{ marginBottom: 0 }}>
+      <div style={{ ...layout.cap, marginBottom: 0 }}>
         {channels.length} {channels.length === 1 ? 'canal' : 'canais'}
         {validos !== channels.length && (
           <span style={{ color: ui.danger, marginLeft: 6 }}>
@@ -51,13 +51,17 @@ export function StepChannels({
           </span>
         )}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
+      <div style={layout.list}>
         {channels.map((c, i) => (
-          <div key={i} className="csw-chan" data-bad={errors[i] !== null}>
-            <span className="csw-chan-ic">
+          <div
+            key={i}
+            className="csw-chan"
+            style={layout.chanRow(errors[i] !== null)}
+          >
+            <span style={layout.chanIcon}>
               <Ic name={KIND_ICON[c.kind]} size={16} />
             </span>
-            <div className="csw-chan-name">
+            <div className="csw-chan-name" style={{ minWidth: 0 }}>
               <TextField
                 value={c.name}
                 onChange={(v) => onUpdate(i, { name: slugChannel(v) })}
@@ -67,7 +71,7 @@ export function StepChannels({
                 hint="letras minúsculas, números e hífen"
               />
             </div>
-            <div className="csw-chan-kind">
+            <div className="csw-chan-kind" style={{ minWidth: 0 }}>
               <Select
                 value={c.kind}
                 onChange={(v) => onUpdate(i, { kind: v as ChannelKind, category: categoryFor(v as ChannelKind) })}
@@ -75,7 +79,7 @@ export function StepChannels({
                 ariaLabel={`Tipo do canal ${i + 1}`}
               />
             </div>
-            <div className="csw-chan-cat">
+            <div className="csw-chan-cat" style={{ minWidth: 0 }}>
               <Select
                 value={c.category}
                 onChange={(v) => onUpdate(i, { category: v })}
@@ -130,21 +134,21 @@ export function StepRoles({
         title="Cargos"
         sub="Quem pode fazer o quê. Os três abaixo vêm prontos — pode deixar como está."
       />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
+      <div style={layout.list}>
         {roles.map((r) => {
           const aberto = expanded === r.key
           return (
-            <div key={r.key} className="csw-role" data-on={r.enabled}>
-              <div className="csw-role-top">
+            <div key={r.key} className="csw-role" style={layout.roleCard(r.enabled)}>
+              <div className="csw-role-top" style={layout.roleTop}>
                 <input
                   type="checkbox"
                   checked={r.enabled}
                   onChange={() => onToggleRole(r.key)}
                   aria-label={`Criar cargo ${r.name}`}
-                  style={{ margin: 0, width: 16, height: 16, cursor: 'pointer', accentColor: ui.accent }}
+                  style={{ margin: 0, width: 16, height: 16, cursor: 'pointer', accentColor: ui.accent, flexShrink: 0 }}
                 />
-                <span className="csw-role-dot" style={{ background: r.color }} />
-                <div className="csw-role-name">
+                <span style={layout.roleDot(r.color)} />
+                <div className="csw-role-name" style={{ flex: 1, minWidth: 0 }}>
                   <TextField
                     value={r.name}
                     onChange={(v) => onRenameRole(r.key, v)}
@@ -162,18 +166,19 @@ export function StepRoles({
                   </span>
                 </Tooltip>
               </div>
-              <div className="csw-role-why">{r.why}</div>
+              <div style={layout.roleWhy}>{r.why}</div>
               {aberto && (
-                <div className="csw-perms">
+                <div className="csw-perms" style={layout.perms}>
                   {(Object.keys(PERMS) as (keyof typeof PERMS)[]).map((key) => {
                     const bit = PERMS[key]
                     const pl = (PERM_LABELS as Record<number, string>)[bit] ?? key
                     return (
-                      <label key={key} className="csw-check">
+                      <label key={key} className="csw-check" style={layout.check}>
                         <input
                           type="checkbox"
                           checked={(r.permissions & bit) !== 0}
                           onChange={() => onTogglePerm(r.key, bit)}
+                          style={{ margin: 0, width: 15, height: 15, flexShrink: 0, cursor: 'pointer', accentColor: ui.accent }}
                         />
                         {pl}
                       </label>
@@ -213,12 +218,11 @@ export function StepRules({ value, onChange }: { value: string; onChange: (v: st
         ariaLabel="Regras do servidor"
         hint="Uma regra por linha. Elas aparecem para quem está pensando em entrar."
       />
-      <div className="csw-count">
+      <div style={layout.count}>
         {value.length}/{LIMITE_REGRAS}
       </div>
     </>
   )
 }
 
-/** Rótulo de tipo de canal, exportado para o resumo lateral. */
 export { KIND_LABEL, StepCap }

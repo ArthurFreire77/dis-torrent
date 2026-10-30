@@ -2,31 +2,35 @@
 //
 // Componente de APRESENTAÇÃO: recebe o estado e devolve mudanças por callback.
 // Toda regra (limite de nome, catálogo de ícones, modelos) vem de `wizardModel`,
-// que é puro e testável. Antes este bloco vivia no meio de um arquivo de 1191
-// linhas com estado, criação e os outros três passos.
+// que é puro e testável.
+//
+// O layout vem de `layout` (INLINE, em `wizardStyles`), não de folha de estilo.
+// Assim rótulo e descrição nunca colam um no outro nem quando o `<style>` não é
+// aplicado — era o defeito de "ServidorSem tema definido… Grudados" num build
+// que perdeu a folha.
 
 import { Ic, type IconName } from '../../shared/icons'
 import { Notice, TextArea, TextField, ui } from '../../shared/ui'
+import { layout } from './wizardStyles'
 import {
   ICON_CATEGORIES,
   LIMITE_NOME,
   MODELOS,
-  type ChannelKind,
   type NameCheck,
 } from './wizardModel'
 
 export function StepCap({ children }: { children: React.ReactNode }) {
-  return <div className="csw-cap">{children}</div>
+  return <div style={layout.cap}>{children}</div>
 }
 
 /** Título + explicação do passo. Fica no conteúdo (abaixo do stepper). */
 export function StepHead({ step, title, sub }: { step: number; title: string; sub: string }) {
   return (
-    <div className="csw-step-head">
-      <span className="csw-step-num" aria-hidden>{step}</span>
+    <div style={layout.stepHead}>
+      <span style={layout.stepNum} aria-hidden>{step}</span>
       <div style={{ minWidth: 0 }}>
-        <div className="csw-step-title">{title}</div>
-        <div className="csw-step-sub">{sub}</div>
+        <div style={layout.stepTitle}>{title}</div>
+        <div style={layout.stepSub}>{sub}</div>
       </div>
     </div>
   )
@@ -59,22 +63,29 @@ export function StepIdentity({
 
       <div>
         <StepCap>Comece por um modelo (opcional)</StepCap>
-        <div className="csw-models">
+        <div style={layout.models} className="csw-models">
           {MODELOS.map((m) => (
             <button
               key={m.id}
               type="button"
-              className="csw-model"
+              className="csw-card"
+              style={layout.card(modeloId === m.id)}
               aria-pressed={modeloId === m.id}
               onClick={() => onModelo(m.id)}
             >
-              <span className="csw-model-row">
-                <span style={{ color: modeloId === m.id ? ui.accent : ui.muted, display: 'flex' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                <span style={{ color: modeloId === m.id ? ui.accent : ui.muted, display: 'flex', flexShrink: 0 }}>
                   <Ic name={m.icon} size={15} />
                 </span>
-                <span className="csw-model-t">{m.label}</span>
+                {/* `display:block` no título e na descrição é obrigatório: como
+                    spans inline eles saíam grudados ("ComunidadeBate-papo…"). */}
+                <span style={{ display: 'block', fontSize: 13, fontWeight: 800, color: ui.heading, ...layout.ellipsis }}>
+                  {m.label}
+                </span>
               </span>
-              <span className="csw-model-d">{m.desc}</span>
+              <span style={{ display: 'block', fontSize: 11, color: ui.muted, lineHeight: 1.45, minWidth: 0 }}>
+                {m.desc}
+              </span>
             </button>
           ))}
         </div>
@@ -118,21 +129,26 @@ export function StepIdentity({
 
       <div>
         <StepCap>Ícone — {ICON_CATEGORIES.find((c) => c.id === iconId)?.label ?? 'Servidor'}</StepCap>
-        <div className="csw-cats" role="group" aria-label="Ícone do servidor">
+        <div style={layout.cats} className="csw-cats" role="group" aria-label="Ícone do servidor">
           {ICON_CATEGORIES.map((c) => (
             <button
               key={c.id}
               type="button"
-              className="csw-cat"
+              className="csw-card"
+              style={layout.catCard(iconId === c.id)}
               aria-pressed={iconId === c.id}
               onClick={() => onIcon(c.id)}
             >
-              <span className="csw-cat-ic">
+              <span style={layout.catIcon(iconId === c.id)}>
                 <Ic name={c.id} size={16} />
               </span>
-              <span className="csw-cat-body">
-                <span className="csw-cat-t">{c.label}</span>
-                <span className="csw-cat-d">{c.desc}</span>
+              <span style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ display: 'block', fontSize: 12, fontWeight: 800, color: ui.heading, lineHeight: 1.3, ...layout.ellipsis }}>
+                  {c.label}
+                </span>
+                <span style={{ display: 'block', fontSize: 11, color: ui.muted, lineHeight: 1.45, marginTop: 2 }}>
+                  {c.desc}
+                </span>
               </span>
             </button>
           ))}
@@ -141,6 +157,3 @@ export function StepIdentity({
     </>
   )
 }
-
-/** Usado pelo passo de canais ao trocar o tipo. */
-export type { ChannelKind }

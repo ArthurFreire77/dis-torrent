@@ -1,16 +1,17 @@
 // Resumo lateral do assistente: prévia do servidor + canais/cargos/regras.
 //
-// Existia dentro do JSX do wizard (1176→1191) e recalculava `validosCount` no
-// meio da renderização. Aqui recebe tudo pronto e só desenha.
+// Layout vem de `layout` (inline) — o resumo é a única confirmação do que está
+// sendo criado, então ele não pode colapsar quando a folha de estilo não carrega.
 
 import { Ic, type IconName } from '../../shared/icons'
 import { ui } from '../../shared/ui'
+import { layout } from './wizardStyles'
 import { KIND_ICON, type RolePreset, type WizardChannel } from './wizardModel'
 
 function SideBox({ icon, title, children }: { icon: IconName; title: string; children: React.ReactNode }) {
   return (
-    <div className="csw-side-box">
-      <div className="csw-side-t">
+    <div style={layout.sideBox}>
+      <div style={layout.sideTitle}>
         <Ic name={icon} size={12} />
         {title}
       </div>
@@ -41,46 +42,46 @@ export function WizardSummary({
   rulesText: string
 }) {
   return (
-    <aside className="csw-side" aria-label="Resumo do servidor">
-      <div className="csw-prev">
-        <span className="csw-prev-ic">
+    <aside className="csw-side" style={layout.side} aria-label="Resumo do servidor">
+      <div style={layout.prev}>
+        <span style={layout.prevIcon}>
           <Ic name={iconId} size={20} />
         </span>
-        <span className="csw-prev-body">
-          <span className="csw-prev-n">{name.trim() || 'Sem nome ainda'}</span>
-          <span className="csw-prev-d">{description.trim() || 'Sem descrição'}</span>
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <span style={layout.prevName}>{name.trim() || 'Sem nome ainda'}</span>
+          <span style={layout.prevDesc}>{description.trim() || 'Sem descrição'}</span>
         </span>
       </div>
 
       <SideBox icon="hash" title="Canais">
-        <div className="csw-list">
-          {channels.length === 0 && <div className="csw-empty">nenhum</div>}
+        <div style={layout.list}>
+          {channels.length === 0 && <div style={layout.empty}>nenhum</div>}
           {channels.map((c, i) => (
-            <div key={i} className="csw-li">
-              <span className="csw-li-i">
+            <div key={i} style={layout.listItem}>
+              <span style={layout.listIcon}>
                 <Ic name={KIND_ICON[c.kind]} size={13} />
               </span>
-              <span style={{ color: channelErrors[i] ? '#ff9c9c' : undefined }}>
+              <span style={{ ...layout.ellipsis, color: channelErrors[i] ? '#ff9c9c' : undefined }}>
                 {c.name || '(sem nome)'}
               </span>
             </div>
           ))}
         </div>
         <div style={{ marginTop: 9, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <span className="csw-tag">{canaisTexto} texto</span>
-          {canaisVoz > 0 && <span className="csw-tag">{canaisVoz} voz</span>}
+          <span style={layout.tag}>{canaisTexto} texto</span>
+          {canaisVoz > 0 && <span style={layout.tag}>{canaisVoz} voz</span>}
         </div>
       </SideBox>
 
       <SideBox icon="shield" title="Cargos">
         {cargosAtivos.length === 0 ? (
-          <div className="csw-empty">nenhum cargo marcado</div>
+          <div style={layout.empty}>nenhum cargo marcado</div>
         ) : (
-          <div className="csw-list">
+          <div style={layout.list}>
             {cargosAtivos.map((r) => (
-              <div key={r.key} className="csw-li">
-                <span className="csw-role-dot" style={{ background: r.color }} />
-                <span>{r.name.trim() || r.key}</span>
+              <div key={r.key} style={layout.listItem}>
+                <span style={layout.roleDot(r.color)} />
+                <span style={layout.ellipsis}>{r.name.trim() || r.key}</span>
               </div>
             ))}
           </div>
@@ -102,7 +103,7 @@ export function WizardSummary({
             {rulesText.trim()}
           </div>
         ) : (
-          <div className="csw-empty">nenhuma — opcional</div>
+          <div style={layout.empty}>nenhuma — opcional</div>
         )}
       </SideBox>
     </aside>

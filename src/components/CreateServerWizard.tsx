@@ -47,7 +47,7 @@ import { StepIdentity } from './server/wizardSteps'
 import { StepChannels, StepRoles, StepRules } from './server/wizardChannelSteps'
 import { WizardSummary } from './server/wizardSummary'
 import { WizardFooter, WizardStepper } from './server/wizardChrome'
-import { css } from './server/wizardStyles'
+import { css, layout } from './server/wizardStyles'
 
 export default function CreateServerWizard({
   open,
@@ -302,8 +302,8 @@ export default function CreateServerWizard({
     // Passo concluído
     return (
       <>
-        <div className="csw-done">
-          <span className="csw-done-ic">
+        <div className="csw-done" style={layout.done}>
+          <span className="csw-done-ic" style={layout.doneIcon}>
             <Ic name="check" size={30} />
           </span>
           <div style={{ fontSize: 19, fontWeight: 900, color: ui.heading }}>Servidor criado</div>
@@ -361,11 +361,12 @@ export default function CreateServerWizard({
       >
         <WizardStepper step={step} visited={visited} busy={busy} onGo={goTo} />
 
-        <div className="csw-cols" ref={mainRef}>
+        <div className="csw-cols" style={layout.cols} ref={mainRef}>
           {/* `role="group"` + `aria-label` para o leitor de tela anunciar a troca
               de contexto, não só a troca de texto. */}
           <div
             className="csw-main"
+            style={layout.main}
             role="group"
             aria-label={concluido ? 'Servidor criado' : `Passo ${step + 1} de 4: Criar servidor`}
           >
