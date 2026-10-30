@@ -48,10 +48,9 @@ import java.io.File
 class UpdaterPlugin(private val activity: android.app.Activity) : Plugin(activity) {
 
   @Command
-  fun installApk(invoke: Invoke) {
+  fun installApk(invoke: Invoke, path: String) {
     try {
-      val path = invoke.getString("path")
-      if (path.isNullOrBlank()) {
+      if (path.isBlank()) {
         invoke.reject("caminho do APK vazio")
         return
       }

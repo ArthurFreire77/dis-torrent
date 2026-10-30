@@ -87,3 +87,22 @@ Write-Host ""
 
 if ($falhas.Count -gt 0) { exit 1 }
 exit 0
+
+# ---------------------------------------------------------------------------
+# ALVO LINUX (WSL). O cargo do Windows NAO compila media_voice.rs/media_video.rs
+# (sao #[cfg(target_os = "linux")]) — erros ali passam batido e so quebram no
+# CI. Use -Linux para rodar o gate de verdade.
+# ---------------------------------------------------------------------------
+if ($Linux) {
+    $distro = wsl -e bash -lc "echo ok" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $falhas.Add('WSL indisponivel (necessario para compilar o alvo Linux)')
+    } else {
+        Gate 'linux: core check+test+clippy+fmt' {
+            wsl -e bash -lc "cd /mnt/e/Programas/dis-torrent/distorrent-core && cargo check --lib && cargo test --lib && cargo clippy --all-targets && cargo fmt --check" 2>&1 | Select-Object -Last 12
+        }
+        Gate 'linux: shell check+fmt' {
+            wsl -e bash -lc "cd /mnt/e/Programas/dis-torrent/src-tauri && cargo check --lib && cargo fmt --check" 2>&1 | Select-Object -Last 8
+        }
+    }
+}

@@ -34,16 +34,54 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:TEMP\node24\node-v24.22.1-win-x64;
 & "$env:TEMP\node24\node-v24.22.1-win-x64\npm.cmd" run lint        # eslint .
 & "$env:TEMP\node24\node-v24.22.1-win-x64\npm.cmd" run test:unit   # node --test tests/index.ts
 & "$env:TEMP\node24\node-v24.22.1-win-x64\npm.cmd" run build       # tsc -b && vite build
-
-cd distorrent-core; cargo check --lib; cargo test --lib; cargo fmt --check
-cd src-tauri;       cargo check --lib; cargo fmt --check
 ```
 
 - Use `npm.cmd`, **nunca** `npm.ps1` (ExecutionPolicy bloqueia).
 - `&&` não funciona no PowerShell: use `;` ou comandos separados.
-- Os testes de mídia (`media_voice*`) são **Linux-only** e não rodam aqui — só
-  no CI. `cargo test --lib` no Windows cobre o resto.
-- Rode `run-verify.ps1` (neste diretório da skill) para o pacote completo.
+- `pwsh` **não** está instalado: use `powershell -NoProfile -ExecutionPolicy Bypass`.
+
+### ARMADILHA GRANDE: o Windows não compila o código Linux
+
+`media_voice.rs`, `media_video.rs` e `media_dsp.rs` são
+`#[cfg(target_os = "linux")]`. Um `cargo check` no Windows **não vê** esses
+arquivos — erros de compilação passam e só aparecem no CI (já quebrou o build
+duas vezes). Para verificar de verdade, use o **WSL**:
+
+```powershell
+wsl -e bash -lc "cd /mnt/e/Programas/dis-torrent/distorrent-core && cargo check --lib && cargo test --lib && cargo clippy --all-targets && cargo fmt --check"
+wsl -e bash -lc "cd /mnt/e/Programas/dis-torrent/src-tauri && cargo check --lib && cargo fmt --check"
+```
+
+O WSL tem ALSA/GStreamer/glib instalados, então **tudo** compila e os testes de
+mídia rodam (188 testes, contra 162 no Windows). Use isso antes de commitar
+qualquer mudança em `media_*` ou em `voice_gate`.
+
+### Android
+
+```powershell
+$env:ANDROID_HOME = "C:\Users\lucas\AppData\Local\Android\Sdk"
+$env:NDK_HOME = "$env:ANDROID_HOME\ndk\27.0.12077973"
+$env:JAVA_HOME = "C:\Users\lucas\jdk-17.0.13+11"
+# 1) checar o alvo (pega erro em bloco cfg(android) do updater/background)
+cargo check --target aarch64-linux-android --lib   # em src-tauri
+# 2) .so + hard link (symlink falha sem Developer Mode) + Gradle
+cargo build --target aarch64-linux-android --release
+```
+
+Depois: `mklink /H` do `libdistorrent_lib.so` para
+`gen/android/app/src/main/jniLibs/arm64-v8a/` e
+`gradlew.bat assembleDebug -x rustBuild*Debug`.
+
+### Empacotar o Windows
+
+```powershell
+npm run tauri build -- --no-bundle          # gera distorent-cli.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1 -SkipBuild
+```
+
+O `.exe` do app é `distorrent.exe` (copiado de `distorent-cli.exe`). Confira
+`ProductVersion` **antes** de publicar — já saiu release com binário antigo.
+Scan obrigatório: `MpCmdRun.exe -Scan -ScanType 3 -File <exe> -DisableRemediation`.
 
 ## Mapa do código
 
@@ -93,16 +131,42 @@ Pontos que já causaram os bugs relatados de "conectado mas não aparece":
 
 ## Auto-update (GitHub Releases)
 
+- **Tela de boot própria** (`src/components/UpdateBootScreen.tsx`): aparece
+  SEMPRE na inicialização e diz o que está acontecendo (procurando / já é a
+  mais nova / baixando / instalando / sem conexão). Teto de 12 s para rede ruim
+  não travar; 3 retentativas com backoff no boot e rechecagem a cada 6 h.
 - `update_check` lê `/releases/latest`, escolhe o asset da plataforma e devolve
   os metadados. A decisão de versão é pura em `updateRules.ts`
-  (`1.1.10 > 1.1.9`; comparar como string inverteria e criaria loop).
+  (`1.1.11 > 1.1.10`; comparar como string inverteria e criaria loop).
 - `update_download` só aceita URL sob `github.com/ArthurFreire77/dis-torrent/releases/download/`,
   extensão por plataforma e confere o `digest` SHA-256 antes de gravar.
 - `update_apply`: Windows executa o Inno com `/SILENT /CLOSEAPPLICATIONS
-  /RESTARTAPPLICATIONS` (instala e reabre); Linux abre o instalador; Android
-  manda para o link (instalar APK sozinho exige permissão que o app não tem).
+  /RESTARTAPPLICATIONS` (instala e reabre); Linux abre o instalador; **Android
+  chama `plugin:updater|installApk`** (Kotlin) que entrega o APK ao instalador
+  do sistema por `content://` (FileProvider + `REQUEST_INSTALL_PACKAGES`).
+  O toque de confirmação é obrigatório e não dá para contornar fora da loja.
 - Falha de rede **não** bloqueia o boot; instalador que falha é marcado em
   `update.failed` para não reiniciar em loop.
+
+## Abrir junto com o Windows
+
+`background.rs::init` liga o autostart no **primeiro** boot (plugin oficial
+`tauri-plugin-autostart`) e grava `ui.autostart_decided` quando o usuário mexe
+no checkbox em `SystemNotificationSettings` — depois disso nada é automático.
+Publicar uma release nova NÃO precisa mexer nisso.
+
+## Publicar (quando o workflow falhar)
+
+Se o job `Release` quebrar, publique à mão com a credencial do git:
+
+```powershell
+$cred = "protocol=https`nhost=github.com`n`n" | git credential fill
+# POST /repos/<owner>/<repo>/releases  (tag limpa, prerelease=false)
+# POST https://uploads.github.com/.../releases/<id>/assets?name=<arquivo>
+```
+
+Confira depois em `GET /releases/latest` que o asset está lá **com `digest`** —
+sem `digest` o app se recusa a executar o instalador (por segurança).
 
 ## Release
 
