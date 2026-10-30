@@ -75,8 +75,39 @@ foreach ($path in $arquivos) {
     $tamanho = [math]::Round((Get-Item $path).Length / 1MB, 2)
     Write-Host "  subindo $nome ($tamanho MB)"
     $url = "https://uploads.github.com/repos/ArthurFreire77/dis-torrent/releases/$releaseId/assets?name=$([uri]::EscapeDataString($nome))"
-    $up = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -ContentType 'application/octet-stream' -InFile $path -TimeoutSec 1800
-    Write-Host "    -> $($up.name) $([math]::Round($up.size/1MB,2)) MB digest=$($up.digest)"
+
+    # Arquivo grande (>90 MB) derruba o `Invoke-RestMethod` com "conexao
+    # subjacente fechada" no meio do envio. O `curl` do sistema retenta melhor e
+    # da' diagnostico claro; o RestMethod fica como reserva para maquinas sem ele.
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    $ok = $false
+    for ($tentativa = 1; $tentativa -le 3 -and -not $ok; $tentativa++) {
+        if ($curl) {
+            & $curl.Source -sS -X POST -H "Authorization: Bearer $tok" `
+                -H 'Accept: application/vnd.github+json' -H 'User-Agent: distorrent-release' `
+                -H 'Content-Type: application/octet-stream' `
+                --data-binary "@$path" --max-time 3600 -o "$env:TEMP\gh-upload.json" -w '%{http_code}' $url | Out-Null
+            $code = $LASTEXITCODE
+            $resp = Get-Content "$env:TEMP\gh-upload.json" -Raw -ErrorAction SilentlyContinue
+            if ($code -eq 0 -and $resp -match '"name"') {
+                $info = $resp | ConvertFrom-Json
+                Write-Host "    -> $($info.name) $([math]::Round($info.size/1MB,2)) MB digest=$($info.digest)"
+                $ok = $true
+            } else {
+                Write-Host "    tentativa $tentativa falhou (curl=$code) - retentando"
+            }
+        } else {
+            try {
+                $up = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -ContentType 'application/octet-stream' -InFile $path -TimeoutSec 1800
+                Write-Host "    -> $($up.name) $([math]::Round($up.size/1MB,2)) MB digest=$($up.digest)"
+                $ok = $true
+            } catch {
+                Write-Host "    tentativa $tentativa falhou - retentando"
+            }
+        }
+        if (-not $ok) { Start-Sleep -Seconds (5 * $tentativa) }
+    }
+    if (-not $ok) { throw "nao foi possivel subir $nome apos 3 tentativas" }
 }
 
 # 3) confere o resultado final
