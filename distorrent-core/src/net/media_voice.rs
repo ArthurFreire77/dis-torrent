@@ -991,6 +991,8 @@ const SDP_WAIT: Duration = Duration::from_millis(1500);
 const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
 /// Teto de frames PLC seguidos: depois de um buraco longo, mascarar tudo consome
 /// CPU sem recuperar audio.
+/// (mantido para os testes de contrato que citam o limite histórico)
+#[allow(dead_code)]
 const MAX_PLC_BURST: u32 = 50;
 
 /// Buraco (`seq` pulado) acima disto NÃO é perda de rede: é mute/desmute do
@@ -1182,6 +1184,7 @@ impl Shared {
             packets_in: self.packets_in.load(Ordering::Relaxed),
             packets_out: self.packets_out.load(Ordering::Relaxed),
             write_errors: self.write_errors.load(Ordering::Relaxed),
+            plc_frames: self.plc_frames.load(Ordering::Relaxed),
             decode_errors: self.decode_errors.load(Ordering::Relaxed),
             rtt_ms: *self.rtt_ms.lock().unwrap(),
             mic_error: self::audio::hub().mic_error(),
@@ -1193,6 +1196,14 @@ impl Shared {
             video_packets_in: Some(self.video_packets_in.load(Ordering::Relaxed)),
             frames_in: Some(self.frames_in.load(Ordering::Relaxed)),
             frames_out: Some(self.frames_out.load(Ordering::Relaxed)),
+            // Contagem por estado (ver `peers_connected` em `VoiceStats`):
+            // `stats()` é de UMA sessão, então aqui é 1/1 quando conectada.
+            peers_connected: Some(if self.state.lock().unwrap().as_str() == "connected" {
+                1
+            } else {
+                0
+            }),
+            peers_total: Some(1),
         }
     }
 }
@@ -1339,6 +1350,10 @@ impl PeerConnectionEventHandler for H {
                 self.sh.connected_flag.store(false, Ordering::SeqCst);
             }
             RTCPeerConnectionState::New => self.sh.set_state("idle"),
+            // `RTCPeerConnectionState` é `#[non_exhaustive]`: sem este braço o
+            // crate não compila no Linux. Novos estados do rtc ficam sem efeito
+            // (o watchdog de mídia cobre).
+            _ => {}
         }
     }
 
@@ -2058,10 +2073,12 @@ mod stats_aggregation_tests {
             jitter_depth_ms: 50,
             packets_in: 2,
             packets_out: 3,
+            write_errors: 0,
             plc_frames: 0,
             decode_errors: 0,
             rtt_ms: Some(10),
             mic_error: None,
+            speaker_error: None,
             video_state: Some(state.into()),
             video_codec: source.map(|_| "video/VP8".into()),
             video_source: source.map(str::to_owned),
@@ -2320,24 +2337,23 @@ async fn build_session(
     // para sempre (o callback de playout seguia dando lock nela) e a assinatura
     // de mic nunca era liberada — o microfone parecia "ocupado" e o diagnóstico
     // de `subscriber_count` nunca voltava a zero.
-    struct LimpezaNoErro<'a> {
-        hub: &'a Arc<audio::AudioHub>,
+    struct LimpezaNoErro {
         inbox_id: Option<u64>,
         mic_id: u64,
     }
-    impl Drop for LimpezaNoErro<'_> {
+    impl Drop for LimpezaNoErro {
         fn drop(&mut self) {
-            // `armed` implícito: os campos viram `None`/0 no fim do sucesso.
+            // Desarma quando o build dá certo: os campos viram `None`/0.
+            let hub = audio::hub();
             if self.mic_id != 0 {
-                self.hub.unsubscribe(self.mic_id);
+                hub.unsubscribe(self.mic_id);
             }
             if let Some(id) = self.inbox_id {
-                self.hub.unregister_inbox(id);
+                hub.unregister_inbox(id);
             }
         }
     }
     let mut limpeza = LimpezaNoErro {
-        hub: &hub,
         inbox_id: Some(inbox_id),
         mic_id: 0,
     };
@@ -2622,9 +2638,10 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             // inteira, com `state = "connected"` e `packets_out = 0`.
             // Agora ficamos tentando assinar por até 60 s; o loop dorme, então
             // não gira CPU.
+            let hub_mic = self::audio::hub();
             for _ in 0..30 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                if let Some(rx) = hub.subscribe().ok() {
+                if let Some((_, rx)) = hub_mic.subscribe().ok() {
                     mic_rx = Some(rx);
                     eprintln!(
                         "[voice] {}/{}: microfone passou a existir — envio liberado",
@@ -2679,7 +2696,7 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
         // para cancelar: o custo seria CPU e o risco de o filtro adaptativo
         // aprender a voz local. `RefRing` compartilhado entre as sessões porque
         // a referência é o MESMO áudio tocando para todos os peers.
-        let hub = crate::net::media_voice::audio::hub();
+        let hub = self::audio::hub();
         let aec_ref = hub.play_ref();
         let mut aec = crate::net::media_dsp::EchoCanceller::new(aec_ref.clone(), hub.has_speaker());
         if aec.is_enabled() {
@@ -3558,10 +3575,12 @@ mod aggregate_priority_tests {
             jitter_depth_ms: 20,
             packets_in: 1,
             packets_out: 1,
+            write_errors: 0,
             plc_frames: 0,
             decode_errors: 0,
             rtt_ms: Some(5),
             mic_error: None,
+            speaker_error: None,
             video_state: None,
             video_codec: None,
             video_source: None,

@@ -5983,6 +5983,8 @@ impl NetworkEngine {
             return false;
         };
         let (cand, mid) = unwrap_wire_candidate(cand, mid);
+        // Clone para o log: o `spawn_blocking` move `mid` para dentro da closure.
+        let mid_log = mid.clone();
         let (cid, pfp) = (call_id.to_string(), peer_fp.to_string());
         let res =
             tokio::task::spawn_blocking(move || v.add_ice_candidate(&cid, &pfp, &cand, &mid)).await;
@@ -5993,7 +5995,7 @@ impl NetworkEngine {
             tracing::debug!(
                 call_id = %call_id,
                 peer = %peer_fp,
-                mid = %mid,
+                mid = %mid_log,
                 "candidato ICE nativo recusado (formato do fio inválido)"
             );
         }
@@ -6460,7 +6462,6 @@ impl NetworkEngine {
     }
 
     /// Re-anuncia a NOSSA presença em todos os canais de voz em que estamos.
-    ///
     /// BUG QUE ISTO CORRIGE (o "conectado mas ninguém aparece"): `voice_join`
     /// mandava `VoiceJoin` uma única vez e só para membros com link `Online`
     /// naquele instante. `EngineCmd::SendToPeer` para quem não tem link é
@@ -6473,7 +6474,7 @@ impl NetworkEngine {
     /// Idempotente no receptor: `set_voice_state` é upsert e o evento
     /// `voice_joined` é deduplicado no front (`addVoiceParticipant`).
     /// Frames pequenos, uma vez a cada tick de 15 s — custo desprezível.
-    fn reannounce_voice_channels(&self) {
+    fn reannounce_voice_channels(self: &Arc<Self>) {
         let me = self.identity.fingerprint.clone();
         let mine = match self.store.my_voice_states(&me) {
             Ok(v) => v,
