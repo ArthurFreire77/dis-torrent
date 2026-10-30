@@ -1,5 +1,63 @@
 # CHANGELOG
 
+## [1.1.13-pre-alpha] — 2026-10-30
+
+### "Conectando" eterno, amigo online que some, e só voltava fechando o app
+
+Relato de campo: o app ficava em CONECTANDO, o amigo aparecia online e depois
+sumia, e o normal só voltava reiniciando o app.
+
+**Causa 1 — trava do relay nunca liberada.** `relay_dial_stream` usa o mapa
+`relay_in` como trava anti-duplicação do handshake (dois handshakes com chaves
+efêmeras diferentes viram sessões half-open). Quando o handshake TERMINAVA —
+com sucesso, timeout ou fingerprint errado — a entrada continuava no mapa. A
+trava então devolvia `None` em todo ciclo e o laço de reconexão girava em
+backoff para sempre. Reiniciar zerava o mapa, e daí "fecho e abro e volta".
+
+Agora a entrada é liberada em todo caminho de saída, comparando o CANAL e não só
+o fingerprint: um respondente pode ter substituído a entrada (mesmo peer,
+sentido inverso) e removê-la mataria a sessão dele.
+
+**Causa 2 — estado congelado com a janela escondida.** A leitura de estado
+(`useNetwork.refresh`) dava `return` cedo quando `document.hidden` — exatamente
+a situação de quem minimiza para a bandeja. O app seguia conectado e trocando
+mensagens, mas o último estado lido ficava parado na tela. Agora só o poll é
+pausado quando oculto; evento do motor força a leitura, e voltar para a frente
+relê na hora.
+
+### Grupos: "0 membros", sem ver quem está, sem renomear
+
+O contador lia `localStorage['distorrent:extras:group_members:<id>']` na mão —
+chave que só existe no MODO NAVEGADOR. No app nativo o roster está no SQLite,
+então o número era sempre 0 e não havia tela para ver os membros.
+
+Agora o contador vem do motor, e clicar no nome do grupo abre um painel (modal no
+desktop, sheet no mobile) que lista os membros com nome legível, copia o
+fingerprint, remove alguém (menos você, que o core recusaria) e adiciona amigos
+em um toque. Renomear o grupo propaga para todos.
+
+Sem frame novo no protocolo: `GroupCreated` já carrega o estado completo do grupo
+e o receptor substitui o roster — remover e renomear usam o mesmo caminho de
+sincronização que já existia.
+
+### Limpeza
+
+- `src/services/diagLog.ts` (132 linhas) removido: código morto, nenhuma
+  referência em lugar nenhum.
+- `scripts/find-orphans.mjs` prova o órfão — e mostrou que dois módulos que
+  pareciam mortos devem ficar: `shared/theme.ts` (paleta canônica, só o teste
+  importa hoje) e `host/`/`aec-probe/` (ferramentas documentadas).
+- ~1,2 GB de artefatos removidos: `src-tauri/target/release-notes/` (resíduo com
+  dois `.exe` antigos e backups de config) e os `target/` de `host` e
+  `aec-probe`. Os fontes ficaram.
+
+### Verificação
+
+- Rust: `cargo test --lib` **190/190** (eram 188 — 2 testes novos travam a
+  liberação da trava e a sobrevivência da entrada de outro dono),
+  `cargo fmt --check` verde.
+- Web: `typecheck` 0, `lint` 0, **unit 229/229**, `build` OK.
+
 ## [1.1.12-pre-alpha] — 2026-10-30
 
 ### Atualização automática: a janela que abria e fechava em loop
