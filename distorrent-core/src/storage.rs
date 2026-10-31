@@ -1894,6 +1894,33 @@ impl Store {
         Ok(())
     }
 
+    /// Canais de voz em que `fp` aparece — só LEITURA (não apaga nada).
+    pub fn peer_voice_states(&self, fp: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.locked();
+        let mut st =
+            conn.prepare("SELECT community_id,channel_id FROM voice_states WHERE fp=?1")?;
+        let rows = st
+            .query_map(params![fp], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Remove a linha de voz de UM canal (o peer caiu daquele canal).
+    pub fn drop_peer_voice_state(
+        &self,
+        community_id: &str,
+        channel_id: &str,
+        fp: &str,
+    ) -> Result<()> {
+        self.locked().execute(
+            "DELETE FROM voice_states WHERE community_id=?1 AND channel_id=?2 AND fp=?3",
+            params![community_id, channel_id, fp],
+        )?;
+        Ok(())
+    }
+
     /// Remove linhas de voz de OUTRO fp (peer caiu sem VoiceLeave e ficava
     /// "na voz" para sempre) e devolve os canais de onde ele saiu.
     pub fn drop_peer_voice_states(&self, fp: &str) -> Result<Vec<(String, String)>> {

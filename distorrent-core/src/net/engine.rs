@@ -7029,33 +7029,44 @@ impl NetworkEngine {
     /// para sempre no canal (e, no Linux, o `voice_join` ainda abria sessão
     /// nativa contra esse fingerprint morto, que nunca conectava e mantinha o
     /// agregado em `failed`).
+    ///
+    /// SÓ LIMPA SE A ROTA ESTIVER MORTA. `PeerOffline` é emitido a cada queda
+    /// da sessão de TRANSPORTE (troca de rede, re-eleição do relay, backoff) e
+    /// o RTP é independente dela: apagar a linha aqui fazia o participante
+    /// sumir do canal e voltar ~15 s depois (quando o re-anúncio chegava),
+    /// mesmo com o áudio fluindo. Era o "aparece e desaparece" do roster.
     fn drop_voice_presence_of(&self, peer_fp: &str) {
-        let Ok(canais) = self.store.drop_peer_voice_states(peer_fp) else {
+        let Ok(canais) = self.store.peer_voice_states(peer_fp) else {
             return;
         };
         for (community_id, channel_id) in canais {
+            // Na rota NATIVA dá para PROVAR se a mídia continua viva; nas
+            // outras plataformas o core não vê o RTP da WebView, então a
+            // presença segue a sessão (e o re-anúncio de 15 s a restaura).
             #[cfg(target_os = "linux")]
-            {
+            let rota_viva = {
                 let call_id = format!("voice-{community_id}-{channel_id}");
-                // NÃO derruba a mídia se a rota está VIVA.
-                //
-                // `PeerOffline` é emitido a cada queda da sessão de
-                // TRANSPORTE (troca de rede, re-eleição de relay, backoff) —
-                // e o RTP do WebRTC é independente dela. Fechar a
-                // PeerConnection aqui fazia a voz de uma pessoa sumir por
-                // ~15 s (até o re-anúncio refazer offer/answer/ICE) mesmo com
-                // o áudio fluindo perfeitamente. Só fechamos quando a própria
-                // sessão nativa já não está conectada.
-                let rota_viva = self
+                let viva = self
                     .voice_media()
                     .and_then(|v| v.stats_peer(&call_id, peer_fp))
                     .map(|s| s.state == "connected")
                     .unwrap_or(false);
-                if !rota_viva {
+                if !viva {
                     self.voice_hangup_peer(&call_id, peer_fp);
                     self.voice_forget_peer(&call_id, peer_fp);
                 }
+                viva
+            };
+            #[cfg(not(target_os = "linux"))]
+            let rota_viva = false;
+            // Rota viva = a pessoa AINDA está no canal (o transporte piscou,
+            // a mídia não). Manter a linha e não emitir VoiceLeft.
+            if rota_viva {
+                continue;
             }
+            let _ = self
+                .store
+                .drop_peer_voice_state(&community_id, &channel_id, peer_fp);
             let _ = self.events.send(EngineEvent::VoiceLeft {
                 community_id,
                 channel_id,
@@ -14533,6 +14544,7 @@ mod relay_lock_tests {
     }
 }
 
+#[cfg(test)]
 mod call_queue_tests {
     use super::*;
     use crate::protocol::SecureFrame;
@@ -14610,6 +14622,47 @@ mod call_queue_tests {
             mapa.get("peer-b").map(|q| q.is_empty()).unwrap_or(true),
             "o flush precisa drenar a fila da chamada"
         );
+    }
+
+    /// Presença de voz é do CANAL, não do transporte: `PeerOffline` dispara a
+    /// cada re-eleição de relay/troca de rede. Apagar a linha nessa hora fazia
+    /// o participante sumir do canal e voltar ~15s depois (o "aparece e
+    /// desaparece"). Só some quando a linha realmente não existe mais.
+    #[test]
+    fn peer_offline_nao_apaga_presenca_de_quem_nao_esta_no_canal() {
+        let (e, _d) = mk("voice-presence");
+        // Sem linha de voz: nada a apagar, nada a anunciar.
+        assert!(e
+            .store
+            .peer_voice_states("peer-sem-voz")
+            .unwrap()
+            .is_empty());
+        e.drop_voice_presence_of("peer-sem-voz");
+        assert!(e
+            .store
+            .peer_voice_states("peer-sem-voz")
+            .unwrap()
+            .is_empty());
+    }
+
+    /// A limpeza por CANAL remove só aquele canal (antes apagava o fp inteiro,
+    /// derrubando a presença legítima dele em outro servidor).
+    #[test]
+    fn limpeza_de_presenca_e_por_canal() {
+        let (e, _d) = mk("voice-presence-2");
+        e.store
+            .set_voice_state("c1", "canal-a", "peer-x", false, false)
+            .unwrap();
+        e.store
+            .set_voice_state("c2", "canal-b", "peer-x", false, false)
+            .unwrap();
+        assert_eq!(e.store.peer_voice_states("peer-x").unwrap().len(), 2);
+        e.store
+            .drop_peer_voice_state("c1", "canal-a", "peer-x")
+            .unwrap();
+        let restou = e.store.peer_voice_states("peer-x").unwrap();
+        assert_eq!(restou.len(), 1, "o outro canal precisa sobreviver");
+        assert_eq!(restou[0], ("c2".to_string(), "canal-b".to_string()));
     }
 
     /// BUG do "as vezes nao pega": a fila descartava o frame MAIS ANTIGO —
