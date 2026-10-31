@@ -904,12 +904,12 @@ fn net_diag(state: State<AppState>) -> Result<NetDiagView, String> {
     })
 }
 
+/// Diagnóstico honesto das pernas do relay: com motor respeita o modo de
+/// privacidade (probe via SOCKS5); sem motor, probe direto.
 #[tauri::command]
 async fn relay_status(
     state: State<'_, AppState>,
 ) -> Result<Vec<distorrent_core::net::relay::RelayLegStatus>, String> {
-    /// Diagnóstico honesto das pernas do relay: com motor respeita o modo de
-    /// privacidade (probe via SOCKS5); sem motor, probe direto.
     let engine = state
         .engine
         .lock()
