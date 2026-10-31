@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## [1.1.20-pre-alpha] - 2026-10-31
+
+### Ligar e o outro lado não tocar
+
+Você ligava, ficava em **"Chamando…"** e o telefone do outro lado nunca tocava.
+A segunda ligação funcionava. Às vezes só reiniciando o app.
+
+Duas causas no mesmo caminho:
+
+**1. O convite era enviado uma única vez e não havia retentativa.** Quando o
+canal da sessão já estava morto (writer encerrado, sessão meio-aberta que ainda
+reporta `Online`), o envio falhava e o frame **ia para o nada** — só mensagens de
+texto tinham tratamento de entrega. O convite agora volta para a fila e sai na
+sessão nova, e o chamador **repete o ring a cada 6 s** enquanto a chamada não
+conecta. O receptor deduplica por `(call_id, peer)`, então o toque não reinicia
+nem empilha aviso.
+
+A offer pendente também é reenviada: convite recebido sem offer fazia a pessoa
+atender e ficar **muda**.
+
+### Participante sumindo do canal e voltando 15 s depois
+
+`drop_voice_presence_of` apagava a presença de voz do peer a cada queda de
+**transporte** (troca de rede, re-eleição de relay, backoff) **antes** de olhar
+se a mídia continuava no ar. O RTP não depende da sessão de transporte, então a
+pessoa desaparecia do canal com o áudio fluindo e voltava no re-anúncio seguinte
+— o "aparece e desaparece" do roster.
+
+Agora, no caminho nativo, a rota é consultada primeiro: viva = a pessoa continua
+no canal, sem `VoiceLeft` e sem derrubar a mídia.
+
+### Presença apagada em todos os servidores de uma vez
+
+A limpeza apagava o fingerprint de **todos** os canais ao mesmo tempo. Um único
+`PeerOffline` derrubava presença legítima em outro servidor. A limpeza passou a
+ser por canal (`peer_voice_states` para ler, `drop_peer_voice_state` para apagar
+um canal só).
+
+### Chamada acabava quando a penúltima pessoa saía
+
+Relação real: 5 pessoas, uma saiu, outra saiu e a chamada **terminou para
+todos**. A causa era recalcular a "coletividade" com o roster **já reduzido**:
+sair o segundo deixava só você, a regra dizia "isto é uma chamada 1:1" e
+encerrava a sala. Coletividade é propriedade da SALA, não do número de pessoas
+no instante da checagem — agora é travada na primeira vez em que foi verdadeira
+e a decisão de continuar é uma função pura (`leaveOutcome`, com testes).
+
+### "Já existe uma chamada em andamento" sem haver chamada
+
+O gate que impede duas chamadas usava o estado em memória. Se uma saída falhava
+no meio (rede caiu, canal que não respondeu), o estado ficava preso e o app
+recusava **toda** chamada nova — sem saída pela interface. Agora existe
+`forceReset()`, que derruba PCs, microfones, timers e a sala anunciada sem
+pedir nada ao core, e o aviso ganha um botão **Destravar chamada**.
+
+### Sair do canal de voz deixava a sala no ar
+
+`leaveVoice` não passava pelo `cleanup`, então fechava o estado sem fechar o
+anúncio: os outros continuavam vendo "Entrar" numa chamada que não existia.
+
+### Outros
+
+- Entrar numa sala anunciada, áudio ao parar o compartilhamento de tela e
+  amizade entre aparelhos.
+- Botão inferior esquerdo abre **Sair do app** / **Minimizar (continuar)** em vez
+  de fazer logout.
+- Script `scripts/find-orphans.mjs`: acha código-fonte sem importador (0 órfãos
+  hoje).
+
 ## [1.1.19-pre-alpha] — 2026-10-31
 
 ### A chamada acabava quando a penúltima pessoa saía
