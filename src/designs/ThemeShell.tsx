@@ -2692,6 +2692,23 @@ export default function ThemeShell({ designId }: {designId:string}){
           {error && (
             <div style={{ margin: '10px 16px 0', background: '#2a1518', border: `1px solid ${t.red}55`, color: '#ff9c9c', fontSize: 12, padding: '8px 12px', borderRadius: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
               {error}
+              {/* SAÍDA HONESTA: se o gate de "já existe chamada" travou (estado
+                  preso), o usuário não tem como encerrar pela UI. Este botão
+                  limpa tudo à força em vez de deixar o app inutilizável. */}
+              {/chamada em andamento/i.test(error) && (
+                <button
+                  type="button"
+                  data-testid="force-reset-call"
+                  onClick={async () => {
+                    try { await callManager.forceReset() } catch { /* limpa o que der */ }
+                    setError(null)
+                    setNotice('estado da chamada limpo — tente de novo')
+                  }}
+                  style={{ marginLeft: 8, background: t.red, color: '#fff', border: 'none', padding: '5px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800, whiteSpace: 'nowrap' }}
+                >
+                  Destravar chamada
+                </button>
+              )}
               <button onClick={() => setError(null)} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#ff9c9c', cursor: 'pointer' }}>x</button>
             </div>
           )}
@@ -3512,7 +3529,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </>
               )}
             </div>
-            <button onClick={() => callManager.leave()} data-testid="call-leave" aria-label="Sair da chamada" title="Sair da chamada" style={{ width: 64, height: 48, borderRadius: 24, border: 'none', background: t.red, color: '#fff', cursor: 'pointer', fontWeight: 800, fontSize: 13 }}>Sair</button>
+            <button onClick={() => { void callManager.leave() }} data-testid="call-leave" aria-label="Sair da chamada" title="Sair da chamada" style={{ width: 64, height: 48, borderRadius: 24, border: 'none', background: t.red, color: '#fff', cursor: 'pointer', fontWeight: 800, fontSize: 13 }}>Sair</button>
           </div>
         </div>
       )}
@@ -3625,13 +3642,13 @@ export default function ThemeShell({ designId }: {designId:string}){
         <QuitDialog
           canQuit={services.kind === 'native'}
           onClose={() => setShowQuitMenu(false)}
-          onBackground={async () => {
-            // Encerra a chamada/mic antes de esconder: processo na bandeja não
-            // pode continuar publicando áudio de alguém que saiu da tela.
+          onMinimize={async () => {
             try { await callManager.leave() } catch { /* sem chamada */ }
             try { await services.appHideToTray() } catch (e: any) { setError(String(e?.message ?? e)) }
           }}
           onQuit={async () => {
+            // Encerra a chamada antes: microfone/câmera não podem ficar presos
+            // depois que o processo morre (no Android o device continuaria em uso).
             try { await callManager.leave() } catch { /* sem chamada */ }
             try { await services.appQuit() } catch (e: any) { setError(String(e?.message ?? e)) }
           }}

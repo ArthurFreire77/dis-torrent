@@ -4,7 +4,7 @@ import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
 import { setCallVideoSending } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
-import { isCollectiveRoom } from './callRoomRules'
+import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
 import type { VoiceMediaStats } from './models'
 import {
@@ -976,6 +976,12 @@ export class CallManager {
   private leavingCalls = new Set<string>()
   /** Conversa cuja sala de chamada estamos anunciando (fecha ao sair). */
   private roomConvId: string | null = null
+  /**
+   * A chamada atual é COLETIVA? Travado no primeiro momento em que foi true.
+   * Recalcular com o roster já reduzido fazia a chamada acabar quando a
+   * penúltima pessoa saía.
+   */
+  private collectiveRoom = false
   /** Renova o anúncio da sala (participantes mudam durante a chamada). */
   private roomTimer: ReturnType<typeof setInterval> | null = null
   private connectTimer: ReturnType<typeof setTimeout> | null = null
@@ -1236,9 +1242,21 @@ export class CallManager {
           // de todos ("se tiver um cidadão não deve acabar"). O que decide é
           // gente no roster: mais de 2 (eu + 2) = sala coletiva.
           const fp = String((ev as { from_fp?: string }).from_fp ?? '')
-          const coletiva = this.isCollectiveCall(st)
+          // TRAVA DE COLETIVIDADE: calculada uma vez, quando a sala nasce.
+          // Recalcular aqui usava o roster JÁ reduzido: numa sala de 5, a
+          // segunda saída deixava só eu, a regra dizia "1:1" e encerrava a
+          // chamada de todos. `collectiveRoom` só sobe para true.
+          if (this.isCollectiveCall(st)) this.collectiveRoom = true
           const saiuEu = !!fp && fp === this.myFp
-          if (coletiva && !saiuEu && !wasIncoming) {
+          // Quem mais continua na sala (fora eu e quem saiu)?
+          const outros = (st.participants ?? []).filter(
+            (p) => !!p.fp && p.fp !== this.myFp && p.fp !== fp,
+          )
+          const decisao = leaveOutcome({
+            collective: this.collectiveRoom,
+            othersRemain: outros.length > 0,
+          })
+          if (decisao === 'keep' && !saiuEu) {
             if (fp && fp !== this.myFp) {
               this.pendingOffers.delete(fp)
               try { this.pcs.get(fp)?.close() } catch { /* fecha só este par */ }
@@ -1249,6 +1267,8 @@ export class CallManager {
               this.pendingIce.delete(fp)
               const cur = this.state
               if (cur && removeVoiceParticipant(cur.participants, fp)) {
+                // A sala mudou: quem fica precisa anunciar a lista nova.
+                try { this.publishRoom() } catch { /* best-effort */ }
                 this.onUpdate({ ...cur })
               }
               this.onCallNotice?.(`${fp.slice(0, 8)} saiu da chamada`)
@@ -2015,6 +2035,10 @@ export class CallManager {
       this.relayActive = false
       this.relayManual = false
       this.relayReason = null
+      // Nova chamada: a trava de coletividade recomeça do zero. Sem isto, uma
+      // sala de grupo anterior marcava toda DM seguinte como coletiva (e ela
+      // nunca encerrava quando o par saía).
+      this.collectiveRoom = false
     } catch { /* nunca derruba a chamada */ }
   }
 
@@ -2775,9 +2799,79 @@ export class CallManager {
     return null
   }
 
+  /**
+   * ENCERRAR À FORÇA: limpa estado local mesmo sem conseguir falar com o core.
+   *
+   * Existe porque o gate de "já existe uma chamada em andamento" pode ficar
+   * preso (arena/canal que não responde, `leave` que falhou no meio), e aí o
+   * usuário não conseguia entrar em NENHUMA chamada nova — sem saída pela UI.
+   * Aqui não perguntamos nada: derruba PCs, mics, timers e a sala anunciada.
+   */
+  async forceReset(): Promise<void> {
+    const st = this.state
+    const cid = st?.callId
+    this.leavingCalls.add(cid ?? '__force__')
+    try {
+      // Avisa o outro lado (melhor esforço) e segue: a UI precisa destravar.
+      if (cid) {
+        try {
+          if (cid.startsWith('voice-')) {
+            const ch = st?.convId
+            const community = ch && cid.endsWith(`-${ch}`)
+              ? cid.slice('voice-'.length, cid.length - `-${ch}`.length)
+              : ''
+            if (community && ch) await services.voiceLeave(community, ch).catch(() => {})
+          } else {
+            await services.callEnd(cid).catch(() => {})
+          }
+        } catch { /* sem rede/core: ainda assim limpamos */ }
+      }
+      this.stopOutgoingWatchdog()
+      this.stopIncomingWatchdog()
+      this.stopConnectWatchdog()
+      this.stopReconnectWatchdog()
+      this.clearIceRestartTimers()
+      this.stopNativeVoiceMonitor()
+      this.stopQualityMonitor()
+      this.stopRosterReconcile()
+      this.stopCallForeground()
+      this.pcs.forEach((pc) => { try { pc.close() } catch { /* ignore */ } })
+      this.pcs.clear()
+      this.localStream?.getTracks().forEach((t) => { try { t.stop() } catch { /* ignore */ } })
+      this.localStream = null
+      this.resetScreenRuntime()
+      this.resetRelayForNewCall()
+      this.pendingIce.clear()
+      this.localIce.clear()
+      this.pendingOffers.clear()
+      this.acceptedCalls.clear()
+      this.lastRemoteOffer.clear()
+      this.iceReports.clear()
+      this.iceRestarts.clear()
+      this.accepting.clear()
+      this.closeRoom()
+      // NÃO marca em `endedCalls`: uma chamada NOVA com outro id precisa passar;
+      // o id travado só serve para barrar aceite tardio do mesmo id, e ele é
+      // justamente o que impede a próxima — então esquecemos.
+      if (cid) this.endedCalls.delete(cid)
+      this.state = null
+      this.lastPhase = 'ended'
+      this.lastFailureCause = null
+      this.qualityNotice = null
+      this.onUpdate(null as any)
+    } finally {
+      this.leavingCalls.delete(cid ?? '__force__')
+    }
+  }
+
   async leave() {
     const st = this.state
-    if (!st) return
+    if (!st) {
+      // Sem estado mas com sala anunciada: o anúncio ficava órfão e os outros
+      // continuavam vendo "Entrar" numa chamada que não existe mais.
+      this.closeRoom()
+      return
+    }
     const cid = st.callId
     // No navegador `callEnd` também ecoa pelo event bus local. Sem esta trava,
     // o eco chamava `leave()` de novo antes do primeiro cleanup terminar.
@@ -2849,7 +2943,14 @@ export class CallManager {
       this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
       this.resetScreenRuntime()
       this.localStream = null
+      // SALA ANUNCIADA: sem isto ela continuava viva para os outros (era o
+      // "saí da chamada e ainda aparece Entrar"). `leaveVoice` não passa pelo
+      // `cleanup`, então fechar aqui é obrigatório.
+      this.closeRoom()
       this.state = null
+      // A fase também precisa voltar a ociosa: `isCallPhaseActive` é o gate de
+      // "posso começar outra chamada" e ficava travado depois de sair do canal.
+      this.lastPhase = 'ended'
       this.onUpdate(null as any)
     }
   }

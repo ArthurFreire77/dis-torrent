@@ -1,23 +1,22 @@
-// Fechar o DisTorrent: segundo plano (continua recebendo chamadas) ou sair.
+// Fechar o DisTorrent.
 //
-// O botão inferior esquerdo fazia LOGOUT (`setPhase('lock')`), o que derrubava a
-// sessão por engano — o dono pediu que ele feche o programa mantendo a conta.
-// Ficar em segundo plano é o padrão útil: o motor segue conectado na bandeja
-// (no Android, o serviço de primeiro plano continua), então chamada e mensagem
-// ainda chegam.
+// O botão inferior esquerdo fazia LOGOUT (`setPhase('lock')`), derrubando a
+// sessão por engano. O dono pediu que ele SAIA do app de verdade — inclusive
+// quando o app está em segundo plano (bandeja/serviço), que continuaria vivo
+// sem isso. "Sair da conta" fica no perfil, onde é o lugar certo.
 import { Button } from '../shared/ui'
 
 export interface QuitDialogProps {
-  /** Continua rodando na bandeja/serviço. */
-  onBackground: () => Promise<void>
-  /** Encerra o processo de verdade. */
+  /** Encerra o processo (bandeja, foreground service, motor). */
   onQuit: () => Promise<void>
+  /** Minimiza sem encerrar (opcional). */
+  onMinimize: () => Promise<void>
   onClose: () => void
   /** No navegador não há processo para encerrar. */
   canQuit: boolean
 }
 
-export function QuitDialog({ onBackground, onQuit, onClose, canQuit }: QuitDialogProps) {
+export function QuitDialog({ onQuit, onMinimize, onClose, canQuit }: QuitDialogProps) {
   return (
     <div
       onClick={onClose}
@@ -25,24 +24,29 @@ export function QuitDialog({ onBackground, onQuit, onClose, canQuit }: QuitDialo
     >
       <div
         role="dialog"
-        aria-label="Fechar o DisTorrent"
+        aria-label="Sair do DisTorrent"
         onClick={(e) => e.stopPropagation()}
         style={{ width: '100%', maxWidth: 420, background: '#2b2d31', border: '1px solid #26272b', borderRadius: 12, padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}
       >
-        <div style={{ fontSize: 16, fontWeight: 800, color: '#fff' }}>Fechar o DisTorrent</div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: '#fff' }}>Sair do DisTorrent</div>
         <div style={{ fontSize: 12.5, color: '#949ba4', lineHeight: 1.6 }}>
-          Você continua conectado? Sim: na bandeja, o app segue recebendo chamadas e
-          mensagens sem ficar na tela. Sua conta permanece aberta nos dois casos.
+          Sair encerra o app por completo, inclusive o que está rodando em segundo
+          plano: você para de receber chamadas e mensagens até abrir de novo.
+          Sua conta continua salva.
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
-          <Button variant="primary" onClick={() => { void onBackground().finally(onClose) }}>
-            Continuar em segundo plano
-          </Button>
-          {canQuit && (
+          {canQuit ? (
             <Button variant="danger" onClick={() => { void onQuit() }}>
               Sair do app
             </Button>
+          ) : (
+            <div style={{ fontSize: 12, color: '#f0b232' }}>
+              Fechar o processo só funciona no app instalado.
+            </div>
           )}
+          <Button variant="secondary" onClick={() => { void onMinimize().finally(onClose) }}>
+            Minimizar (continuar recebendo)
+          </Button>
           <Button variant="ghost" onClick={onClose}>Cancelar</Button>
         </div>
       </div>

@@ -34,3 +34,28 @@ export function isCollectiveRoom(input: CollectiveRoomInput | null | undefined):
   }
   return noRoster.size > 1
 }
+
+/**
+ * Decisão de "esta chamada continua?" quando UM peer sai.
+ *
+ * O erro que isto corrige: recalcular a coletividade com o roster JÁ reduzido.
+ * Numa sala de 5, sair o primeiro deixava 4 (coletiva, ok); sair o segundo
+ * deixava só eu — a regra então dizia "não é coletiva" e encerrava a chamada
+ * de todo mundo. O caráter coletivo é uma propriedade da SALA, não do número
+ * de pessoas no instante da checagem, então ele é travado no início.
+ */
+export interface LeaveDecisionInput {
+  /** A sala foi coletiva em algum momento? (trava do `CallManager`) */
+  collective: boolean
+  /** Ainda restam outros participantes (fora eu) depois de remover quem saiu? */
+  othersRemain: boolean
+}
+
+/** `keep` = continua para os que ficaram; `end` = encerrar a chamada inteira. */
+export function leaveOutcome(input: LeaveDecisionInput): 'keep' | 'end' {
+  // Sala coletiva continua mesmo que eu fique sozinho: o dono pediu que ela só
+  // acabe quando não houver mais ninguém (e quem decide sair sou eu).
+  if (input.collective) return 'keep'
+  // Chamada 1:1: o outro lado saiu, não há mais ninguém — encerra.
+  return input.othersRemain ? 'keep' : 'end'
+}

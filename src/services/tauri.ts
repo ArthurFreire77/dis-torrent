@@ -447,7 +447,16 @@ export const tauriServices: DisTorrentServices = {
   },
   appShowWindow: () => invoke<void>('app_show_window'),
   appHideToTray: () => invoke<void>('app_hide_to_tray'),
-  appQuit: () => invoke<void>('app_quit'),
+  appQuit: async () => {
+    // ANDROID: o foreground service mantém o processo vivo mesmo depois de
+    // `app.exit` — "sair" viraria uma tela preta com o app recebendo em
+    // segundo plano. Para os serviços ANTES de encerrar (sair de verdade).
+    if (isAndroidRuntime()) {
+      try { await invoke<void>('plugin:bgservice|stop') } catch { /* sem serviço */ }
+      try { await invoke<void>('plugin:callfg|stop') } catch { /* sem chamada ativa */ }
+    }
+    return invoke<void>('app_quit')
+  },
   backgroundSetConnection: (state, onlinePeers, unread) =>
     invoke<void>('background_set_connection', { stateLabel: state, onlinePeers, unread: unread ?? null }),
   presenceList: () => invoke<PresenceView[]>('presence_list'),

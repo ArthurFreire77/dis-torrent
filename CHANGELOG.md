@@ -1,5 +1,60 @@
 # CHANGELOG
 
+## [1.1.19-pre-alpha] — 2026-10-31
+
+### A chamada acabava quando a penúltima pessoa saía
+
+Relação real: 5 pessoas, uma saiu ("00a115b0 saiu da chamada"), outra saiu e a
+chamada **terminou para todos**.
+
+A causa era recalcular a "coletividade" com o roster **já reduzido**. Sair o
+primeiro deixava 4 (coletiva, ok); sair o segundo deixava só eu, a regra dizia
+"isto é uma chamada 1:1" e encerrava a sala. Coletividade é propriedade da
+SALA, não do número de pessoas no instante da checagem: agora ela é travada no
+primeiro momento em que foi verdadeira (`collectiveRoom`) e a decisão de
+continuar é uma função pura (`leaveOutcome`, com testes).
+
+Quem fica também passa a anunciar a lista nova da sala, então o cabeçalho não
+segue mostrando gente que já saiu.
+
+### "Já existe uma chamada em andamento" sem haver chamada
+
+O gate que impede duas chamadas usava o estado em memória. Se uma saída falhava
+no meio (rede caiu, canal que não respondeu), o estado ficava preso e o app
+recusava **toda** chamada nova — sem saída pela interface.
+
+Agora existe `forceReset()`, que derruba PCs, microfones, timers e a sala
+anunciada sem pedir nada ao core, e o aviso ganha um botão **Destravar
+chamada** (no PC e no celular). Também deixou de marcar o `callId` travado como
+encerrado, que era justamente o que barrava a próxima.
+
+### Sair do canal de voz deixava a sala no ar
+
+`leaveVoice` não passa pelo `cleanup`, então fechava o estado sem fechar o
+anúncio: os outros continuavam vendo "Entrar" numa chamada que não existia. E
+`leave()` saía cedo quando não havia estado, também sem limpar a sala.
+
+### Botão de fechar o app
+
+O botão inferior esquerdo fazia **logout**. Agora abre **Sair do app** (encerra
+de verdade, inclusive o serviço de segundo plano) ou **Minimizar (continuar
+recebendo)**. No Android, `appQuit` para o serviço de primeiro plano e o de
+chamada antes de encerrar — sem isso "sair" deixava o processo vivo. "Sair da
+conta" ficou no perfil.
+
+### Botão Entrar no cabeçalho (celular)
+
+A conversa aberta mostra **Entrar** em azul no cabeçalho quando há chamada na
+sala, ao lado dos botões de ligar — igual ao PC, em vez de só na lista.
+
+### Verificação
+
+- **Frontend**: 262 testes unitários (3 novos da regra de saída), typecheck,
+  lint e build verdes.
+- **Core Rust**: 220 testes.
+- **Não validado em aparelho real**: a sequência de saídas em grupo depende de
+  duas ou mais máquinas; foi coberta por teste de regra pura.
+
 ## [1.1.18-pre-alpha] — 2026-10-31
 
 ### "Cliquei Entrar e não foi"

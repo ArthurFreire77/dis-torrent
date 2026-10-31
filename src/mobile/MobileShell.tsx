@@ -1408,6 +1408,8 @@ export default function MobileShell() {
   const isChannel = !!selCommunity
   /** A conversa aberta é um grupo de DM? (afeta cabeçalho e painel de membros) */
   const isGroupConv = selConvObj?.kind === 'group'
+  /** Sala de chamada viva nesta conversa (botão Entrar do cabeçalho). */
+  const selConvRoom = selConv ? callRoomsMap.get(selConv) ?? null : null
   /**
    * Membros do grupo aberto — vem do MOTOR (SQLite), não tratado como DM.
    */
@@ -2002,6 +2004,20 @@ export default function MobileShell() {
           </div>
           {!isChannel && (
             <>
+              {/* SALA EM ANDAMENTO: entra direto pelo cabeçalho (botão azul),
+                  igual ao PC. Antes só existia na lista de conversas. */}
+              {selConvRoom && !activeCall && (
+                <button
+                  type="button"
+                  data-testid="mobile-header-join-room"
+                  aria-label={`Entrar na chamada — ${selConvRoom.participants.length || 1} na sala`}
+                  title={`Entrar na chamada em andamento (${selConvRoom.participants.length || 1} na sala)`}
+                  onClick={() => { if (selConv) void joinRoom(selConvObj!, selConvRoom) }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, background: t.accent, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                >
+                  <Icon d={Icons.phone} size={13} /> Entrar
+                </button>
+              )}
               {/* Sem hard-disable: o clique mostra o diagnóstico real. */}
               <span title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
                 <button aria-label="Chamada de voz" title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? undefined : { opacity: 0.75, color: t.red }} onClick={() => startCall('voice')}><Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" size={17} /></button>
@@ -2454,6 +2470,21 @@ export default function MobileShell() {
       {error && (
         <div className="m-err" style={{ margin: '0 12px 8px', flexShrink: 0 }}>
           {error}
+          {/* Mesma saída do desktop: destrava um estado de chamada preso. */}
+          {/chamada em andamento/i.test(error) && (
+            <button
+              type="button"
+              data-testid="force-reset-call"
+              onClick={async () => {
+                try { await callManager.forceReset() } catch { /* limpa o que der */ }
+                setError(null)
+                setNotice('estado da chamada limpo — tente de novo')
+              }}
+              style={{ marginLeft: 8, background: '#f23f42', color: '#fff', border: 'none', padding: '5px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800, whiteSpace: 'nowrap' }}
+            >
+              Destravar
+            </button>
+          )}
           <button onClick={() => setError(null)} style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#ff9c9c', cursor: 'pointer' }}>x</button>
         </div>
       )}
@@ -3016,10 +3047,8 @@ export default function MobileShell() {
         <QuitDialog
           canQuit={services.kind === 'native'}
           onClose={() => setShowQuitConfirm(false)}
-          onBackground={async () => {
+          onMinimize={async () => {
             try { await callManager.leave() } catch { /* sem chamada */ }
-            // Android: `app_hide_to_tray` não existe como bandeja; o correto é
-            // só minimizar (o serviço de primeiro plano segue recebendo).
             try { await services.appHideToTray() } catch { /* melhor esforço */ }
           }}
           onQuit={async () => {
