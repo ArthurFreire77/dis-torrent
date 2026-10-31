@@ -36,6 +36,15 @@ export function StepHead({ step, title, sub }: { step: number; title: string; su
   )
 }
 
+/** Seta ">" do molde, girada quando o molde está selecionado. */
+export function ModelChevron({ selected }: { selected: boolean }) {
+  return (
+    <span style={layout.cardChevron} aria-hidden>
+      <Ic name="chevronRight" size={14} rotate={selected ? 90 : 0} />
+    </span>
+  )
+}
+
 export function StepIdentity({
   modeloId,
   name,
@@ -73,19 +82,20 @@ export function StepIdentity({
               aria-pressed={modeloId === m.id}
               onClick={() => onModelo(m.id)}
             >
-              <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                <span style={{ color: modeloId === m.id ? ui.accent : ui.muted, display: 'flex', flexShrink: 0 }}>
-                  <Ic name={m.icon} size={15} />
-                </span>
-                {/* `display:block` no título e na descrição é obrigatório: como
-                    spans inline eles saíam grudados ("ComunidadeBate-papo…"). */}
+              <span style={{ ...layout.modelIcon(modeloId === m.id), background: `${m.tint}26`, color: m.tint }}>
+                <Ic name={m.icon} size={15} />
+              </span>
+              {/* `display:block` no título e na descrição é obrigatório: como
+                  spans inline eles saíam grudados ("ComunidadeBate-papo…"). */}
+              <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'block', fontSize: 13, fontWeight: 800, color: ui.heading, ...layout.ellipsis }}>
                   {m.label}
                 </span>
+                <span style={{ display: 'block', fontSize: 11, color: ui.muted, lineHeight: 1.45, minWidth: 0 }}>
+                  {m.desc}
+                </span>
               </span>
-              <span style={{ display: 'block', fontSize: 11, color: ui.muted, lineHeight: 1.45, minWidth: 0 }}>
-                {m.desc}
-              </span>
+              <ModelChevron selected={modeloId === m.id} />
             </button>
           ))}
         </div>

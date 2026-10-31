@@ -83,29 +83,51 @@ export const layout = {
     marginTop: 3,
   } satisfies CSSProperties,
 
-  /** Grade dos modelos: 3 colunas, cai para 1 em telas estreitas (na folha). */
+  /** Moldes em lista vertical (estilo Discord): uma linha por molde. */
   models: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-    gap: ui.sm,
+    gridTemplateColumns: 'minmax(0, 1fr)',
+    gap: 8,
   } satisfies CSSProperties,
 
-  /** Card clicável (modelo/ícone). `aria-pressed` decide o realce. */
+  /** Linha clicável de molde: ícone | texto | seta. `aria-pressed` realça. */
   card: (selected: boolean): CSSProperties => ({
     appearance: 'none',
     textAlign: 'left',
     cursor: 'pointer',
     background: selected ? 'rgba(88,101,242,.14)' : ui.surface,
     border: `1px solid ${selected ? ui.accent : ui.border}`,
-    borderRadius: 10,
-    padding: '12px 13px',
+    borderRadius: 8,
+    padding: '10px 12px',
     color: ui.text,
     display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     minWidth: 0,
     font: 'inherit',
   }),
+
+  /** Caixa do ícone do molde, mesma linguagem dos cards de categoria. */
+  modelIcon: (selected: boolean): CSSProperties => ({
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: selected ? 'rgba(88,101,242,.26)' : ui.input,
+    color: selected ? '#fff' : ui.muted,
+    flexShrink: 0,
+  }),
+
+  /** Seta ">" à direita, empurrada para o fim da linha. */
+  cardChevron: {
+    marginLeft: 'auto',
+    color: ui.muted,
+    flexShrink: 0,
+    display: 'flex',
+  } satisfies CSSProperties,
 
   /** Grade de ícones: colunas de 200px, quantas couberem. */
   cats: {

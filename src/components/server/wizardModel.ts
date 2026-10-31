@@ -96,6 +96,8 @@ export const MODELOS: {
   label: string
   desc: string
   icon: IconName
+  /** Cor do "emoji" do molde (fundo do quadradinho, como no Discord). */
+  tint: string
   description: string
   channels: { name: string; kind: ChannelKind }[]
 }[] = [
@@ -104,6 +106,7 @@ export const MODELOS: {
     label: 'Comunidade',
     desc: 'Bate-papo, eventos e gente nova',
     icon: 'users',
+    tint: '#23a559',
     description: 'Espaço para conversar, combinar o que fazer e manter todo mundo por perto.',
     channels: [
       { name: 'geral', kind: 'text' },
@@ -116,6 +119,7 @@ export const MODELOS: {
     label: 'Estudo',
     desc: 'Aulas, avisos e materiais',
     icon: 'code',
+    tint: '#f0b232',
     description: 'Grupo de estudos: avisos de aula, materiais compartilhados e dúvidas.',
     channels: [
       { name: 'geral', kind: 'text' },
@@ -129,6 +133,7 @@ export const MODELOS: {
     label: 'Trabalho',
     desc: 'Projetos, tarefas e reunião',
     icon: 'terminal',
+    tint: '#5865f2',
     description: 'Equipe de trabalho: andamento de projetos, tarefas abertas e reunião rápida.',
     channels: [
       { name: 'geral', kind: 'text' },
