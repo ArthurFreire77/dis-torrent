@@ -85,6 +85,52 @@ fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
+/// Copia o arquivo já gravado para o Downloads PÚBLICO do Android (MediaStore).
+///
+/// ## Por que este comando existe (e não `plugin:downloads|save` direto)
+///
+/// O frontend chamava `plugin:downloads|save` e o Tauri recusava com
+/// **"not allowed by ACL"**: a capability da janela declara só `core:default`, e
+/// o plugin `downloads` não publica um conjunto de permissões. Resultado real
+/// (captura do usuário): todo download no Android terminava em
+///
+/// > não foi possível salvar via save_file: não foi possível gravar em
+/// > Downloads do celular: Command plugin:downloads|save not allowed by ACL
+///
+/// A chamada sai agora do RUST: `run_mobile_plugin` no handle registrado no
+/// `setup` não passa pelo ACL do WebView (o ACL protege o que a PÁGINA pode
+/// invocar — e a página não precisa mais dessa porta).
+///
+/// No desktop não há nada a copiar: o `save_file_stream` já gravou em
+/// `~/Downloads`. Devolver o caminho é a resposta honesta.
+#[tauri::command]
+fn save_public_copy(app: AppHandle, path: String, name: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let handle = app.try_state::<tauri::plugin::PluginHandle<tauri::Wry>>().ok_or_else(|| {
+            "o plugin de downloads não está registrado neste aparelho — \
+             o arquivo continua na área do app"
+                .to_string()
+        })?;
+        #[derive(serde::Deserialize)]
+        struct Res {
+            path: String,
+        }
+        let r: Res = handle
+            .run_mobile_plugin("save", serde_json::json!({ "path": path, "name": name }))
+            .map_err(|e| format!("não foi possível gravar em Downloads do celular: {e}"))?;
+        if r.path.trim().is_empty() {
+            return Err("o Android devolveu caminho vazio ao salvar em Downloads".into());
+        }
+        Ok(r.path)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, &name);
+        Ok(path)
+    }
+}
+
 /// Estado global do app. Engine existe só depois que a identidade existe.
 struct AppState {
     engine: Mutex<Option<Arc<NetworkEngine>>>,
@@ -4879,6 +4925,7 @@ fn main() {
             connect_addr,
             disconnect_peer,
             save_file_stream,
+            save_public_copy,
             friends_list,
             friend_request,
             friend_respond,

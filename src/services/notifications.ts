@@ -18,6 +18,9 @@
 import { services } from './index'
 import { appStateSnapshot, setTrayUnread } from './appState'
 import { getPrefs, levelFor } from '../shared/prefs'
+import { avatarCacheGet, avatarCacheSet } from '../shared/avatar'
+import { isAndroidRuntime } from '../shared/runtime.ts'
+import { invoke } from '@tauri-apps/api/core'
 import {
   createSeenTracker, decideMessageNotice, levelAllows, notificationIdFor, truncate,
 } from './notificationRules'
@@ -127,6 +130,31 @@ interface ShowArgs {
 
 function show(a: ShowArgs): boolean {
   if (services.kind !== 'native') return false
+  // ANDROID: plugin próprio (`msgnotif`) que mostra a FOTO do remetente e usa
+  // `MessagingStyle` (nome em destaque + mensagem empilhada). O plugin oficial
+  // só aceita `drawable` do APK como ícone grande — a foto vem do swarm em
+  // base64 — e usa `BigTextStyle`, que não destaca quem mandou: era o aviso
+  // "sem o nome e sem a foto". Falha cai no aviso comum, nunca em silêncio.
+  if (isAndroidRuntime()) {
+    const avatar = buscarAvatarDoAviso(a.conversation)
+    void invoke('plugin:msgnotif|show', {
+      conversation: a.conversation ?? '',
+      title: a.title,
+      body: a.body,
+      avatarB64: avatar,
+      silent: a.silent ?? false,
+    }).catch(() => {
+      // Plugin ausente (build antigo): o aviso genérico ainda serve.
+      void services.notificationShow({
+        id: a.id,
+        title: a.title,
+        body: a.body,
+        conversation: a.conversation ?? null,
+        silent: a.silent ?? false,
+      }).catch(() => { /* permissão negada / SO sem suporte */ })
+    })
+    return true
+  }
   void services.notificationShow({
     id: a.id,
     title: a.title,
@@ -135,6 +163,56 @@ function show(a: ShowArgs): boolean {
     silent: a.silent ?? false,
   }).catch(() => { /* permissão negada / SO sem suporte: a UI segue normal */ })
   return true
+}
+
+/**
+ * Foto (base64) do remetente para o aviso nativo.
+ *
+ * Vem do cache em memória de `shared/avatar` — o mesmo que o avatar da UI usa.
+ * Se ainda não estiver lá, dispara `profileList()` em segundo plano para a
+ * PRÓXIMA mensagem já sair com foto. Não bloqueia o aviso: foto é enfeite,
+ * mensagem é o conteúdo.
+ */
+function buscarAvatarDoAviso(convId: string | undefined): string {
+  if (!convId) return ''
+  const fp = peerFpDaConversa(convId)
+  if (!fp) {
+    // Sem mapa ainda: aquece o cache e segue.
+    void services.profileList()
+      .then((list) => {
+        for (const p of list) {
+          if (p.avatar_b64) avatarCacheSet(p.fp, p.avatar_b64)
+        }
+      })
+      .catch(() => {})
+    return ''
+  }
+  const hit = avatarCacheGet(fp)
+  if (hit) return hit
+  void services.profileList()
+    .then((list) => {
+      for (const p of list) {
+        if (p.avatar_b64) avatarCacheSet(p.fp, p.avatar_b64)
+      }
+    })
+    .catch(() => {})
+  return ''
+}
+
+/** fp do peer de uma conversa, quando o shell registrou (ver `registerConversationPeer`). */
+function peerFpDaConversa(convId: string): string | null {
+  return conversationPeers.get(convId) ?? null
+}
+
+const conversationPeers = new Map<string, string>()
+
+/**
+ * O shell informa de quem é cada conversa DM (o módulo de notificação não tem
+ * acesso ao banco). Chamado ao abrir a conversa e no boot.
+ */
+export function registerConversationPeer(convId: string, fp: string) {
+  if (!convId || !fp) return
+  conversationPeers.set(convId, fp)
 }
 
 /** Conversa aberta/lida → some o aviso e zera o contador dela. */

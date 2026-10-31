@@ -57,7 +57,7 @@ import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
   notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
-  setOpenConversation, onOpenConversation, onCallNotificationAction,
+  setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
 import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
@@ -1324,6 +1324,13 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   // Conversa aberta = aviso daquela conversa cancelado (e sem badge parado).
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
+  // Mapa conversa → peer, para a notificação saber de QUEM é a foto.
+  // O módulo de notificação não tem acesso ao banco; o shell tem.
+  useEffect(() => {
+    for (const c of conversations) {
+      if (c.peer_fp) registerConversationPeer(c.id, c.peer_fp)
+    }
+  }, [conversations])
   // Clique na notificação → abre a conversa certa (id vem do Rust, que
   // guardou o mapa notificação→conversa).
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
@@ -2453,7 +2460,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
                   {conversations.map(c => (
                     <div key={c.id} className={'nav-row' + (c.id === selConv ? ' active' : '')} onClick={() => { setSelConv(c.id); setSelPeerFp(c.peer_fp) }} style={{ cursor: 'pointer' }}>
-                      <Avatar name={c.title} fp={c.peer_fp} size={28} />
+                      <Avatar name={c.title} fp={c.peer_fp} size={28} avatarB64={socialProfiles[c.peer_fp]?.avatar_b64} />
                       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{c.title}</span>
                       <button title="Apagar conversa" onClick={async (e) => { e.stopPropagation(); if (!confirm(`Apagar conversa com ${c.title}?`)) return; try { await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.trash} size={14} /></button>
                     </div>
@@ -2467,7 +2474,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                       {onlinePeers.filter(p => friendsAccepted.some(f => f.fp === p.fp)).map(p => (
                         <button key={p.fp} onClick={() => openDm({ fp: p.fp, nickname: p.nickname })} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')}>
                           <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                            <Avatar name={p.nickname || p.fp} fp={p.fp} size={28} />
+                            <Avatar name={p.nickname || p.fp} fp={p.fp} size={28} avatarB64={socialProfiles[p.fp]?.avatar_b64} />
                             <PeerDot s={p.state} />
                           </span>
                           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{p.nickname || p.fp}</span>
@@ -2483,7 +2490,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
                       {friendRequests.map(r => (
                         <div key={r.fp} className="req-row">
-                          <Avatar name={r.nickname || r.fp} fp={r.fp} size={28} />
+                          <Avatar name={r.nickname || r.fp} fp={r.fp} size={28} avatarB64={socialProfiles[r.fp]?.avatar_b64} />
                           <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</span>
                           <button onClick={() => respondFriend(r.fp, true)} title="Aceitar" className="req-btn ok"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12l5 5L20 7"/></svg></button>
                           <button onClick={() => respondFriend(r.fp, false)} title="Recusar" className="req-btn no"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
@@ -2744,7 +2751,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                         const isQueued = !onlineFps.has(r.fp)
                         return (
                           <div key={r.fp} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, marginBottom: 6 }}>
-                            <Avatar name={r.nickname || r.fp} fp={r.fp} size={28} />
+                            <Avatar name={r.nickname || r.fp} fp={r.fp} size={28} avatarB64={socialProfiles[r.fp]?.avatar_b64} />
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: 12, fontWeight: 700, color: text }}>{r.nickname || r.fp}</div>
                               <div style={{ fontSize: 10, color: isQueued ? t.yellow : t.green }}>{isQueued ? 'offline — será entregue ao reconectar' : '✓ peer online — enviando…'}</div>
@@ -2762,7 +2769,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>Não há solicitações pendentes. Que pena.</div>
                 ) : friendRequests.map(r => (
                   <div key={r.fp} className="friend-row">
-                    <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} />
+                    <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} avatarB64={socialProfiles[r.fp]?.avatar_b64} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</div>
                       <div style={{ fontSize: 11, color: muted }}>Solicitação de amizade recebida</div>
@@ -2776,7 +2783,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>Ninguém bloqueado.</div>
                 ) : friendsBlocked.map(f => (
                   <div key={f.fp} className="friend-row">
-                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} />
+                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} avatarB64={socialProfiles[f.fp]?.avatar_b64} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
                       <div style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono' }}>{f.fp.slice(0, 12)} · não consegue te achar</div>
@@ -2796,7 +2803,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               ) : shownFriends.map(f => (
                 <div key={f.fp} className={'friend-row' + (f.fp === selPeerFp ? ' active' : '')} onClick={() => openDm(f)}>
                   <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} />
+                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} avatarB64={socialProfiles[f.fp]?.avatar_b64} />
                     <PeerDot s={onlineFps.has(f.fp) ? 'CONNECTED' : 'DISCONNECTED'} />
                   </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -2873,11 +2880,16 @@ export default function ThemeShell({ designId }: {designId:string}){
                   // o PC salvava direto quando o arquivo já estava completo,
                   // pulando a verificação blake3 e o aviso de conclusão que o
                   // celular fazia. Agora ambos passam pela fila.
+                  //
+                  // NÃO abre o painel de downloads: o próprio cartão já mostra
+                  // barra, % e velocidade, e a central abrindo por cima de
+                  // QUALQUER download é intrusiva (pedido explícito do usuário).
+                  // Quem quiser a lista toca no ícone de downloads ou no botão
+                  // "Painel de downloads" do cartão.
                   const baixar = async () => {
                     setError(null)
                     try {
                       await startDownload(fmeta)
-                      setShowDownloads(true)
                     } catch (e: any) { setError(String(e?.message ?? e)) }
                   }
                   return (
@@ -3081,7 +3093,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <div className="member-group-head" style={{ color: role.color }}>{role.name} — {membersInRole.length}</div>
                   {membersInRole.map(([fp, nick]) => (
                     <div key={fp} className="member-row">
-                      <Avatar name={nick || fp} fp={fp} size={28} />
+                      <Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13, fontWeight: 600, color: role.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nick || fp}</div>
                         <div style={{ fontSize: 10, color: muted, fontFamily: 'JetBrains Mono' }}>{fp.slice(0, 8)}</div>
@@ -3105,7 +3117,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 const online = isOnlineFp(fp)
                 return (
                   <div key={fp} className="member-row">
-                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
+                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nick || fp}</div>
                       <div style={{ fontSize: 10, color: muted }}>{online ? 'Online' : 'Offline'}</div>
@@ -3567,7 +3579,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 return (
                   <label key={f.fp} style={{ display:'flex', alignItems:'center', gap:10, padding:'6px 8px', borderRadius:6, background: checked? `${t.accent}22` : 'transparent', cursor:'pointer' }}>
                     <input type="checkbox" checked={checked} onChange={e=> setGroupPick(prev=>{ const n=new Set(prev); if(e.target.checked) n.add(f.fp); else n.delete(f.fp); return n })} />
-                    <Avatar name={f.nickname||f.fp} fp={f.fp} size={28} />
+                    <Avatar name={f.nickname||f.fp} fp={f.fp} size={28} avatarB64={socialProfiles[f.fp]?.avatar_b64} />
                     <span style={{ fontSize:13, fontWeight:600, color:text, flex:1 }}>{f.nickname || f.fp}</span>
                     <span style={{ fontSize:10, color:muted, fontFamily:'JetBrains Mono' }}>{f.fp.slice(0,8)}</span>
                   </label>
@@ -3641,7 +3653,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               {friendsAccepted.filter(f=> !activeCall?.participants.find((p:any)=>p.fp===f.fp)).length===0 && <div style={{ fontSize:12, color:muted, textAlign:'center', padding:12 }}>Todos os amigos já estão na chamada</div>}
               {friendsAccepted.filter(f=> !activeCall?.participants.find((p:any)=>p.fp===f.fp)).map(f=> (
                 <div key={f.fp} style={{ display:'flex', alignItems:'center', gap:10, background:inputBg, border:`1px solid ${borderColor}`, borderRadius:8, padding:'8px 10px' }}>
-                  <Avatar name={f.nickname||f.fp} fp={f.fp} size={32}/>
+                  <Avatar name={f.nickname||f.fp} fp={f.fp} size={32} avatarB64={socialProfiles[f.fp]?.avatar_b64}/>
                   <div style={{ flex:1 }}>
                     <div style={{ fontSize:13, fontWeight:700, color:text }}>{f.nickname||f.fp}</div>
                     <div style={{ fontSize:10, color:muted, fontFamily:'JetBrains Mono' }}>{f.fp.slice(0,12)}</div>
@@ -3741,7 +3753,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 80 }} onClick={() => setShowSettings(false)}>
           <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 16, padding: 28, width: 520, maxWidth: 'calc(100vw - 32px)', maxHeight: '85vh', overflowY: 'auto', boxSizing: 'border-box' }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-              <Avatar name={identity.nickname} fp={identity.fingerprint} size={48} />
+              <Avatar name={identity.nickname} fp={identity.fingerprint} size={48} avatarB64={socialProfiles[identity.fingerprint]?.avatar_b64} />
               <div>
                 <h3 style={{ fontWeight: 900, color: t.heading, margin: 0, fontSize: 20 }}>Configurações</h3>
                 <div style={{ fontSize: 13, color: muted, marginTop: 2 }}>versão {version} • modo {services.kind === 'native' ? 'nativo (P2P real)' : 'navegador (sem rede)'}</div>

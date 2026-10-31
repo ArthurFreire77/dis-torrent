@@ -61,6 +61,8 @@ class MainActivity : TauriActivity() {
     loadPlugin(webView, "updater", "distorrentUpdater") { UpdaterPlugin(this) }
     loadPlugin(webView, "callnotif", "distorrentCallNotif") { CallNotificationPlugin(this) }
     loadPlugin(webView, "bgservice", "distorrentBgService") { BgServicePlugin(this) }
+    // Mensagem com foto do remetente + estilo de conversa (ver o plugin).
+    loadPlugin(webView, "msgnotif", "distorrentMsgNotif") { MessageNotificationPlugin(this) }
 
     // Boot a frio com "Atender"/"Recusar": a intenção chegou em `onCreate`,
     // ANTES de o WebView existir, e ninguém escutaria o evento. O plugin a

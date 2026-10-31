@@ -46,7 +46,7 @@ import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
   notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
-  setOpenConversation, onOpenConversation, onCallNotificationAction,
+  setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
 import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
@@ -123,17 +123,19 @@ const PeerDot = memo(function PeerDot({ on, ring }: { on: boolean; ring?: string
 // Linhas memoizadas — JSX idêntico ao das helpers antigas (convRow/serverRow/
 // friendRow), só que como componentes memo: linhas cujas props não mudaram
 // pulam o re-render (antes TODAS eram recriadas a cada setState do shell).
-const ConvRow = memo(function ConvRow({ c, online, selected, onOpen, onDelete }: {
+const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete }: {
   c: Conversation
   online: boolean
   selected: boolean
+  /** Foto do peer. Prop (não estado do shell): o memo não alcança o escopo. */
+  avatarB64?: string
   onOpen: (c: Conversation) => void
   onDelete: (id: string, title: string, isSelected: boolean) => void
 }) {
   return (
     <div className="m-row" onClick={() => onOpen(c)}>
       <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-        <Avatar name={c.title} fp={c.peer_fp} size={40} />
+        <Avatar name={c.title} fp={c.peer_fp} size={40} avatarB64={avatarB64} />
         <PeerDot on={online} />
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -163,9 +165,11 @@ const ServerRow = memo(function ServerRow({ c, active, onSelect }: {
   )
 })
 
-const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove, onBlock }: {
+const FriendRow = memo(function FriendRow({ f, online, avatarB64, onOpen, onRemove, onBlock }: {
   f: { fp: string, nickname: string }
   online: boolean
+  /** Foto do amigo (ver ConvRow: prop em vez de estado do shell). */
+  avatarB64?: string
   onOpen: (fp: string, nick?: string) => void
   onRemove: (fp: string, nickname: string) => void
   onBlock: (fp: string, nickname: string) => void
@@ -173,7 +177,7 @@ const FriendRow = memo(function FriendRow({ f, online, onOpen, onRemove, onBlock
   return (
     <div className="friend-row" onClick={() => onOpen(f.fp, f.nickname)}>
       <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-        <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} />
+        <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} avatarB64={avatarB64} />
         <PeerDot on={online} />
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -755,6 +759,12 @@ export default function MobileShell() {
   // Conversa aberta = aviso daquela conversa cancelado; clique na notificação
   // abre a conversa certa (id vem do shell nativo).
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
+  // Mapa conversa → peer (a notificação precisa do fp para achar a foto).
+  useEffect(() => {
+    for (const c of conversations) {
+      if (c.peer_fp) registerConversationPeer(c.id, c.peer_fp)
+    }
+  }, [conversations])
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
 
   // ANDROID: "Atender"/"Recusar" tocados na notificação de chamada.
@@ -1080,11 +1090,13 @@ export default function MobileShell() {
     // Mesma ação do desktop (`services/downloadAction`): pausa retoma, falha
     // tenta de novo, arquivo já completo passa pela fila para verificar o hash
     // antes de gravar. Antes cada shell decidia sozinho e eles divergiam.
+    //
+    // NÃO abre a central de downloads: o cartão já mostra barra/%/velocidade e
+    // o painel abrindo por cima de todo download atrapalha a conversa.
     const cur = fileSwarm.files.get(fileId)
     if (!cur) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
     setError(null)
     void startDownload({ file_id: fileId, name: cur.name, size: cur.size, chunks: cur.chunks, hash: cur.hash })
-      .then(() => setShowDownloads(true))
       .catch((e: any) => setError(String(e?.message ?? e)))
   }, [])
   // Suporte a chamadas: 'full' = WebRTC direto, 'none' = desabilita com diagnóstico.
@@ -1780,7 +1792,7 @@ export default function MobileShell() {
                   }}
                   style={{ display: 'flex', gap: 8, alignItems: 'flex-start', textAlign: 'left', background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: 8, cursor: 'pointer', color: t.text }}
                 >
-                  <Avatar name={h.author_fp} fp={h.author_fp} size={26} />
+                  <Avatar name={h.author_fp} fp={h.author_fp} size={26} avatarB64={profilesByFp[h.author_fp]?.avatar_b64} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 10, color: t.muted }}>{h.author_fp.slice(0, 10)} · {new Date(h.ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</div>
                     <div style={{ fontSize: 13, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } as any}>{h.body}</div>
@@ -1827,7 +1839,7 @@ export default function MobileShell() {
               {threadMsgs.length === 0 && <div style={{ fontSize: 12, color: t.muted }}>nenhuma mensagem na discussão ainda</div>}
               {threadMsgs.map((tm) => (
                 <div key={tm.id} style={{ display: 'flex', gap: 8 }}>
-                  <Avatar name={tm.author_fp} fp={tm.author_fp} size={24} />
+                  <Avatar name={tm.author_fp} fp={tm.author_fp} size={24} avatarB64={profilesByFp[tm.author_fp]?.avatar_b64} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 10, color: t.muted }}>{tm.author_fp.slice(0, 10)} · {new Date(tm.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                     <RichText body={tm.body} ctx={richCtx} color={t.text} fontSize={14} />
@@ -1854,7 +1866,7 @@ export default function MobileShell() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
               <span style={{ position: 'relative', display: 'inline-flex' }}>
-                <Avatar name={profilePeer.name} fp={profilePeer.fp} size={56} />
+                <Avatar name={profilePeer.name} fp={profilePeer.fp} size={56} avatarB64={profilesByFp[profilePeer.fp]?.avatar_b64} />
                 <PeerDot on={(presence.get(profilePeer.fp)?.status ?? (profilePeer.fp === myFp ? myPresence : 'offline')) !== 'offline'} ring={t.panel} />
               </span>
               <div style={{ minWidth: 0 }}>
@@ -1920,7 +1932,7 @@ export default function MobileShell() {
                 }}
                 style={{ display: 'flex', alignItems: 'center', gap: 10, background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: 10, cursor: 'pointer', textAlign: 'left' }}
               >
-                <Avatar name={c.title} fp={c.id} size={28} />
+                <Avatar name={c.title} fp={c.id} size={28} avatarB64={profilesByFp[c.id]?.avatar_b64} />
                 <div style={{ flex: 1, minWidth: 0, fontSize: 13, color: t.text, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</div>
               </button>
             ))}
@@ -1953,7 +1965,7 @@ export default function MobileShell() {
           </button>
           {isChannel
             ? <span style={{ color: t.muted, display: 'flex', flexShrink: 0 }}><Icon d={Icons.hash} size={20} /></span>
-            : <Avatar name={peerTitle} fp={selPeerFp ?? selConv} size={26} />}
+            : <Avatar name={peerTitle} fp={selPeerFp ?? selConv} size={26} avatarB64={profilesByFp[selPeerFp ?? selConv ?? ""]?.avatar_b64} />}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontWeight: 700, fontSize: 15, color: t.heading, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{isChannel ? channelName : peerTitle}</div>
             <div style={{ fontSize: 11, color: t.muted }}>
@@ -2020,7 +2032,7 @@ export default function MobileShell() {
               {(activeComm?.members ?? []).map(([fp, nick]) => (
                 <div key={fp} className="member-row">
                   <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                    <Avatar name={nick || fp} fp={fp} size={28} />
+                    <Avatar name={nick || fp} fp={fp} size={28} avatarB64={profilesByFp[fp]?.avatar_b64} />
                     <PeerDot on={onlineFps.has(fp) || (!!identity?.fingerprint && fp === identity.fingerprint)} ring={t.sidebar} />
                   </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -2420,12 +2432,12 @@ export default function MobileShell() {
           <div className="m-sec">AMIGOS ONLINE — {onlineFriends.length}</div>
           {onlineFriends.length === 0
             ? <EmptyBlock msg="Ninguém online agora — é silencioso demais aqui." sub={<span>Um amigo que trabalha em equipe é uma coisa boa — <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{onlineFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{onlineFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} avatarB64={profilesByFp[f.fp]?.avatar_b64} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>}
 
           <div className="m-sec">CONVERSAS RECENTES</div>
           {filteredConvs.length === 0
             ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.slice(0, 5).map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} onOpen={openConv} onDelete={deleteConv} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.slice(0, 5).map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} />)}</div>}
 
           <div className="m-sec">SEUS SERVIDORES — {filteredComms.length}</div>
           {filteredComms.length === 0
@@ -2529,7 +2541,7 @@ export default function MobileShell() {
           <div className="m-sec">CONVERSAS DIRETAS — {filteredConvs.length}</div>
           {filteredConvs.length === 0
             ? <EmptyBlock msg="Nenhuma conversa" sub={<span>Adicione amigos em <button className="link-btn" onClick={() => setTab('friends')}>Amigos</button> e comece a conversar.</span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} onOpen={openConv} onDelete={deleteConv} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} />)}</div>}
         </>}
 
         {tab === 'friends' && <>
@@ -2582,7 +2594,7 @@ export default function MobileShell() {
                   <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: t.muted, marginBottom: 8 }}>ENVIADAS ({pendingOut.length}) — aguardando</div>
                   {pendingOut.map(r => (
                     <div key={r.fp} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, marginBottom: 6 }}>
-                      <Avatar name={r.nickname || r.fp} fp={r.fp} size={28} />
+                      <Avatar name={r.nickname || r.fp} fp={r.fp} size={28} avatarB64={profilesByFp[r.fp]?.avatar_b64} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 12, color: t.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</div>
                         <div style={{ fontSize: 10, color: t.muted, fontFamily: MONO }}>{r.fp.slice(0, 12)} · aguardando</div>
@@ -2601,7 +2613,7 @@ export default function MobileShell() {
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 {friendRequests.map(r => (
                   <div key={r.fp} className="friend-row">
-                    <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} />
+                    <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} avatarB64={profilesByFp[r.fp]?.avatar_b64} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</div>
                       <div style={{ fontSize: 11, color: t.muted }}>Solicitação de amizade recebida</div>
@@ -2619,7 +2631,7 @@ export default function MobileShell() {
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 {friendsBlocked.map(f => (
                   <div key={f.fp} className="friend-row">
-                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} />
+                    <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} avatarB64={profilesByFp[f.fp]?.avatar_b64} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
                       <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{f.fp.slice(0, 12)} · não consegue te achar</div>
@@ -2632,7 +2644,7 @@ export default function MobileShell() {
           ) : shownFriends.length === 0 ? (
             <EmptyBlock msg={friendsTab === 'online' ? 'Ninguém online agora — é silencioso demais aqui.' : 'Que silêncio por aqui...'} sub={<span>Um amigo que trabalha em equipe é uma coisa boa — <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column' }}>{shownFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>{shownFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} avatarB64={profilesByFp[f.fp]?.avatar_b64} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>
           )}
         </>}
 

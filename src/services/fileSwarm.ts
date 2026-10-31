@@ -165,9 +165,6 @@ async function shareOrFalse(blob: Blob, name: string): Promise<boolean> {
   } catch { return false }
 }
 
-/** Resposta do plugin Kotlin `DownloadsPlugin`. */
-interface DownloadsSaveResult { path?: string; name?: string }
-
 /**
  * Android: move o arquivo do diretório privado do app para a pasta
  * **Downloads de verdade** (MediaStore, API 29+ — sem permissão; pasta
@@ -179,10 +176,16 @@ interface DownloadsSaveResult { path?: string; name?: string }
  * (o plugin apaga o rascunho). Devolve o caminho público pro toast.
  */
 async function saveToPublicDownloads(privatePath: string, name: string): Promise<string> {
-  const res = await tauriInvoke<DownloadsSaveResult>('plugin:downloads|save', { path: privatePath, name })
-  const pub = typeof res?.path === 'string' ? res.path.trim() : ''
-  if (!pub) throw new Error('plugin:downloads|save devolveu caminho vazio')
-  return pub
+  // A chamada é do RUST (`save_public_copy`), não de `plugin:downloads|save`.
+  // O WebView não pode invocar o plugin: a capability só declara `core:default`
+  // e o Tauri recusa com "not allowed by ACL" — era o erro que aparecia em TODO
+  // download no Android ("não foi possível salvar via save_file ... not allowed
+  // by ACL"). O handle do plugin vive no processo nativo, onde o ACL do WebView
+  // não se aplica.
+  const pub = await tauriInvoke<string>('save_public_copy', { path: privatePath, name })
+  const trimmed = typeof pub === 'string' ? pub.trim() : ''
+  if (!trimmed) throw new Error('o Android devolveu caminho vazio ao salvar em Downloads')
+  return trimmed
 }
 
 

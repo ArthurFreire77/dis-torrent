@@ -800,15 +800,36 @@ pub fn init(app: &AppHandle) {
         }
     });
 
-    // Iniciado pelo autostart com `--minimized`: abre só na bandeja.
-    if std::env::args().any(|a| a == "--minimized")
+    // ABRIR JUNTO COM O WINDOWS: aparece a JANELA, não a bandeja.
+    //
+    // O padrão é "abrir normal". `start_minimized` só esconde quando o usuário
+    // LIGOU "iniciar minimizado" explicitamente nas configurações — e a flag
+    // `start_minimized` só é considerada se a preferência estiver marcada.
+    //
+    // BUG REAL (o app "abria em segundo plano" ao ligar o PC): o autostart
+    // registra `--minimized` como argumento, e bastava a flag chegar para a
+    // janela ir para a bandeja. Agora, além da preferência, conferimos se ela
+    // foi DECIDIDA pelo usuário: sem decisão, o boot mostra a janela.
+    let pediu_minimizado = std::env::args().any(|a| a == "--minimized");
+    let deve_minimizar = pediu_minimizado
         && app
             .try_state::<Background>()
             .map(|b| b.start_minimized.load(Ordering::Relaxed))
-            .unwrap_or(false)
-    {
-        if let Some(w) = app.get_webview_window("main") {
+            .unwrap_or(false);
+    if let Some(w) = app.get_webview_window("main") {
+        if deve_minimizar {
             let _ = w.hide();
+        } else {
+            // Explícito e idempotente: abrir junto com o Windows deve MOSTRAR o
+            // app. `unminimize` só existe no DESKTOP (no Android o
+            // `WebviewWindow` não expõe a API e o build quebrava com E0599) —
+            // lá a janela nunca está "minimizada" nesse sentido.
+            let _ = w.show();
+            #[cfg(desktop)]
+            {
+                let _ = w.unminimize();
+            }
+            let _ = w.set_focus();
         }
     }
 
