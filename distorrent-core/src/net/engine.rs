@@ -265,6 +265,16 @@ pub enum EngineEvent {
         muted: bool,
         deafened: bool,
     },
+    /// Sala de chamada mudou (abriu/fechou/lista de participantes).
+    CallRoom {
+        call_id: String,
+        conv_id: String,
+        kind: String,
+        /// "open" | "closed"
+        state: String,
+        participants: Vec<String>,
+        host_fp: String,
+    },
     FileAnnounceEv {
         file_id: String,
         name: String,
@@ -468,6 +478,7 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | CallAnswer { .. }
         | CallIce { .. }
         | CallAddParticipant { .. }
+        | CallRoom { .. }
         | ScreenShareOffer { .. }
         | ScreenShareAnswer { .. }
             | VoiceJoin { .. }
@@ -488,6 +499,7 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | CommunityKicked { .. }
         | GroupCreated { .. }
         | GroupMemberAdded { .. }
+        | GroupDeleted { .. }
         | PeerExchange { .. }
         | PeerRelayPut { .. }
         | PeerRelayGet { .. }
@@ -610,6 +622,11 @@ impl PeerLink {
     }
 }
 
+/// Anúncio da sala de chamada (grupo/DM) — ver `net/engine/room_announce.rs`.
+mod room_announce;
+#[cfg(test)]
+mod room_announce_tests;
+
 pub struct NetworkEngine {
     pub store: Arc<Store>,
     keypair: Arc<Keypair>,
@@ -704,6 +721,10 @@ pub struct NetworkEngine {
     /// de 5s). Cap 64/peer (voz/sinalização é efêmera; além disso descarta a
     /// mais antiga). NÃO havia fila antes — frames offline eram descartados.
     pending_calls: StdMutex<HashMap<String, Vec<SecureFrame>>>,
+    /// Salas de chamada VIVAS anunciadas (`net::call_room`): quem está na
+    /// conversa vê que há chamada e pode entrar. Sem isto a chamada só existia
+    /// para quem recebeu o `CallInvite`.
+    call_rooms: StdMutex<super::call_room::Rooms>,
     /// Último endpoint público anunciado (UPnP/ipify) — usado no Punch.
     public_addr: StdMutex<Option<String>>,
     /// Porta EXTERNA mapeada no roteador (UPnP/NAT-PMP) que DEVE ser anunciada.
@@ -995,6 +1016,7 @@ impl NetworkEngine {
             punch_upgrades: StdMutex::new(HashMap::new()),
             punch_rate: StdMutex::new(HashMap::new()),
             pending_calls: StdMutex::new(HashMap::new()),
+            call_rooms: StdMutex::new(super::call_room::Rooms::default()),
             cancel_tx: tokio::sync::watch::channel(false).0,
             public_addr: StdMutex::new(None),
             nat_external_port: Arc::new(AtomicU16::new(0)),
@@ -1081,6 +1103,7 @@ impl NetworkEngine {
             punch_upgrades: StdMutex::new(HashMap::new()),
             punch_rate: StdMutex::new(HashMap::new()),
             pending_calls: StdMutex::new(HashMap::new()),
+            call_rooms: StdMutex::new(super::call_room::Rooms::default()),
             cancel_tx: tokio::sync::watch::channel(false).0,
             public_addr: StdMutex::new(None),
             nat_external_port: Arc::new(AtomicU16::new(0)),
@@ -5748,6 +5771,112 @@ impl NetworkEngine {
         Ok(())
     }
 
+    /// Sai do grupo (qualquer membro, inclusive quem não é o criador).
+    ///
+    /// Antes "apagar conversa" só removia a linha local: o criador reenviava
+    /// `GroupCreated` no próximo evento e o grupo voltava (era o "não consigo
+    /// sair de grupos pelo celular"). Aqui o roster é re-sincronizado SEM mim e
+    /// meu banco local é limpo — quem ficou deixa de me listar.
+    ///
+    /// O criador NÃO sai: sem ele o grupo fica órfão (`GroupCreated sem o
+    /// criador na lista` é recusado). Ele usa `group_delete` (para todos) ou
+    /// `group_delete_local` (só na máquina dele).
+    pub fn group_leave(&self, conv_id: &str) -> Result<()> {
+        let conv = self
+            .store
+            .get_conversation(conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
+        if conv.kind != "group" {
+            return Err(DistorrentError::Protocol("não é grupo".into()));
+        }
+        let me = self.identity.fingerprint.clone();
+        let membros = self.store.list_group_members(conv_id)?;
+        let sou_criador = membros.first().map(|(fp, _)| fp == &me).unwrap_or(false);
+        if sou_criador {
+            return Err(DistorrentError::Protocol(
+                "você criou este grupo — escolha apagar para todos ou só para você".into(),
+            ));
+        }
+        // Avisa os que ficam ANTES de apagar o roster local (a lista é a fonte).
+        let restantes: Vec<(String, String)> = membros
+            .iter()
+            .filter(|(fp, _)| fp != &me)
+            .cloned()
+            .collect();
+        let titulo = conv.title.clone();
+        for (fp, _) in &restantes {
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    fp.clone(),
+                    SecureFrame::GroupCreated {
+                        conv_id: conv_id.to_string(),
+                        title: titulo.clone(),
+                        members: restantes.clone(),
+                    },
+                ))
+                .ok();
+        }
+        self.store.leave_group_local(conv_id)?;
+        let _ = self.events.send(EngineEvent::GroupSynced {
+            conv_id: conv_id.to_string(),
+            // Vazio = a UI só atualiza a lista (a conversa sumiu para mim).
+            title: String::new(),
+        });
+        Ok(())
+    }
+
+    /// DONO: apaga o grupo para TODOS (avisa os membros e limpa o local).
+    pub fn group_delete(&self, conv_id: &str) -> Result<()> {
+        let conv = self
+            .store
+            .get_conversation(conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
+        if conv.kind != "group" {
+            return Err(DistorrentError::Protocol("não é grupo".into()));
+        }
+        let me = self.identity.fingerprint.clone();
+        let membros = self.store.list_group_members(conv_id)?;
+        let sou_criador = membros.first().map(|(fp, _)| fp == &me).unwrap_or(false);
+        if !sou_criador {
+            return Err(DistorrentError::Protocol(
+                "só quem criou o grupo pode apagar para todos".into(),
+            ));
+        }
+        for (fp, _) in membros.iter().filter(|(fp, _)| fp != &me) {
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    fp.clone(),
+                    SecureFrame::GroupDeleted {
+                        conv_id: conv_id.to_string(),
+                    },
+                ))
+                .ok();
+        }
+        self.store.leave_group_local(conv_id)?;
+        let _ = self.events.send(EngineEvent::GroupSynced {
+            conv_id: conv_id.to_string(),
+            title: String::new(),
+        });
+        Ok(())
+    }
+
+    /// Apaga o grupo SÓ desta máquina (sem avisar ninguém).
+    pub fn group_delete_local(&self, conv_id: &str) -> Result<()> {
+        let conv = self
+            .store
+            .get_conversation(conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
+        if conv.kind != "group" {
+            return Err(DistorrentError::Protocol("não é grupo".into()));
+        }
+        self.store.leave_group_local(conv_id)?;
+        let _ = self.events.send(EngineEvent::GroupSynced {
+            conv_id: conv_id.to_string(),
+            title: String::new(),
+        });
+        Ok(())
+    }
+
     /// Renomeia o grupo e propaga o novo título no `GroupCreated`.
     ///
     /// O título novo viaja no mesmo frame de sincronização (o receptor faz
@@ -6346,6 +6475,7 @@ impl NetworkEngine {
                 | SecureFrame::CallAnswer { .. }
                 | SecureFrame::CallIce { .. }
                 | SecureFrame::CallAddParticipant { .. }
+                | SecureFrame::CallRoom { .. }
                 | SecureFrame::ScreenShareOffer { .. }
                 | SecureFrame::ScreenShareAnswer { .. }
         )
@@ -8066,6 +8196,11 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 //    (`set_voice_state` é upsert) e conserta o roster
                 //    assimétrico sem tocar no protocolo.
                 engine.reannounce_voice_channels();
+                // 5) Renova o anúncio das SALAS de chamada (grupo/DM): quem
+                //    está na conversa vê "chamada em andamento" e pode entrar,
+                //    sem depender de ter recebido o invite. Salas alheias sem
+                //    renovação vencem em ROOM_TTL_MS.
+                engine.room_tick_arc();
             }
             _ = presence_tick.tick() => {
                 let me = engine.identity.fingerprint.clone();
@@ -9476,6 +9611,10 @@ async fn register_and_run(
         // canal antes do link subir nunca era informado (o `VoiceJoin` original
         // virou no-op silencioso) — o par aparecia conectado e não se ouvia.
         engine.flush_voice_state_to(peer_fp);
+        // SALAS: manda para o peer recém-online as salas vivas em que ele
+        // participa (grupo ou DM). Sem isto ele só veria a chamada no próximo
+        // tique de 15 s — e quem abriu o app durante a chamada não entrava.
+        engine.flush_rooms_to(peer_fp);
         // PRESENÇA: anuncia o status atual para a sessão que acabou de subir.
         // Sem isto o peer novo via "offline" por até 30 s (até o próximo tick),
         // e com o TTL antigo isso virava flicker constante na lista de amigos.
@@ -10745,6 +10884,21 @@ async fn handle_frame(
     peer_nick: &str,
     frame: SecureFrame,
 ) -> Result<()> {
+    // SALA DE CHAMADA: tratada antes do gate de amizade porque o anúncio é
+    // para MEMBROS da conversa (grupo pode não ter amizade). A validação de
+    // "é membro desta conversa" acontece dentro de `room_receive`.
+    if let SecureFrame::CallRoom {
+        call_id,
+        conv_id,
+        kind,
+        state,
+        participants,
+        ..
+    } = &frame
+    {
+        engine.room_receive(peer_fp, call_id, conv_id, kind, state, participants.clone());
+        return Ok(());
+    }
     // GATE: sinalização de chamada 1:1 só de AMIGO ACEITO — sem isso qualquer
     // peer conectado podia te LIGAR e injetar SDP/ICE (spam/abuso).
     if matches!(
@@ -11360,6 +11514,26 @@ async fn handle_frame(
                 title: String::new(),
             });
         }
+        SecureFrame::GroupDeleted { conv_id } => {
+            // Só o CRIADOR encerra o grupo: o peer precisa ser o primeiro da
+            // lista (mesma autoridade usada no `GroupCreated`).
+            let criador = engine
+                .store
+                .list_group_members(&conv_id)?
+                .first()
+                .map(|(fp, _)| fp == peer_fp)
+                .unwrap_or(false);
+            if !criador {
+                return Err(DistorrentError::Protocol(
+                    "GroupDeleted de quem não criou o grupo".into(),
+                ));
+            }
+            engine.store.leave_group_local(&conv_id)?;
+            let _ = engine.events.send(EngineEvent::GroupSynced {
+                conv_id,
+                title: String::new(),
+            });
+        }
         SecureFrame::ChannelMsg {
             community_id,
             channel_id,
@@ -11815,6 +11989,9 @@ async fn handle_frame(
                 muted,
                 deafened,
             });
+        }
+        SecureFrame::CallRoom { .. } => {
+            // Tratado antes do gate de amizade (ver topo de `handle_frame`).
         }
         SecureFrame::FileAnnounce {
             file_id,

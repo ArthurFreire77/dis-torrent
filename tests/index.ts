@@ -8,6 +8,7 @@
 //   node --experimental-strip-types --test tests/<arquivo>.test.ts
 import './botCommands.test.ts'
 import './callPhases.test.ts'
+import './callRooms.test.ts'
 import './callMedia.test.ts'
 import './callParticipants.test.ts'
 import './callPlayback.test.ts'

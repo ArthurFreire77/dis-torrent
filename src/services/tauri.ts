@@ -265,6 +265,18 @@ export const tauriServices: DisTorrentServices = {
   groupAdd: (cid, fp) => invoke<void>('group_add', { convId: cid, fp }),
   groupRemove: (cid, fp) => invoke<void>('group_remove', { convId: cid, fp }),
   groupRename: (cid, title) => invoke<void>('group_rename', { convId: cid, title }),
+  /** Sair do grupo de verdade (local + aviso aos membros no core). */
+  groupLeave: (cid) => invoke<void>('group_leave', { convId: cid }),
+  /** Dono: apaga o grupo para todos. */
+  groupDelete: (cid) => invoke<void>('group_delete', { convId: cid }),
+  /** Apaga o grupo só nesta máquina. */
+  groupDeleteLocal: (cid) => invoke<void>('group_delete_local', { convId: cid }),
+  callRoomPublish: (callId, convId, kind, participants) =>
+    invoke<void>('call_room_publish', { callId, convId, kind, participants }),
+  callRoomClose: (convId) => invoke<void>('call_room_close', { convId }),
+  callRoomJoin: (convId, kind) =>
+    invoke<[string, string[]]>('call_room_join', { convId, kind }),
+  callRoomsList: () => invoke<any[]>('call_rooms_list').catch(() => []),
   callInvite: (targetFp, kind) => invoke<string>('call_invite', { targetFp: targetFp, kind }),
   callAccept: (callId, fromFp) => invoke<void>('call_accept', { callId: callId, fromFp: fromFp }),
   callReject: (callId, fromFp, reason) => invoke<void>('call_reject', { callId: callId, fromFp: fromFp, reason }),

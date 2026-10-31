@@ -1,3 +1,6 @@
+/// Sala de chamada anunciada (grupo/DM): quem está na conversa vê que há
+/// chamada e pode entrar. Puro (sem rede), testável.
+pub mod call_room;
 pub mod dht;
 pub mod discovery;
 pub mod engine;

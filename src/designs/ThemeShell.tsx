@@ -21,6 +21,7 @@ import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
 import { ChannelVoicePeers } from '../components/calls/ChannelVoicePeers'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
+import { callRooms, roomSummary, type CallRoomView } from '../services/callRooms'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import { FileCard } from '../components/FileCard'
@@ -36,7 +37,7 @@ import {
   type ServerSummary,
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
-import { Modal, Notice } from '../shared/ui'
+import { Modal, Notice, Button } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { copyText } from '../shared/clipboard'
@@ -973,6 +974,20 @@ export default function ThemeShell({ designId }: {designId:string}){
     identity?.fingerprint,
   ])
 
+  // Nomes reais nos quadrados/na sala (antes ia `fp.slice(0,6)`).
+  useEffect(() => {
+    const st: any = activeCall
+    if (!st?.participants?.length) return
+    let mudou = false
+    for (const p of st.participants as { fp: string; nickname?: string }[]) {
+      if (!p?.fp || p.fp === identity?.fingerprint) continue
+      const nome = nameOfFp(p.fp)
+      if (nome && nome !== p.nickname && nome !== p.fp.slice(0, 8)) { p.nickname = nome; mudou = true }
+    }
+    if (mudou) setActiveCall((cur: any) => (cur ? { ...cur, participants: [...cur.participants] } : cur))
+    // nameOfFp muda com membros/perfis; o roster re-emite no onUpdate do manager.
+  }, [activeCall?.participants, identity?.fingerprint, socialProfiles, peers])
+
   // Mídia REAL, não fase: badge verde só com track viva (local ou remota).
   const mediaLive = useMemo(() => {
     if (!activeCall) return false
@@ -1807,6 +1822,51 @@ export default function ThemeShell({ designId }: {designId:string}){
     return () => { alive = false; window.clearInterval(h) }
   }, [phase])
 
+  // ---------- salas de chamada anunciadas (grupo/DM) ----------
+  const [callRoomsMap, setCallRoomsMap] = useState<Map<string, CallRoomView>>(() => callRooms.snapshot())
+  /** Foto de perfil por fp para os quadrados da chamada. */
+  const callAvatars = useMemo<Record<string, string | undefined>>(() => {
+    const out: Record<string, string | undefined> = {}
+    for (const [fp, p] of Object.entries(socialProfiles as Record<string, any>)) {
+      if (p?.avatar_b64) out[fp] = p.avatar_b64
+    }
+    return out
+  }, [socialProfiles])
+  /** Sala da conversa aberta (anel/botão Entrar no cabeçalho). */
+  const selRoom = selConv ? callRoomsMap.get(selConv) ?? null : null
+  const [showRoomMembers, setShowRoomMembers] = useState(false)
+  useEffect(() => {
+    const off = callRooms.subscribe(setCallRoomsMap)
+    // Boot: a UI perdeu eventos enquanto estava fechada (janela/tela apagada).
+    services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
+    return off
+  }, [])
+  useEffect(() => {
+    const un = services.subscribe((ev: any) => {
+      if (ev?.type === 'call_room') callRooms.apply(ev)
+    })
+    return () => { try { un() } catch { /* ignore */ } }
+  }, [])
+
+  /** Botão "Entrar" da lista de conversas: entra na sala em andamento. */  async function enterRoomFromList(convId: string, sala: CallRoomView, nome: (fp: string) => string) {
+    if (callActionBusy) return
+    if (!callsOk) { setError(getCallsUnavailableMessage()); return }
+    if (activeCall) { setError('já existe uma chamada em andamento'); return }
+    setCallActionBusy(true)
+    try {
+      const conv = conversations.find((c) => c.id === convId)
+      setSelConv(convId)
+      if (conv?.peer_fp) setSelPeerFp(conv.peer_fp)
+      await callManager.enterRoom(convId, sala.kind)
+      sfxCallConnect()
+      setNotice(`entrou na chamada de ${nome(sala.hostFp) || conv?.title || 'grupo'}`)
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+    } finally {
+      setCallActionBusy(false)
+    }
+  }
+
   // eventos do motor que mudam a camada social
   useEffect(() => {
     return services.subscribe((ev: any) => {
@@ -2290,13 +2350,30 @@ export default function ThemeShell({ designId }: {designId:string}){
 
                 <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}><span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, flex: 1 }}>CONVERSAS DIRETAS</span><button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', display: 'flex' }}><Icon d={Icons.plus} size={12}/></button></div>
                 <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {conversations.map(c => (
+                  {conversations.map(c => {
+                    const sala = callRoomsMap.get(c.id) ?? null
+                    return (
                     <div key={c.id} className={'nav-row' + (c.id === selConv ? ' active' : '')} onClick={() => { setSelConv(c.id); setSelPeerFp(c.peer_fp) }} style={{ cursor: 'pointer' }}>
-                      <Avatar name={c.title} fp={c.peer_fp} size={28} avatarB64={socialProfiles[c.peer_fp]?.avatar_b64} />
+                      {/* Anel verde = chamada em andamento nesta conversa. */}
+                      <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0, borderRadius: '50%', boxShadow: sala ? `0 0 0 2px ${t.green}, 0 0 8px ${t.green}66` : undefined }}>
+                        <Avatar name={c.title} fp={c.peer_fp} size={28} avatarB64={socialProfiles[c.peer_fp]?.avatar_b64} />
+                      </span>
                       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{c.title}</span>
-                      <button title="Apagar conversa" onClick={async (e) => { e.stopPropagation(); if (!confirm(`Apagar conversa com ${c.title}?`)) return; try { await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.trash} size={14} /></button>
+                      {sala && (
+                        <button
+                          type="button"
+                          title={roomSummary(sala, nameOfFp) ?? 'Entrar na chamada'}
+                          aria-label={`Entrar na chamada de ${c.title}`}
+                          onClick={(e) => { e.stopPropagation(); void enterRoomFromList(c.id, sala, nameOfFp) }}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}
+                        >
+                          <Icon d={Icons.phone} size={11} /> Entrar {sala.participants.length || ''}
+                        </button>
+                      )}
+                      <button title={c.kind === 'group' ? 'Sair do grupo' : 'Apagar conversa'} onClick={async (e) => { e.stopPropagation(); const msg = c.kind === 'group' ? `Sair do grupo "${c.title}"? Você deixa de ver as mensagens dele.` : `Apagar conversa com ${c.title}?`; if (!confirm(msg)) return; try { if (c.kind === 'group') await services.groupLeave(c.id); else await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={14} /></button>
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
 
                 {onlinePeers.filter(p => friendsAccepted.some(f => f.fp === p.fp)).length > 0 && (
@@ -2456,6 +2533,33 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </button>
               ) : (
                 <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
+              )}
+              {/* SALA EM ANDAMENTO: quem está na chamada + entrar, no cabeçalho. */}
+              {selRoom && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowRoomMembers(true)}
+                    title={roomSummary(selRoom, nameOfFp) ?? 'Quem está na chamada'}
+                    aria-label="Ver quem está na chamada"
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: `${t.green}22`, color: t.green, border: `1px solid ${t.green}66`, borderRadius: 99, padding: '3px 9px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}
+                  >
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}` }} />
+                    {selRoom.participants.length || 1} na chamada
+                  </button>
+                  {!activeCall && (
+                    <button
+                      type="button"
+                      onClick={() => void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp)}
+                      disabled={callActionBusy || !callsOk}
+                      title={callsOk ? 'Entrar na chamada que já está acontecendo' : callsUnavailableDetail}
+                      aria-label="Entrar na chamada"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '4px 10px', fontSize: 11, fontWeight: 800, cursor: callActionBusy || !callsOk ? 'not-allowed' : 'pointer', opacity: callsOk ? 1 : 0.6 }}
+                    >
+                      <Icon d={Icons.phone} size={12} /> Entrar
+                    </button>
+                  )}
+                </span>
               )}
               {/* CALL toolbar — sem hard-disable: o clique explica o que falta. */}
               <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -3261,9 +3365,22 @@ export default function ThemeShell({ designId }: {designId:string}){
                 palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
                 minHeight={callPanelSize === 'compact' ? 112 : 150}
                 avatarColor={avatarColor}
+                avatarB64={callAvatars}
+                onOpenProfile={(fp) => setProfileFp(fp)}
               />
             ))}
           </div>
+          {/* Quem foi chamado e AINDA NÃO entrou: chip pequeno, nunca quadrado. */}
+          {((activeCall as any)?.invited?.length ?? 0) > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, padding: '6px 12px', borderTop: `1px solid ${borderColor}`, background: '#1a1a1a', fontSize: 11, color: muted, flexShrink: 0 }}>
+              <span style={{ fontWeight: 700 }}>aguardando:</span>
+              {((activeCall as any).invited as { fp: string; nickname: string }[]).map((i) => (
+                <span key={i.fp} title={`${i.fp} ainda não entrou`} style={{ fontSize: 10, background: inputBg, border: `1px solid ${borderColor}`, padding: '2px 8px', borderRadius: 99 }}>
+                  {nameOfFp(i.fp) || i.nickname}
+                </span>
+              ))}
+            </div>
+          )}
           {/* Aviso de mesh FORA do grid: dentro disputava altura com os vídeos. */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '8px 16px', fontSize: 11, color: muted, borderTop: `1px solid ${borderColor}`, background: '#1a1a1a', flexShrink: 0 }}>
             <Icon d={Icons.users} size={13} />
@@ -3384,6 +3501,7 @@ export default function ThemeShell({ designId }: {designId:string}){
             myFp={identity?.fingerprint ?? ''}
             friends={friendsAccepted}
             profiles={socialProfiles}
+            onlineFps={onlineFps}
             onClose={() => setShowGroupPanel(false)}
             onRenamed={() => {
               // A lista de conversas vem do hook; quem recarrega é o `refresh`.
@@ -3394,6 +3512,41 @@ export default function ThemeShell({ designId }: {designId:string}){
               refreshConvos()
             }}
           />
+        </Modal>
+      )}
+
+      {/* QUEM ESTÁ NA CHAMADA (botão ao lado do "Entrar" no cabeçalho). */}
+      {showRoomMembers && selRoom && (
+        <Modal
+          open
+          onClose={() => setShowRoomMembers(false)}
+          title={`Chamada — ${conversations.find((c) => c.id === selConv)?.title ?? 'conversa'}`}
+          subtitle={roomSummary(selRoom, nameOfFp) ?? undefined}
+          width={WIDTHS.sm}
+          dialogLabel="Quem está na chamada"
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {selRoom.participants.length === 0 && (
+              <div style={{ fontSize: 12, color: muted }}>O motor não informou quem está na sala ainda.</div>
+            )}
+            {selRoom.participants.map((fp) => (
+              <div key={fp} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: inputBg, borderRadius: 8, border: `1px solid ${borderColor}` }}>
+                <Avatar name={nameOfFp(fp)} fp={fp} size={26} avatarB64={socialProfiles[fp]?.avatar_b64} />
+                <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: t.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {fp === identity?.fingerprint ? `${nameOfFp(fp)} (você)` : nameOfFp(fp)}
+                </span>
+                {selRoom.hostFp === fp && <span style={{ fontSize: 10, fontWeight: 800, color: t.accent }}>QUEM LIGOU</span>}
+              </div>
+            ))}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+              <Button onClick={() => setShowRoomMembers(false)}>Fechar</Button>
+              {!activeCall && (
+                <Button variant="success" icon="phone" disabled={callActionBusy || !callsOk} onClick={() => { setShowRoomMembers(false); if (selRoom) void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp) }}>
+                  Entrar na chamada
+                </Button>
+              )}
+            </div>
+          </div>
         </Modal>
       )}
 

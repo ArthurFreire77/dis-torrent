@@ -203,6 +203,7 @@ export type EngineEvent =
   | { type: 'voice_joined'; community_id: string; channel_id: string; fp: string }
   | { type: 'voice_left'; community_id: string; channel_id: string; fp: string }
   | { type: 'voice_state_changed'; community_id: string; channel_id: string; fp: string; muted: boolean; deafened: boolean }
+  | { type: 'call_room'; call_id: string; conv_id: string; kind: string; state: 'open' | 'closed'; participants: string[]; host_fp: string }
   | { type: 'file_announce'; file_id: string; name: string; size: number; chunks: number; hash: string; from_fp: string; chunk_hashes?: string[] }
   | { type: 'file_chunk_request'; file_id: string; index: number; from_fp: string }
   | { type: 'file_chunk_data'; file_id: string; index: number; data_b64: string; from_fp: string }
@@ -665,6 +666,20 @@ export interface DisTorrentServices {
   groupRemove(convId: string, fp: string): Promise<void>
   /** Renomeia o grupo; o título novo chega aos membros pela sincronização. */
   groupRename(convId: string, title: string): Promise<void>
+  /** Sai do grupo: apaga local e avisa os membros (o grupo não reaparece). */
+  groupLeave(convId: string): Promise<void>
+  /** DONO: apaga o grupo para todos os membros. */
+  groupDelete(convId: string): Promise<void>
+  /** Apaga o grupo só nesta máquina (os outros continuam com ele). */
+  groupDeleteLocal(convId: string): Promise<void>
+
+  // Salas de chamada anunciadas (grupo/DM): ver, entrar e sair
+  callRoomPublish(callId: string, convId: string, kind: string, participants: string[]): Promise<void>
+  callRoomClose(convId: string): Promise<void>
+  /** Entra numa sala anunciada → `[callId, participantes avisados]`. */
+  callRoomJoin(convId: string, kind: string): Promise<[string, string[]]>
+  /** Salas vivas no boot (a UI perdeu os eventos enquanto estava fechada). */
+  callRoomsList(): Promise<any[]>
 
   // Chamadas (voice/video + screen share) — mesh P2P onde todos semeiam
   callInvite(targetFp: string, kind: string): Promise<string>

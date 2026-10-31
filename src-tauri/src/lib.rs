@@ -3034,6 +3034,81 @@ fn group_rename(conv_id: String, title: String, state: State<AppState>) -> Resul
     engine(&state)?.group_rename(&conv_id, &title).map_err(err)
 }
 
+/// Sai do grupo: re-sincroniza o roster sem mim e limpa o banco local.
+#[tauri::command]
+fn group_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.group_leave(&conv_id).map_err(err)
+}
+
+/// DONO: apaga o grupo para todos (avisa os membros).
+#[tauri::command]
+fn group_delete(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.group_delete(&conv_id).map_err(err)
+}
+
+/// Apaga o grupo só nesta máquina, sem avisar ninguém.
+#[tauri::command]
+fn group_delete_local(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.group_delete_local(&conv_id).map_err(err)
+}
+
+#[tauri::command]
+fn call_room_publish(
+    call_id: String,
+    conv_id: String,
+    kind: String,
+    participants: Vec<String>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let e = engine(&state)?;
+    e.publish_room(&call_id, &conv_id, &kind, participants);
+    Ok(())
+}
+
+#[tauri::command]
+fn call_room_close(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.unpublish_room(&conv_id);
+    Ok(())
+}
+
+/// Entra numa sala anunciada. Devolve `(call_id, participantes_avisados)`.
+#[tauri::command]
+fn call_room_join(
+    conv_id: String,
+    kind: String,
+    state: State<AppState>,
+) -> Result<(String, Vec<String>), String> {
+    engine(&state)?.room_join(&conv_id, &kind).map_err(err)
+}
+
+/// Salas vivas no boot (a UI perdeu os eventos enquanto estava fechada).
+#[tauri::command]
+fn call_rooms_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let e = engine(&state)?;
+    let mut out = Vec::new();
+    for ev in e.rooms_snapshot() {
+        if let distorrent_core::EngineEvent::CallRoom {
+            call_id,
+            conv_id,
+            kind,
+            state,
+            participants,
+            host_fp,
+        } = ev
+        {
+            out.push(serde_json::json!({
+                "call_id": call_id,
+                "conv_id": conv_id,
+                "kind": kind,
+                "state": state,
+                "participants": participants,
+                "host_fp": host_fp,
+            }));
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 async fn call_invite(
     target_fp: String,
@@ -4646,6 +4721,13 @@ fn main() {
             group_add,
             group_remove,
             group_rename,
+            group_leave,
+            group_delete,
+            group_delete_local,
+            call_room_publish,
+            call_room_close,
+            call_room_join,
+            call_rooms_list,
             call_invite,
             call_accept,
             call_reject,

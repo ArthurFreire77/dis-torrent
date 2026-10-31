@@ -160,6 +160,12 @@ export interface CallState {
   localStream?: MediaStream | null
   /** `true` = mídia no core Rust (Linux), sem MediaStream na página. */
   nativeMedia?: boolean
+  /**
+   * Convidados que AINDA não entraram. Não viram quadrado (senão o painel
+   * enchia de gente que nunca atendeu); aparecem como "aguardando" no rodapé
+   * e saem da lista no instante em que a mídia/estado do peer chega.
+   */
+  invited?: { fp: string; nickname: string }[]
 }
 
 // Privacidade×ICE: lógica em ./callIcePrivacy (standalone testável); reexportado daqui.
@@ -952,6 +958,10 @@ export class CallManager {
   private accepting = new Set<string>()
   /** Evita que o eco de `call_ended` execute `leave()` recursivamente. */
   private leavingCalls = new Set<string>()
+  /** Conversa cuja sala de chamada estamos anunciando (fecha ao sair). */
+  private roomConvId: string | null = null
+  /** Renova o anúncio da sala (participantes mudam durante a chamada). */
+  private roomTimer: ReturnType<typeof setInterval> | null = null
   private connectTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly CONNECT_TIMEOUT_MS = 20_000
   /** Sem resposta do outro lado (ninguém atendeu / sinalização não andou). */
@@ -1560,6 +1570,9 @@ export class CallManager {
       if (!fp || fp === this.myFp) return
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) {
+        // `CallAddParticipant` = aviso de que a pessoa ENTROU (a mídia vem em
+        // seguida): aqui ela ganha o quadrado, igual ao `voice_joined`.
+        this.dropInvite(fp)
         st.participants.push({ fp, nickname: fp.slice(0, 6) })
         // cada participante existente oferece conexão ao novo (anti-glare:
         // o novo peer só responde — todos os offers vêm de um lado só).
@@ -1577,7 +1590,10 @@ export class CallManager {
       const st = this.state
       if (!st || st.callId !== callId || !fp || fp === this.myFp) return
       const added = addVoiceParticipant(st.participants, fp)
-      if (added) this.onUpdate({ ...st })
+      if (added) {
+        this.dropInvite(fp)
+        this.onUpdate({ ...st })
+      }
       // MESH NO BROWSER: só o lado de fp MAIOR oferece ao novo (regra determinística, anti-glare).
       if (
         !(st as any).nativeMedia &&
@@ -1615,6 +1631,7 @@ export class CallManager {
       if (!st || st.callId !== callId || !fp || fp === this.myFp) return
       const added = addVoiceParticipant(st.participants, fp)
       const changed = updateVoiceParticipantState(st.participants, fp, muted, deafened)
+      if (added) this.dropInvite(fp)
       if (added || changed) this.onUpdate({ ...st })
       // ANÚNCIO REVERSO do core: sem criar PC aqui, o joiner nunca abre mídia com quem chegou antes.
       if (
@@ -1707,7 +1724,6 @@ export class CallManager {
       [targetFps[0], ...targetFps.slice(1)]
         .filter((fp): fp is string => !!fp && fp !== me.fingerprint),
     )]
-
     // CHAMADA NATIVA: nada de getUserMedia aqui (mic da página competia com o do core e ficava preso).
     if (nativeVoiceAvailable === true) {
       this.localStream = null
@@ -1726,10 +1742,14 @@ export class CallManager {
         cameraOn: false,
         screenOn: false,
         sharing: false,
-        participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }, ...convidados.map(fp => ({ fp, nickname: fp.slice(0, 6), muted: false }))],
+        participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }],
+        // Convidados NÃO entram no painel até entrarem de fato (pedido: "tira
+        // eles daí; quando entrarem, aparece"). Ficam na lista de espera.
+        invited: convidados.map(fp => ({ fp, nickname: fp.slice(0, 6) })),
         nativeMedia: true,
       } as unknown as CallState
       this.startNativeVoiceMonitor(callId)
+      this.publishRoom()
       this.onUpdate({ ...this.state })
       this.startCallForeground()
       return this.state
@@ -1754,9 +1774,9 @@ export class CallManager {
       sharing: false,
       participants: [
         { fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined },
-        // Convidados no roster desde o início (sem eles a malha ficava em estrela).
-        ...convidados.map(fp => ({ fp, nickname: fp.slice(0, 6) })),
       ],
+      // Convidados só viram quadrado quando respondem (ver `invited`).
+      invited: convidados.map(fp => ({ fp, nickname: fp.slice(0, 6) })),
       startAt: Date.now(),
       quality: this.quality,
       qualityNotice: null,
@@ -1774,6 +1794,7 @@ export class CallManager {
       await this.createPC(fp, callId, true)
     }
     // para grupo >10, convida resto via CallAddParticipant (engine relay)
+    this.publishRoom()
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -1907,6 +1928,8 @@ export class CallManager {
     this.startConnectWatchdog()
     this.ensureRelayTransport()
     this.startQualityMonitor()
+    // Canal de voz: a barra do canal já mostra quem está; só publica em DM/grupo.
+    this.publishRoom()
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -2040,6 +2063,7 @@ export class CallManager {
       } as unknown as CallState
       this.stopConnectWatchdog()
       this.startNativeVoiceMonitor(callId)
+      this.publishRoom()
       this.onUpdate({ ...this.state })
       return this.state
     }
@@ -2133,6 +2157,7 @@ export class CallManager {
     } catch { /* offer pendente nunca derruba o accept */ }
     // MALHA COMPLETA: pede à sala que apresente quem já está dentro (cobre offer perdida).
     this.announceSelfToRoom(callId)
+    this.publishRoom()
     this.startCallForeground()
     return this.state
   }
@@ -4077,10 +4102,24 @@ export class CallManager {
   private markJoined(fp: string) {
     try {
       if (!this.state || !fp || fp === this.myFp) return
-      if (this.state.participants.find((p: any) => p.fp === fp)) return
+      // Entrou: sai da lista de espera e ganha o quadrado.
+      const eraConvidado = this.dropInvite(fp)
+      if (this.state.participants.find((p: any) => p.fp === fp)) {
+        if (eraConvidado) this.onUpdate({ ...this.state })
+        return
+      }
       this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
       this.onUpdate({ ...this.state })
     } catch { /* ignore */ }
+  }
+
+  /** Tira `fp` dos convidados que ainda não entraram. Devolve se removeu. */
+  private dropInvite(fp: string): boolean {
+    const st = this.state
+    if (!st || !Array.isArray(st.invited)) return false
+    const antes = st.invited.length
+    st.invited = st.invited.filter((i) => i.fp !== fp)
+    return st.invited.length !== antes
   }
 
   private async handleOffer(fromFp: string, callId: string, sdpStr: string) {
@@ -4297,8 +4336,148 @@ export class CallManager {
     } catch { /* ignore */ }
   }
 
-  private cleanup(expectedCallId?: string) {
-    // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
+  // ── Sala anunciada (grupo/DM): ver, entrar e sair ───────────────────────
+  /**
+   * Publica a sala viva desta chamada para os membros da conversa.
+   * `convId` inválido (ou demo do navegador sem conversa) só ignora em
+   * silêncio: publicar sala é acessório, nunca pode derrubar a chamada.
+   */
+  private publishRoom() {
+    const st = this.state
+    if (!st || !st.convId) return
+    if (st.callId.startsWith('voice-')) return // canal de voz tem roster próprio
+    try {
+      this.roomConvId = st.convId
+      const participantes = st.participants.map((p) => p.fp).filter(Boolean)
+      void services
+        .callRoomPublish(st.callId, st.convId, st.kind, participantes)
+        .catch(() => { /* sem motor (navegador/demo): sala é só informativa */ })
+      // Renova a cada 15 s: o TTL do core é 35 s e a lista muda quando entra
+      // gente nova — sem reenvio, quem entra no meio não aparecia.
+      if (!this.roomTimer) {
+        this.roomTimer = setInterval(() => { try { this.publishRoom() } catch { /* ignore */ } }, 15_000)
+      }
+    } catch { /* nunca derruba a chamada */ }
+  }
+
+  /** Fecha a sala anunciada (fim da chamada ou troca de conversa). */
+  private closeRoom() {
+    if (this.roomTimer) {
+      try { clearInterval(this.roomTimer) } catch { /* ignore */ }
+      this.roomTimer = null
+    }
+    const convId = this.roomConvId ?? this.state?.convId
+    this.roomConvId = null
+    if (!convId) return
+    try {
+      void services.callRoomClose(convId).catch(() => { /* melhor esforço */ })
+    } catch { /* nunca derruba o encerramento */ }
+  }
+
+  /** Conversa da chamada ativa (ou null) — usado pelo shell p/ "Entrar". */
+  getRoomConvId(): string | null {
+    return this.roomConvId
+  }
+
+  /**
+   * Entra numa chamada JÁ EM ANDAMENTO anunciada na conversa (botão "Entrar").
+   *
+   * O host já está na sala; entramos com o MESMO `callId` e mandamos invite
+   * para quem está lá — a mídia é o mesh de sempre. Se ninguém responder, a
+   * chamada encerra com erro honesto em vez de ficar "conectando" sozinha.
+   */
+  async enterRoom(convId: string, kind: 'voice' | 'video' = 'voice', fps: string[] = []): Promise<CallState> {
+    const me = this.getIdentity()
+    if (!me) throw new Error('sem identidade')
+    if (this.state && isCallPhaseActive(this.state.phase)) {
+      throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar')
+    }
+    await detectNativeVoice(true)
+    if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
+    const [callId, alvos] = await services.callRoomJoin(convId, kind)
+    if (!alvos.length) throw new Error('a chamada encerrou — ninguém mais está na sala')
+    this.myFp = me.fingerprint
+    this.quality = getStoredQuality()
+    this.qualityNotice = null
+    this.badWindows = 0
+    this.lastFailureCause = null
+    try { this.lastStats.clear() } catch { /* ignore */ }
+    try { this.lastNativeStats = null } catch { /* ignore */ }
+    this.prevLost.clear()
+    this.resetRelayForNewCall()
+    this.acceptedCalls.add(callId)
+    this.roomConvId = convId
+
+    if (nativeVoiceAvailable === true) {
+      this.localStream = null
+      this.screenStream = null
+      this.state = {
+        callId,
+        kind,
+        convId,
+        phase: 'connecting',
+        startedAt: Date.now(),
+        startAt: Date.now(),
+        quality: this.quality,
+        muted: false,
+        deafened: false,
+        cameraOn: false,
+        screenOn: false,
+        sharing: false,
+        participants: [
+          { fp: me.fingerprint, nickname: me.nickname, muted: false },
+          ...alvos.map((fp) => ({ fp, nickname: fp.slice(0, 6), muted: false })),
+        ],
+        nativeMedia: true,
+      } as unknown as CallState
+      this.startNativeVoiceMonitor(callId)
+      this.publishRoom()
+      this.onUpdate({ ...this.state })
+      this.startCallForeground()
+      return this.state
+    }
+
+    if (!this.localStream) {
+      try {
+        this.localStream = kind === 'video'
+          ? await getLocalMedia({ audio: true, video: { ...CAMERA_CONSTRAINTS } })
+          : await getLocalMedia({ audio: true })
+      } catch { this.localStream = null }
+    }
+    this.state = {
+      callId,
+      kind,
+      convId,
+      phase: 'connecting',
+      muted: false,
+      deafened: false,
+      cameraOn: this.hasLiveCamera(),
+      sharing: false,
+      participants: [
+        { fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined },
+        ...alvos.map((fp) => ({ fp, nickname: fp.slice(0, 6) })),
+      ],
+      startAt: Date.now(),
+      quality: this.quality,
+      qualityNotice: null,
+      relayActive: false,
+      relayManual: false,
+      relayReason: null,
+    }
+    this.startConnectWatchdog()
+    this.startQualityMonitor()
+    this.ensureRelayTransport()
+    // Abre PC para cada um que já estava na sala (eu sou o lado novo).
+    for (const fp of new Set([...alvos, ...fps.filter((f) => f && f !== me.fingerprint)])) {
+      await this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
+    }
+    this.publishRoom()
+    this.onUpdate({ ...this.state })
+    this.startCallForeground()
+    return this.state
+  }
+
+  private cleanup(expectedCallId?: string) {    // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
     if (expectedCallId && this.state?.callId !== expectedCallId) return
     this.stopCallForeground()
     // O roster é da chamada que está terminando: sem parar o timer, ele
@@ -4342,6 +4521,9 @@ export class CallManager {
     this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
     this.resetScreenRuntime()
     this.localStream = null
+    // SALA ANUNCIADA: some da lista de conversas de todo mundo (o tique
+    // também vence por TTL se este aviso se perder).
+    this.closeRoom()
     // Guarda o callId encerrado para `canAccept` barar aceite tardio. Com teto:
     // uma sessão longa não deveria acumular milhares de ids.
     if (this.state) {

@@ -37,6 +37,10 @@ export interface CallTileProps {
   minHeight?: number
   /** `cover` para câmera, `contain` para tela — automático pelo tipo. */
   avatarColor: (fp: string) => string
+  /** Foto de perfil (base64) por fingerprint; sem ela, inicial + cor. */
+  avatarB64?: Record<string, string | undefined>
+  /** Abre o perfil da pessoa (foto/nome/fingerprint) ao tocar no avatar. */
+  onOpenProfile?: (fp: string) => void
 }
 
 /** `true` se o elemento tem dimensões de vídeo válidas. */
@@ -64,6 +68,8 @@ export function CallTile({
   palette: c,
   minHeight = 150,
   avatarColor,
+  avatarB64,
+  onOpenProfile,
 }: CallTileProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [aspect, setAspect] = useState<string | null>(null)
@@ -193,7 +199,13 @@ export function CallTile({
           />
         ) : (
           <div style={{ textAlign: 'center', padding: 8 }}>
-            <div
+            {/* Foto de perfil quando existe; sem ela, inicial + cor do fp. */}
+            <button
+              type="button"
+              onClick={isScreen || !onOpenProfile ? undefined : () => onOpenProfile(tile.fp)}
+              disabled={isScreen || !onOpenProfile}
+              title={isScreen ? undefined : `Ver perfil de ${tile.nickname}`}
+              aria-label={isScreen ? undefined : `Ver perfil de ${tile.nickname}`}
               style={{
                 width: isScreen ? 64 : 104,
                 height: isScreen ? 64 : 104,
@@ -206,10 +218,18 @@ export function CallTile({
                 fontWeight: 800,
                 fontSize: isScreen ? 26 : 40,
                 boxShadow: '0 6px 24px rgba(0,0,0,.4)',
+                padding: 0,
+                border: isScreen ? 'none' : `2px solid ${c.border}`,
+                overflow: 'hidden',
+                cursor: isScreen || !onOpenProfile ? 'default' : 'pointer',
               }}
             >
-              {isScreen ? <Icon d={Icons.screen} size={28} /> : (tile.nickname || tile.fp).charAt(0).toUpperCase()}
-            </div>
+              {isScreen
+                ? <Icon d={Icons.screen} size={28} />
+                : avatarB64?.[tile.fp]
+                  ? <img src={`data:image/jpeg;base64,${avatarB64[tile.fp]}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  : (tile.nickname || tile.fp).charAt(0).toUpperCase()}
+            </button>
             <div style={{ fontWeight: 700, color: c.heading, marginTop: 12, fontSize: 15 }}>{tile.label}</div>
             <div style={{ fontSize: 11, color: c.muted, marginTop: 2 }}>
               {isScreen

@@ -7,6 +7,7 @@ import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
+import { callRooms, type CallRoomView } from '../services/callRooms'
 import { FileCard } from '../components/FileCard'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -117,7 +118,7 @@ const PeerDot = memo(function PeerDot({ on, ring }: { on: boolean; ring?: string
 })
 
 // Linhas memoizadas: props iguais pulam re-render (antes eram todas recriadas).
-const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete }: {
+const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete, room, onJoinRoom }: {
   c: Conversation
   online: boolean
   selected: boolean
@@ -125,10 +126,13 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
   avatarB64?: string
   onOpen: (c: Conversation) => void
   onDelete: (id: string, title: string, isSelected: boolean) => void
+  /** Chamada em andamento nesta conversa (anel verde + Entrar). */
+  room?: CallRoomView | null
+  onJoinRoom?: (c: Conversation, room: CallRoomView) => void
 }) {
   return (
     <div className="m-row" onClick={() => onOpen(c)}>
-      <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+      <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0, borderRadius: '50%', boxShadow: room ? `0 0 0 2px ${t.green}, 0 0 8px ${t.green}66` : undefined }}>
         <Avatar name={c.title} fp={c.peer_fp} size={40} avatarB64={avatarB64} />
         <PeerDot on={online} />
       </span>
@@ -140,7 +144,18 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
         <div style={{ fontSize: 12, color: t.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }}>{(c as any).last_body || 'Toque para conversar'}</div>
       </div>
       {((c as any).unread_count ?? 0) > 0 && <span className="m-badge">{(c as any).unread_count > 9 ? '9+' : (c as any).unread_count}</span>}
-      <button title="Apagar conversa" aria-label="Apagar conversa" onClick={(e) => { e.stopPropagation(); void onDelete(c.id, c.title, selected) }} style={{ background: 'transparent', border: 'none', padding: 6, cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8e929b' }}><Icon d={Icons.trash} size={16} /></button>
+      {room && onJoinRoom && (
+        <button
+          type="button"
+          title="Entrar na chamada em andamento"
+          aria-label={`Entrar na chamada de ${c.title}`}
+          onClick={(e) => { e.stopPropagation(); onJoinRoom(c, room) }}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '4px 9px', fontSize: 11, fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}
+        >
+          <Icon d={Icons.phone} size={12} /> {room.participants.length || 1}
+        </button>
+      )}
+      <button title={c.kind === 'group' ? 'Sair do grupo' : 'Apagar conversa'} aria-label={c.kind === 'group' ? 'Sair do grupo' : 'Apagar conversa'} onClick={(e) => { e.stopPropagation(); void onDelete(c.id, c.title, selected) }} style={{ background: 'transparent', border: 'none', padding: 6, cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8e929b' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={16} /></button>
     </div>
   )
 })
@@ -1013,7 +1028,39 @@ export default function MobileShell() {
   // Callbacks estáveis (useCallback) para as linhas memo manterem props iguais.
   const openDm = useCallback(async (fp: string, nick?: string) => { if (!fp || fp.trim() === '') { setError('Selecione um amigo válido'); return } try { const conv = await services.dmOpen(fp.trim(), (nick || fp).trim()); setSelCommunity(null); setSelPeerFp(fp.trim()); setSelConv(conv.id); setTab('chats'); refreshConvos() } catch (e: any) { setError(String(e?.message ?? e)) } }, [refreshConvos])
   const openConv = useCallback((c: Conversation) => { setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp) }, [])
-  const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => { if (!confirm(`Apagar conversa com ${title}?`)) return; try { await services.conversationDelete(id); if (isSelected) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshConvos])
+  // Salas de chamada anunciadas: anel verde + botão Entrar na lista.
+  const [callRoomsMap, setCallRoomsMap] = useState<Map<string, CallRoomView>>(() => callRooms.snapshot())
+  useEffect(() => {
+    const off = callRooms.subscribe(setCallRoomsMap)
+    services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
+    return off
+  }, [])
+  useEffect(() => {
+    const un = services.subscribe((ev: any) => { if (ev?.type === 'call_room') callRooms.apply(ev) })
+    return () => { try { un() } catch { /* ignore */ } }
+  }, [])
+  const joinRoom = useCallback(async (c: Conversation, room: CallRoomView) => {
+    if (activeCall) { setError('já existe uma chamada em andamento'); return }
+    try {
+      setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp)
+      await callManager.enterRoom(c.id, room.kind)
+    } catch (e: any) { setError(String(e?.message ?? e)) }
+  }, [activeCall])
+  // Lixeira: em grupo é SAIR (o roster remoto é atualizado); em DM é apagar.
+  const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => {
+    const grupo = conversations.find((c) => c.id === id)?.kind === 'group'
+    const msg = grupo
+      ? `Sair do grupo "${title}"? Você deixa de ver as mensagens dele.`
+      : `Apagar conversa com ${title}?`
+    if (!confirm(msg)) return
+    try {
+      if (grupo) await services.groupLeave(id)
+      else await services.conversationDelete(id)
+      if (isSelected) setSelConv(null)
+      refreshConvos()
+      if (grupo) setNotice('Você saiu do grupo')
+    } catch (err: any) { setError(String(err?.message ?? err)) }
+  }, [conversations, refreshConvos])
   const removeFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Remover ${nickname || fp} dos amigos?`)) return; try { await services.friendRemove(fp); refreshFriends(); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   const blockFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Bloquear ${nickname || fp}? As mensagens recebidas serão rejeitadas.`)) return; try { await services.friendBlock(fp); refreshFriends(); refreshConvos(); setNotice('Participante bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   // v6: fila real no downloadManager; painel para acompanhar; card lê o swarm.
@@ -1447,6 +1494,12 @@ export default function MobileShell() {
     )
   }, [memberNicks, profilesByFp, peers, identity])
   const myFp = identity?.fingerprint ?? ''
+  /** Foto de perfil por fp nos quadrados da chamada (mobile). */
+  const mobileCallAvatars = useMemo<Record<string, string | undefined>>(() => {
+    const out: Record<string, string | undefined> = {}
+    for (const [fp, p] of Object.entries(profilesByFp)) if (p?.avatar_b64) out[fp] = p.avatar_b64
+    return out
+  }, [profilesByFp])
   const readState = useReadState(selConv, myFp)
   const unreadMarkTs = readState.lastRead
 
@@ -1696,6 +1749,7 @@ export default function MobileShell() {
             myFp={identity?.fingerprint ?? ''}
             friends={friendsAccepted}
             profiles={profilesByFp}
+            onlineFps={onlineFps}
             onClose={() => setShowGroupPanel(false)}
             onRenamed={() => { refreshConvos() }}
             onChanged={() => {
@@ -2068,6 +2122,8 @@ export default function MobileShell() {
                         palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
                         minHeight={callPanelSize === 'compact' ? 92 : 124}
                         avatarColor={avatarColor}
+                        avatarB64={mobileCallAvatars}
+                        onOpenProfile={(fp) => setProfilePeer({ fp, name: resolveMemberName(fp) || fp.slice(0, 8) })}
                       />
                     </div>
                   ))}
@@ -2356,7 +2412,7 @@ export default function MobileShell() {
           <div className="m-sec">CONVERSAS RECENTES</div>
           {filteredConvs.length === 0
             ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.slice(0, 5).map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.slice(0, 5).map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
 
           <div className="m-sec">SEUS SERVIDORES — {filteredComms.length}</div>
           {filteredComms.length === 0
@@ -2458,7 +2514,7 @@ export default function MobileShell() {
           <div className="m-sec">CONVERSAS DIRETAS — {filteredConvs.length}</div>
           {filteredConvs.length === 0
             ? <EmptyBlock msg="Nenhuma conversa" sub={<span>Adicione amigos em <button className="link-btn" onClick={() => setTab('friends')}>Amigos</button> e comece a conversar.</span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
         </>}
 
         {tab === 'friends' && <>

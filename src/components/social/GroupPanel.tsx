@@ -40,13 +40,13 @@ export interface GroupFriend {
 function shortFp(fp: string): string {
   return fp.slice(0, 12)
 }
-
 export function GroupPanel({
   convId,
   title,
   myFp,
   friends,
   profiles,
+  onlineFps,
   onClose,
   onRenamed,
   onChanged,
@@ -56,10 +56,10 @@ export function GroupPanel({
   myFp: string
   friends: GroupFriend[]
   profiles: Record<string, ProfileView>
+  /** fps com sessão viva agora (presença real, não "tem gente na lista"). */
+  onlineFps?: Set<string>
   onClose: () => void
-  /** Chamado quando o título muda (o shell atualiza a lista de conversas). */
   onRenamed: (titulo: string) => void
-  /** Chamado quando o roster muda (o shell recarrega contagem/mensagens). */
   onChanged: () => void
 }) {
   const [roster, setRoster] = useState<Roster>([])
@@ -69,6 +69,8 @@ export function GroupPanel({
   const [erro, setErro] = useState<string | null>(null)
   const [aviso, setAviso] = useState<string | null>(null)
   const [addFp, setAddFp] = useState('')
+  /** Menu de saída do grupo (o dono escolhe para todos ou só para ele). */
+  const [menuSair, setMenuSair] = useState(false)
 
   const carregar = useCallback(async () => {
     setCarregando(true)
@@ -124,6 +126,28 @@ export function GroupPanel({
     } catch (e) {
       setErro(String((e as Error)?.message ?? e))
     }
+  }
+
+  /** Sair do grupo (membro) ou apagar (dono, com a escolha). */
+  const souCriador = roster.length > 0 && roster[0][0] === myFp
+
+  async function sairParaMim() {
+    setErro(null); setSalvando(true)
+    try {
+      if (souCriador) await services.groupDeleteLocal(convId)
+      else await services.groupLeave(convId)
+      onChanged(); onClose()
+    } catch (e) { setErro(String((e as Error)?.message ?? e)) }
+    finally { setSalvando(false) }
+  }
+
+  async function apagarParaTodos() {
+    setErro(null); setSalvando(true)
+    try {
+      await services.groupDelete(convId)
+      onChanged(); onClose()
+    } catch (e) { setErro(String((e as Error)?.message ?? e)) }
+    finally { setSalvando(false) }
   }
 
   async function adicionar() {
@@ -192,6 +216,15 @@ export function GroupPanel({
                 background: ui.surface, border: `1px solid ${ui.border}`, borderRadius: 8,
               }}
             >
+              {/* Presença REAL: sessão viva agora (não "está no roster"). */}
+              <span
+                title={fp === myFp ? 'você' : onlineFps?.has(fp) ? 'online agora' : 'offline'}
+                style={{
+                  width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                  background: fp === myFp ? ui.success : onlineFps?.has(fp) ? ui.success : ui.muted,
+                  boxShadow: fp === myFp || onlineFps?.has(fp) ? `0 0 6px ${ui.success}88` : 'none',
+                }}
+              />
               <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: ui.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {nomeDe(fp, apelido)}
               </span>
@@ -259,7 +292,24 @@ export function GroupPanel({
         </div>
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: ui.sm }}>
+        <div style={{ position: 'relative' }}>
+          <Button variant="danger" icon="minus" busy={salvando} onClick={() => setMenuSair((v) => !v)}>
+            {souCriador ? 'Apagar grupo' : 'Sair do grupo'}
+          </Button>
+          {menuSair && (
+            <div style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 6, background: ui.surface, border: `1px solid ${ui.border}`, borderRadius: 8, padding: 6, display: 'flex', flexDirection: 'column', gap: 2, boxShadow: '0 8px 24px rgba(0,0,0,.45)', zIndex: 5, minWidth: 230 }}>
+              {souCriador ? (
+                <>
+                  <button type="button" onClick={() => { setMenuSair(false); if (confirm(`Apagar "${title}" para TODOS? Ninguém mais vê o grupo.`)) void apagarParaTodos() }} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: ui.danger, padding: '7px 9px', borderRadius: 6, cursor: 'pointer', fontSize: 12.5, fontWeight: 700 }}>Apagar para todos</button>
+                  <button type="button" onClick={() => { setMenuSair(false); if (confirm(`Apagar "${title}" só para você? Os outros continuam no grupo.`)) void sairParaMim() }} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: ui.text, padding: '7px 9px', borderRadius: 6, cursor: 'pointer', fontSize: 12.5 }}>Apagar só para mim</button>
+                </>
+              ) : (
+                <button type="button" onClick={() => { setMenuSair(false); if (confirm(`Sair do grupo "${title}"? Você deixa de ver as mensagens dele.`)) void sairParaMim() }} style={{ textAlign: 'left', background: 'transparent', border: 'none', color: ui.danger, padding: '7px 9px', borderRadius: 6, cursor: 'pointer', fontSize: 12.5, fontWeight: 700 }}>Sair do grupo</button>
+              )}
+            </div>
+          )}
+        </div>
         <Button onClick={onClose}>Fechar</Button>
       </div>
     </div>

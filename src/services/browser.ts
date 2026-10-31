@@ -130,6 +130,8 @@ const listeners = new Set<CB>()
 // Dedupe: evento já entregue via `listeners` não re-entrega via window bus.
 const viaListeners = new WeakSet<object>()
 let bc: BroadcastChannel | null = null
+/** Salas de chamada desta aba (modo navegador não tem motor). */
+const roomsInBrowser = new Map<string, { call_id: string; conv_id: string; kind: string; state: string; participants: string[]; host_fp: string }>()
 try {
   if (typeof BroadcastChannel !== 'undefined') {
     bc = new BroadcastChannel('distorrent-bus-v2')
@@ -1137,6 +1139,45 @@ export const browserServices: DisTorrentServices = {
     try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: nome }) } catch { /* ignore */ }
     return Promise.resolve()
   },
+  // Modo navegador: só o estado local (não há motor nem roster remoto).
+  groupLeave: (cid) => {
+    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch { /* silent */ }
+    writeConvos(readConvos().filter((c) => c.id !== cid))
+    emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
+    return Promise.resolve()
+  },
+  groupDelete: (cid) => {
+    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch { /* silent */ }
+    writeConvos(readConvos().filter((c) => c.id !== cid))
+    emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
+    return Promise.resolve()
+  },
+  groupDeleteLocal: (cid) => {
+    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch { /* silent */ }
+    writeConvos(readConvos().filter((c) => c.id !== cid))
+    emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
+    return Promise.resolve()
+  },
+  // Salas: o navegador não tem motor; a sala local é publicada na própria aba
+  // para a UI funcionar igual (entrar/sair continua sendo o fluxo de chamada).
+  callRoomPublish: (callId, convId, kind, participants) => {
+    const sala = { call_id: callId, conv_id: convId, kind, state: 'open', participants, host_fp: participants[0] ?? '' }
+    if (callId) roomsInBrowser.set(convId, sala)
+    emit({ type: 'call_room', ...sala } as any)
+    return Promise.resolve()
+  },
+  callRoomClose: (convId) => {
+    roomsInBrowser.delete(convId)
+    emit({ type: 'call_room', conv_id: convId, state: 'closed', participants: [] } as any)
+    return Promise.resolve()
+  },
+  callRoomJoin: (convId) => {
+    const sala = roomsInBrowser.get(convId)
+    if (!sala) return Promise.reject(new Error('a chamada encerrou ou ainda não foi anunciada'))
+    return Promise.resolve([sala.call_id, sala.participants.slice()] as [string, string[]])
+  },
+  callRoomsList: () => Promise.resolve([...roomsInBrowser.values()]),
   callInvite: (targetFp, kind) => {
     const rand = (() => {
       try {

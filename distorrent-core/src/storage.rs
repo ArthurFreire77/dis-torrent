@@ -1708,6 +1708,23 @@ impl Store {
         Ok(())
     }
 
+    /// SAIR do grupo (lado local): apaga a conversa, as mensagens e o vínculo
+    /// com os membros. Antes o botão "apagar conversa" só apagava o
+    /// `conversations`, e o grupo reaparecia na próxima sincronização do
+    /// criador (`upsert_group_state` reinsere o roster e a conversa).
+    pub fn leave_group_local(&self, conv_id: &str) -> Result<()> {
+        let mut conn = self.locked();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM group_members WHERE conv_id=?1",
+            params![conv_id],
+        )?;
+        tx.execute("DELETE FROM messages WHERE conv_id=?1", params![conv_id])?;
+        tx.execute("DELETE FROM conversations WHERE id=?1", params![conv_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---------- calls ----------
     pub fn create_call(
         &self,

@@ -308,6 +308,26 @@ pub enum SecureFrame {
         #[serde(default)]
         kind: String,
     },
+    /// Criador → membros: o grupo foi encerrado (dono apagou para todos).
+    GroupDeleted {
+        conv_id: String,
+    },
+    /// Sala de chamada VIVA (grupo, DM ou canal de voz): o convite só chega a
+    /// quem foi chamado, então quem está na conversa nunca sabia que havia
+    /// chamada acontecendo. Repetido a cada ~10 s; `state: "closed"` encerra.
+    CallRoom {
+        call_id: String,
+        conv_id: String,
+        kind: String,
+        /// "open" | "closed"
+        state: String,
+        /// Quem está na sala agora (fps; inclui o host).
+        #[serde(default)]
+        participants: Vec<String>,
+        /// Quando o host publicou (epoch ms) — só informativo.
+        #[serde(default)]
+        ts: i64,
+    },
     VoiceJoin {
         community_id: String,
         channel_id: String,
