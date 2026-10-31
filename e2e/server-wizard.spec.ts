@@ -16,12 +16,11 @@ async function createAccount(page: Page, name: string) {
 test('wizard completo: 4 passos criam servidor com convite', async ({ page }) => {
   await createAccount(page, 'Alice');
 
-  // abre o fluxo pelo + da barra de servidores
   await page.getByTitle('Adicionar um servidor').click();
-  await expect(page.getByText('Crie seu próprio servidor')).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('dialog', { name: 'Servidores' })).toBeVisible({ timeout: 10000 });
 
-  // passo 'create' agora é o assistente v6 (helper robusto: label, não placeholder)
-  await page.getByText('Criar meu próprio', { exact: false }).click();
+  // o hub leva ao assistente v6 pelo botão direto
+  await page.getByRole('dialog', { name: 'Servidores' }).getByRole('button', { name: 'Criar servidor', exact: true }).click();
   const wizard = page.getByRole('dialog', { name: 'Criar servidor' });
   await expect(wizard).toBeVisible({ timeout: 10000 });
 
@@ -43,8 +42,8 @@ test('wizard completo: 4 passos criam servidor com convite', async ({ page }) =>
   await wizard.getByLabel('Regras do servidor').fill('sem flood');
   await wizard.getByRole('button', { name: 'Criar servidor' }).click();
 
-  // tela final: confirmação + link de convite pronto para copiar
-  await expect(wizard.getByRole('heading', { name: 'Servidor criado' })).toBeVisible({ timeout: 15000 });
+  // tela final: o subtítulo muda para 'Pronto. O convite está abaixo.'
+  await expect(wizard.getByText('Pronto. O convite está abaixo.').first()).toBeVisible({ timeout: 15000 });
   await expect(wizard.getByText(/invite/i)).toBeVisible();
 
   // concluir fecha e nada quebra
@@ -68,7 +67,7 @@ test('helper compartilhado também cria servidor utilizável', async ({ page }) 
 test('wizard cancelável sem criar nada (X fecha e nada persiste)', async ({ page }) => {
   await createAccount(page, 'Bob');
   await page.getByTitle('Adicionar um servidor').click();
-  await page.getByText('Criar meu próprio', { exact: false }).click();
+  await page.getByRole('dialog', { name: 'Servidores' }).getByRole('button', { name: 'Criar servidor', exact: true }).click();
   const wizard = page.getByRole('dialog', { name: 'Criar servidor' });
   await expect(wizard).toBeVisible({ timeout: 10000 });
 

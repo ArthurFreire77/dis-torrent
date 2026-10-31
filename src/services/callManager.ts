@@ -4477,7 +4477,8 @@ export class CallManager {
     return this.state
   }
 
-  private cleanup(expectedCallId?: string) {    // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
+  private cleanup(expectedCallId?: string) {
+    // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
     if (expectedCallId && this.state?.callId !== expectedCallId) return
     this.stopCallForeground()
     // O roster é da chamada que está terminando: sem parar o timer, ele

@@ -20,7 +20,10 @@ const WIZARD = '#csw-title' as const
 
 export async function createServerViaWizard(page: Page, name: string, openIt = true): Promise<void> {
   await page.getByTitle('Adicionar um servidor').click()
-  await page.getByText('Criar meu próprio', { exact: false }).click()
+  // O hub de servidores abre direto; "Criar servidor" leva ao assistente.
+  const hub = page.getByRole('dialog', { name: 'Servidores' })
+  await expect(hub).toBeVisible({ timeout: 10000 })
+  await hub.getByRole('button', { name: 'Criar servidor', exact: true }).click()
 
   // ancora no título e sobe até o dialog
   const wizard = page.locator(WIZARD).locator('xpath=ancestor::*[@role="dialog"]')
@@ -52,9 +55,9 @@ export async function createServerViaWizard(page: Page, name: string, openIt = t
   ).toBeEnabled({ timeout: 10000 })
   await criar.click()
 
-  // "Servidor criado" aparece como título (h2#csw-title) e como rótulo do
-  // grupo do conteúdo. O título é o que indica que a criação terminou.
-  await expect(wizard.locator('#csw-title')).toHaveText('Servidor criado', { timeout: 20000 })
+  // O título do diálogo é fixo ("Criar servidor"); a conclusão aparece no
+  // subtítulo ("Pronto. O convite está abaixo.").
+  await expect(wizard.getByText('Pronto. O convite está abaixo.').first()).toBeVisible({ timeout: 20000 })
   await wizard.getByRole('button', { name: 'Concluir' }).click()
   await expect(wizard).toBeHidden({ timeout: 10000 })
 

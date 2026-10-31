@@ -42,6 +42,7 @@ import { useSocialWindow, useMessageActions, usePresence, useReadState } from '.
 import { BookmarksPanel } from '../components/social/Social'
 import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
+import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
 import { shouldNotify, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
@@ -1011,7 +1012,43 @@ export default function MobileShell() {
   const onlineFriends = useMemo(() => friendsAccepted.filter(f =>
     onlineFps.has(f.fp) && presence.get(f.fp)?.status !== 'invisible'
   ), [friendsAccepted, onlineFps, presence])
+  // Membros de TODOS os grupos (contador do topo: amigos + grupos + servidor).
+  const [groupMemberFps, setGroupMemberFps] = useState<[string, string][]>([])
+  useEffect(() => {
+    const grupos = conversations.filter((c) => c.kind === 'group')
+    if (grupos.length === 0) { setGroupMemberFps([]); return }
+    let vivo = true
+    const ler = async () => {
+      const pares: [string, string][] = []
+      for (const g of grupos) {
+        try {
+          const mems = await services.groupMembers(g.id)
+          for (const m of mems as unknown as [string, string][]) if (m?.[0]) pares.push(m)
+        } catch { /* grupo sem roster (offline): ignora */ }
+      }
+      if (vivo) setGroupMemberFps(pares)
+    }
+    void ler()
+    const off = services.subscribe((ev) => { if (ev.type === 'group_synced') void ler() })
+    return () => { vivo = false; off() }
+  }, [conversations])
+
   const shownFriends = friendsTab === 'online' ? onlineFriends : friendsAccepted
+  /**
+   * TUDO que tem vínculo comigo e está online agora: amigos + membros dos
+   * grupos + membros pareados do servidor aberto. O contador do topo mostrava
+   * só "amigos online" e dava 0 mesmo com gente do grupo conectada.
+   */
+  const linkedOnline = useMemo(() => {
+    const s = new Set<string>()
+    for (const f of friendsAccepted) if (onlineFps.has(f.fp)) s.add(f.fp)
+    for (const [, fp] of groupMemberFps) if (fp && onlineFps.has(fp)) s.add(fp)
+    for (const m of memberPairing) {
+      if ((m.state === 'connected' || m.state === 'relay') && m.fp) s.add(m.fp)
+    }
+    if (identity?.fingerprint) s.delete(identity.fingerprint)
+    return s
+  }, [friendsAccepted, groupMemberFps, memberPairing, onlineFps, identity?.fingerprint])
   const unreadTotal = useMemo(() => conversations.reduce((a, c) => a + (((c as any).unread_count as number) || 0), 0), [conversations])
   const netState: NetworkState | null = status?.state ?? null
   // Honesta: verde só com ≥1 peer Online real; nó ouvindo sem peers ≠ ONLINE.
@@ -1022,7 +1059,9 @@ export default function MobileShell() {
   const pillLabel = !nativeKind ? 'LOCAL' : netState === null ? 'INICIANDO…' : netOnline ? 'ONLINE' : stateLabel[netState as NetworkState]
   // Contagem = peers com sessão viva (amigos + membros), não "amigos online";
   // "0" aparece: é informação honesta.
-  const onlineLabel = `${pillLabel} · ${peerCount}`
+  // Qualquer vínculo online (amigos + grupos + servidor aberto), nunca o meu fp.
+  const linkedCount = linkedOnline.size || peerCount
+  const onlineLabel = `${pillLabel} · ${linkedCount}`
   const privacyLabel = PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode
 
   // Callbacks estáveis (useCallback) para as linhas memo manterem props iguais.
@@ -1046,21 +1085,26 @@ export default function MobileShell() {
       await callManager.enterRoom(c.id, room.kind)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }, [activeCall])
-  // Lixeira: em grupo é SAIR (o roster remoto é atualizado); em DM é apagar.
+  // Lixeira: em grupo abre o diálogo (sair / dono escolhe apagar); DM apaga.
+  const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => {
-    const grupo = conversations.find((c) => c.id === id)?.kind === 'group'
-    const msg = grupo
-      ? `Sair do grupo "${title}"? Você deixa de ver as mensagens dele.`
-      : `Apagar conversa com ${title}?`
-    if (!confirm(msg)) return
+    const conv = conversations.find((c) => c.id === id)
+    if (conv?.kind === 'group') {
+      let owner = false
+      try {
+        const mems = await services.groupMembers(id)
+        owner = mems.length > 0 && mems[0][0] === identity?.fingerprint
+      } catch { /* sem roster: cai como membro comum */ }
+      setLeaveTarget({ id, title, owner })
+      return
+    }
+    if (!confirm(`Apagar conversa com ${title}?`)) return
     try {
-      if (grupo) await services.groupLeave(id)
-      else await services.conversationDelete(id)
+      await services.conversationDelete(id)
       if (isSelected) setSelConv(null)
       refreshConvos()
-      if (grupo) setNotice('Você saiu do grupo')
     } catch (err: any) { setError(String(err?.message ?? err)) }
-  }, [conversations, refreshConvos])
+  }, [conversations, identity?.fingerprint, refreshConvos])
   const removeFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Remover ${nickname || fp} dos amigos?`)) return; try { await services.friendRemove(fp); refreshFriends(); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   const blockFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Bloquear ${nickname || fp}? As mensagens recebidas serão rejeitadas.`)) return; try { await services.friendBlock(fp); refreshFriends(); refreshConvos(); setNotice('Participante bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   // v6: fila real no downloadManager; painel para acompanhar; card lê o swarm.
@@ -1755,6 +1799,10 @@ export default function MobileShell() {
             onChanged={() => {
               void services.groupMembers(selConv).then((m) => setGroupMemberCount(m.length)).catch(() => {})
               refreshConvos()
+              // Saiu/apagou o grupo: fecha a conversa que não existe mais.
+              services.conversationsList().then((l) => {
+                if (!l.some((c) => c.id === selConv)) { setSelConv(null); setSelPeerFp(null) }
+              }).catch(() => { /* lista best-effort */ })
             }}
           />,
           () => setShowGroupPanel(false),
@@ -2399,15 +2447,47 @@ export default function MobileShell() {
             <span style={{ width: 10, height: 10, borderRadius: '50%', background: pillColor, boxShadow: netOnline && nativeKind ? `0 0 6px ${t.green}` : 'none', flexShrink: 0 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 800, color: t.heading }}>{netState ? stateLabel[netState as NetworkState] : 'INICIANDO…'}</div>
-              <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>{onlineFriends.length} amigos online{status && status.listen_port > 0 ? ` • porta ${status.listen_port}` : ''}</div>
+              <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>{linkedOnline.size} online entre amigos, grupos e servidor{status && status.listen_port > 0 ? ` • porta ${status.listen_port}` : ''}</div>
             </div>
             <span style={{ fontSize: 10, color: t.muted, fontFamily: MONO, flexShrink: 0 }}>{identity?.fingerprint.slice(0, 8)}</span>
           </div>
 
-          <div className="m-sec">AMIGOS ONLINE — {onlineFriends.length}</div>
-          {onlineFriends.length === 0
-            ? <EmptyBlock msg="Ninguém online agora — é silencioso demais aqui." sub={<span>Um amigo que trabalha em equipe é uma coisa boa — <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{onlineFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} avatarB64={profilesByFp[f.fp]?.avatar_b64} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>}
+          {(() => {
+            // ONLINE = qualquer vínculo (amigo, grupo ou servidor aberto).
+            const amigos = new Set(friendsAccepted.map(f => f.fp))
+            const vinculados = peers.filter(p => p.state === 'CONNECTED' && p.fp !== identity?.fingerprint && (
+              amigos.has(p.fp)
+              || groupMemberFps.some(([fp]) => fp === p.fp)
+              || (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
+            ))
+            return (
+              <>
+                <div className="m-sec">ONLINE — {vinculados.length}</div>
+                {vinculados.length === 0
+                  ? <EmptyBlock msg="Ninguém online agora — é silencioso demais aqui." sub={<span>Amigo, grupo ou servidor: quem estiver conectado aparece aqui. <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
+                  : <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {vinculados.map(p => {
+                        const ehAmigo = amigos.has(p.fp)
+                        const nome = resolveMemberName(p.fp) || p.nickname || p.fp.slice(0, 8)
+                        return (
+                          <div key={p.fp} className="friend-row" onClick={() => { if (ehAmigo) void openDm(p.fp, nome) }} style={{ cursor: ehAmigo ? 'pointer' : 'default' }}>
+                            <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                              <Avatar name={nome} fp={p.fp} size={32} avatarB64={profilesByFp[p.fp]?.avatar_b64} />
+                              <PeerDot on ring={t.sidebar} />
+                            </span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nome}</div>
+                              <div style={{ fontSize: 11, color: t.muted }}>
+                                {ehAmigo ? 'amigo' : groupMemberFps.some(([fp]) => fp === p.fp) ? 'mesmo grupo' : 'mesmo servidor'}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>}
+              </>
+            )
+          })()}
 
           <div className="m-sec">CONVERSAS RECENTES</div>
           {filteredConvs.length === 0
@@ -2429,10 +2509,12 @@ export default function MobileShell() {
           const summaries: ServerSummary[] = filteredComms.map((c) => {
             const st = c.id === selCommunity ? memberPairing : []
             const s = summarize(st)
+            // ONLINE por sessão viva (qualquer membro com link agora).
+            const vivos = (c.members ?? []).filter(([fp]) => onlineFps.has(fp)).length
             return {
               community: c,
-              online: s.online,
-              total: s.total > 0 ? s.total : c.members.length,
+              online: Math.max(s.online, vivos),
+              total: c.members.length || s.total,
               pending: s.pending,
             }
           })
@@ -2451,7 +2533,7 @@ export default function MobileShell() {
                 {activeComm && (
                   <button
                     onClick={() => setShowServerDetails((v) => !v)}
-                    aria-label="Detalhes e membros do servidor"
+                    aria-label="Membros e convite do servidor"
                     aria-expanded={showServerDetails}
                     style={{ width: 42, flexShrink: 0, background: showServerDetails ? t.hover : t.input, border: `1px solid ${t.border}`, color: t.text, borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                   >
@@ -2474,15 +2556,80 @@ export default function MobileShell() {
                   />
                 )}
 
+              {activeComm && (() => {
+                const c = activeComm
+                return (
+                  <>
+                    {/* Abre o servidor em JANELA (canais + membros + convite). */}
+                    <button
+                      onClick={() => setShowServerDetails(true)}
+                      aria-label={`Abrir o servidor ${c.name}`}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', marginTop: 10, marginBottom: 10, padding: 10, background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 10, color: t.text, cursor: 'pointer', textAlign: 'left' }}
+                    >
+                      <Avatar name={c.name} fp={c.id} size={34} />
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: 13, fontWeight: 800, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                        <span style={{ display: 'block', fontSize: 11, color: t.muted, marginTop: 2 }}>{c.channels.length} canais · {c.members.length} membros</span>
+                      </span>
+                      <Icon d={Icons.chevronRight} size={16} />
+                    </button>
+                    <div className="m-sec">CANAIS</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      {c.channels.map(([id, name]) => (
+                        <button key={id} className={'chan-row' + (selConv === id ? ' active' : '')} onClick={() => setSelConv(id)}>
+                          <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )
+              })()}
+
+              {/* SERVIDOR: abre em JANELA (sheet) com canais, membros e convite.
+                  Antes os canais eram despejados na lista — precisava abrir
+                  "detalhes" para achar qualquer coisa. */}
               {activeComm && showServerDetails && (
-                <div style={{ marginTop: 12, padding: 12, background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 10 }}>
-                  <div className="m-sec" style={{ marginTop: 0 }}>MEMBROS — pareamento</div>
-                  <MemberPairingList
-                    members={memberPairing}
-                    emptyHint="Nenhum membro sincronizado. Se você acabou de entrar, aguarde a confirmação do dono."
-                  />
-                  <div style={{ marginTop: 14 }}>
-                    <div className="m-sec" style={{ marginTop: 0 }}>CONVITE</div>
+                <div
+                  onClick={() => setShowServerDetails(false)}
+                  style={{ position: 'fixed', inset: 0, zIndex: 320, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'flex-end' }}
+                >
+                  <div
+                    role="dialog"
+                    aria-label={`Servidor ${activeComm.name}`}
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ width: '100%', maxHeight: '88dvh', overflowY: 'auto', background: t.panel, borderTop: `1px solid ${t.border}`, borderRadius: 16, padding: 12, paddingBottom: 'calc(16px + env(safe-area-inset-bottom))' }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                      <Avatar name={activeComm.name} fp={activeComm.id} size={40} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{activeComm.name}</div>
+                        <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>{activeComm.channels.length} canais · {activeComm.members.length} membros</div>
+                      </div>
+                      <button onClick={() => setShowServerDetails(false)} aria-label="Fechar" style={{ background: 'transparent', border: 'none', color: t.muted, display: 'flex', padding: 4, cursor: 'pointer' }}><Icon d={Icons.x} size={18} /></button>
+                    </div>
+
+                    <div className="m-sec" style={{ marginTop: 0 }}>CANAIS</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      {activeComm.channels.map(([id, name]) => (
+                        <button
+                          key={id}
+                          className={'chan-row' + (selConv === id ? ' active' : '')}
+                          onClick={() => { setSelConv(id); setShowServerDetails(false) }}
+                        >
+                          <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="m-sec">MEMBROS — pareamento</div>
+                    <MemberPairingList
+                      members={memberPairing}
+                      emptyHint="Nenhum membro sincronizado. Se você acabou de entrar, aguarde a confirmação do dono."
+                    />
+
+                    <div className="m-sec">CONVITE</div>
                     <InvitePanel
                       communityId={activeComm.id}
                       canCreateInvite={activeComm.is_owner === true}
@@ -2491,21 +2638,6 @@ export default function MobileShell() {
                   </div>
                 </div>
               )}
-
-              {activeComm && (() => {
-                const c = activeComm
-                return <>
-                  <div className="m-sec">CANAIS</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    {c.channels.map(([id, name]) => (
-                      <button key={id} className={'chan-row' + (selConv === id ? ' active' : '')} onClick={() => setSelConv(id)}>
-                        <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
-                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              })()}
             </>
           )
         })()}
@@ -2855,6 +2987,32 @@ export default function MobileShell() {
 
       {renderIncomingModal()}
 
+      {leaveTarget && (
+        <GroupLeaveDialog
+          title={leaveTarget.title}
+          isOwner={leaveTarget.owner}
+          onClose={() => setLeaveTarget(null)}
+          onLeave={async () => {
+            await services.groupLeave(leaveTarget.id)
+            if (selConv === leaveTarget.id) setSelConv(null)
+            refreshConvos()
+            setNotice('Você saiu do grupo')
+          }}
+          onDeleteAll={async () => {
+            await services.groupDelete(leaveTarget.id)
+            if (selConv === leaveTarget.id) setSelConv(null)
+            refreshConvos()
+            setNotice('Grupo apagado para todos')
+          }}
+          onDeleteLocal={async () => {
+            await services.groupDeleteLocal(leaveTarget.id)
+            if (selConv === leaveTarget.id) setSelConv(null)
+            refreshConvos()
+            setNotice('Grupo apagado só para você')
+          }}
+        />
+      )}
+
       {/* bottom nav — 5 itens, fundo rail, ativo heading, inativo muted, badges vermelhas */}
       <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: t.rail, borderTop: `1px solid ${t.border}`, display: 'flex', padding: '6px 0 calc(6px + env(safe-area-inset-bottom))', zIndex: 10 }}>
         {([
@@ -2884,3 +3042,4 @@ export default function MobileShell() {
     </div>
   )
 }
+

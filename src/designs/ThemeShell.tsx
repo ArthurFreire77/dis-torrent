@@ -40,6 +40,7 @@ import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink
 import { Modal, Notice, Button } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
 import { GroupPanel } from '../components/social/GroupPanel'
+import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
 import { copyText } from '../shared/clipboard'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -708,14 +709,17 @@ export default function ThemeShell({ designId }: {designId:string}){
     return communities.map((c) => {
       const st = c.id === selCommunity ? memberPairing : []
       const s = summarize(st)
+      // ONLINE por sessão viva: qualquer membro do roster com link agora,
+      // não só o pareamento do servidor aberto.
+      const vivos = (c.members ?? []).filter(([fp]) => peers.some((p) => p.fp === fp && p.state === 'CONNECTED')).length
       return {
         community: c,
-        online: s.online,
-        total: s.total > 0 ? s.total : c.members.length,
+        online: Math.max(s.online, vivos),
+        total: c.members.length || s.total,
         pending: s.pending,
       }
     })
-  }, [communities, selCommunity, memberPairing])
+  }, [communities, selCommunity, memberPairing, peers])
   // Leitura de `?invite=` centralizada em App.tsx (services/deepLink).
 
   const [oldPass, setOldPass] = useState('')
@@ -764,6 +768,25 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showAddToCall, setShowAddToCall] = useState(false)
   const [showCreateGroup, setShowCreateGroup] = useState(false)
   const [showGroupPanel, setShowGroupPanel] = useState(false)
+  /** Grupo a sair/apagar (diálogo do dono: todos ou só para mim). */
+  const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
+  /** Roster de cada grupo (fp → apelido) para o "ONLINE" incluir não-amigos. */
+  const [groupRosters, setGroupRosters] = useState<Record<string, [string, string][]>>({})
+  useEffect(() => {
+    const grupos = conversations.filter((c) => c.kind === 'group')
+    if (grupos.length === 0) return
+    let vivo = true
+    const ler = async () => {
+      const next: Record<string, [string, string][]> = {}
+      for (const g of grupos) {
+        try { next[g.id] = await services.groupMembers(g.id) } catch { /* offline */ }
+      }
+      if (vivo) setGroupRosters(next)
+    }
+    void ler()
+    const off = services.subscribe((ev) => { if (ev.type === 'group_synced') void ler() })
+    return () => { vivo = false; off() }
+  }, [conversations])
   /** Roster REAL do grupo aberto (vem do motor, não de cache da UI). */
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [groupTitle, setGroupTitle] = useState('')
@@ -1310,6 +1333,17 @@ export default function ThemeShell({ designId }: {designId:string}){
   })()
   const channelLabel = mergedChannelsForLabel.find(c => c.id === selConv)?.name ?? (activeComm?.channels.find(([cid]) => cid === selConv)?.[1] ?? 'canal')
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
+  /** fps que estão em algum grupo meu (para "ONLINE" incluir não-amigos). */
+  const groupMemberFps = useMemo<Set<string>>(() => {
+    const s = new Set<string>()
+    for (const c of conversations) {
+      if (c.kind !== 'group') continue
+      const mem = groupRosters[c.id]
+      if (mem) for (const [fp] of mem) if (fp) s.add(fp)
+    }
+    s.delete(identity?.fingerprint ?? '')
+    return s
+  }, [conversations, groupRosters, identity?.fingerprint])
   const shownFriends = friendsTab === 'online'
     ? friendsAccepted.filter(f => onlineFps.has(f.fp) && socialPresence[f.fp] !== 'invisible')
     : friendsAccepted
@@ -2370,28 +2404,43 @@ export default function ThemeShell({ designId }: {designId:string}){
                           <Icon d={Icons.phone} size={11} /> Entrar {sala.participants.length || ''}
                         </button>
                       )}
-                      <button title={c.kind === 'group' ? 'Sair do grupo' : 'Apagar conversa'} onClick={async (e) => { e.stopPropagation(); const msg = c.kind === 'group' ? `Sair do grupo "${c.title}"? Você deixa de ver as mensagens dele.` : `Apagar conversa com ${c.title}?`; if (!confirm(msg)) return; try { if (c.kind === 'group') await services.groupLeave(c.id); else await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={14} /></button>
+                      <button title={c.kind === 'group' ? 'Sair ou apagar o grupo' : 'Apagar conversa'} onClick={async (e) => { e.stopPropagation(); if (c.kind === 'group') { let owner = false; try { const mems = await services.groupMembers(c.id); owner = mems.length > 0 && mems[0][0] === identity?.fingerprint } catch { /* roster offline */ } setLeaveTarget({ id: c.id, title: c.title, owner }); return } if (!confirm(`Apagar conversa com ${c.title}?`)) return; try { await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={14} /></button>
                     </div>
                     )
                   })}
                 </div>
 
-                {onlinePeers.filter(p => friendsAccepted.some(f => f.fp === p.fp)).length > 0 && (
-                  <>
-                    <div style={{ marginTop: 16, fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, padding: '0 8px' }}>AMIGOS ONLINE</div>
-                    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {onlinePeers.filter(p => friendsAccepted.some(f => f.fp === p.fp)).map(p => (
-                        <button key={p.fp} onClick={() => openDm({ fp: p.fp, nickname: p.nickname })} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')}>
-                          <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                            <Avatar name={p.nickname || p.fp} fp={p.fp} size={28} avatarB64={socialProfiles[p.fp]?.avatar_b64} />
-                            <PeerDot s={p.state} />
-                          </span>
-                          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{p.nickname || p.fp}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
+                {(() => {
+                  // ONLINE = qualquer vínculo comigo (amigo, grupo ou servidor),
+                  // não só a lista de amigos. Era o "0 online" com gente no grupo.
+                  const amigos = new Set(friendsAccepted.map(f => f.fp))
+                  const vinculados = onlinePeers.filter(p => p.fp !== identity?.fingerprint && (
+                    amigos.has(p.fp)
+                    || groupMemberFps.has(p.fp)
+                    || (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
+                  ))
+                  if (vinculados.length === 0) return null
+                  return (
+                    <>
+                      <div style={{ marginTop: 16, fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, padding: '0 8px' }}>ONLINE — {vinculados.length}</div>
+                      <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        {vinculados.map(p => {
+                          const ehAmigo = amigos.has(p.fp)
+                          return (
+                            <button key={p.fp} onClick={() => { if (ehAmigo) openDm({ fp: p.fp, nickname: p.nickname }) }} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')} title={ehAmigo ? 'Abrir conversa' : 'Está no mesmo grupo ou servidor'}>
+                              <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                                <Avatar name={p.nickname || p.fp} fp={p.fp} size={28} avatarB64={socialProfiles[p.fp]?.avatar_b64} />
+                                <PeerDot s={p.state} />
+                              </span>
+                              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{p.nickname || p.fp}</span>
+                              {!ehAmigo && <span style={{ fontSize: 10, color: muted, flexShrink: 0 }}>{groupMemberFps.has(p.fp) ? 'grupo' : 'servidor'}</span>}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </>
+                  )
+                })()}
 
                 {friendRequests.length > 0 && (
                   <>
@@ -3510,6 +3559,10 @@ export default function ThemeShell({ designId }: {designId:string}){
             onChanged={() => {
               void services.groupMembers(selConv).then((m) => setGroupMemberCount(m.length)).catch(() => {})
               refreshConvos()
+              // Saiu/apagou o grupo: não pode ficar na conversa inexistente.
+              services.conversationsList().then((l) => {
+                if (!l.some((c) => c.id === selConv)) { setSelConv(null); setSelPeerFp(null) }
+              }).catch(() => { /* lista best-effort */ })
             }}
           />
         </Modal>
@@ -3548,6 +3601,33 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* Grupo: sair (membro) ou dono escolhe apagar para todos/só para mim. */}
+      {leaveTarget && (
+        <GroupLeaveDialog
+          title={leaveTarget.title}
+          isOwner={leaveTarget.owner}
+          onClose={() => setLeaveTarget(null)}
+          onLeave={async () => {
+            await services.groupLeave(leaveTarget.id)
+            if (selConv === leaveTarget.id) setSelConv(null)
+            refreshConvos()
+            setNotice('Você saiu do grupo')
+          }}
+          onDeleteAll={async () => {
+            await services.groupDelete(leaveTarget.id)
+            if (selConv === leaveTarget.id) setSelConv(null)
+            refreshConvos()
+            setNotice('Grupo apagado para todos')
+          }}
+          onDeleteLocal={async () => {
+            await services.groupDeleteLocal(leaveTarget.id)
+            if (selConv === leaveTarget.id) setSelConv(null)
+            refreshConvos()
+            setNotice('Grupo apagado só para você')
+          }}
+        />
       )}
 
       {/* TELA CHEIA da transmissão: painel fica montado atrás (áudio segue tocando). */}

@@ -589,6 +589,11 @@ pub struct PeerDiagInfo {
     pub send_gave_up: u64,
     /// Último toque em qualquer campo (epoch ms) - base do bound LRU do mapa.
     pub last_seen_ms: i64,
+    /// Último FRAME recebido deste peer (epoch ms) — prova de vida real.
+    /// O link pode ficar `Online` na memória depois de o processo do outro
+    /// lado morrer; sem isto a bolinha verde mentia ("aparece online mas não
+    /// recebe nada"). Ping a cada 10s (relay 20s) mantém isto fresco.
+    pub last_rx_ms: i64,
 }
 
 /// Diagnóstico GLOBAL da rede: STUN, anúncio de endpoint e DHT BitTorrent.
@@ -622,6 +627,8 @@ impl PeerLink {
     }
 }
 
+#[cfg(test)]
+mod peer_liveness_tests;
 /// Anúncio da sala de chamada (grupo/DM) — ver `net/engine/room_announce.rs`.
 mod room_announce;
 #[cfg(test)]
@@ -2545,7 +2552,8 @@ impl NetworkEngine {
     }
 
     pub fn peer_state(&self, fp: &str) -> NetworkState {
-        self.links
+        let st = self
+            .links
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(fp)
@@ -2554,7 +2562,34 @@ impl NetworkEngine {
                 PeerLinkState::Connecting => NetworkState::Connecting,
                 PeerLinkState::Reconnecting => NetworkState::Reconnecting,
             })
-            .unwrap_or(NetworkState::Disconnected)
+            .unwrap_or(NetworkState::Disconnected);
+        // LINK ZUMBI: a sessão está "Online" na memória mas o outro lado não
+        // manda nada há mais de dois timeouts. Sem esta checagem a bolinha
+        // ficava verde para sempre (peer que fechou o app sem avisar).
+        if st == NetworkState::Connected && !self.peer_alive(fp) {
+            return NetworkState::Reconnecting;
+        }
+        st
+    }
+
+    /// Prova de vida: frame recebido dentro da janela de heartbeat.
+    ///
+    /// `0` (nunca recebemos nada) conta como vivo: a sessão acabou de subir e
+    /// o primeiro frame pode estar a caminho — senão todo peer novo piscava
+    /// "reconectando" na UI.
+    pub fn peer_alive(&self, fp: &str) -> bool {
+        let last_rx = self
+            .peer_diag
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(fp)
+            .map(|d| d.last_rx_ms)
+            .unwrap_or(0);
+        if last_rx == 0 {
+            return true;
+        }
+        let janela_ms = RELAY_PING_TIMEOUT.as_millis() as i64;
+        crate::identity::now_ms().saturating_sub(last_rx) <= janela_ms
     }
 
     pub fn aggregated_state(&self) -> NetworkState {
@@ -10884,6 +10919,11 @@ async fn handle_frame(
     peer_nick: &str,
     frame: SecureFrame,
 ) -> Result<()> {
+    // PROVA DE VIDA: qualquer frame decifrado deste peer renova o relógio.
+    // É isto que impede "online" eterno depois que o outro processo morreu.
+    engine.diag_update(peer_fp, |d| {
+        d.last_rx_ms = crate::identity::now_ms();
+    });
     // SALA DE CHAMADA: tratada antes do gate de amizade porque o anúncio é
     // para MEMBROS da conversa (grupo pode não ter amizade). A validação de
     // "é membro desta conversa" acontece dentro de `room_receive`.
