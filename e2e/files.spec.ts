@@ -64,7 +64,7 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
 test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   await createAccount(page, 'Carol');
 
-  // Acima do teto (o default e' 2 GB, configuravel por VITE_DISTORRENT_MAX_FILE_MB).
+  // Acima do teto (o default e' 50 GB, configuravel por VITE_DISTORRENT_MAX_FILE_MB).
   // Usa 8 GB para ser barrado independente do teto configurado.
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {

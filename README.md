@@ -189,7 +189,7 @@ Todas opcionais. Veja [`.env.example`](.env.example) com comentários.
 | `DISTORRENT_DISCOVERY_BROADCASTS` | — | Broadcasts extras de discovery (VPN/ZeroTier) |
 | `DISTORRENT_NO_RELAY` / `DISTORRENT_NO_TUNNEL` / `DISTORRENT_NO_ANNOUNCE` / `DISTORRENT_NO_DHT` | `0` | Kill-switches de feature |
 | `DISTORRENT_NO_NATIVE_VOICE` | `0` | Força o WebRTC do navegador no lugar da voz nativa |
-| `VITE_DISTORRENT_MAX_FILE_MB` | `2048` | Teto de tamanho por arquivo no swarm, em MB (2 GB). Não remova o teto sem motivo: é a validação anti-DoS (ver abaixo) |
+| `VITE_DISTORRENT_MAX_FILE_MB` | `51200` | Teto de tamanho por arquivo no swarm, em MB (50 GB). Não remova o teto sem motivo: é a validação anti-DoS (ver abaixo) |
 | `RUST_LOG` | `info` | Filtro de log |
 
 ---

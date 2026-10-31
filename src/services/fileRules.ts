@@ -22,7 +22,7 @@ const MAX_FILE_MB = (() => {
     } catch { return undefined }
   })()
   const n = Number(raw)
-  return Number.isFinite(n) && n > 0 ? n : 2048
+  return Number.isFinite(n) && n > 0 ? n : 51200
 })()
 
 export const MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024

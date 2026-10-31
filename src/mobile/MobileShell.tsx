@@ -482,7 +482,11 @@ export default function MobileShell() {
   const friendInputRef = useRef<HTMLInputElement | null>(null)
   // T1: sem bloqueio global sending — permite digitar/enviar a proxima durante o envio.
   // So barra duplo-submit da MESMA tecla Enter em <300ms.
-  const lastSendRef = useRef(0)
+  //
+  // Por CONVERSA, não por relógio global: um único instante descartava o envio
+  // para B feito logo depois do envio para A (o `return` acontece antes de
+  // limpar o input), e o Enter parecia morto ao trocar de conversa.
+  const lastSendByConvRef = useRef<{ conv: string; at: number }>({ conv: '', at: 0 })
   const [searchQ, setSearchQ] = useState('')
   // --- camada social (5.5) ---
   const [bots, setBots] = useState<BotView[]>([])
@@ -1225,9 +1229,10 @@ export default function MobileShell() {
     const body = raw
     if (!body || !selConv) return
     const now = Date.now()
-    if (now - lastSendRef.current < 300) return
-    lastSendRef.current = now
     const convId = selConv
+    // Antiduplo-SUBMIT por conversa (ver `lastSendByConvRef`).
+    if (lastSendByConvRef.current.conv === convId && now - lastSendByConvRef.current.at < 300) return
+    lastSendByConvRef.current = { conv: convId, at: now }
     const communityId = selCommunity
     const myFp = identity?.fingerprint ?? ''
     const ts = Date.now()

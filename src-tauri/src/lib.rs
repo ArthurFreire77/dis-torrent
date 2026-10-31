@@ -4135,9 +4135,16 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Teto do fluxo em lotes. Espelha a validacao do frontend (VITE_DISTORRENT_MAX_FILE_MB,
-/// default 2 GB) — este e' o que impede um peer de nos fazer preencher o disco.
-const MAX_STREAM_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Teto do fluxo em lotes — o lado que impede um peer de nos fazer preencher o
+/// disco. Espelha a validação do frontend e o `MAX_ANNOUNCED_FILE_BYTES` do
+/// core: os três PRECISAM concordar, senão o arquivo é aceito no anúncio e
+/// recusado no salvamento (ou o contrário).
+///
+/// 50 GB (era 2 GB): o limite é anti-DoS, não anti-arquivo-grande. Quem protege
+/// o disco de verdade é a checagem de espaço livre antes de gravar, e quem
+/// protege a memória é o teto de 32 MB por LOTE — este número nunca é alocado
+/// de uma vez. Subir para 50 GB só deixa passar filme/backup grande.
+const MAX_STREAM_FILE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
 /// Formata bytes como "X MB"/"X GB" para as mensagens de erro.
 pub(crate) fn fmt_mb(b: u64) -> String {

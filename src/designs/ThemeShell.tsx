@@ -1447,7 +1447,12 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   // T1: sem bloqueio global sending — permite digitar/enviar a proxima durante o envio.
   // So barra duplo-submit da MESMA tecla Enter em <300ms.
-  const lastSendRef = useRef(0)
+  //
+  // A chave é a CONVERSA, não o relógio global. Antes era um único instante:
+  // mandar para A e, em menos de 300ms, mandar para B DESCARTava o envio de B
+  // sem aviso (o `return` acontece antes de limpar o input), e o Enter parecia
+  // morto ao trocar de conversa. Duplo-submit é por conversa — é ela que repete.
+  const lastSendByConvRef = useRef<{ conv: string; at: number }>({ conv: '', at: 0 })
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
 
@@ -1508,9 +1513,11 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
 
     const now = Date.now()
-    if (now - lastSendRef.current < 300) return
-    lastSendRef.current = now
     const convId = selConv
+    // Antiduplo-SUBMIT por conversa (ver `lastSendByConvRef`): mandar para outra
+    // pessoa no mesmo segundo não pode ser engolido.
+    if (lastSendByConvRef.current.conv === convId && now - lastSendByConvRef.current.at < 300) return
+    lastSendByConvRef.current = { conv: convId, at: now }
     // `selCommunity` sobrevive à abertura de DM (só a aba "amigos" o limpa),
     // então ele não é prova de que a conversa selecionada é um canal. O
     // membership real é a única fonte: mandar num id de DM com community setado

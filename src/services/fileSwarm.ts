@@ -33,7 +33,7 @@ export const MAX_FILE_SIZE = (() => {
   // `ceil(MAX_FILE_SIZE / CHUNK) + 1` blocos.
   const meta = import.meta as unknown as { env?: Record<string, string> }
   const n = Number(meta.env?.VITE_DISTORRENT_MAX_FILE_MB)
-  const mb = Number.isFinite(n) && n > 0 ? n : 2048
+  const mb = Number.isFinite(n) && n > 0 ? n : 51200
   return mb * 1024 * 1024
 })()
 export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_SIZE / (1024 * 1024)) >= 1024
@@ -45,10 +45,12 @@ export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_SIZE / (1024 * 1024)) >= 10
  * Teto de tamanho por arquivo. Configuravel por DISTORRENT_MAX_FILE_MB (bundle nao
  * tem terminal: exporte antes de subir o app, ou use um launcher).
  *
- * PADRAO: 2 GB. O teto nao e' arbitrario — e' a validacao anti-DoS: sem ele, um
- * peer anuncia "size: 500 GB" num frame de 200 bytes e o motor tenta alocar o
+ * PADRAO: 50 GB. O teto nao e' arbitrario — e' a validacao anti-DoS: sem ele, um
+ * peer anuncia "size: 5000 GB" num frame de 200 bytes e o motor tenta alocar o
  * buffer inteiro. `validateAnnounce` roda no envio local E no anuncio remoto,
- * entao o teto protege dos dois lados.
+ * entao o teto protege dos dois lados. Com 50 GB um filme/backup grande passa;
+ * o disco e' protegido pelo espaco livre antes de gravar, e a memoria pelo
+ * teto de um LOTE (32 MB), nunca pelo tamanho total.
  */
 
 // Swarm: não inundar o peer. Teto de chunks em voo por arquivo (relay-friendly),
