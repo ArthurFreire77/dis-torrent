@@ -54,8 +54,13 @@ test('regressão: áudio do sistema pede restrictOwnAudio (evita eco de retorno)
 test('regressão: sem escala dupla — 720p sai 720p, não 640×360', () => {
   const o = opts({ quality: '720p', fps: '60' })
   const c = screenConstraints(o) as Record<string, any>
-  assert.equal(c.width.max, 1280)
-  assert.equal(c.height.max, 720)
+  // `ideal` (não `max`): o teto sozinho fazia o Chromium ESTRICAR a imagem em
+  // telas que não são 16:9 (1440×900 virava 1280×720 = texto borrado e barra
+  // preta). Com `ideal` o engine escolhe o mais próximo preservando a proporção.
+  assert.equal(c.width.ideal, 1280)
+  assert.equal(c.height.ideal, 720)
+  assert.equal(c.width.max, undefined, 'max sem ideal estica/corta a imagem')
+  assert.equal(c.resizeMode, 'none', 'o engine não pode reescalar por conta própria')
   const tuning = buildSenderTuning(o)
   assert.equal(tuning.scaleResolutionDownBy, 1, 'a captura já entrega 720p; dividir de novo vira 360p')
   // 480p também não pode ser dividido por 4 em cima da captura de 854×480.

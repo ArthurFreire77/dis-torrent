@@ -19,6 +19,7 @@ import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
+import { ChannelVoicePeers } from '../components/calls/ChannelVoicePeers'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
@@ -2414,6 +2415,22 @@ export default function ThemeShell({ designId }: {designId:string}){
                                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{ch.name}</span>
                                   {ch.topic && <span style={{ fontSize: 10, color: muted, maxWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.topic}</span>}
                                 </button>
+                                {/* QUEM ESTÁ NO CANAL DE VOZ — sempre visível.
+                                    Como no Discord: dá para ver os nomes de quem
+                                    está na chamada e entrar nela tocando no canal,
+                                    sem precisar perguntar. Antes só quem já tinha
+                                    entrado via a barra de voz; quem chegava depois
+                                    não sabia que havia gente ali. */}
+                                {ch.kind === 'voice' && (
+                                  <ChannelVoicePeers
+                                    communityId={selCommunity!}
+                                    channelId={ch.id}
+                                    myFp={identity?.fingerprint ?? ''}
+                                    isCurrent={voiceChannel?.channelId === ch.id}
+                                    nameOf={nameOfFp}
+                                    palette={{ muted, text, heading: t.heading, green: t.green, red: t.red }}
+                                  />
+                                )}
                                 {isOwner && (
                                   <button
                                     className="chan-gear"

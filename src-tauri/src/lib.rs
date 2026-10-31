@@ -107,11 +107,13 @@ fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 fn save_public_copy(app: AppHandle, path: String, name: String) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
-        let handle = app.try_state::<tauri::plugin::PluginHandle<tauri::Wry>>().ok_or_else(|| {
-            "o plugin de downloads não está registrado neste aparelho — \
+        let handle = app
+            .try_state::<tauri::plugin::PluginHandle<tauri::Wry>>()
+            .ok_or_else(|| {
+                "o plugin de downloads não está registrado neste aparelho — \
              o arquivo continua na área do app"
-                .to_string()
-        })?;
+                    .to_string()
+            })?;
         #[derive(serde::Deserialize)]
         struct Res {
             path: String,

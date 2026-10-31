@@ -280,8 +280,14 @@ function newPeerConnection(): RTCPeerConnection {
 }
 
 /** Offer com Opus afinado (baixa latência). */
-export async function createTunedOffer(pc: RTCPeerConnection): Promise<RTCSessionDescriptionInit> {
-  const offer = await pc.createOffer()
+export async function createTunedOffer(
+  pc: RTCPeerConnection,
+  opts?: { iceRestart?: boolean },
+): Promise<RTCSessionDescriptionInit> {
+  // `iceRestart` renova as credenciais ICE e refaz a conectividade SEM trocar a
+  // sessão (mais barato que recriar o PC e não perde o áudio já fluindo). É o
+  // caminho do reparo de par half-open no mesh de grupo.
+  const offer = await pc.createOffer(opts?.iceRestart ? { iceRestart: true } : undefined)
   offer.sdp = tuneOpusSdp(offer.sdp ?? '')
   return offer
 }
@@ -1193,6 +1199,8 @@ export class CallManager {
    * a ser a fonte de verdade a cada 10 s.
    */
   private rosterTimer: ReturnType<typeof setInterval> | null = null
+  /** Reparo periódico de par half-open no mesh (ver `repairHalfOpenPairs`). */
+  private repairTimer: ReturnType<typeof setInterval> | null = null
   private badWindows = 0
   private prevLost = new Map<string, number>()
   /** UI pode assinar para exibir toast além do CallState.qualityNotice. */
@@ -1364,9 +1372,42 @@ export class CallManager {
       }
       if (ev.type === 'call_rejected') {
         if (this.state && this.state.callId === ev.call_id) {
-          this.applyPhase('remote-reject')
-          this.onCallNotice?.('chamada recusada')
-          this.leave()
+          // RECUSA EM GRUPO/SERVIDOR É INDIVIDUAL.
+          //
+          // BUG REAL (o relato "se um recusar, recusa para todos"): qualquer
+          // `call_reject` caía em `leave()` e encerrava a chamada INTEIRA. Numa
+          // chamada de grupo/servidor quem recusa só não participa — os outros
+          // continuam sendo chamados e a conversa segue.
+          //
+          // `pcs` tem uma conexão POR PEER, então dá para soltar só a de quem
+          // recusou. A distinção é estrutural: mais de um PC vivo (ou uma
+          // chamada que nasceu de canal/grupo) = coletiva.
+          const fp = String((ev as { from_fp?: string }).from_fp ?? '')
+          const coletiva = this.pcs.size > 1 || this.state.callId.startsWith('voice-')
+          if (coletiva) {
+            // Solta SÓ a mídia de quem recusou (mesma limpeza do
+            // `onVoiceParticipantLeft`, que já é o caminho de saída de um par).
+            if (fp && fp !== this.myFp) {
+              this.pendingOffers.delete(fp)
+              try { this.pcs.get(fp)?.close() } catch { /* fecha só este par */ }
+              this.pcs.delete(fp)
+              this.iceRestarts.delete(fp)
+              this.localIce.delete(fp)
+              this.lastRemoteOffer.delete(fp)
+              this.pendingIce.delete(fp)
+              const st = this.state
+              if (st && removeVoiceParticipant(st.participants, fp)) {
+                this.onUpdate({ ...st })
+              } else if (st) {
+                this.onUpdate({ ...st })
+              }
+              this.onCallNotice?.(`${fp.slice(0, 8)} não entrou na chamada`)
+            }
+          } else {
+            this.applyPhase('remote-reject')
+            this.onCallNotice?.('chamada recusada')
+            this.leave()
+          }
         }
       }
       if (ev.type === 'call_participant_added') {
@@ -1405,6 +1446,33 @@ export class CallManager {
         const st = this.state
         if (st && st.callId === ev.call_id) {
           const wasIncoming = st.phase === 'incoming'
+          // EM GRUPO, "DESLIGAR" É INDIVIDUAL.
+          //
+          // BUG REAL ("quando alguém desliga, para todos"): qualquer
+          // `call_ended` chamava `leave()` e derrubava a chamada INTEIRA. Num
+          // mesh de 3+, quem sai só deve sair — os outros continuam se ouvindo.
+          // A distinção é estrutural, igual à recusa: mais de um par vivo ou
+          // chamada de canal (`voice-…`) = coletiva.
+          const fp = String((ev as { from_fp?: string }).from_fp ?? '')
+          const coletiva = this.pcs.size > 1 || st.callId.startsWith('voice-')
+          const saiuEu = !!fp && fp === this.myFp
+          if (coletiva && !saiuEu && !wasIncoming) {
+            if (fp && fp !== this.myFp) {
+              this.pendingOffers.delete(fp)
+              try { this.pcs.get(fp)?.close() } catch { /* fecha só este par */ }
+              this.pcs.delete(fp)
+              this.iceRestarts.delete(fp)
+              this.localIce.delete(fp)
+              this.lastRemoteOffer.delete(fp)
+              this.pendingIce.delete(fp)
+              const cur = this.state
+              if (cur && removeVoiceParticipant(cur.participants, fp)) {
+                this.onUpdate({ ...cur })
+              }
+              this.onCallNotice?.(`${fp.slice(0, 8)} saiu da chamada`)
+            }
+            return
+          }
           this.applyPhase('remote-ended')
           if (wasIncoming) {
             this.onCallNotice?.('chamada perdida')
@@ -1976,6 +2044,22 @@ export class CallManager {
       try { await services.callAddParticipant(fp, callId, fp, kind) } catch { /* ring best-effort */ }
     }
 
+    // O CHAMADOR JÁ CONHECE A SALA INTEIRA.
+    //
+    // BUG REAL ("chamo B e C, mas para ele só aparece você"): o roster inicial
+    // era `[{ eu }]` e `addParticipant` só era chamado pelos ATENDENTES. O
+    // chamador nunca registrava os convidados que ele mesmo acabou de chamar —
+    // então o próprio A não sabia que B e C estavam na sala (e os dois nunca
+    // eram apresentados um ao outro). A malha ficava em estrela com o chamador
+    // no centro e ninguém mais se ouvindo.
+    //
+    // Aqui o roster nasce com TODOS os convidados. `announceSelfToRoom` (no
+    // tick de reparo) então troca as apresentações e o mesh fecha completo.
+    const convidados = [...new Set(
+      [targetFps[0], ...targetFps.slice(1)]
+        .filter((fp): fp is string => !!fp && fp !== me.fingerprint),
+    )]
+
     // CHAMADA NATIVA (voz em Rust): o core cuida de offer/answer/ICE e da
     // mídia. Nada de getUserMedia aqui — o check antigo vinha DEPOIS do
     // getLocalMedia e a WebView abria um microfone competindo com o do core,
@@ -1997,7 +2081,7 @@ export class CallManager {
         cameraOn: false,
         screenOn: false,
         sharing: false,
-        participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }],
+        participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }, ...convidados.map(fp => ({ fp, nickname: fp.slice(0, 6), muted: false }))],
         nativeMedia: true,
       } as unknown as CallState
       this.startNativeVoiceMonitor(callId)
@@ -2026,7 +2110,13 @@ export class CallManager {
       // câmera que nunca existiu.
       cameraOn: this.hasLiveCamera(),
       sharing: false,
-      participants: [{ fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined }],
+      participants: [
+        { fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined },
+        // Convidados no roster desde o início (ver `convidados` acima): sem eles
+        // o próprio chamador não sabia quem estava na sala e a malha ficava em
+        // estrela, sem ninguém se ouvir além dele.
+        ...convidados.map(fp => ({ fp, nickname: fp.slice(0, 6) })),
+      ],
       startAt: Date.now(),
       quality: this.quality,
       qualityNotice: null,
@@ -2383,6 +2473,17 @@ export class CallManager {
           await this.handleOffer(fromFp, pend.callId, pend.sdp)
         }
       } catch { /* offer pendente nunca derruba o accept */ }
+      // MALHA COMPLETA PARA QUEM ENTRA POR ÚLTIMO.
+      //
+      // Quem atende só conhecia quem ligou. Num grupo, os outros participantes
+      // existem mas este lado não abre PC com eles (ninguém o apresentou), então
+      // B e C não se ouvem — o relato "para ele só tem você".
+      //
+      // `announceSelfToRoom` pede a cada pessoa conhecida que anuncie os demais
+      // a mim (`CallAddParticipant` sem kind = "fulano está na sala"), e já abre
+      // PC na direção dos que eu conheço. Um tick curto cobre o caso de alguém
+      // aceitar no mesmo instante.
+      this.announceSelfToRoom(callId)
       return this.state
     }
     // mic do answerer (áudio sempre; vídeo só se for chamada de vídeo)
@@ -2462,6 +2563,11 @@ export class CallManager {
       }
       this.onUpdate({ ...this.state })
     } catch { /* offer pendente nunca derruba o accept */ }
+    // MALHA COMPLETA: pede à sala que apresente quem já está dentro (ver
+    // `announceSelfToRoom`). Cobre o caso em que a offer do outro membro se
+    // perdeu e o `pendingOffers` nunca recebeu nada dele — sem isso os dois
+    // ficam na chamada sem se ouvir.
+    this.announceSelfToRoom(callId)
     this.startCallForeground()
     return this.state
   }
@@ -3402,11 +3508,31 @@ export class CallManager {
     try {
       this.rosterTimer = setInterval(tick, 10_000)
     } catch { this.rosterTimer = null }
+    // REPARO DE PAR HALF-OPEN no mesh (o "um escuta, o outro não").
+    //
+    // O roster acima só sincroniza QUEM está na chamada. A mídia entre dois
+    // pares pode ficar assimétrica (offer de A chegou em B, a de B se perdeu):
+    // não havia nada que detectasse isso, e o par ficava mudo até alguém sair e
+    // voltar. Este tick (15 s — depois do roster de 10 s, para não competir)
+    // só age em par NÃO conectado e só do lado de fingerprint maior.
+    try {
+      this.repairTimer = setInterval(() => {
+        const st = this.state
+        if (!st || st.callId !== callId) { this.stopRosterReconcile(); return }
+        // Reapresentação periódica: uma entrega perdida do `CallAddParticipant`
+        // deixava dois participantes sem malha entre si para sempre. Um frame
+        // pequeno por par a cada 15 s conserta sozinho.
+        this.announceSelfToRoom(callId)
+        void this.repairHalfOpenPairs().catch(() => { /* reparo é best-effort */ })
+      }, 15_000)
+    } catch { this.repairTimer = null }
   }
 
   private stopRosterReconcile() {
     try { if (this.rosterTimer) clearInterval(this.rosterTimer) } catch { /* ignore */ }
     this.rosterTimer = null
+    try { if (this.repairTimer) clearInterval(this.repairTimer) } catch { /* ignore */ }
+    this.repairTimer = null
   }
 
   /**
@@ -4155,11 +4281,24 @@ export class CallManager {
 
   /**
    * Grupo (mesh real): adiciona um peer à chamada ativa.
+   *
    * - cria PC iniciador com o novo peer (nossa offer conecta a mídia);
    * - toca o telefone dele (frame CallAddParticipant COM kind → CallIncoming
    *   no receptor, que atende normalmente via acceptInbound);
    * - avisa os demais participantes (frame SEM kind → cada um cria PC ao novo
    *   peer; o novo só responde offers → sem GLARE).
+   *
+   * ## O que faltava (o "para ele só tem você")
+   *
+   * O aviso era SÓ no sentido "os antigos ficam sabendo do novo". O NOVO nunca
+   * recebia a lista de quem JÁ estava na sala — e, no mesh, quem não conhece um
+   * par não abre PC com ele. Resultado real: A chama B e C, os dois atendem, mas
+   * B só forma malha com A e C só com A (cada um "só vê você"), e B e C não se
+   * ouvem.
+   *
+   * Agora, ao aceitar (`acceptInbound`), o novo recebe um `CallAddParticipant`
+   * SEM kind para cada pessoa que já está na sala: ele abre PC com todos e a
+   * malha fecha completa.
    */
   addParticipant(fp: string, nickname: string) {
     if (!this.state) return
@@ -4176,6 +4315,45 @@ export class CallManager {
       services.callAddParticipant(p.fp, this.state.callId, fp, kind).catch(() => {})
     }
     this.onUpdate({ ...this.state })
+  }
+
+  /**
+   * Pede que a sala se apresente, para a MALHA FECHAR.
+   *
+   * ## O bug que isto corrige
+   *
+   * A chamo B e C (grupo). B atende e só sabe que A existe; C atende e só sabe
+   * que A existe. No mesh, quem não se conhece não abre `RTCPeerConnection` —
+   * então B e C nunca se ouvem, embora os três estejam "na chamada". O sintoma
+   * é exatamente "chamei os dois, mas para ele só aparece você".
+   *
+   * O `addParticipant` já avisa os ANTIGOS sobre o NOVO. Faltava o inverso: o
+   * NOVO precisa saber dos antigos. Aqui cada pessoa conhecida recebe
+   * `CallAddParticipant(sem kind)` para cada OUTRO participante que eu conheço —
+   * ou seja, eu peço "me apresente quem está aí". O receptor do frame (sem kind)
+   * cria PC na direção do novo, e o novo responde à offer.
+   *
+   * Idempotente e barato: um frame pequeno por par conhecido. Roda no aceite e
+   * no tick de reparo do mesh, então uma entrega perdida se conserta sozinha.
+   */
+  private announceSelfToRoom(callId: string) {
+    const st = this.state
+    if (!st || st.callId !== callId || !this.myFp) return
+    const outros = st.participants
+      .map(p => p.fp)
+      .filter(fp => !!fp && fp !== this.myFp)
+    if (outros.length === 0) return
+    for (const porta of outros) {
+      // Peço a `porta` que anuncie, para MIM, todos os outros que ela conhece.
+      for (const fp of outros) {
+        if (fp === porta) continue
+        services.callAddParticipant(porta, callId, fp, '').catch(() => {})
+      }
+      // E abro a mídia com quem eu já conheço (o outro lado responde).
+      if (!this.pcs.has(porta)) {
+        void this.createPC(porta, callId, true).catch(() => { /* par best-effort */ })
+      }
+    }
   }
 
   /** Regra polite/impolite por fingerprint: fp menor = impolite; maior = polite. */
@@ -4572,20 +4750,36 @@ export class CallManager {
     } catch { /* peer isolado não derruba os demais */ }
   }
 
+  /**
+   * Cria/renegocia a conexão de UM par do mesh.
+   *
+   * ## Regra do mesh que estava faltando: não destruir sessão saudável
+   *
+   * BUG REAL ("numa chamada de grupo um escuta o outro e outro não"): aqui o
+   * PC anterior do par era `close()`ado INCONDICIONALMENTE antes de criar o
+   * novo. Como `createPC` é chamado de vários caminhos (`start`, `joinVoice`,
+   * `onParticipantAdded`, `voice_joined`, `onPeerBack`, retry de ICE), dois
+   * gatilhos próximos fechavam uma conexão que já estava com áudio fluindo e a
+   * nova offer podia nem completar — o par ficava mudo para um dos lados
+   * enquanto os outros dois se ouviam.
+   *
+   * Agora: se já existe PC para este par e ele está **conectado**
+   * (`connected`/`completed`), a chamada vira um no-op. Renegociação legítima
+   * (trocar track, nova mídia) passa por `seedScreenPeers`/`attachLocalStream`,
+   * que usam `replaceTrack` — o caminho certo.
+   */
   private async createPC(fp: string, callId: string, initiator: boolean) {
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
     // Medidor: registra os iceServers efetivos (o que foi tentado de verdade).
     try { this.iceServersUsed = getIceServers() } catch { this.iceServersUsed = null }
-    // FECHA o PC anterior deste par antes de substituir no mapa.
-    //
-    // Antes `this.pcs.set(fp, pc)` sobrescrevia sem `close()`: chamado de
-    // vários caminhos (start, joinVoice, onParticipantAdded, addParticipant)
-    // isso deixava dois RTCPeerConnection com o MESMO peer enviando o mesmo
-    // microfone — RTP duplicado (eco) — e o antigo ficava inalcançável no Map,
-    // nunca fechado até reiniciar o app. O `ontrack` do PC morto também
-    // continuava alimentando o tile (imagem congelada).
     const anterior = this.pcs.get(fp)
-    if (anterior && anterior !== undefined) {
+    // Sessão VIVA e saudável: não recriar. Fechar e refazer aqui derrubava
+    // justamente o par que já estava ouvindo (o "um escuta, o outro não").
+    if (anterior) {
+      const st = anterior.connectionState
+      if (st === 'connected') {
+        return
+      }
       try { anterior.close() } catch { /* já fechado */ }
     }
     const pc = newPeerConnection()
@@ -4604,6 +4798,44 @@ export class CallManager {
         this.pcs.delete(fp)
         console.debug('[call] createOffer falhou, PC descartado:', String((e as any)?.message ?? e))
         throw e
+      }
+    }
+  }
+
+  /**
+   * Re-par pela metade: um lado escuta e o outro não.
+   *
+   * O mesh pode ficar assimétrico (a offer de A chegou em B, mas a de B se
+   * perdeu). Aqui o lado de fingerprint MAIOR refaz a offer — mesma regra
+   * determinística do `voice_joined`, então só UM lado tenta e não há offer
+   * contra offer. Chamado pelo watcher periódico enquanto a chamada estiver
+   * ativa; um par já conectado nunca é tocado.
+   */
+  private async repairHalfOpenPairs(): Promise<void> {
+    const st = this.state
+    if (!st || !isCallPhaseActive(st.phase) || !this.myFp) return
+    for (const p of st.participants) {
+      const fp = p.fp
+      if (!fp || fp === this.myFp) continue
+      const pc = this.pcs.get(fp)
+      const cs = pc?.connectionState
+      // RTCPeerConnection.connectionState n�o tem 'completed' (isso � do
+      // iceConnectionState): s� 'connected' significa m�dia fluindo.
+      if (cs === 'connected') continue
+      // Só o lado MAIOR inicia (o menor espera a offer).
+      if (!(this.myFp > fp)) continue
+      // Um ICE restart é mais barato que um PC novo e resolve o caso half-open.
+      if (pc && cs === 'failed') {
+        try {
+          const offer = await createTunedOffer(pc, { iceRestart: true })
+          await pc.setLocalDescription(offer)
+          await services.callOffer(fp, st.callId, JSON.stringify(offer)).catch(() => {})
+          this.setFailureCause(`reparando rota com ${fp.slice(0, 8)}…`)
+          continue
+        } catch { /* cai para recriar abaixo */ }
+      }
+      if (!pc || cs === 'failed' || cs === 'closed') {
+        void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
       }
     }
   }

@@ -37,8 +37,9 @@ import { EmojiPicker } from '../shared/EmojiPicker'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { activeToken } from '../shared/markdown'
 import { RichText, type InlineCtx } from '../shared/richText'
-import { useSocialWindow, useMessageActions, usePresence, PRESENCE_COLOR, PRESENCE_LABEL, useReadState } from '../app/useSocial'
+import { useSocialWindow, useMessageActions, usePresence, useReadState } from '../app/useSocial'
 import { BookmarksPanel } from '../components/social/Social'
+import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { shouldNotify, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
@@ -48,7 +49,6 @@ import {
   notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
   setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
-import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
 import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage, MemberPairing } from '../services/models'
@@ -497,8 +497,7 @@ export default function MobileShell() {
   const [showThread, setShowThread] = useState(false)
   const [threadMsgs, setThreadMsgs] = useState<StoredMessage[]>([])
   const [threadInput, setThreadInput] = useState('')
-  const [customStatus, setCustomStatus] = useState('')
-  const [myPresence, setMyPresence] = useState<PresenceStatus>('online')
+  const [myPresence] = useState<PresenceStatus>('online')
   const [composerEmoji, setComposerEmoji] = useState(false)
   /** Quem está digitando na conversa aberta (fp → nome, expira em 3,5s). */
   const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
@@ -507,7 +506,6 @@ export default function MobileShell() {
   const [pinnedMsgs, setPinnedMsgs] = useState<{ id: string; body: string; author: string }[]>([])
   const readRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
-  const [myStatusBusy, setMyStatusBusy] = useState(false)
   const [topMenu, setTopMenu] = useState(false)
   const [showPrivacy, setShowPrivacy] = useState(false)
   /** Seletor completo de compartilhamento (fonte/áudio/qualidade/FPS). */
@@ -1112,12 +1110,31 @@ export default function MobileShell() {
   async function startCall(kind: 'voice' | 'video') {
     if (callActionBusy) return
     if (!selConv) return
-    const fp = selPeerFp ?? selConvObj?.peer_fp
-    if (!fp) { setError('selecione um amigo para ligar'); return }
+    // GRUPO: chama TODOS os membros, não só o "peer da conversa".
+    //
+    // BUG REAL ("ele só fica comigo, os outros não entram"): aqui o alvo era
+    // sempre `selPeerFp ?? selConvObj?.peer_fp`. Numa conversa de grupo esse
+    // campo é vazio (ou o do criador), então só UMA pessoa era chamada — o
+    // resto do grupo nunca recebia invite e a chamada nunca virava grupo.
+    // O desktop já fazia `groupMembers`; o celular não.
+    let fps: string[] = []
+    if (selConvObj?.kind === 'group') {
+      try {
+        const mems = await services.groupMembers(selConv)
+        fps = (mems as Array<{ fp?: string } | [string, string]>)
+          .map((m) => (Array.isArray(m) ? m[0] : m?.fp) ?? '')
+          .filter((fp) => !!fp && fp !== identity?.fingerprint)
+      } catch { /* lista best-effort */ }
+      if (fps.length === 0) { setError('este grupo não tem membros para chamar'); return }
+    } else {
+      const fp = selPeerFp ?? selConvObj?.peer_fp
+      if (!fp) { setError('selecione um amigo para ligar'); return }
+      fps = [fp]
+    }
     // Rota única: WebRTC direto (host/STUN/TURN) ou erro honesto.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     setCallActionBusy(true)
-    try { await callManager.start(kind, selConv, [fp]) } catch (e: any) { setError(String(e?.message ?? e)) }
+    try { await callManager.start(kind, selConv, fps) } catch (e: any) { setError(String(e?.message ?? e)) }
     finally { setCallActionBusy(false) }
   }
   async function handleIncomingAccept() {
@@ -1374,20 +1391,33 @@ export default function MobileShell() {
    */
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [showGroupPanel, setShowGroupPanel] = useState(false)
+  /** fp → apelido, do roster REAL do grupo/canal (usado como nome do autor). */
+  const [memberNicks, setMemberNicks] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    if (!selConv || !isGroupConv) { setGroupMemberCount(0); return }
+    if (!selConv || !isGroupConv) { setGroupMemberCount(0); setMemberNicks({}); return }
     let vivo = true
     const ler = async () => {
       try {
         const mems = await services.groupMembers(selConv)
-        if (vivo) setGroupMemberCount(mems.length)
+        if (!vivo) return
+        setGroupMemberCount(mems.length)
+        // Guarda nome E fp: sem isto o nome de quem mandou caía no título da
+        // conversa (que num grupo é o NOME DO GRUPO) e todas as mensagens
+        // apareciam assinadas como "Grupo ...".
+        const map: Record<string, string> = {}
+        for (const m of mems as Array<{ fp?: string; nickname?: string }>) {
+          if (m?.fp) map[m.fp] = m.nickname || ''
+        }
+        setMemberNicks(map)
       } catch { if (vivo) setGroupMemberCount(0) }
     }
     void ler()
     const off = services.subscribe((ev) => { if (ev.type === 'group_synced') void ler() })
     return () => { vivo = false; off() }
   }, [selConv, isGroupConv])
+
+
 
   const social = useSocialWindow(messages, selConv)
   const actions = useMessageActions((ids) => social.refreshIds(ids))
@@ -1496,6 +1526,26 @@ export default function MobileShell() {
     })
     return () => { alive = false; window.clearInterval(h); un() }
   }, [])
+  /**
+   * Nome de um membro do grupo/canal aberto.
+   *
+   * Ordem: apelido no servidor (roster) → perfil → apelido do peer conhecido.
+   * Devolve '' quando não sabe — o chamador mostra o fingerprint curto, que é
+   * honesto ("não sei quem é") em vez de repetir o nome do grupo.
+   *
+   * Fica DEPOIS de `profilesByFp` de propósito: o resolvedor lê o estado de
+   * perfis, que é declarado mais abaixo no componente.
+   */
+  const resolveMemberName = useCallback((fp: string): string => {
+    if (!fp) return ''
+    if (fp === identity?.fingerprint) return identity?.nickname ?? ''
+    return (
+      memberNicks[fp]
+      || profilesByFp[fp]?.display_name
+      || peers.find((p) => p.fp === fp)?.nickname
+      || ''
+    )
+  }, [memberNicks, profilesByFp, peers, identity])
   const myFp = identity?.fingerprint ?? ''
   const readState = useReadState(selConv, myFp)
   const unreadMarkTs = readState.lastRead
@@ -1550,7 +1600,23 @@ export default function MobileShell() {
 
   const messageNodes = useMemo(() => messages.map((m, idx) => {
     const mine = m.direction === 'out'
-    const authorName = mine ? identity?.nickname ?? 'você' : selConvObj?.title ?? m.author_fp.slice(0, 8)
+    // NOME DO AUTOR — nunca o título da conversa em GRUPO.
+    //
+    // BUG REAL (no grupo, toda mensagem aparecia como "Grupo SECO"): aqui o
+    // fallback era `selConvObj?.title`, que numa DM é o nome do contato mas num
+    // grupo é o NOME DO GRUPO. Resultado: as mensagens de todos os membros
+    // saíam assinadas com o nome do grupo — inclusive as suas.
+    //
+    // A ordem correta é a mesma do desktop: apelido no servidor → perfil →
+    // apelido do peer → fingerprint curto. Em DM o título continua servindo de
+    // último recurso (é o nome do contato).
+    const authorName = mine
+      ? identity?.nickname ?? 'você'
+      : (isChannel
+          ? (resolveMemberName(m.author_fp) || m.author_fp.slice(0, 8))
+          : (selConvObj?.kind === 'group'
+              ? (resolveMemberName(m.author_fp) || m.author_fp.slice(0, 8))
+              : (selConvObj?.title ?? m.author_fp.slice(0, 8))))
     const authorFp = mine ? identity?.fingerprint ?? '' : m.author_fp
     const fmeta = parseFileBody(m.body)
     const body = social.bodies.get(m.id) ?? m.body
@@ -1715,18 +1781,6 @@ export default function MobileShell() {
       await loadThread(threadId)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
-  async function setMyStatus(st: PresenceStatus, txt: string, emoji = '') {
-    setMyStatusBusy(true)
-    try {
-      await services.presenceSet(st, txt, emoji)
-      // O estado central também passa a conhecer a escolha: é ele quem decide
-      // o que anunciar quando a janela sai de foco.
-      setDesiredPresence(st)
-      setMyPresence(st)
-      setCustomStatus(txt)
-      setError(null)
-    } catch (e: any) { setError(String(e?.message ?? e)) } finally { setMyStatusBusy(false) }
-  }
 
   const sheetWrap = (title: string, body: React.ReactNode, onClose: () => void) => (
     <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'flex-end' }}>
@@ -1861,57 +1915,23 @@ export default function MobileShell() {
           </div>
         ), () => { setShowThread(false); setThreadFor(null); setThreadId(null) })}
 
-        {/* PERFIL DE OUTRO USUÁRIO */}
-        {profilePeer && sheetWrap(profilePeer.name, (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-              <span style={{ position: 'relative', display: 'inline-flex' }}>
-                <Avatar name={profilePeer.name} fp={profilePeer.fp} size={56} avatarB64={profilesByFp[profilePeer.fp]?.avatar_b64} />
-                <PeerDot on={(presence.get(profilePeer.fp)?.status ?? (profilePeer.fp === myFp ? myPresence : 'offline')) !== 'offline'} ring={t.panel} />
-              </span>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 17, fontWeight: 800, color: t.heading }}>{profilePeer.name}</div>
-                <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO }}>{profilePeer.fp}</div>
-                <div style={{ fontSize: 11, color: presence.get(profilePeer.fp)?.status === 'dnd' ? t.red : t.muted }}>
-                  {PRESENCE_LABEL[(presence.get(profilePeer.fp)?.status ?? (profilePeer.fp === myFp ? myPresence : 'offline')) as PresenceStatus]}
-                </div>
-              </div>
-            </div>
-            {profilePeer.fp === myFp && (
-              <div style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 10, padding: 10 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: t.muted, marginBottom: 6, textTransform: 'uppercase' }}>Meu status</div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-                  {(['online', 'idle', 'dnd', 'invisible'] as PresenceStatus[]).map((st) => (
-                    <button
-                      key={st}
-                      onClick={() => void setMyStatus(st, customStatus)}
-                      disabled={myStatusBusy}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: myPresence === st ? 'rgba(88,101,242,.25)' : t.sidebar, border: `1px solid ${myPresence === st ? t.accent : t.border}`, color: t.text, borderRadius: 99, padding: '5px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
-                    >
-                      <span style={{ width: 8, height: 8, borderRadius: '50%', background: PRESENCE_COLOR[st] }} />{PRESENCE_LABEL[st]}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  value={customStatus}
-                  onChange={(e) => setCustomStatus(e.target.value)}
-                  onBlur={() => void setMyStatus(myPresence, customStatus)}
-                  placeholder="O que você está fazendo?"
-                  aria-label="Status personalizado"
-                  style={{ width: '100%', boxSizing: 'border-box', background: t.sidebar, color: t.text, border: `1px solid ${t.border}`, borderRadius: 8, padding: '9px 10px', fontSize: 14, outline: 'none' }}
-                />
-                <div style={{ fontSize: 10, color: t.muted, marginTop: 6 }}>o status é assinado e vai pelo túnel P2P — só quem é seu amigo vê</div>
-              </div>
-            )}
-            <button
-              onClick={() => {
-                setProfilePeer(null)
-                if (profilePeer.fp !== myFp) { setSelPeerFp(profilePeer.fp); void openDm(profilePeer.fp, profilePeer.name) }
-              }}
-              style={{ background: t.accent, color: '#fff', border: 'none', borderRadius: 8, padding: '11px 0', fontSize: 13, fontWeight: 800, cursor: 'pointer' }}
-            >{profilePeer.fp === myFp ? 'Fechar' : 'Abrir conversa'}</button>
-          </div>
-        ), () => setProfilePeer(null))}
+        {/* PERFIL — mesmo componente do desktop, inclusive EDIÇÃO.
+            Antes este sheet era só leitura: no celular não havia como definir
+            nome, foto nem "sobre", então a foto nunca saía daqui. O
+            `ProfileModal` já tem tudo (compressão do avatar, revisão,
+            `onSaved`) — reusar evita as duas implementações divergirem. */}
+        {profilePeer && (
+          <ProfileModal
+            fp={profilePeer.fp}
+            nickname={profilePeer.name}
+            myFp={myFp}
+            communityId={selCommunity ?? undefined}
+            communityName={activeComm?.name}
+            onClose={() => setProfilePeer(null)}
+            onMessage={fp => { setProfilePeer(null); setSelPeerFp(fp); void openDm(fp) }}
+            onSaved={p => setProfilesByFp(prev => ({ ...prev, [p.fp]: p }))}
+          />
+        )}
 
         {/* ENCAMINHAR */}
         {forwardFrom && sheetWrap(`Encaminhar de ${forwardFrom.name}`, (
@@ -2079,6 +2099,40 @@ export default function MobileShell() {
               <span style={{ fontSize: 13, fontWeight: 800, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={15} /> : <Icon d={Icons.phone} size={15} />} Em chamada • {fmtCallDuration(callDuration)} • {(activeCall.participants ?? []).length} na sala</span>
               </span>
+              {/* QUEM ESTÁ NA CHAMADA — nomes, não só o número.
+                  O pedido é "ver quando as pessoas já estão na call": com
+                  "3 na sala" você sabe que há gente, mas não QUEM. A lista vem
+                  do roster real da chamada (`participants`), com o nome
+                  resolvido por apelido/perfil. */}
+              {callPanelSize !== 'compact' && (activeCall.participants ?? []).length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {(activeCall.participants ?? []).map((p: any) => {
+                    const eu = p.fp === identity?.fingerprint
+                    const nome = eu
+                      ? (identity?.nickname ?? 'você')
+                      : (resolveMemberName(p.fp) || p.nickname || p.fp.slice(0, 8))
+                    const mudo = !!(p.muted || p.deafened)
+                    return (
+                      <span
+                        key={p.fp}
+                        title={p.deafened ? `${nome} — surdo` : p.muted ? `${nome} — mic mudo` : nome}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 4,
+                          fontSize: 10.5, fontWeight: 700,
+                          background: t.input, border: `1px solid ${mudo ? `${t.red}66` : t.border}`,
+                          color: mudo ? t.muted : t.text,
+                          borderRadius: 99, padding: '3px 8px', maxWidth: 150,
+                        }}
+                      >
+                        <span style={{ display: 'flex', flexShrink: 0, color: mudo ? t.red : t.green }}>
+                          <Icon d={p.deafened ? Icons.volumeX : p.muted ? Icons.micOff : Icons.mic} size={9} />
+                        </span>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nome}</span>
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
               {/* HONESTIDADE (proxy/full): a mÃ­dia WebRTC sai direto (UDP do
                   WebView), fora do proxy/Tor do app â€” nÃ£o apresentar o modo
                   como protetor da chamada. */}
@@ -2650,7 +2704,16 @@ export default function MobileShell() {
 
         {tab === 'profile' && <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 4px 8px' }}>
-            {identity && <span style={{ position: 'relative', display: 'inline-flex' }}>
+            {/* FOTO DO PRÓPRIO PERFIL — tocável.
+                O celular só EXIBIA o perfil: não havia como definir nome, foto
+                nem "sobre" daqui, então a foto nunca saía deste aparelho. O
+                mesmo `ProfileModal` do desktop é usado (uma implementação só). */}
+            {identity && <button
+              type="button"
+              aria-label="Editar meu perfil"
+              onClick={() => setProfilePeer({ fp: identity.fingerprint, name: profilesByFp[identity.fingerprint]?.display_name || identity.nickname })}
+              style={{ position: 'relative', display: 'inline-flex', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', flexShrink: 0 }}
+            >
               <Avatar
                 name={profilesByFp[identity.fingerprint]?.display_name || identity.nickname}
                 fp={identity.fingerprint}
@@ -2659,7 +2722,10 @@ export default function MobileShell() {
                 accent={profilesByFp[identity.fingerprint]?.accent || undefined}
               />
               <PeerDot on={myPresence !== 'offline' && myPresence !== 'invisible'} ring={t.sidebar} />
-            </span>}
+              <span aria-hidden style={{ position: 'absolute', right: -2, top: -2, background: t.accent, color: '#fff', borderRadius: '50%', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `2px solid ${t.main}` }}>
+                <Icon d={Icons.edit} size={11} />
+              </span>
+            </button>}
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 18, fontWeight: 900, color: profilesByFp[identity?.fingerprint ?? '']?.accent || t.heading }}>{profilesByFp[identity?.fingerprint ?? '']?.display_name || identity?.nickname}</div>
               <div style={{ fontSize: 11, color: t.muted, fontFamily: MONO, wordBreak: 'break-all', marginTop: 2 }}>{identity?.fingerprint}</div>
@@ -2667,6 +2733,11 @@ export default function MobileShell() {
             </div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 8 }}>
+            <button className="nav-row" onClick={() => identity && setProfilePeer({ fp: identity.fingerprint, name: profilesByFp[identity.fingerprint]?.display_name || identity.nickname })}>
+              <span style={{ display: 'flex', flexShrink: 0 }}><Icon d={Icons.edit} size={17} /></span>
+              Editar perfil
+              <span style={{ marginLeft: 'auto', fontSize: 11, color: t.muted }}>nome • foto • sobre</span>
+            </button>
             <button className="nav-row" onClick={() => { services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {}); setProxyPendingMode(null); void refreshPrivacyExtras(privacyMode); setShowPrivacy(true) }}>
               <span style={{ display: 'flex', flexShrink: 0 }}><Icon d={Icons.settings} size={17} /></span>
               Privacidade

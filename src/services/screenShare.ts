@@ -348,8 +348,19 @@ export function screenConstraints(opts: ScreenShareOptions): MediaTrackConstrain
   const fps = fpsOf(step, opts)
   const c: Record<string, unknown> = {}
   if (step) {
-    c.width = { ideal: step.width, max: step.width }
-    c.height = { ideal: step.height, max: step.height }
+    // `ideal` + `max` SÓ em `width`/`height` MANTÉM a proporção?
+    //
+    // Não. Pedir `width: {max: 1280}` e `height: {max: 720}` numa tela 16:10
+    // (1440×900) faz o Chromium escolher 1280×720 (16:9) e o quadro sai
+    // ESTRICADO — texto borrado e barra preta. Em tela ultrawide (21:9) piora:
+    // 1280×720 espreme a imagem.
+    //
+    // `ideal` deixa o engine escolher o mais próximo PRESERVANDO a proporção da
+    // fonte; `max` só limita o teto. E `resizeMode: 'none'` impede o engine de
+    // reescalar por conta própria (ele reescala inclusive quando não deveria).
+    c.width = { ideal: step.width }
+    c.height = { ideal: step.height }
+    c.resizeMode = 'none'
   }
   if (fps) c.frameRate = { ideal: fps, max: fps }
   return c as MediaTrackConstraints

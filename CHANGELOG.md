@@ -1,5 +1,75 @@
 # CHANGELOG
 
+## [1.1.15-pre-alpha] — 2026-10-30
+
+### X vermelho em quase toda mensagem (o mais grave)
+
+O anti-spam do receptor descartava a mensagem **sem enviar ACK**. O remetente
+reenviava até estourar o orçamento do outbox (12 tentativas) e o item virava
+`failed` — X vermelho em tudo, mesmo com os dois lados conectados.
+
+Duas regras erradas:
+
+1. **Flood fixo em 10 msg/10 s.** Uma conversa real ("cc", "dhdd", "d", "aa")
+   passa disso em segundos. Amigo aceito agora tem teto de **40/10 s** (4/s);
+   estranho continua em 10.
+2. **Duplicada = mesmo texto em 60 s.** "sim", "kkk", "oi", "f" repetidos são
+   conversa normal. A regra passou a atacar repetição EM MASSA: só descarta a
+   partir da 6ª cópia idêntica. Reenvio legítimo já era deduplicado por ID.
+
+### Contato online que não recebia nada
+
+`SendToPeer` fazia `tx.send(...).ok()` — silêncio absoluto. Com o canal da
+sessão já fechado (writer morto, sessão half-open que ainda reporta `Online`), a
+mensagem era descartada sem erro e sem ACK. Agora a falha devolve a mensagem ao
+outbox como `pending` (a UI mostra a verdade) e derruba o link morto para o
+maintain redialar.
+
+Além disso, `message_send` marcava `sent` e tirava a mensagem do outbox sem
+esperar confirmação. Agora ela fica na fila até o `Ack` (`delivered`) — o
+varredor de 20 s passou a ignorar o que já está na fila, senão zerava o backoff
+a cada tique.
+
+### Recusa em chamada de grupo encerrava tudo
+
+Qualquer `call_reject` chamava `leave()` e derrubava a chamada INTEIRA. Numa
+chamada coletiva, quem recusa só não participa: agora fecha apenas a conexão
+daquele par e tira o tile dele. O 1:1 continua encerrando (é o esperado).
+
+### Nome do grupo no lugar do nome de quem mandou
+
+No celular, o autor era `selConvObj.title` — que numa DM é o contato, mas num
+grupo é o **nome do grupo**. Todas as mensagens apareciam assinadas como "Grupo
+SECO SECO". Agora a ordem é: apelido no servidor (roster) → perfil → apelido do
+peer → fingerprint curto.
+
+### Foto de perfil não saía do celular
+
+O mobile só EXIBIA o perfil — não havia tela para definir nome, foto e "sobre",
+então a foto nunca era enviada daqui. O `ProfileModal` do desktop (com
+compressão, revisão e `onSaved`) passou a ser usado nos dois shells, e o
+cabeçalho do perfil no celular ficou tocável.
+
+### Tela compartilhada minúscula no meio de um mar de preto
+
+O `<video>` da tela cheia tinha `width/height: auto` com apenas `max-*: 100%` —
+ficava no tamanho NATIVO do stream (um share 1280×720 desenhava 1280 px e
+parava). O `aspect-ratio` no wrapper ainda brigava com `width/height: 100%`.
+Agora o conteúdo ocupa 100%×100% com `object-fit: contain` (uma alavanca só).
+
+### Resolução da tela compartilhada esticada
+
+`screenConstraints` usava `max` em largura E altura: numa tela 16:10 (1440×900)
+o Chromium forçava 1280×720 e a imagem saía esticada, com texto borrado e barra
+preta. Passou a usar `ideal` (mantém a proporção da fonte) + `resizeMode: 'none'`
+(o engine não reescala por conta própria).
+
+### Quem está na chamada — e como entrar
+
+A linha do canal de voz agora lista os participantes (nome, mic mudo, surdo),
+como no Discord. Antes só quem já estava na chamada via os outros: o canal
+parecia vazio e ninguém entrava. Tocar no canal entra, como sempre.
+
 ## [1.1.14-pre-alpha] — 2026-10-30
 
 ### "Um amigo conecta, o outro não conecta de jeito nenhum"

@@ -7,7 +7,7 @@
 // passava disso). Para ler texto numa tela compartilhada isso não é tela cheia.
 //
 // Aqui a transmissão escolhida cobre a JANELA inteira (`position: fixed`), com:
-//   - `contain` + `aspect-ratio` da fonte: ocupa o máximo possível sem
+//   - `object-fit: contain` da fonte: ocupa o máximo possível sem
 //     esticar nem cortar (letterbox é o correto em tela cheia);
 //   - barra de controles que some sozinha e volta no mouse/teclado (não cobre
 //     conteúdo importante nem atrapalha a leitura);
@@ -62,38 +62,8 @@ export function ScreenStage({
   callTitle,
 }: ScreenStageProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const [aspect, setAspect] = useState<string | null>(null)
   const [chromeVisible, setChromeVisible] = useState(true)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  // Proporção REAL da fonte (troca de monitor/resolução durante o share).
-  const syncAspect = useCallback(() => {
-    const el = videoRef.current
-    if (!el) return
-    const w = el.videoWidth
-    const h = el.videoHeight
-    if (!w || !h) return
-    const next = `${w} / ${h}`
-    setAspect((cur) => (cur === next ? cur : next))
-  }, [])
-
-  useEffect(() => {
-    const el = videoRef.current
-    if (!el) return
-    syncAspect()
-    el.addEventListener('loadedmetadata', syncAspect)
-    el.addEventListener('resize', syncAspect)
-    let ro: ResizeObserver | null = null
-    try {
-      ro = new ResizeObserver(syncAspect)
-      ro.observe(el)
-    } catch { /* engine sem ResizeObserver: fica nos eventos */ }
-    return () => {
-      el.removeEventListener('loadedmetadata', syncAspect)
-      el.removeEventListener('resize', syncAspect)
-      try { ro?.disconnect() } catch { /* ignore */ }
-    }
-  }, [syncAspect, tile.stream])
 
   // Barra que some: só esconde quando o ponteiro SAIR da área, para não
   // desaparecer enquanto a pessoa procura o botão de recolher.
@@ -153,7 +123,20 @@ export function ScreenStage({
         cursor: chromeVisible ? 'default' : 'none',
       }}
     >
-      {/* Conteúdo: maior área útil preservando a proporção do stream. */}
+      {/* Conteúdo: ocupa TODA a área e é o `object-fit: contain` que faz o
+          letterbox — preserva a proporção sem esticar nem cortar.
+
+          BUG REAL (a tela compartilhada aparecia pequena no meio de um mar de
+          preto): o `<video>` estava com `width:auto/height:auto` e apenas
+          `max-width/max-height:100%`. Com isso ele ficava no tamanho NATIVO do
+          stream (um share 1280×720 desenhava 1280px e parava — não crescia até
+          preencher a janela). O `aspectRatio` no wrapper também brigava com
+          `width/height: 100%`: com as duas dimensões fixas o `aspect-ratio` é
+          ignorado e o container não limitava nada.
+
+          Agora o wrapper é só 100%/100% e o vídeo/imagem ocupam tudo com
+          `object-fit: contain` — o dimensionamento é uma alavanca só, que é a
+          regra do projeto (nada de aspect-ratio + max-width ao mesmo tempo). */}
       <div
         style={{
           width: '100%',
@@ -161,7 +144,8 @@ export function ScreenStage({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          ...(aspect ? { aspectRatio: aspect, maxWidth: '100%', maxHeight: '100%' } : null),
+          minWidth: 0,
+          minHeight: 0,
         }}
       >
         {showVideo ? (
@@ -174,10 +158,8 @@ export function ScreenStage({
               attachStream(el, tile.stream)
             }}
             style={{
-              maxWidth: '100%',
-              maxHeight: '100%',
-              width: 'auto',
-              height: 'auto',
+              width: '100%',
+              height: '100%',
               objectFit: 'contain',
               background: '#000',
               display: 'block',
@@ -187,7 +169,7 @@ export function ScreenStage({
           <img
             src={tile.videoUrl}
             alt={tile.label}
-            style={{ maxWidth: '100%', maxHeight: '100%', width: 'auto', height: 'auto', objectFit: 'contain' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
           />
         ) : (
           <div style={{ textAlign: 'center', color: c.heading }}>

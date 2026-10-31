@@ -720,9 +720,10 @@ pub struct NetworkEngine {
     /// `(contagem, início_da_janela_ms)` — janela 10s, teto 10 msgs (Medium).
     /// Estourar = mensagem descartada (sessão preservada) + reputação cai.
     spam_flood: StdMutex<HashMap<String, (u32, i64)>>,
-    /// Anti-spam: último `(hash_do_conteúdo, ts_ms)` por peer — repetida
-    /// em <60s é descartada.
-    spam_dup: StdMutex<HashMap<String, (String, i64)>>,
+    /// Anti-spam: último `(hash_do_conteúdo, ts_ms, repetições)` por peer —
+    /// só descarta repetição EM MASSA (6+ cópias idênticas em 60s), nunca
+    /// "sim" dito duas vezes numa conversa.
+    spam_dup: StdMutex<HashMap<String, (String, i64, u32)>>,
     /// Limites próprios para reações recebidas. A identidade da chave é o
     /// peer autenticado da sessão, nunca o `reactor_fp` declarado no frame.
     reaction_limiter: StdMutex<ReactionLimiter>,
@@ -2590,6 +2591,15 @@ impl NetworkEngine {
                             SecureFrame::Msg(env.clone()),
                         ))
                         .map_err(|_| DistorrentError::PeerNotConnected(conv.peer_fp.clone()))?;
+                    // HONESTO: "sent" é só a SAÍDA daqui — não prova entrega.
+                    // A mensagem SAI do outbox apenas quando o `Ack` do
+                    // destinatário chega (`delivered`). Antes ela saía agora e,
+                    // se o canal estivesse morto (sessão half-open), ficava
+                    // "enviado" na tela com o outro lado sem nada.
+                    //
+                    // Manter no outbox NÃO duplica: o receptor dedupa por id
+                    // (INSERT OR IGNORE) e responde Ack à retransmissão.
+                    self.store.enqueue_outbox(&env.id, &conv.peer_fp)?;
                     self.store.set_message_status(&env.id, "sent")?;
                     let _ = self.events.send(EngineEvent::MessageStatus {
                         msg_id: env.id.clone(),
@@ -2680,7 +2690,29 @@ impl NetworkEngine {
     /// sessão é preservada (o chamador apenas loga). Reputação do peer cai.
     fn spam_gate(&self, peer_fp: &str, body: &str) -> Result<()> {
         let now = crate::identity::now_ms();
-        // 1. flood: 10 msgs por janela de 10s
+        // AMIGO ACEITO TEM LIMITE DE GENTE, NÃO DE ROBÔ.
+        //
+        // BUG REAL (o X vermelho em quase toda mensagem): o teto de flood era
+        // fixo em 10 mensagens/10 s para TODO mundo. Uma conversa de verdade —
+        // "cc", "dhdd", "d", "didd", "aa", "xx" — passa disso em segundos e o
+        // receptor descartava sem enviar `Ack`. O remetente reenviava até
+        // estourar o orçamento do outbox (12 tentativas) e o item virava
+        // `failed`: a tela mostrava X em todas as mensagens, mesmo com os dois
+        // lados conectados.
+        //
+        // Contra ABUSO o limite continua valendo; contra AMIGO ele é folgado,
+        // porque a relação já foi aceita explicitamente (e o custo por mensagem
+        // é um INSERT local). 40/10 s = 4/s: ainda corta script de spam, não
+        // corta dedo rápido no teclado.
+        let eh_amigo = self
+            .store
+            .get_friend(peer_fp)
+            .ok()
+            .flatten()
+            .map(|(_, s)| s == "accepted")
+            .unwrap_or(false);
+        let teto_flood = if eh_amigo { 40 } else { 10 };
+        // 1. flood: N mensagens por janela de 10s
         {
             let mut flood = self.spam_flood.lock().unwrap_or_else(|e| e.into_inner());
             let e = flood.entry(peer_fp.to_string()).or_insert((0, now));
@@ -2688,30 +2720,45 @@ impl NetworkEngine {
                 *e = (0, now);
             }
             e.0 += 1;
-            if e.0 > 10 {
+            if e.0 > teto_flood {
                 drop(flood);
                 let _ = self.store.bump_reputation(peer_fp, -5, false);
                 crate::metrics::metrics().spam_rejected();
-                return Err(DistorrentError::Protocol(
-                    "flood detectado: mensagem descartada (limite 10/10s)".into(),
-                ));
+                return Err(DistorrentError::Protocol(format!(
+                    "flood detectado: mensagem descartada (limite {teto_flood}/10s)"
+                )));
             }
         }
-        // 2. duplicada: mesmo conteúdo em <60s
+        // 2. repetição: só bloqueia SPAM de verdade.
+        //
+        // A regra anterior descartava qualquer mensagem com o MESMO texto em
+        // até 60 s. Em conversa humana isso é normal e frequente ("sim",
+        // "kkk", "oi", "f") — e cada descarte deixava o remetente sem `Ack`,
+        // virando X vermelho depois de 12 tentativas. Reenvio legítimo já é
+        // deduplicado por ID antes deste ponto, então aqui só interessa
+        // REPETIÇÃO EM MASSA.
+        //
+        // A contagem vive no PRÓPRIO valor do mapa (`hash, ts, repetições`) —
+        // um segundo mapa exigiria limpeza independente e vazaria por peer.
         {
             let h = crate::antispam::DuplicateDetector::content_hash(peer_fp, body);
             let mut dup = self.spam_dup.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((last_h, last_ts)) = dup.get(peer_fp) {
-                if *last_h == h && now - *last_ts < 60_000 {
-                    drop(dup);
-                    let _ = self.store.bump_reputation(peer_fp, -2, false);
-                    crate::metrics::metrics().spam_rejected();
-                    return Err(DistorrentError::Protocol(
-                        "mensagem repetida descartada (janela 60s)".into(),
-                    ));
+            let (mesma, n) = match dup.get(peer_fp) {
+                Some((last_h, last_ts, reps)) => {
+                    let igual = *last_h == h && now - *last_ts < 60_000;
+                    (igual, if igual { reps + 1 } else { 1 })
                 }
+                None => (false, 1),
+            };
+            if mesma && n > 5 {
+                drop(dup);
+                let _ = self.store.bump_reputation(peer_fp, -2, false);
+                crate::metrics::metrics().spam_rejected();
+                return Err(DistorrentError::Protocol(
+                    "mensagem repetida descartada (spam: 6+ cópias idênticas em 60s)".into(),
+                ));
             }
-            dup.insert(peer_fp.to_string(), (h, now));
+            dup.insert(peer_fp.to_string(), (h, now, n));
         }
         // 3. link malicioso (encurtador só avisa — passa)
         if let crate::antispam::LinkVerdict::Malicious(d) = crate::antispam::check_links(body, &[])
@@ -5617,6 +5664,15 @@ impl NetworkEngine {
         let call_id = format!("call-{short}-{}", crate::identity::now_ms());
         self.store
             .create_call(&call_id, kind, target_fp, &self.identity.fingerprint)?;
+        // O CHAMADOR É PARTICIPANTE desde o invite.
+        //
+        // Sem esta linha o gate de sinalização de grupo (`is_in_call`) não
+        // reconhecia a própria chamada do chamador: `call_participants` só era
+        // preenchido no aceite (`voice_register`/`join_call`). Em chamada de
+        // grupo com gente que não é amiga, a sinalização de volta (answer/ICE
+        // de um membro) era recusada como "de quem não é amigo" — e o mesh não
+        // fechava, exatamente o "só fica comigo".
+        let _ = self.store.join_call(&call_id, &self.identity.fingerprint);
         self.queue_or_send_call_frame(
             target_fp,
             SecureFrame::CallInvite {
@@ -8053,12 +8109,54 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&fp)
                     .cloned();
+                // Dados da DM capturados ANTES do envio: `tx.send` move o frame,
+                // e no caminho de falha precisamos do id/conv para devolver a
+                // mensagem ao outbox (sem isso a mensagem sumia em silêncio).
+                let msg_falhou = match &frame {
+                    SecureFrame::Msg(env) => engine
+                        .store
+                        .get_conversation(&env.conv_id)
+                        .ok()
+                        .flatten()
+                        .map(|c| (env.id.clone(), c.peer_fp, c.kind)),
+                    _ => None,
+                };
+                let mut entregue = false;
                 if let Some(l) = link {
                     if let Some(tx) = &l.tx {
                         // QoS: classifica e enfileira com prioridade — a writer
                         // task drena em rajadas priorizadas (ver register_and_run).
-                        tx.send((frame_class(&frame), frame)).ok();
+                        entregue = tx.send((frame_class(&frame), frame)).is_ok();
                     }
+                }
+                // SUMIDOURO SILENCIOSO → estado honesto + redial.
+                //
+                // BUG REAL ("o contato aparece online mas não envia mensagem",
+                // com X vermelho em quase todas): antes o `.ok()` descartava o
+                // resultado de `tx.send`. Quando o canal da sessão já estava
+                // FECHADO (writer morreu, sessão half-open que ainda reporta
+                // `Online`), a mensagem era descartada sem erro e SEM o `Ack`
+                // esperado — e o remetente a marcava "sent" (o link dizia
+                // Online). Cada retentativa batia no mesmo canal morto até
+                // estourar o orçamento do outbox e virar `failed`.
+                //
+                // Agora: devolve para o outbox como `pending` (a UI mostra a
+                // verdade) e derruba o link morto para o maintain redialar. O
+                // receptor dedupa por id, então o reenvio é seguro.
+                if !entregue {
+                    if let Some((msg_id, peer, kind)) = msg_falhou {
+                        if kind == "dm" || kind == "group" {
+                            let _ = engine.store.enqueue_outbox(&msg_id, &peer);
+                            let _ = engine.store.set_message_status(&msg_id, "pending");
+                            let _ = engine.events.send(EngineEvent::MessageStatus {
+                                msg_id,
+                                status: "pending".into(),
+                            });
+                        }
+                    }
+                    // Canal morto com link "Online" = sessão half-open: derruba
+                    // para o maintain redialar em vez de ficar tentando nele.
+                    drop_link_if_dead(&engine, &fp);
                 }
             }
             EngineCmd::FlushOutbox(fp) => {
@@ -10570,11 +10668,20 @@ async fn handle_frame(
         // Chamada em GRUPO/canal de voz: o peer pode não ser "amigo" mas é do
         // mesmo grupo/comunidade — senão a sinalização de mídia do mesh era
         // bloqueada e a chamada de grupo não funcionava.
+        //
+        // Também aceita quando o `call_id` do frame pertence a uma chamada em
+        // que EU também estou (o grupo pode ainda não ter sido sincronizado:
+        // `group_convs_with_peer` devolve vazio até o `GroupCreated` chegar, e
+        // aí o membro novo não conseguia nem receber o invite).
+        let shares_chamada = call_id_do_frame(&frame)
+            .map(|cid| engine.store.is_in_call(&cid, &engine.identity.fingerprint))
+            .unwrap_or(false);
         let shares_group = engine
             .store
             .group_convs_with_peer(peer_fp)
             .map(|v| !v.is_empty())
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || shares_chamada;
         let shares_comm = engine
             .store
             .list_communities()
@@ -11427,6 +11534,10 @@ async fn handle_frame(
             }
             #[cfg(target_os = "linux")]
             engine.forget_held_call(&call_id);
+            // O evento SEMPRE traz `from_fp` = quem desligou. O frontend usa
+            // isso para distinguir "eu saí" de "um participante saiu": numa
+            // chamada de grupo, o `CallEnd` de UM par não pode encerrar a
+            // chamada dos outros (era o "quando alguém desliga, para todos").
             let _ = engine.events.send(EngineEvent::CallEnded {
                 call_id,
                 from_fp: peer_fp.into(),
@@ -12770,6 +12881,58 @@ fn short_diag_err(s: &str) -> String {
     t
 }
 
+/// Derruba um link cujo canal de escrita está MORTO.
+///
+/// Um link `Online` com `tx` fechado é a sessão half-open: o OS/relay caiu mas
+/// o estado ainda diz "conectado". Isso fazia o app mostrar o contato online,
+/// tentar enviar, e a mensagem sumir no `send` (descartado). Aqui o link sai do
+/// mapa e o estado vira Reconnecting, então o maintain rediala.
+///
+/// Só remove se o `tx` estiver de fato fechado — um envio concorrente que
+/// falhou por buffer não pode derrubar uma sessão saudável.
+fn drop_link_if_dead(engine: &Arc<NetworkEngine>, fp: &str) {
+    let morto = {
+        let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
+        match links.get(fp) {
+            Some(l) => l.tx.as_ref().map(|t| t.is_closed()).unwrap_or(true),
+            None => false,
+        }
+    };
+    if !morto {
+        return;
+    }
+    {
+        let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = links.remove(fp) {
+            old.drop_notify.notify_one();
+        }
+    }
+    debug!(%fp, "canal da sessão fechado — derrubando para redial");
+    engine.note_dial_failure(fp);
+    set_link_state(engine, fp, PeerLinkState::Reconnecting);
+    engine.emit_state();
+}
+
+/// `call_id` de um frame de sinalização (None para os que não têm).
+///
+/// O gate de chamada precisa saber a que chamada o frame pertence: em grupo, o
+/// peer pode não ser amigo e o grupo pode ainda não estar sincronizado, mas se
+/// a chamada é minha a sinalização é legítima.
+fn call_id_do_frame(frame: &SecureFrame) -> Option<String> {
+    match frame {
+        SecureFrame::CallInvite { call_id, .. }
+        | SecureFrame::CallAccept { call_id }
+        | SecureFrame::CallReject { call_id, .. }
+        | SecureFrame::CallEnd { call_id }
+        | SecureFrame::CallOffer { call_id, .. }
+        | SecureFrame::CallAnswer { call_id, .. }
+        | SecureFrame::CallIce { call_id, .. }
+        | SecureFrame::CallAddParticipant { call_id, .. }
+        | SecureFrame::ScreenShareOffer { call_id, .. } => Some(call_id.clone()),
+        _ => None,
+    }
+}
+
 fn set_link_state(engine: &Arc<NetworkEngine>, fp: &str, state: PeerLinkState) {
     if fp.is_empty() {
         return;
@@ -13871,6 +14034,157 @@ mod tests {
         // Salvar de novo o mesmo conteúdo não cria revisão nova.
         let p2 = e.social_profile_set("Eu Mesmo", "bio", "", "", "").unwrap();
         assert_eq!(p2.rev, 1);
+    }
+
+    /// A FOTO viaja no `ProfileSet` e chega ao outro lado (idêntica).
+    ///
+    /// Este é o caminho que o usuário relatava como "a imagem de perfil não está
+    /// pegando". Aqui provamos os dois trechos que podem perder a foto:
+    ///  1. `profile_set` local → `ProfileSet` com `avatar_b64` (o frame que sai);
+    ///  2. `handle_frame` do receptor → `profile_get` com o mesmo base64.
+    ///
+    /// Se o `cap_b64` cortar, o hash do frame for calculado sobre outro
+    /// conteúdo, ou o `profile_apply_remote` descartar, este teste quebra.
+    #[tokio::test]
+    async fn foto_do_perfil_chega_inteira_no_outro_lado() {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+        let (a, _da) = mk_engine("perfil-foto-a");
+        let (b, _db) = mk_engine("perfil-foto-b");
+        let fp_a = a.identity.fingerprint.clone();
+
+        // JPEG mínimo válido o suficiente para o teste (o conteúdo é opaco aqui;
+        // o que importa é o base64 sobreviver ao frame e ao cap).
+        let bytes: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let avatar = B64.encode(&bytes);
+        assert!(
+            avatar.len() < PROFILE_IMG_B64_MAX,
+            "o teste precisa caber no teto"
+        );
+
+        let p = a
+            .social_profile_set("Eu Mesmo", "minha bio", &avatar, "", "#5865f2")
+            .unwrap();
+        assert_eq!(
+            p.avatar_b64, avatar,
+            "o store precisa devolver a foto inteira"
+        );
+
+        // O frame que o motor manda tem exatamente essa foto.
+        match profile_frame(&p) {
+            SecureFrame::ProfileSet {
+                avatar_b64,
+                content_hash,
+                rev,
+                ..
+            } => {
+                assert_eq!(avatar_b64, avatar, "o frame perdeu a foto");
+                assert_eq!(rev, 1);
+                let esperado = crate::social::profile_content_hash(
+                    "Eu Mesmo",
+                    "minha bio",
+                    &avatar,
+                    "",
+                    "#5865f2",
+                );
+                assert_eq!(content_hash, esperado);
+            }
+            other => panic!("frame inesperado: {other:?}"),
+        }
+
+        // O receptor aplica e guarda a MESMA foto.
+        handle_frame(&b, &fp_a, "pubkey", "Eu Mesmo", profile_frame(&p))
+            .await
+            .unwrap();
+        let recebido = b.store.profile_get(&fp_a).unwrap();
+        assert_eq!(recebido.avatar_b64, avatar, "a foto não chegou íntegra");
+        assert_eq!(recebido.display_name, "Eu Mesmo");
+    }
+
+    /// Repetir a MESMA mensagem ("sim", "kkk") não é spam.
+    ///
+    /// BUG REAL (X vermelho em quase tudo): a regra descartava qualquer conteúdo
+    /// repetido em 60s. O receptor rejeitava sem `Ack`, o remetente reenviava e
+    /// a mensagem virava `failed`. Aqui provamos que a conversa normal passa e
+    /// que só a repetição EM MASSA é bloqueada.
+    #[test]
+    fn repeticao_normal_nao_e_spam_mas_massa_e() {
+        let (e, _d) = mk_engine("spam-dup");
+        let peer = "peer-spam";
+        // 5 cópias idênticas: conversa humana normal ("sim", "sim", ...).
+        for _ in 0..5 {
+            assert!(
+                e.spam_gate(peer, "sim").is_ok(),
+                "repetir a mesma palavra numa conversa não pode virar erro"
+            );
+        }
+        // A 6ª estoura o teto de repetição em massa.
+        assert!(e.spam_gate(peer, "sim").is_err(), "massa de cópias é spam");
+        // Conteúdo diferente continua passando.
+        assert!(e.spam_gate(peer, "outra coisa").is_ok());
+    }
+
+    /// Amigo aceito tem teto de flood folgado: 12 mensagens curtas em sequência
+    /// (o padrão de uma conversa de verdade) NÃO são descartadas.
+    #[test]
+    fn conversa_rapida_com_amigo_nao_dispara_flood() {
+        let (e, _d) = mk_engine("spam-flood");
+        let peer = "peer-amigo";
+        e.store.set_friend(peer, "Amigo", "accepted").unwrap();
+        for i in 0..12 {
+            assert!(
+                e.spam_gate(peer, &format!("msg {i}")).is_ok(),
+                "mensagem {i} de uma conversa normal foi bloqueada como flood"
+            );
+        }
+        // Estranho (sem amizade) mantém o teto apertado.
+        let estranho = "peer-estranho";
+        let mut bloqueou = false;
+        for i in 0..20 {
+            if e.spam_gate(estranho, &format!("m{i}")).is_err() {
+                bloqueou = true;
+                break;
+            }
+        }
+        assert!(
+            bloqueou,
+            "o teto apertado precisa continuar valendo contra abuso"
+        );
+    }
+
+    /// O CHAMADOR entra em `call_participants` no invite.
+    ///
+    /// BUG REAL ("o grupo só fica com o criador"): só o aceite preenchia a
+    /// tabela, então o gate de grupo (`is_in_call`) não reconhecia a própria
+    /// chamada de quem chamou — e a sinalização de volta de um membro que não é
+    /// amigo era recusada.
+    #[test]
+    fn call_invite_registra_o_chamador_como_participante() {
+        let (e, _d) = mk_engine("call-invite-parte");
+        let me = e.identity.fingerprint.clone();
+        let call_id = e.call_invite("peer-alvo", "voice").unwrap();
+        assert!(
+            e.store.is_in_call(&call_id, &me),
+            "sem isto o gate de grupo não reconhece a própria chamada do chamador"
+        );
+        assert!(e.store.call_participants(&call_id).unwrap().contains(&me));
+    }
+
+    /// `is_in_call` distingue chamadas e participantes (base do gate).
+    #[test]
+    fn is_in_call_so_vale_para_a_chamada_e_o_participante_certos() {
+        let (e, _d) = mk_engine("is-in-call");
+        let me = e.identity.fingerprint.clone();
+        e.store.join_call("call-a", &me).unwrap();
+        assert!(e.store.is_in_call("call-a", &me));
+        assert!(
+            !e.store.is_in_call("call-b", &me),
+            "outra chamada não conta"
+        );
+        assert!(
+            !e.store.is_in_call("call-a", "outro-fp"),
+            "outro fp não é participante"
+        );
     }
 }
 

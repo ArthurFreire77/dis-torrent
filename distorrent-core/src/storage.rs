@@ -1100,10 +1100,16 @@ impl Store {
     ) -> Result<Vec<String>> {
         let ids = {
             let conn = self.locked();
+            // `NOT EXISTS (outbox)`: agora toda mensagem sai para o outbox já no
+            // envio (o Ack é quem a remove). Sem este filtro, o varredor de 20s
+            // regravava `pending` por cima de mensagens que já estavam na fila,
+            // com backoff correto — a UI piscava "pendente/enviado" à toa e o
+            // backoff era zerado a cada tique (martelo no peer).
             let mut st = conn.prepare(
                 "SELECT id FROM messages
                  WHERE direction='out' AND status IN ('sending','sent') AND ts < ?1
-                   AND conv_id IN (SELECT id FROM conversations WHERE peer_fp=?2)",
+                   AND conv_id IN (SELECT id FROM conversations WHERE peer_fp=?2)
+                   AND NOT EXISTS (SELECT 1 FROM outbox WHERE outbox.msg_id = messages.id)",
             )?;
             let ids = st
                 .query_map(params![older_than_ts, peer_fp], |r| r.get::<_, String>(0))?
@@ -1818,6 +1824,21 @@ impl Store {
             .query_map(params![call_id], |r| r.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Eu participo desta chamada?
+    ///
+    /// Usado pelo gate de sinalização: uma chamada de GRUPO pode incluir gente
+    /// que não é amiga e cujo grupo ainda não foi sincronizado localmente. Se o
+    /// `call_id` está numa chamada em que EU estou, a sinalização é legítima.
+    pub fn is_in_call(&self, call_id: &str, fp: &str) -> bool {
+        self.locked()
+            .query_row(
+                "SELECT 1 FROM call_participants WHERE call_id=?1 AND fp=?2",
+                params![call_id, fp],
+                |_| Ok(()),
+            )
+            .is_ok()
     }
 
     /// O peer está em alguma chamada ativa? Enquanto estiver, o heartbeat da
