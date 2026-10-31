@@ -10078,10 +10078,15 @@ pub const PROFILE_BANNER_MAX_BYTES: usize = PROFILE_BANNER_B64_MAX * 3 / 4;
 /// o mesmo ritmo do announce da DHT e barato para qualquer broker público.
 const ANNOUNCE_REPUBLISH_MS: i64 = 60 * 1000;
 
-/// Teto do `FileAnnounce` (2 GB) — espelha `MAX_STREAM_FILE_BYTES` da casca e
-/// o `VITE_DISTORRENT_MAX_FILE_MB` do frontend. Sem ele, "size: 500 GB" num
+/// Teto do `FileAnnounce` — espelha `MAX_STREAM_FILE_BYTES` da casca e o
+/// `VITE_DISTORRENT_MAX_FILE_MB` do frontend. Sem ele, "size: 500 GB" num
 /// frame de 200 bytes fazia o receptor tentar alocar.
-const MAX_ANNOUNCED_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+///
+/// 50 GB (era 2 GB), no mesmo valor dos outros dois: o teto existe para o
+/// anúncio não prometer o impossível e para o motor não dimensionar buffer
+/// gigante — não para barrar arquivo grande. Baixar é por bloco de 256 KB, e
+/// o que protege memória/disco é o teto por bloco e o espaço livre.
+pub const MAX_ANNOUNCED_FILE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
 /// Tamanho máximo de UM bloco aceito do fio. O bloco canônico é 256 KB; a folga
 /// cobre base64 e versões futuras, mas impede que um frame de ~1 MiB (o teto do
@@ -11681,8 +11686,13 @@ async fn handle_frame(
                     engine.auto_register_voice_channel(&call_id, peer_fp);
                 }
                 if !engine.voice_is_native(&call_id, peer_fp) && engine.native_voice_available() {
-                    engine.hold_call_offer(&call_id, peer_fp, &sdp);
-                    return Ok(());
+                    // SÓ sai daqui se a offer foi RETIDA de fato. Para
+                    // `voice-*` (canal) a retenção não se aplica e o fluxo
+                    // segue para o JS — antes ele parava aqui e a offer
+                    // desaparecia, deixando o canal sem mídia e sem erro.
+                    if engine.hold_call_offer(&call_id, peer_fp, &sdp) {
+                        return Ok(());
+                    }
                 }
                 if engine.voice_absorb_offer(&call_id, peer_fp, &sdp).await? {
                     return Ok(());

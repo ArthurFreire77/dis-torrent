@@ -40,10 +40,20 @@ impl NetworkEngine {
 
     /// Retém a offer que chegou antes do aceite (só chamadas 1:1 `call-*`;
     /// canais de voz `voice-*` pertencem ao JS).
+    ///
+    /// Devolve `true` só quando a offer foi REALMENTE retida.
+    ///
+    /// BUG QUE ISTO CORRIGE (canal de voz mudo no Linux): o chamador fazia
+    /// `hold_call_offer(...); return Ok(())` sem olhar o resultado. Para
+    /// `voice-*` esta função sai cedo de propósito (o canal não tem aceite),
+    /// mas o `return` acontecia do mesmo jeito — a offer era engolida: não
+    /// virava sessão nativa (o canal não estava registrado) e também não
+    /// chegava ao JS. Resultado: quem entrava no canal não recebia mídia de
+    /// ninguém, sem erro na tela.
     #[cfg(target_os = "linux")]
-    pub(super) fn hold_call_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) {
+    pub(super) fn hold_call_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> bool {
         if call_id.starts_with("voice-") {
-            return;
+            return false;
         }
         let mut map = self.held_calls.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() >= 16 {
@@ -64,6 +74,7 @@ impl NetworkEngine {
         h.peer_fp = peer_fp.to_string();
         h.sdp = sdp.to_string();
         h.held_at = now_ms();
+        true
     }
 
     /// Retém ICE que chegou antes do aceite. `true` se ficou retido.

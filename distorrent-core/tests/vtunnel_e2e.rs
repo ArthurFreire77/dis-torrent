@@ -312,11 +312,17 @@ async fn tunel_fragmenta_frame_grande() {
     .await;
 
     // SDP grande (200KB > frag 48KB): fragmenta e remonta.
+    //
+    // `voice-` de propósito: num `call-*` 1:1 com voz NATIVA disponível (Linux
+    // com ALSA/GStreamer) a offer é RETIDA pelo core (`hold_call_offer`) e o
+    // `CallOfferEv` não sai para o JS — comportamento correto do produto, que
+    // fazia este teste falhar. Canal de voz não passa pelo gate de retenção,
+    // então o frame chega ao evento e a fragmentação é medida de verdade.
     let sdp = "v=0 ".to_string() + &"a=".repeat(200_000);
     a.call_signal(
         &fp_b,
         distorrent_core::protocol::SecureFrame::CallOffer {
-            call_id: "dummy-call".into(),
+            call_id: "voice-dummy-call".into(),
             sdp: sdp.clone(),
         },
     )
