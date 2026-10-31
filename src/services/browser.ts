@@ -1195,8 +1195,11 @@ export const browserServices: DisTorrentServices = {
     } catch { /* silent */ }
     return Promise.resolve(callId)
   },
-  // Aceite/recusa/fim emitem os mesmos eventos do engine nativo pelo
+  // Modo navegador (aba única): o "convite perdido" não existe — o emit é
+  // local e síncrono. No-op explícito para o contrato não ficar sem defesa.
+  callRingRetry: () => Promise.resolve(),
   // BroadcastChannel — antes eram no-ops e o overlay do outro lado travava.
+  // Aceite/recusa/fim emitem os mesmos eventos do engine nativo pelo
   callAccept: (callId, _fromFp) => {
     try { emit({ type: 'call_accepted', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
     return Promise.resolve()

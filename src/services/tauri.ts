@@ -278,6 +278,9 @@ export const tauriServices: DisTorrentServices = {
     invoke<[string, string[]]>('call_room_join', { convId, kind }),
   callRoomsList: () => invoke<any[]>('call_rooms_list').catch(() => []),
   callInvite: (targetFp, kind) => invoke<string>('call_invite', { targetFp: targetFp, kind }),
+  // Reenvia só o ring. O convite sai uma única vez; perdido o frame, o outro
+  // lado nunca toca. Idempotente no receptor.
+  callRingRetry: (callId, targetFp, kind) => invoke<void>('call_ring_retry', { callId, targetFp, kind }),
   callAccept: (callId, fromFp) => invoke<void>('call_accept', { callId: callId, fromFp: fromFp }),
   callReject: (callId, fromFp, reason) => invoke<void>('call_reject', { callId: callId, fromFp: fromFp, reason }),
   callEnd: (callId) => invoke<void>('call_end', { callId: callId }),

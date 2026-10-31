@@ -984,6 +984,16 @@ export class CallManager {
   private collectiveRoom = false
   /** Renova o anúncio da sala (participantes mudam durante a chamada). */
   private roomTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Convite em voo: o ring sai UMA vez. Se aquele frame se perde (sessão
+   * meio-aberta ainda "Online", relay trocou de rota, 4G caiu), o outro lado
+   * nunca toca e o chamador fica em "Chamando…" até desistir — era o
+   * "só funciona na segunda ligação / tem que reiniciar". Reenvia enquanto a
+   * fase for 'outgoing'; é idempotente no receptor.
+   */
+  private ringRetry: { callId: string; kind: CallKind; targets: string[] } | null = null
+  private ringTimer: ReturnType<typeof setInterval> | null = null
+  private static readonly RING_RETRY_MS = 6_000
   private connectTimer: ReturnType<typeof setTimeout> | null = null
   private static readonly CONNECT_TIMEOUT_MS = 20_000
   /** Sem resposta do outro lado (ninguém atendeu / sinalização não andou). */
@@ -1351,6 +1361,11 @@ export class CallManager {
         this.lastPhase = next
         if (next === 'outgoing') this.startOutgoingWatchdog()
         else this.stopOutgoingWatchdog()
+        // O ring é reenviado enquanto a chamada NÃO conectou (ou seja, o outro
+        // lado pode ainda não ter recebido o convite). Ao conectar ou terminar,
+        // reenviar invite seria ruído — e um invite numa chamada já atendida
+        // reacenderia o overlay de toque.
+        if (next !== 'outgoing' && next !== 'connecting') this.stopRingRetry()
         if (next === 'incoming') this.startIncomingWatchdog()
         else this.stopIncomingWatchdog()
         if (next === 'reconnecting') this.startReconnectWatchdog()
@@ -1398,6 +1413,68 @@ export class CallManager {
   private stopOutgoingWatchdog() {
     try { if (this.outgoingTimer) clearTimeout(this.outgoingTimer) } catch { /* ignore */ }
     this.outgoingTimer = null
+  }
+
+  /**
+   * Reenvia o convite enquanto a chamada está em 'outgoing'.
+   *
+   * POR QUÊ: o `call_invite` sai uma única vez. Perdido o frame — link marcado
+   * `Online` mas já morto, relay trocando de rota, rede móvel caindo — o
+   * receptor nunca toca e quem ligou fica em "Chamando…" até o watchdog de
+   * 45 s. Era exatamente o "ligo e não toca; desligo e ligo de novo e vai"
+   * (a segunda ligação já encontrava o link refeito) e o "tem que reiniciar".
+   * O radar correla o reenvio com o pedido de relay/direta que
+   * `queue_or_send_call_frame` dispara quando o canal está fora.
+   */
+  private startRingRetry(callId: string, kind: CallKind, targets: string[]) {
+    this.stopRingRetry()
+    const alvos = targets.filter((fp) => !!fp && fp !== this.myFp)
+    if (alvos.length === 0) return
+    this.ringRetry = { callId, kind, targets: alvos }
+    try {
+      this.ringTimer = setInterval(() => {
+        const r = this.ringRetry
+        const st = this.state
+        // Vale enquanto a chamada ainda não conectou: 'outgoing' (o outro lado
+        // pode nem ter recebido) e 'connecting' (recebeu o ring mas a offer
+        // caiu — sem ela, atende e não se ouve).
+        const buscando = !!st && (st.phase === 'outgoing' || st.phase === 'connecting')
+        if (!r || !st || st.callId !== r.callId || !buscando) {
+          this.stopRingRetry()
+          return
+        }
+        for (const fp of r.targets) services.callRingRetry(r.callId, fp, r.kind).catch(() => {})
+        // O convite sozinho faz o telefone tocar; se foi a OFFER que se perdeu,
+        // o outro lado atende e não há mídia. Reenvia a offer pendente do PC
+        // (idempotente: o receptor ignora offer repetida já aplicada).
+        void this.resendPendingOffers(r.callId)
+      }, CallManager.RING_RETRY_MS)
+    } catch { this.ringTimer = null }
+  }
+
+  private stopRingRetry() {
+    try { if (this.ringTimer) clearInterval(this.ringTimer) } catch { /* ignore */ }
+    this.ringTimer = null
+    this.ringRetry = null
+  }
+
+  /**
+   * Reenvia a offer que está no ar, sem recriar PC nem renegociar.
+   *
+   * Dois frames saem na largada (invite e offer). Se o PEER acordou com o
+   * convite mas a offer caiu, ele toca, atende e fica sem mídia — parecia
+   * "conecta e não se ouve". `localDescription` já contém a offer vigente
+   * (inclusive ICE restart), então reenviar é seguro e idempotente.
+   */
+  private async resendPendingOffers(callId: string): Promise<void> {
+    for (const [fp, pc] of this.pcs) {
+      try {
+        if (this.state?.callId !== callId || pc.signalingState !== 'have-local-offer') continue
+        const desc = pc.localDescription
+        if (!desc || desc.type !== 'offer') continue
+        await services.callOffer(fp, callId, JSON.stringify(desc)).catch(() => {})
+      } catch { /* par isolado não derruba os demais */ }
+    }
   }
   /** Watchdog de INCOMING: quem ligou sumiu sem call_ended → 'missed' (ring eterno). */
   private startIncomingWatchdog() {
@@ -1761,6 +1838,9 @@ export class CallManager {
       if (fp === me.fingerprint) continue
       try { await services.callAddParticipant(fp, callId, fp, kind) } catch { /* ring best-effort */ }
     }
+    // Ring em voo: um frame perdido deixava a chamada muda de um lado só.
+    // Armado aqui (antes da mídia) para cobrir o convite que já saiu.
+    this.startRingRetry(callId, kind, targetFps)
 
     // O CHAMADOR JÁ CONHECE A SALA INTEIRA: roster nasce com todos os convidados (mesh em estrela era o bug).
     const convidados = [...new Set(
@@ -2834,6 +2914,7 @@ export class CallManager {
       this.stopNativeVoiceMonitor()
       this.stopQualityMonitor()
       this.stopRosterReconcile()
+      this.stopRingRetry()
       this.stopCallForeground()
       this.pcs.forEach((pc) => { try { pc.close() } catch { /* ignore */ } })
       this.pcs.clear()
@@ -4628,6 +4709,8 @@ export class CallManager {
   private cleanup(expectedCallId?: string) {
     // Protege uma chamada nova de uma limpeza antiga que terminou atrasada.
     if (expectedCallId && this.state?.callId !== expectedCallId) return
+    // Invite em voo não sobrevive ao fim da chamada (ring fantasma no peer).
+    this.stopRingRetry()
     this.stopCallForeground()
     // O roster é da chamada que está terminando: sem parar o timer, ele
     // continuaria consultando um canal do qual já saímos.

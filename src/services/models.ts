@@ -683,6 +683,8 @@ export interface DisTorrentServices {
 
   // Chamadas (voice/video + screen share) — mesh P2P onde todos semeiam
   callInvite(targetFp: string, kind: string): Promise<string>
+  /** Reenvia só o convite (ring) enquanto a chamada não conecta; idempotente no receptor. */
+  callRingRetry(callId: string, targetFp: string, kind: string): Promise<void>
   callAccept(callId: string, fromFp: string): Promise<void>
   callReject(callId: string, fromFp: string, reason: string): Promise<void>
   callEnd(callId: string): Promise<void>

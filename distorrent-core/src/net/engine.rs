@@ -732,6 +732,10 @@ pub struct NetworkEngine {
     /// de 5s). Cap 64/peer (voz/sinalização é efêmera; além disso descarta a
     /// mais antiga). NÃO havia fila antes — frames offline eram descartados.
     pending_calls: StdMutex<HashMap<String, Vec<SecureFrame>>>,
+    /// Convites já entregues (`call_id|peer`): o chamador reenvia o ring
+    /// enquanto a chamada não conecta, e o mesmo invite não pode reacender o
+    /// toque nem empilhar overlay no receptor.
+    ring_seen: StdMutex<std::collections::HashSet<String>>,
     /// Salas de chamada VIVAS anunciadas (`net::call_room`): quem está na
     /// conversa vê que há chamada e pode entrar. Sem isto a chamada só existia
     /// para quem recebeu o `CallInvite`.
@@ -1027,6 +1031,7 @@ impl NetworkEngine {
             punch_upgrades: StdMutex::new(HashMap::new()),
             punch_rate: StdMutex::new(HashMap::new()),
             pending_calls: StdMutex::new(HashMap::new()),
+            ring_seen: StdMutex::new(std::collections::HashSet::new()),
             call_rooms: StdMutex::new(super::call_room::Rooms::default()),
             cancel_tx: tokio::sync::watch::channel(false).0,
             public_addr: StdMutex::new(None),
@@ -1114,6 +1119,7 @@ impl NetworkEngine {
             punch_upgrades: StdMutex::new(HashMap::new()),
             punch_rate: StdMutex::new(HashMap::new()),
             pending_calls: StdMutex::new(HashMap::new()),
+            ring_seen: StdMutex::new(std::collections::HashSet::new()),
             call_rooms: StdMutex::new(super::call_room::Rooms::default()),
             cancel_tx: tokio::sync::watch::channel(false).0,
             public_addr: StdMutex::new(None),
@@ -6008,6 +6014,29 @@ impl NetworkEngine {
         Ok(call_id)
     }
 
+    /// Reenvia SÓ o convite (o ring), sem tocar em SDP/ICE.
+    ///
+    /// A sinalização de chamada sai UMA vez. Se aquele frame se perder no
+    /// caminho — sessão meio-aberta que ainda reporta `Online`, relay que
+    /// trocou de rota, 4G que caiu no meio — o outro lado nunca toca e quem
+    /// ligou fica em "Chamando…" até desistir (o segundo call só funcionava
+    /// porque refazia o link). Reenviar o invite é idempotente no receptor: o
+    /// ring não duplica estado nem reabre mídia.
+    pub fn call_ring_retry(&self, call_id: &str, target_fp: &str, kind: &str) -> Result<()> {
+        if call_id.trim().is_empty() || target_fp.trim().is_empty() {
+            return Err(DistorrentError::Protocol("call_id/alvo vazios".into()));
+        }
+        self.queue_or_send_call_frame(
+            target_fp,
+            SecureFrame::CallInvite {
+                call_id: call_id.into(),
+                kind: kind.into(),
+                target_fp: target_fp.into(),
+            },
+        );
+        Ok(())
+    }
+
     pub fn call_accept(self: &Arc<Self>, call_id: &str, from_fp: &str) -> Result<()> {
         self.store.join_call(call_id, &self.identity.fingerprint)?;
         self.store.join_call(call_id, from_fp)?;
@@ -6621,17 +6650,7 @@ impl NetworkEngine {
         // Offline: fila para o flush imediato da sessão recém-criada.
         // (Qualquer frame via call_signal é enfileirado; o filtro Call* é
         // documental — o flush drena na ordem de chegada.)
-        {
-            let mut map = self.pending_calls.lock().unwrap_or_else(|e| e.into_inner());
-            let q = map.entry(peer_fp.to_string()).or_default();
-            if q.len() >= Self::PENDING_CALL_MAX {
-                Self::evict_call_frame(q);
-                if q.len() >= Self::PENDING_CALL_MAX {
-                    q.remove(0); // sem vítima elegível: o teto vale mesmo assim
-                }
-            }
-            q.push(frame);
-        }
+        self.enqueue_call_frame(peer_fp, frame);
         // Dial IMEDIATO (não espera o tick de 5s do bootstrap): relay primeiro,
         // direta em paralelo vence na eleição se o NAT deixar.
         self.cmd_tx
@@ -6640,6 +6659,36 @@ impl NetworkEngine {
         self.cmd_tx
             .send(EngineCmd::LookupAnnounce(peer_fp.to_string()))
             .ok();
+    }
+
+    /// Primeira vez que este convite chega de `peer_fp`?
+    ///
+    /// O chamador repete o invite enquanto a chamada não conecta (o frame
+    /// pode se perder). Sem esta trava o telefone reiniciava o toque a cada
+    /// reenvio e o overlay empilhava; ids de chamada são únicos, então o
+    /// conjunto só precisa de um teto para não crescer sem limite.
+    fn ring_is_new(&self, call_id: &str, peer_fp: &str) -> bool {
+        let mut vistos = self.ring_seen.lock().unwrap_or_else(|e| e.into_inner());
+        if vistos.len() > 512 {
+            vistos.clear();
+        }
+        vistos.insert(format!("{call_id}|{peer_fp}"))
+    }
+
+    /// Enfileira sinalização de chamada para `peer_fp` sem disparar dial.
+    /// Separado do `queue_or_send_call_frame` porque o caminho de ENTREGA
+    /// falha (canal da sessão morto) precisa só repor o frame na fila: quem
+    /// já tratou o link morto foi o `drop_link_if_dead`, e o maintain rediala.
+    fn enqueue_call_frame(&self, peer_fp: &str, frame: SecureFrame) {
+        let mut map = self.pending_calls.lock().unwrap_or_else(|e| e.into_inner());
+        let q = map.entry(peer_fp.to_string()).or_default();
+        if q.len() >= Self::PENDING_CALL_MAX {
+            Self::evict_call_frame(q);
+            if q.len() >= Self::PENDING_CALL_MAX {
+                q.remove(0); // sem vítima elegível: o teto vale mesmo assim
+            }
+        }
+        q.push(frame);
     }
 
     /// Drena a fila de chamadas na sessão recém-criada (FLUSH IMEDIATO, sem
@@ -8419,6 +8468,16 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     _ => None,
                 };
                 let mut entregue = false;
+                // SINALIZAÇÃO DE CHAMADA SEM RETRY PRÓPRIO: o invite/offer só
+                // saem uma vez. Se o canal da sessão já estava fechado (writer
+                // morto, half-open ainda "Online"), o frame ia para o nada: o
+                // outro lado nunca tocava e quem ligou ficava em "Chamando…".
+                // Guarda cópia para devolver à fila e reenviar na sessão nova.
+                let reserva = if NetworkEngine::is_call_frame(&frame) {
+                    Some(frame.clone())
+                } else {
+                    None
+                };
                 if let Some(l) = link {
                     if let Some(tx) = &l.tx {
                         // QoS: classifica e enfileira com prioridade — a writer
@@ -8454,6 +8513,11 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     // Canal morto com link "Online" = sessão half-open: derruba
                     // para o maintain redialar em vez de ficar tentando nele.
                     drop_link_if_dead(&engine, &fp);
+                    // Sinalização de chamada enfileirada (cap + política de
+                    // descarte próprias) para sair assim que a sessão subir.
+                    if let Some(f) = reserva {
+                        engine.enqueue_call_frame(&fp, f);
+                    }
                 }
             }
             EngineCmd::FlushOutbox(fp) => {
@@ -11783,11 +11847,16 @@ async fn handle_frame(
             kind,
             target_fp: _,
         } => {
-            let _ = engine.events.send(EngineEvent::CallIncoming {
-                call_id,
-                from_fp: peer_fp.into(),
-                kind,
-            });
+            // DEDUP DO CONVITE REENVIADO: quem liga repete o invite enquanto a
+            // chamada não conecta (frame perdido = ninguém toca). Sem esta
+            // trava, o ring reiniciava a cada reenvio e o aviso piscava.
+            if engine.ring_is_new(&call_id, peer_fp) {
+                let _ = engine.events.send(EngineEvent::CallIncoming {
+                    call_id,
+                    from_fp: peer_fp.into(),
+                    kind,
+                });
+            }
         }
         SecureFrame::CallAccept { call_id } => {
             // GATE: aceite só vale para chamada que EU criei (sou o host dela) —
@@ -14489,6 +14558,58 @@ mod call_queue_tests {
     }
     fn is_ice(f: &SecureFrame) -> bool {
         matches!(f, SecureFrame::CallIce { .. })
+    }
+
+    /// Engine isolado (o `mk_engine` dos outros modulos de teste e' privado).
+    fn mk(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
+        let kp = Keypair::generate();
+        let e = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
+        (e, dir)
+    }
+
+    /// O chamador reenvia o CONVITE enquanto a chamada nao conecta. O ring so
+    /// pode acender uma vez por (call_id, peer): senao o aviso piscava e o
+    /// overlay empilhava a cada reenvio de 6s.
+    #[test]
+    fn invite_reenviado_nao_reacende_o_ring() {
+        let (e, _d) = mk("ring-dedup");
+        assert!(e.ring_is_new("call-x", "peer-a"), "primeiro invite toca");
+        assert!(
+            !e.ring_is_new("call-x", "peer-a"),
+            "reenvio do MESMO invite nao pode tocar de novo"
+        );
+        assert!(
+            e.ring_is_new("call-y", "peer-a"),
+            "chamada nova precisa tocar mesmo com o mesmo peer"
+        );
+        assert!(
+            e.ring_is_new("call-x", "peer-b"),
+            "o mesmo id em outro peer e' outro convite"
+        );
+    }
+
+    /// Sinalizacao de chamada enfileirada para o peer offline sai no flush,
+    /// sem depender de sessao viva (era o "convite perdido" do 4G/relay).
+    #[test]
+    fn call_frame_enfileirado_sobrevive_sem_link() {
+        let (e, _d) = mk("call-queue-offline");
+        e.enqueue_call_frame("peer-b", offer(1));
+        {
+            let mapa = e.pending_calls.lock().unwrap();
+            let q = mapa.get("peer-b").expect("fila do peer precisa existir");
+            assert!(
+                q.iter().any(NetworkEngine::is_offer_frame),
+                "offer enfileirada nao pode sumir"
+            );
+        }
+        e.flush_pending_calls("peer-b");
+        let mapa = e.pending_calls.lock().unwrap();
+        assert!(
+            mapa.get("peer-b").map(|q| q.is_empty()).unwrap_or(true),
+            "o flush precisa drenar a fila da chamada"
+        );
     }
 
     /// BUG do "as vezes nao pega": a fila descartava o frame MAIS ANTIGO —

@@ -3142,6 +3142,23 @@ async fn call_accept(
     Ok(())
 }
 
+/// Reenvia só o CONVITE (ring) — usado enquanto a chamada sai de "Chamando…".
+///
+/// O invite sai uma vez; se o frame se perder, o outro lado nunca toca e o
+/// chamador fica preso até desistir. `call_ring_retry` é idempotente no
+/// receptor (não abre mídia nem duplica estado).
+#[tauri::command]
+fn call_ring_retry(
+    call_id: String,
+    target_fp: String,
+    kind: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .call_ring_retry(&call_id, &target_fp, &kind)
+        .map_err(err)
+}
+
 #[tauri::command]
 fn call_reject(
     call_id: String,
@@ -4729,6 +4746,7 @@ fn main() {
             call_room_join,
             call_rooms_list,
             call_invite,
+            call_ring_retry,
             call_accept,
             call_reject,
             call_end,
