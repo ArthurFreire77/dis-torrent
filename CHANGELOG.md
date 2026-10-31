@@ -2,6 +2,77 @@
 
 ## [1.1.17-pre-alpha] — 2026-10-31
 
+### Chamada em andamento agora aparece para todo mundo (e dá para entrar)
+
+O convite de chamada só chegava a quem foi chamado. Na lista de conversas
+ninguém sabia que havia chamada acontecendo, e quem abria o app depois do
+convite não tinha como entrar sem ser chamado de novo.
+
+Agora quem está na chamada anuncia a sala para os membros do grupo/DM (frame
+`call_room`, renovado a cada 15 s; sala sem renovação morre em 35 s). A
+conversa ganha:
+
+- anel verde no avatar, no PC e no celular;
+- botão **Entrar** com a contagem de quem está na sala;
+- um botão ao lado que abre **quem está na chamada** (com o selo de quem ligou).
+
+Entrar usa o mesmo `call_id` da sala, então a malha continua sendo a de sempre.
+Se a chamada já tiver encerrado, o erro é honesto em vez de "conectando" para
+sempre.
+
+### Convidado que não atendeu não ocupa mais quadrado
+
+Era o pedido literal: "tira eles daí; quando entrarem aparece". Os convidados
+saem do painel de vídeo e ficam como chips **aguardando** no rodapé. No instante
+em que a mídia/estado do peer chega, ele ganha o quadrado.
+
+### Foto de perfil e nome real nos quadrados da chamada
+
+Os tile mostravam só a inicial e `fp.slice(0,6)`. Agora usam a foto do perfil
+(persistida pelo core e sincronizada por `ProfileSet`) com fallback para
+inicial + cor do fingerprint, e o nome resolvido (membro do servidor → perfil →
+peer). Tocar no avatar abre o perfil completo.
+
+### Sair de grupo finalmente funciona (PC e celular)
+
+"Apagar conversa" só removia a linha local: o criador reenviava `GroupCreated`
+na próxima sincronização e o grupo voltava. Agora:
+
+- **membro**: `group_leave` re-sincroniza o roster sem mim e limpa o banco
+  local — os outros deixam de me listar;
+- **dono**: escolhe **apagar para todos** (frame `GroupDeleted`, aceito apenas
+  se vier do criador) ou **apagar só para mim**;
+- o mesmo diálogo serve desktop e celular;
+- o painel do grupo mostra presença real por membro (bolinha verde = sessão
+  viva agora, não "está na lista").
+
+### "Online" deixou de mentir
+
+O link ficava `Online` na memória depois que o processo do outro lado morria, e
+a bolinha verde continuava acesa sem receber nada. Agora cada frame recebido
+carimba o relógio do peer, e `peer_state` cai para **Reconnecting** quando o
+silêncio passa da janela de heartbeat. Peer sem nenhum frame ainda conta como
+vivo (senão todo peer novo piscava "reconectando").
+
+### Contador do topo e lista ONLINE incluem todo vínculo
+
+Era "1 amigos online" mesmo com gente do grupo conectada. Agora o número e a
+lista do Início cobrem **amigos + membros dos grupos + servidor aberto**, cada
+linha dizendo de onde vem o vínculo.
+
+### Celular: servidor abre em janela
+
+A aba Servidores despejava a lista de canais na tela. Agora o servidor tem um
+cartão (nome + canais/membros) que abre uma janela com canais, membros pareados
+e convite — os canais continuam acessíveis direto na lista.
+
+### Verificação
+
+211 testes no core (3 novos de liveness), 254 unitários no front, typecheck,
+lint e build verdes. E2E de wizard e cabeçalho mobile passando; o teste do
+painel de bot falha igual antes destas mudanças (bug pré-existente, não
+regressão).
+
 ### Mensagem que desistia em 3 minutos (o "X vermelho" com o contato online)
 
 O reenvio do outbox esperava **15 s fixos** entre tentativas. Com o teto de 12
