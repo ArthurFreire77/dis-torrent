@@ -15,19 +15,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 /// Validade da presença anunciada por push (`PresenceSet`).
-///
-/// POR QUE 90 s E NÃO 30 s: o heartbeat do engine é de 30 s. Com TTL igual ao
-/// intervalo, qualquer jitter (rede, suspensão, GC do WebView) fazia o registro
-/// expirar ANTES do próximo anúncio — os amigos piscavam offline↔online de 30
-/// em 30 segundos, e o usuário lia isso como "a rede caiu". 90 s = 3× o
-/// heartbeat: tolera duas perdas seguidas e ainda detecta app fechado rápido.
+/// 90 s = 3× o heartbeat de 30 s: tolera jitter sem fazer amigos piscarem
+/// offline↔online (era o bug do TTL=30 s).
 pub const PRESENCE_TTL_MS: i64 = 90_000;
 
 // ================================ SCHEMA ================================
 
-/// `column_exists` local: o helper de `storage.rs` só aceita tabelas da
-/// allowlist dele, e `profiles` não está nela (devolveria `false` sempre e o
-/// ALTER rodaria de novo, estourando "duplicate column" no segundo boot).
+/// `column_exists` local: o helper de `storage.rs` não aceita `profiles`
+/// (devolveria `false` sempre e o ALTER estouraria "duplicate column").
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let sql = format!("PRAGMA table_info({table})");
     let Ok(mut stmt) = conn.prepare(&sql) else {
@@ -36,10 +31,8 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) else {
         return false;
     };
-    // O `any()` consome o iterador; sem esta variável o `stmt` (e o
-    // `MappedRows` que empresta dele) era dropado com a expressão ainda viva e
-    // o borrow checker recusava (E0597). Materializar a resposta antes de
-    // devolver resolve — e o custo é o mesmo (para no primeiro match).
+    // Materializar antes de devolver: sem isto o `stmt` era dropado com o
+    // iterador ainda vivo (E0597).
     let found = rows.filter_map(|r| r.ok()).any(|c| c == column);
     found
 }
@@ -217,18 +210,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     // ---------------------------------------------------------------
-    // Revisão de perfil (sincronização P2P sem servidor central).
-    //
-    // Antes só existia `updated_at`, gravado com o relógio de QUEM RECEBE.
-    // Dois efeitos ruins: (1) era impossível comparar versões entre
-    // dispositivos — relógio adiantado "vencia" para sempre; (2) revisão velha
-    // chegando atrasada sobrescrevia a nova sem aviso.
-    //
-    // `rev` é um contador monotônico por identidade: o autor incrementa a cada
-    // edição efetiva, e o receptor só aceita `rev` maior. `content_hash` é o
-    // blake3 do conteúdo público — detecta "nada mudou" sem trafegar imagens e
-    // identifica edições concorrentes (mesmo `rev`, conteúdo diferente) sem
-    // depender de relógio: nesse caso o desempate é determinístico pelo hash.
+    // Revisão de perfil (sincronização P2P): `rev` é contador monotônico
+    // do autor (receptor só aceita rev maior) e `content_hash` desempata
+    // edições concorrentes sem depender de relógio de quem recebe.
     // ---------------------------------------------------------------
     for column in ["rev", "content_hash"] {
         if !column_exists(conn, "profiles", column) {
@@ -301,17 +285,14 @@ pub struct ProfileView {
     /// para decidir quem vence quando duas versões se cruzam na rede.
     #[serde(default)]
     pub rev: i64,
-    /// blake3 (hex, 32 chars) do conteúdo público. Detecta "nada mudou" e
-    /// desempata edições concorrentes sem depender do relógio do aparelho.
+    /// blake3 do conteúdo público — detecta "nada mudou" e desempata
+    /// edições concorrentes sem depender de relógio.
     #[serde(default)]
     pub content_hash: String,
 }
 
-/// Campos públicos de um perfil, na ordem em que entram no hash de conteúdo.
-///
-/// `updated_at` NÃO entra: é o relógio de quem grava e mudaria o hash a cada
-/// recebimento, fazendo dois peers "discordarem" sobre o mesmo perfil para
-/// sempre. `rev` entra porque duas edições no mesmo contador são conflito real.
+/// Campos públicos do perfil, na ordem do hash de conteúdo.
+/// `updated_at` NÃO entra (relógio de quem grava); `rev` entra (conflito real).
 pub fn profile_content_hash(
     display_name: &str,
     about: &str,
@@ -494,11 +475,8 @@ impl crate::storage::Store {
         Ok(out)
     }
 
-    /// Reações de várias mensagens de uma vez.
-    ///
-    /// Uma consulta só, com `IN`: a tela lista ~100 mensagens de uma vez e a
-    /// versão em laço fazia 100 travessias do banco por renderização de tela.
-    /// Os reatores vêm desagregados do emoji porque o agrupamento é feito aqui.
+    /// Reações de várias mensagens: consulta única com `IN` (o laço fazia
+    /// 100 travessias por render); ids são vinculados, sem injeção.
     pub fn reactions_for_msgs(&self, msg_ids: &[String]) -> Result<Vec<ReactionSummary>, String> {
         if msg_ids.is_empty() {
             return Ok(Vec::new());
@@ -507,9 +485,8 @@ impl crate::storage::Store {
             return Err("lote de reações grande demais".into());
         }
         let conn = self.locked();
-        // 9 parâmetros por linha: rusqlite não tem placeholder de tamanho
-        // variável, então o `IN` é montado com o total conhecido. Os ids são
-        // VINCULADOS (nunca concatenados no SQL), então isso não é injeção.
+        // IN montado com placeholder fixo porque rusqlite não tem tamanho
+        // variável; ids VINCULADOS (nunca concatenados).
         let placeholders = vec!["?"; msg_ids.len()].join(",");
         let sql = format!(
             "SELECT msg_id, emoji, reactor_fp FROM msg_reactions
@@ -560,12 +537,9 @@ impl crate::storage::Store {
         rows
     }
 
-    /// Aplica um estado de reação VINDO DO PEER de forma idempotente.
-    ///
-    /// O caminho de recepção usava `reaction_toggle` (inverte), então um
-    /// reenvio legítimo (retry de offline, duplicata de relay) REMOVIA uma
-    /// reação que deveria existir — ou recriava uma removida. Com `add`
-    /// explícito, re-entregar é sempre seguro. Devolve o estado resultante.
+    /// Aplica reação VINDO DO PEER com `add` explícito (idempotente):
+    /// reenvio legítimo não pode inverter o estado — retry/duplicata era
+    /// bug com `reaction_toggle`.
     pub fn reaction_apply(
         &self,
         msg_id: &str,
@@ -593,9 +567,8 @@ impl crate::storage::Store {
         }
     }
 
-    /// Enfileira uma reação para um peer offline (último estado vence por
-    /// chave). Teto de 200 por peer: reação é estado efêmero de UI, e um peer
-    /// que nunca volta não pode inflar o banco.
+    /// Enfileira reação p/ peer offline (último estado vence; teto 200 por
+    /// peer para não inflar o banco).
     pub fn queue_pending_react(
         &self,
         peer_fp: &str,
@@ -873,11 +846,7 @@ impl crate::storage::Store {
         Ok(n)
     }
 
-    /// Quantas mensagens não lidas me mencionam — o badge da barra de menções.
-    ///
-    /// Só conta o que o AUTOR NÃO escreveu (mencionar a si mesmo não notifica)
-    /// e o que chegou depois do cursor de leitura. A conversa é resolvida pelo
-    /// `conv_id` da própria mensagem, que é o mesmo campo do cursor.
+    /// Badge de menções não lidas: só de outros autores e após o cursor.
     pub fn unread_mentions(&self, fp: &str) -> Result<i64, String> {
         if fp.is_empty() {
             return Ok(0);
@@ -958,13 +927,8 @@ impl crate::storage::Store {
             custom_emoji: String::new(),
             updated_at: 0,
         });
-        // Presença recebida tem validade de PRESENCE_TTL. Sem heartbeat, um
-        // peer que fechou o app não pode continuar aparecendo online.
-        //
-        // BUG CORRIGIDO: o TTL era 30 s e o heartbeat também era 30 s. Com
-        // qualquer jitter de rede/renderização o registro expirava ANTES do
-        // próximo `PresenceSet`, e a lista de amigos piscava offline↔online a
-        // cada meio minuto (parecia instabilidade da rede, era o TTL).
+        // Sem heartbeat, peer que fechou o app expira após PRESENCE_TTL
+        // (bug do TTL=30 s: amigos piscavam offline↔online).
         if presence.status != "offline"
             && presence.updated_at < crate::identity::now_ms() - PRESENCE_TTL_MS
         {
@@ -975,9 +939,7 @@ impl crate::storage::Store {
         Ok(presence)
     }
 
-    /// Lê o status local sem aplicar expiração de 30 segundos.
-    /// Usado pelo heartbeat: presença local nunca deve perder `idle` ou `dnd`
-    /// apenas porque passou o período da última publicação.
+    /// Status local sem expirar — usado pelo heartbeat (não perde idle/dnd).
     pub fn presence_get_live(&self, fp: &str) -> Result<PresenceView, String> {
         let conn = self.locked();
         let r = conn
@@ -1037,14 +999,9 @@ impl crate::storage::Store {
 
     // ======================= PERFIL =======================
 
-    /// Grava o perfil do PRÓPRIO usuário, incrementando a revisão.
-    ///
-    /// Retorna `None` quando nada mudou de verdade — nesse caso NÃO cria
-    /// revisão nova e NÃO vale a pena reanunciar na rede. Isso é o que impede
-    /// a reconciliação de 10 min de "inventar" uma versão a cada tique.
-    ///
-    /// `clear_avatar`/`clear_banner` existem porque antes `avatar_b64=""`
-    /// significava "mantenha o anterior": era impossível remover a foto.
+    /// Grava perfil local incrementando `rev`. Retorna `None` se nada mudou
+    /// (não cria revisão nem reanuncia). `clear_*` permite remover foto/banner
+    /// (antes vazio = manter era impossível limpar).
     pub fn profile_set_local(
         &self,
         fp: &str,
@@ -1074,8 +1031,7 @@ impl crate::storage::Store {
             .optional()
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
-        // Mesma semântica de antes: vazio = mantém a foto atual. A remoção
-        // explícita passa por `clear_avatar`.
+        // vazio = mantém a foto atual; remoção explícita via `clear_avatar`.
         let av = if clear_avatar {
             String::new()
         } else if avatar_b64.is_empty() {
@@ -1142,19 +1098,10 @@ impl crate::storage::Store {
         Ok(Some(self.profile_get(fp)?))
     }
 
-    /// Aplica um perfil vindo da rede, com resolução de conflito.
-    ///
-    /// Regras (nesta ordem) — todas sem depender do relógio do aparelho:
-    /// 1. `rev` maior vence.
-    /// 2. `rev` menor é descartado (versão antiga NUNCA sobrescreve a nova).
-    /// 3. mesmo `rev`, conteúdo idêntico (`content_hash` do autor): nada a fazer
-    ///    — é o caso normal da reconciliação periódica, sem escrita.
-    /// 4. mesmo `rev` e conteúdo diferente (dois dispositivos editaram a partir
-    ///    do mesmo ponto): desempate determinístico pelo MAIOR `content_hash`.
-    ///    Todos os peers escolhem o mesmo vencedor, então a rede converge em
-    ///    vez de ficar oscilando.
-    ///
-    /// Retorna `true` quando o estado local mudou (a UI precisa ser avisada).
+    /// Aplica perfil vindo da rede, sem relógio: `rev` maior vence; menor é
+    /// descartado; mesmo `rev` + hash igual = nada a fazer; hash diferente =
+    /// desempate determinístico pelo maior hash (rede converge).
+    /// Retorna `true` quando o estado local mudou.
     pub fn profile_apply_remote(
         &self,
         fp: &str,
@@ -1175,9 +1122,8 @@ impl crate::storage::Store {
             .optional()
             .map_err(|e| e.to_string())?;
 
-        // Avatar/banner vazios de um peer = "não tenho a foto", não "apague":
-        // apagar é decisão do autor, e o autor manda o campo vazio junto com
-        // a revisão nova apenas quando ele mesmo limpou.
+        // Avatar/banner vazios do peer = "não tenho a foto", não "apague"
+        // (apagar é decisão do autor).
         let (cur_rev, cur_hash) = cur.unwrap_or((0, String::new()));
         let new_hash = profile_content_hash(display_name, about, avatar_b64, banner_b64, accent);
 
@@ -1221,8 +1167,7 @@ impl crate::storage::Store {
         Ok(true)
     }
 
-    /// Grava sem tocar em `rev`/`content_hash` — compatibilidade com chamadas
-    /// antigas (testes e seeds locais que só querem semear um perfil).
+    /// Grava sem tocar em `rev`/`content_hash` — compat com chamadas antigas.
     pub fn profile_set(
         &self,
         fp: &str,
@@ -1721,13 +1666,9 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Registra um voto.
-    ///
-    /// O `multi` vem da própria enquete (nada de confiar no chamante): em
-    /// enquete simples o voto SUBSTITUI o anterior, em múltipla acumula. A
-    /// versão anterior apagava o voto anterior sempre, o que tornava a opção
-    /// "múltipla escolha" impossível de usar — a segunda escolha apagava a
-    /// primeira e o total nunca passava de 1 por pessoa.
+    /// Registra voto: `multi` vem da enquete (simples substitui, múltipla
+    /// acumula — a versão antiga apagava sempre e "múltipla" nunca passava
+    /// de 1 voto por pessoa).
     pub fn poll_vote(&self, poll_id: &str, voter_fp: &str, option_idx: i64) -> Result<(), String> {
         let conn = self.locked();
         let multi: Option<i64> = conn
@@ -1740,8 +1681,8 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())?;
         let multi = multi.ok_or_else(|| "enquete inexistente".to_string())?;
 
-        // a opção precisa existir: um índice fora da faixa viraria um voto em
-        // uma opção invisível na contagem, inflating o total sem aparecer na UI.
+        // opção precisa existir: índice fora da faixa inflaria o total
+        // com um voto invisível na UI.
         let options: String = conn
             .query_row(
                 "SELECT options FROM polls WHERE id=?1",
@@ -1958,9 +1899,8 @@ impl crate::storage::Store {
         let needle = q.text.trim().to_lowercase();
         let limit = if q.limit <= 0 { 50 } else { q.limit.min(500) };
         let conn = self.locked();
-        // `conversations` não tem coluna de dono: a comunidade de uma mensagem
-        // de canal vem do próprio canal (`channels.community_id`). `msg_meta` é
-        // LEFT e opcional, então "não deletada" precisa aceitar NULL.
+        // comunidade vem do canal (`msg_meta` é LEFT: "não deletada"
+        // precisa aceitar NULL).
         let mut sql = String::from(
             "SELECT g.id, g.conv_id, g.author_fp, g.body, g.ts, g.direction,
                     IFNULL(ch.community_id, ''), IFNULL(ch.id, '')
@@ -2038,14 +1978,12 @@ impl crate::storage::Store {
         ts: i64,
         limit: i64,
     ) -> Result<Vec<crate::storage::StoredMessage>, String> {
-        // `limit` vem do frontend (rota de busca): sem clamp, `limit as usize`
-        // negativo virava um número gigante e o `take` não limitava nada.
+        // clamp: `limit` do frontend negativo virava número gigante no `take`.
         let limit = limit.clamp(1, 500) as usize;
         let conn = self.locked();
-        // `thread_id` PRECISAVA estar no SELECT: o mapper lê `r.get(9)`, mas a
-        // query listava só 9 colunas (0..8). O `query_map` então devolvia Err
-        // por linha e o `.flatten()` descartava TODAS em silêncio — "pular para
-        // mensagem" sempre vinha vazio.
+        // `thread_id` PRECISA estar no SELECT: o mapper lê `r.get(9)` e, sem
+        // a 10ª coluna, TODAS as linhas falhavam em silêncio no `.flatten()`
+        // ("pular para mensagem" vinha vazio).
         let mut stmt = conn
             .prepare("SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id,thread_id FROM messages WHERE conv_id=?1 ORDER BY ts ASC")
             .map_err(|e| e.to_string())?;

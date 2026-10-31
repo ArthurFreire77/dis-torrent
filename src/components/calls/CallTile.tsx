@@ -1,25 +1,9 @@
 // CallTile — um QUADRADO da chamada: pessoa (câmera/avatar) ou tela.
-//
-// ## Por que um componente só para os dois tipos
-//
-// Antes cada shell (desktop e mobile) desenhava o tile inline e usava o MESMO
-// `<video>`/`objectFit` para câmera e para tela. Consequências reais:
-//
-//  - a tela era esticada/cortada (`object-fit: cover`) porque telas têm
-//    proporção diferente da câmera;
-//  - quem transmitia não via a própria câmera (o tile local dependia de um
-//    stream remoto que nunca chega por loopback);
-//  - não existia quadrado separado para a tela, então `sharing` e `cameraOn`
-//    brigavam pelo mesmo espaço.
-//
-// Aqui o tipo do quadrado decide a apresentação:
-//  - `participant`: `object-fit: cover` (é uma pessoa, como no Discord);
-//  - `screen`: `object-fit: contain` + `aspect-ratio` real da fonte — nada de
-//    esticar, cortar ou forçar 16:9.
-//
-// O `aspect-ratio` vem do próprio vídeo (`videoWidth/videoHeight`) e é
-// atualizado quando a resolução muda (`resize`), o que cobre troca de monitor
-// e mudança de janela durante o compartilhamento.
+// Antes cada shell desenhava inline e a tela era esticada (`cover`), quem
+// transmitia não via a própria câmera e não havia tile separado para a tela.
+// Aqui o tipo decide a apresentação: pessoa `cover`; tela `contain` +
+// `aspect-ratio` real do vídeo (atualizado no `resize` — cobre troca de
+// monitor e janela durante o share).
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { attachStream } from '../../shared/mediaAttach'
@@ -85,8 +69,7 @@ export function CallTile({
   const [aspect, setAspect] = useState<string | null>(null)
   const isScreen = tile.kind === 'screen'
 
-  // A proporção real da fonte: atualiza no primeiro frame e a cada mudança de
-  // resolução (troca de monitor, redimensionar janela compartilhada).
+  // Proporção real da fonte: no primeiro frame e a cada mudança de resolução.
   const syncAspect = useCallback(() => {
     const next = readAspect(videoRef.current)
     if (next) setAspect((cur) => (cur === next ? cur : next))
@@ -119,24 +102,18 @@ export function CallTile({
       data-call-participant={tile.kind === 'participant' ? tile.fp : undefined}
       data-call-screen-fp={tile.kind === 'screen' ? tile.fp : undefined}
       style={{
-        // A TELA tem fundo preto e o quadro é DELIMITADO pela proporção real:
-        // `aspectRatio` na caixa faz a borda acompanhar o conteúdo, então não
-        // sobram faixas mortas em volta e a escala é sempre a mesma do stream.
-        // Pessoa continua no gradiente (é avatar/câmera, não conteúdo de tela).
+        // TELA: fundo preto e caixa DELIMITADA pela proporção real (`aspectRatio`
+        // na caixa — sem faixa morta, escala sempre igual à do stream).
+        // EXPANDIDO: caixa na proporção, CENTRALIZADA — maior área útil sem
+        // barras nem esticar.
+        // Pessoa continua no gradiente.
         background: isScreen ? '#000' : `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`,
         borderRadius: 12,
         overflow: 'hidden',
         position: 'relative',
         minHeight: expanded ? 0 : thumbnail ? 72 : minHeight,
-        // Quadrado normal da tela: a borda acompanha a proporção REAL, então a
-        // escala do conteúdo é a mesma e não sobra faixa morta. `alignSelf:start`
-        // é necessário porque o grid estica os itens (stretch) e a altura
-        // imposta pelo stretch anularia o `aspect-ratio`.
-        //
-        // EXPANDIDO: a caixa também abraça a proporção e é CENTRALIZADA na área
-        // útil (`maxHeight: 100%`): o conteúdo cresce até o limite do painel sem
-        // virar barras pretas nem esticar. É a "maior área útil preservando a
-        // proporção" — a escala do que foi compartilhado não muda.
+        // Quadrado normal da tela: borda acompanha a proporção real;
+        // `alignSelf:start` porque o grid estica os itens e anularia o aspect-ratio.
         ...(isScreen && aspect
           ? expanded
             ? {
@@ -161,12 +138,8 @@ export function CallTile({
         boxShadow: '0 2px 10px rgba(0,0,0,.35)',
       }}
     >
-      {/* A TELA ocupa o quadrado SEM esticar em NENHUM modo:
-          - normal: a caixa já tem a proporção do stream (`aspect-ratio` no
-            artigo de cima), então `100%` preenche sem faixa morta;
-          - expandido: a caixa é maior que o conteúdo e o `contain` mantém a
-            proporção original (letterbox), que é o correto para "maior área útil";
-          - miniatura: idem, sem cortar conteúdo importante. */}
+      {/* A TELA ocupa o quadrado SEM esticar em NENHUM modo (normal: caixa na
+          proporção; expandido/miniatura: `contain` com letterbox correto). */}
       <div
         style={
           isScreen
@@ -178,8 +151,7 @@ export function CallTile({
           <video
             autoPlay
             playsInline
-            // O vídeo é SEMPRE mudo: o som sai do <audio> do participante.
-            // Sem isso a voz/tela do peer tocava duas vezes (eco/comb-filter).
+            // Vídeo SEMPRE mudo: o som sai do <audio> do participante (sem eco).
             muted
             ref={(el) => {
               videoRef.current = el
@@ -188,10 +160,8 @@ export function CallTile({
             style={
               isScreen
                 ? {
-                    // TELA: `max-*` + `auto` mantém a proporção INTRÍNSECA do
-                    // stream em qualquer caixa. Com `width/height: 100%` o
-                    // navegador esticava o quadro quando a caixa não era 16:9
-                    // (medido: 1059x872 com conteúdo 1920x1080 = deformado).
+                    // TELA: `max-*` + `auto` mantém a proporção intrínseca;
+                    // width/height 100% esticava quando a caixa não era 16:9.
                     maxWidth: '100%',
                     maxHeight: '100%',
                     width: 'auto',
@@ -211,8 +181,7 @@ export function CallTile({
             }
           />
         ) : showImage ? (
-          /* Caminho NATIVO (Linux): o core decodifica o RTP e entrega JPEG.
-             Não existe MediaStream na página — um <img> é o honesto. */
+          /* Caminho NATIVO (Linux): sem MediaStream na página — <img> honesto. */
           <img
             src={tile.videoUrl}
             alt={tile.label}
@@ -255,8 +224,7 @@ export function CallTile({
         )}
       </div>
 
-      {/* Selo de origem: identifica QUEM compartilha (item de produto) e não
-          deixa confundir tela com câmera. */}
+      {/* Selo de origem: identifica QUEM compartilha (não confundir tela com câmera). */}
       {isScreen ? (
         <span
           title={`Tela compartilhada por ${tile.nickname}`}
@@ -297,9 +265,7 @@ export function CallTile({
         </span>
       )}
 
-      {/* Controles de fixar/expandir: existem para PESSOA e para TELA. Antes o
-          botão só existia no tile do participante e a tela não podia ser
-          fixada nem expandida. */}
+      {/* Fixar/expandir para PESSOA e TELA (antes só o participante tinha). */}
       <div style={{ position: 'absolute', right: 8, top: 38, display: 'flex', flexDirection: 'column', gap: 4 }}>
         {onPin && (
           <button
@@ -332,8 +298,7 @@ export function CallTile({
               border: '1px solid #ffffff44', borderRadius: 6,
               background: expanded ? c.accent : '#111c',
               color: '#fff', cursor: 'pointer',
-              // Ícone SVG precisa de caixa própria: `padding` de glifo de texto
-              // deixava o botão desalinhado dos vizinhos.
+              // Caixa própria: padding de glifo deixava o botão desalinhado.
               width: 26, height: 26, padding: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
@@ -347,8 +312,8 @@ export function CallTile({
         <ParticipantAudioControls fp={tile.fp} nickname={tile.nickname} callDeafened={callDeafened} />
       )}
 
-      {/* Áudio remoto SEMPRE presente (inclusive sem vídeo): antes ele vivia
-          dentro do ramo do vídeo e a chamada de voz ficava muda. */}
+      {/* Áudio remoto SEMPRE presente (antes vivia no ramo do vídeo e a voz
+          ficava muda). */}
       {!tile.isLocal && tile.stream && (
         <audio
           autoPlay

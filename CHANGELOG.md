@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## [1.1.17-pre-alpha] — 2026-10-31
+
+### Mensagem que desistia em 3 minutos (o "X vermelho" com o contato online)
+
+O reenvio do outbox esperava **15 s fixos** entre tentativas. Com o teto de 12
+tentativas, a mensagem virava `failed` em ~3 minutos — mas a reconexão pelo
+relay leva de 30 s a 2 min (backoff + handshake). Resultado: mensagem escrita
+logo depois de uma queda esgotava o orçamento **antes** de o link voltar, e o
+X vermelho aparecia num contato que estava online (o link voltava depois, e as
+mensagens antigas já tinham morrido).
+
+Agora o intervalo dobra a cada tentativa (15 s, 30 s, 60 s, 120 s, 240 s,
+480 s…) com o **mesmo** teto de 12 tentativas: a janela passa de ~45 minutos
+em vez de 3, e o peer não é martelado quando está só lento.
+
+### "Está online, mas não chega nada" — agora tem causa visível
+
+Rejeições do receptor (anti-spam, `conv_id` divergente, assinatura, gate de
+amigo) morriam num `debug!`, que o filtro padrão (`info`) **não escreve**. Não
+havia rastro nenhum no log para explicar um contato conectado que não entregava
+mensagem — o diagnóstico era adivinhação.
+
+Agora:
+
+- a rejeição é `warn!`, com o peer e o motivo, no arquivo de log;
+- o motivo fica no diagnóstico do peer e aparece no painel
+  (`recusado pelo peer: …`), junto de quantas mensagens nossas desistiram de
+  sair. Se o número cresce com o contato "online", o caminho existe e é o
+  outro lado que está recusando — não é mais "conectado" e silêncio.
+
 ## [1.1.16-pre-alpha] — 2026-10-31
 
 ### "Mando uma mensagem, funciona; depois para e só religando resolve"

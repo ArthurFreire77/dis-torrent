@@ -1,16 +1,11 @@
 // Servidores ICE/TURN da chamada + privacidade por modo.
-//
-// POR QUÃŠ UM MÃ“DULO PRÃ“PRIO (mesmo padrÃ£o do callWire.ts): o callManager
-// importa a Ã¡rvore de services (localStorage/@tauri) e nÃ£o Ã© carregÃ¡vel
-// pelo runner de testes unit (node strip-types); este arquivo Ã© standalone
-// e testÃ¡vel. O callManager reexporta tudo â€” shells importam como sempre.
-//
-// PRIVACIDADE Ã— ICE: em proxy/full os SERVIDORES PÃšBLICOS de reserva
-// (Google STUN, openrelay TURN) NÃƒO entram na lista â€” o ICE do WebRTC usa
-// sockets UDP diretos do WebView (fora do SOCKS5/Tor do app), entÃ£o
-// consultÃ¡-los entregaria o IP real a terceiros que o modo promete
-// esconder. Fica sÃ³ o TURN/STUN configurado EXPLICITAMENTE pelo usuÃ¡rio.
-// Ver THREAT_MODEL.md ("LimitaÃ§Ãµes assumidas").
+// Módulo standalone (mesmo padrão do callWire.ts): o callManager importa a
+// árvore de services e não é carregável no unit (node strip-types); o
+// callManager reexporta tudo.
+// PRIVACIDADE × ICE: em proxy/full os SERVIDORES PÚBLICOS de reserva NÃO
+// entram — o ICE usa UDP direto do WebView (fora do SOCKS5/Tor) e consultá-los
+// entregaria o IP real. Fica só o TURN/STUN configurado pelo usuário.
+// Ver THREAT_MODEL.md ("Limitações assumidas").
 
 import { hmac } from '@noble/hashes/hmac.js'
 import { sha1 } from '@noble/hashes/legacy.js'
@@ -33,27 +28,17 @@ export function getTurnUrl(): string {
   } catch { return '' }
 }
 
-// ── P2P puro: nenhum servidor de terceiro no padrão ─────────────────────────
-// A lista padrão de ICE é VAZIA (só candidatos host locais) + o que o usuário
-// configurar explicitamente (distorrent:turn_url / VITE_TURN_URL). Os fallbacks
-// públicos (Google STUN, openrelay TURN com credencial pública e cota de
-// ~20 GB/mês) SAÍRAM do padrão: mídia 100% P2P, sem VPS e sem terceiro.
-// Consequência honesta: fora da LAN, NAT restritivo/4G pode não fechar rota —
-// a UI avisa (hasRelayConfigured) em vez de fingir. As funções abaixo seguem
-// exportadas para opt-in explícito, não para o caminho padrão.
+// ── P2P puro: lista padrão de ICE VAZIA (só candidatos host) + o que o
+// usuário configurar (localStorage/env). Os fallbacks públicos SAÍRAM do
+// padrão (mídia 100% P2P, sem terceiro); fora da LAN, NAT restritivo/4G pode
+// não fechar rota — a UI avisa (hasRelayConfigured). Seguem exportados para
+// opt-in explícito.
 const FALLBACK_TURN_HOST = 'staticauth.openrelay.metered.ca'
 const FALLBACK_TURN_SECRET = 'openrelayprojectsecret'
 /** Validade da credencial efêmera gerada localmente (o coturn aceita até o epoch). */
 const FALLBACK_TURN_TTL_S = 24 * 3600
 
-/**
- * STUN público: descobre o IP/porta mapped do NAT (candidato `srflx`) SEM
- * envolver nenhum terceiro no tráfego — o STUN só responde "qual é o meu
- * endereço"; a mídia continua indo direto de um peer para o outro.
- * Sem nenhum `stun:` na lista, atrás de NAT o ICE só produzia candidatos
- * `host` (endereço privado), que nenhum peer de fora consegue alcançar — e a
- * chamada morria sem nunca tentar a rota direta.
- */
+/** STUN público: descobre o mapped address do NAT (srflx) sem tocar na mídia. */
 const FALLBACK_STUN_URLS = [
   'stun:stun.l.google.com:19302',
   'stun:stun1.l.google.com:19302',
@@ -72,11 +57,7 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
-/**
- * Gera credencial TURN efêmera (esquema static-auth-secret do coturn) de forma
- * síncrona via @noble/hashes (já é dependência do projeto). Retorna null se algo
- * falhar — o chamador então segue só com o relay configurado, sem quebrar nada.
- */
+/** Credencial TURN efêmera (static-auth-secret do coturn); null se falhar. */
 export function getFallbackTurnCredential(nowMs: number = Date.now()): { username: string; credential: string } | null {
   try {
     const expiry = Math.floor(nowMs / 1000) + FALLBACK_TURN_TTL_S
@@ -101,12 +82,7 @@ export function getFallbackTurnServer(): RTCIceServer | null {
   }
 }
 
-/**
- * TURN público CLÁSSICO (openrelay) com credenciais estáticas fixas. O host
- * segue no ar (o `staticauth...` acima está instável/fora). Entra como reserva
- * ADICIONAL — o ICE tenta todos e usa o que responder. Sem isso, no 4G/CGNAT
- * não há rota de mídia e a chamada fica muda.
- */
+/** TURN público clássico (openrelay, credencial estática) como reserva adicional. */
 export function getClassicTurnServer(): RTCIceServer {
   return {
     urls: [
@@ -124,17 +100,9 @@ export function getClassicTurnServer(): RTCIceServer {
 // ou via env VITE_TURN_URL (+ VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL; padrão distorrent/distorrent).
 // Padrão = só o configurado. Nenhum STUN/TURN público embutido (P2P puro).
 export function getIceServers(): RTCIceServer[] {
-  // â”€â”€ Privacidade Ã— ICE â€” MUDOU DE POLÃTICA (era: "a lista nÃ£o muda") â”€â”€
-  // O ICE do WebRTC no browser/WebView NÃƒO passa pelo SOCKS5/Tor do app (o
-  // proxy cobre o TCP do distorrent-core; a mÃ­dia usa sockets UDP do prÃ³prio
-  // WebRTC). NÃ£o hÃ¡ como "rotear o ICE pelo Tor" a partir deste mÃ³dulo â€”
-  // limitaÃ§Ã£o documentada no THREAT_MODEL.
-  // O QUE MUDOU: em proxy/full os SERVIDORES PÃšBLICOS de reserva (Google
-  // STUN, openrelay TURN) ficam FORA da lista â€” consultÃ¡-los entregaria o
-  // IP real a terceiros que o modo promete esconder. Fica sÃ³ o TURN/STUN
-  // configurado EXPLICITAMENTE pelo usuÃ¡rio (servidor dele, escolha dele)
-  // + candidatos host (LAN). A chamada segue possÃ­vel na LAN; a UI mostra
-  // "chamada nÃ£o anÃ´nima" enquanto houver chamada nesses modos.
+  // Privacidade × ICE: o ICE não passa pelo SOCKS5/Tor do app (limitação do
+  // THREAT_MODEL). Em proxy/full, servidores públicos de reserva ficam FORA —
+  // consultá-los entregaria o IP real. Só o que o usuário configurou + host.
   const servers: RTCIceServer[] = []
   // também tenta localStorage para UI dinâmica
   const env: any = (import.meta as any)?.env ?? {}
@@ -150,16 +118,9 @@ export function getIceServers(): RTCIceServer[] {
       servers.push({ urls: viteTurn.trim(), username: turnUser, credential: turnCred })
     }
   } catch { /* ignore */ }
-  // ── Reserva automática (Fase "funciona no 4G/CGNAT") ──────────────────────
-  // Bug real que isto corrige: as funções abaixo existiam mas NUNCA eram
-  // chamadas. Resultado: com nenhum TURN configurado no usuário, a lista de
-  // ICE saía vazia de servidores → em 4G/CGNAT o ICE só tinha candidatos
-  // host/srflx, nunca fechava, e a chamada ficava muda (ou caía no relay).
-  // Agora, mesmo sem configurar nada, o ICE tem rotas de reserva públicas.
-  // proxy/full: NÃO consulta os SERVIDORES PÚBLICOS de reserva (Google
-  // STUN / openrelay veriam o IP real que o modo promete esconder). A lista
-  // fica apenas com o que o usuário configurou explicitamente — pode ser
-  // VAZIA, e aí a chamada só fecha na LAN. Comportamento honesto do modo.
+  // Reserva automática: sem ela a lista saía vazia e a chamada ficava muda em
+  // 4G/CGNAT. Em proxy/full os servidores públicos ficam fora (IP real exposto);
+  // a lista pode ficar vazia e a chamada só fechar na LAN — honesto.
   if (isIcePublicFallbackSuppressed()) {
     return servers
   }

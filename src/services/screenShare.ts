@@ -93,10 +93,8 @@ export function classifyScreenShareError(e: unknown): ScreenShareError {
   else if (name === 'AbortError') code = 'cancelled'
   else if (name === 'NotFoundError' || name === 'OverconstrainedError') code = 'no-source'
   else if (name === 'NotReadableError' || name === 'TrackStartError') code = 'unavailable'
-  // ANTES do teste de "getDisplayMedia" abaixo: a mensagem do TypeError do
-  // Chromium ("min constraints are not supported") também cita getDisplayMedia,
-  // e cair em `unsupported` dizia que o aparelho não tem captura — mentira,
-  // o engine só recusou as opções.
+  // ANTES do teste de getDisplayMedia: TypeError de constraint do Chromium
+  // também cita getDisplayMedia — cair em `unsupported` mentia sobre o aparelho.
   else if (name === 'TypeError' && /constraint/i.test(String(anyE?.message ?? ''))) code = 'constraints'
   else if (/getDisplayMedia/i.test(String(anyE?.message ?? ''))) code = 'unsupported'
   const retryable = RETRYABLE_CODES.has(code)
@@ -170,10 +168,9 @@ export function detectPlatformHint(): 'windows' | 'linux' | 'android' | 'ios' | 
 }
 
 /**
-
- * `nativeAvailable` = o core em Rust assume a captura (Linux/WebKitGTK sem
- * `getDisplayMedia`). Quem sabe disso é o `callManager`; aqui não importamos
- * dele para o módulo continuar carregável nos testes em node puro.
+ * `nativeAvailable` = o core em Rust assume a captura (Linux/WebKitGTK).
+ * Quem sabe disso é o `callManager`; aqui não o importamos para o módulo
+ * continuar carregável nos testes em node puro.
  */
 export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironment {
   const notes: string[] = []
@@ -185,20 +182,16 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
   else if (detectPlatformHint() === 'macos') platform = 'macos'
 
   const md = (typeof navigator !== 'undefined' ? (navigator as unknown as { mediaDevices?: Record<string, unknown> }).mediaDevices : null) ?? null
-  // Android: o WebView do sistema EXPÕE `getDisplayMedia` (a função existe e é
-  // chamável), mas ela lança `TypeError` na hora da captura — não há
-  // MediaProjection mapeado no wry 0.57. Tratar só a presença da função fazia
-  // a UI prometer tela e o usuário receber "TypeError" ao tocar no botão.
-  // Aqui a plataforma decide antes: em Android o backend é NENHUM, a menos que
-  // exista captura nativa em Rust (não existe no Android hoje).
+  // Android: o WebView EXPÕE getDisplayMedia mas ela lança TypeError na captura
+  // (sem MediaProjection no wry 0.57) — presença da função não promete nada;
+  // sem captura nativa em Rust, o backend é NENHUM.
   const androidNoCapture = platform === 'android' && !nativeAvailable
   const hasDisplayMedia = !androidNoCapture && typeof md?.getDisplayMedia === 'function'
   let secureContext: boolean
   try { secureContext = typeof isSecureContext === 'undefined' ? true : !!isSecureContext } catch { secureContext = true }
 
-  // O caminho nativo só entra quando o WebView NÃO tem getDisplayMedia — é
-  // exatamente o mesmo teste que `startScreenShare` faz. Sem isso a UI mentia:
-  // o WebView do Linux anunciava "compartilhar" mas o picker não tinha fonte.
+  // Caminho nativo só entra quando o WebView NÃO tem getDisplayMedia (mesmo
+  // teste do `startScreenShare`) — sem isso a UI do Linux mentia.
   const backend: ScreenBackend = hasDisplayMedia ? 'display-media' : (nativeAvailable ? 'native' : 'none')
 
   const displaySurfaces: ScreenSourceKind[] = ['screen']
@@ -226,12 +219,9 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
       notes.push('Linux: este WebView (WebKitGTK 4.x) não implementa getDisplayMedia — a captura usa o pipeline nativo em Rust')
     }
   } else if (platform === 'android') {
-    // Chromium no Android NÃO entrega áudio do sistema (AudioPlaybackCapture
-    // exigiria MediaProjection + foreground service, que o app não tem).
+    // Chromium no Android NÃO entrega áudio do sistema (exigiria MediaProjection
+    // + foreground service, que o app não tem).
     surfaceSwitching = false
-    // O WebView do Android EXPÕE a função mas ela falha com TypeError: é
-    // exatamente por isso que a UI não pode prometer captura com base só na
-    // presença dela (era o "TypeError" que o usuário via ao tocar em "tela").
     notes.push('Android: o WebView do sistema não entrega captura de tela (getDisplayMedia existe mas lança erro) — compartilhar tela ainda não é possível neste aparelho')
   } else if (platform === 'ios') {
     notes.push('iOS/iPadOS não oferece captura de tela para apps de terceiros')
@@ -278,25 +268,18 @@ export function buildDisplayMediaConstraints(
   const wantsSystemAudio = opts.audio === 'system' || opts.audio === 'system+mic'
   const displaySurface = opts.source === 'window' ? 'window' : 'monitor'
   const constraints: Record<string, unknown> = {
-    // SEM `min` aqui: o `getDisplayMedia` do Chromium (WebView2 inclusive)
-    // recusa constraint obrigatória com `TypeError: min constraints are not
-    // supported` — e a captura simplesmente não abria dentro do app, embora
-    // funcionasse no teste com o Edge. `ideal` é dica, não exigência, e é o
-    // que o engine aceita. O piso de fps é perseguido depois, em
-    // `applyScreenConstraints` (applyConstraints, que ESSE aceita `max`).
+    // SEM `min` aqui: o Chromium (WebView2 incluso) recusa constraint obrigatória
+    // com TypeError e a captura não abria. `ideal` é dica; o piso de fps é
+    // perseguido depois em `applyScreenConstraints` (que aceita `max`).
     video: { displaySurface, frameRate: { ideal: 60 } },
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
-    // Loopback do desktop inclui a voz dos próprios participantes saindo nos
-    // alto-falantes (eco de retorno). Chromium implementa esta opção; engines
-    // que não a conhecem ignoram o campo.
+    // Loopback inclui a voz dos próprios participantes (eco); engines antigos ignoram.
     restrictOwnAudio: wantsSystemAudio ? 'include' : 'exclude',
     selfBrowserSurface: 'exclude',
     surfaceSwitching: env.surfaceSwitching ? 'include' : 'exclude',
-    // `exclude` REMOVE as superfícies de monitor do seletor do Chromium — e sem
-    // superfície de monitor o engine não oferece áudio do sistema. Só a captura
-    // de janela pode excluir monitores; `screen` e `monitor` precisam de
-    // `include` (era o bug: o modo padrão escondia os monitores).
+    // `exclude` remove monitores do seletor (e o áudio do sistema junto) — só
+    // vale para captura de janela (bug: o modo padrão escondia os monitores).
     monitorTypeSurfaces: opts.source === 'window' ? 'exclude' : 'include',
     preferCurrentTab: false,
   }
@@ -304,9 +287,8 @@ export function buildDisplayMediaConstraints(
 }
 
 /**
- * Versão relaxada das constraints para quando o engine recusa o pedido
- * original (WebView2 recusa `min`; alguns engines recusam `displaySurface`).
- * Devolve `null` quando não há nada a relaxar — aí não vale repetir a chamada.
+ * Constraints relaxadas para quando o engine recusa o pedido original;
+ * `null` quando não há nada a relaxar.
  */
 export function derivedDisplayConstraints(
   constraints: Record<string, unknown>,
@@ -336,9 +318,7 @@ export function resolveStep(opts: ScreenShareOptions): ScreenQualityStep | null 
 export function fpsOf(step: ScreenQualityStep | null, opts: ScreenShareOptions): number | null {
   const explicit = resolveFps(opts)
   if (explicit !== null) return explicit
-  // `auto` = não fixa teto nenhum (o capturador escolhe). Antes devolvia 60
-  // sempre, então "Automático" era um teto fixo de 60 fps e `screenConstraints`
-  // impunha frameRate mesmo quando o usuário pediu automático.
+  // `auto` = sem teto nenhum (antes devolvia 60 e virava teto de "Automático").
   void step
   return null
 }
@@ -348,16 +328,8 @@ export function screenConstraints(opts: ScreenShareOptions): MediaTrackConstrain
   const fps = fpsOf(step, opts)
   const c: Record<string, unknown> = {}
   if (step) {
-    // `ideal` + `max` SÓ em `width`/`height` MANTÉM a proporção?
-    //
-    // Não. Pedir `width: {max: 1280}` e `height: {max: 720}` numa tela 16:10
-    // (1440×900) faz o Chromium escolher 1280×720 (16:9) e o quadro sai
-    // ESTRICADO — texto borrado e barra preta. Em tela ultrawide (21:9) piora:
-    // 1280×720 espreme a imagem.
-    //
-    // `ideal` deixa o engine escolher o mais próximo PRESERVANDO a proporção da
-    // fonte; `max` só limita o teto. E `resizeMode: 'none'` impede o engine de
-    // reescalar por conta própria (ele reescala inclusive quando não deveria).
+    // `ideal` (não `max`) em width/height preserva a proporção da fonte — `max`
+    // esticava 16:10/21:9 para 16:9. `resizeMode: 'none'` impede reescala do engine.
     c.width = { ideal: step.width }
     c.height = { ideal: step.height }
     c.resizeMode = 'none'
@@ -394,12 +366,9 @@ export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning 
   const maxKbps = step ? Math.round(step.maxBitrateKbps * bitrateFactor) : 6000
   const minKbps = step ? Math.round(step.minBitrateKbps * bitrateFactor) : 800
   return {
-    // Tela é texto/detalhe: perder resolução borra a leitura, perder frame só
-    // deixa menos fluido. Antes era `window` → maintain-framerate (invertido).
+    // Tela é texto/detalhe: manter resolução (antes era `window`, invertido).
     degradationPreference: 'maintain-resolution',
-    // A resolução do degrau JÁ é aplicada na captura por `screenConstraints`
-    // (`applyScreenConstraints`). Reduzir de novo aqui era escala dupla: 720p
-    // saía em 640×360 e 480p em ~214×120. Uma alavanca só.
+    // Resolução JÁ aplicada na captura — escalar aqui era escala dupla.
     scaleResolutionDownBy: 1,
     maxBitrate: maxKbps * 1000,
     minBitrate: minKbps * 1000,
@@ -417,8 +386,7 @@ export async function applySenderTuning(sender: RTCRtpSender, opts: ScreenShareO
       const enc = target as RTCRtpEncodingParameters & { minBitrate?: number }
       enc.scaleResolutionDownBy = tuning.scaleResolutionDownBy
       enc.maxBitrate = tuning.maxBitrate
-      // minBitrate não existe no DOM typings de todo engine; só quem entender
-      // o parâmetro o usa. Ausente = ignorado pelo encoder, não quebra.
+      // minBitrate não existe em todo engine; quem não entende, ignora.
       enc.minBitrate = tuning.minBitrate
       if (tuning.priority) target.priority = tuning.priority
       target.networkPriority = 'high'
@@ -588,10 +556,7 @@ export class ScreenStatsCollector {
 
   /**
    * Lê uma amostra de `RTCStatsReport` e devolve métricas REAIS por delta.
-   *
-   * `nowMs` existe para teste determinístico: sem ele a janela depende do
-   * relógio e um teste de 20ms não produz taxa por segundo nenhuma. Em
-   * produção é sempre omitido (usa Date.now).
+   * `nowMs` só para teste determinístico (em produção usa Date.now).
    */
   read(stats: RTCStatsReport | null | undefined, capture: ScreenFpsSample | null, previousRttMs: number | null, nowMs?: number): ScreenShareMetrics {
     const out = emptyScreenMetrics()
@@ -781,17 +746,9 @@ export function pickMonitorLabel(monitors: MonitorInfo[] | null | undefined, id:
 }
 
 /**
- * Monitores realmente plugged na máquina, via `availableMonitors()` do Tauri 2.
- *
- * Devolve `[]` (e nunca lança) fora do app nativo — Android, iOS e o modo
- * browser não têm multi-monitor. Import dinâmico de propósito: este módulo é
- * carregado também pelos testes em node puro, onde o pacote do Tauri não deve
- * ser pesado nem inicializar IPC.
- *
- * A ESCOLHA final continua sendo do seletor nativo do sistema (é ele que sabe
- * qual monitor/janela está visível no momento); aqui enumeramos para a UI
- * mostrar quantos e quais existem, em vez de oferecer "monitor específico" no
- * escuro.
+ * Monitores realmente plugged, via `availableMonitors()` do Tauri 2.
+ * Devolve `[]` fora do app nativo (import dinâmico: não carrega Tauri nos
+ * testes node). A ESCOLHA final é do seletor nativo do sistema.
  */
 export async function listShareableMonitors(): Promise<MonitorInfo[]> {
   try {
@@ -817,8 +774,7 @@ export async function listShareableMonitors(): Promise<MonitorInfo[]> {
       const width = Number(m?.size?.width ?? 0)
       const height = Number(m?.size?.height ?? 0)
       return {
-        // id estável o bastante para a UI: índice + nome. Não é um id de
-        // captura (o Web não expõe isso de forma padrão) — é rótulo de UI.
+        // id estável para a UI (rótulo, não id de captura do Web).
         id: `${i}:${name ?? 'monitor'}`,
         name,
         width,

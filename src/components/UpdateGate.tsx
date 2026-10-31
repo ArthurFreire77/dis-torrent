@@ -1,21 +1,8 @@
-// TELA DE ATUALIZAÇÃO DO BOOT.
-//
-// POR QUE ELA EXISTE: o pedido é "sempre tentar atualizar antes de entrar". Só
-// que atualizar não pode ser um bloqueio cego — se a rede falhar, o app tem que
-// abrir igual. Então o desenho é:
-//
-//   1. A checagem roda EM PARALELO com o carregamento da identidade (não
-//      adiciona espera no caminho bom).
-//   2. Se não há versão nova (ou o usuário pulou, ou a checagem falhou), a
-//      tela NÃO aparece e o boot segue normalmente.
-//   3. Se há versão nova e a preferência `auto` está ligada, aparece um overlay
-//      com progresso honesto: o Rust baixa o instalador, confere o SHA-256 e
-//      executa; no Windows o Inno fecha este processo e reabre sozinho.
-//   4. Se o modo é manual/link (Linux/Android) ou o usuário escolheu "depois",
-//      aparece um cartão com botão — nunca um download silencioso.
-//
-// O texto de estado é sempre o que está ACONTECENDO: nada de "atualizando…"
-// enquanto só verificamos, porque isso mente para o usuário e esconde falha.
+// TELA DE ATUALIZAÇÃO DO BOOT: checagem em paralelo com o carregamento da
+// identidade; sem versão nova (ou pulada/falha) não aparece; com `auto` ligado
+// faz o fluxo automático com progresso honesto; em modo manual/link mostra
+// cartão com botão — nunca download silencioso. O texto de estado é sempre o
+// que está ACONTECENDO.
 
 import React from 'react'
 import { services } from '../services'
@@ -142,10 +129,8 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
           })
           return outcome
         case 'stalled':
-          // Já instalamos esta versão e o app continua na anterior. Instalar de
-          // novo daria exatamente o mesmo resultado (janela fechando/abrindo em
-          // loop), então paramos e dizemos a verdade. O que resolve de fato é
-          // corrigir o instalador publicado — por isso o botão leva à release.
+          // Versão já instalada sem efeito: parar e dizer a verdade (o fix real
+          // é corrigir o instalador publicado — o botão leva à release).
           setState({
             phase: 'stalled',
             info: outcome.info,
@@ -177,9 +162,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       return
     }
     void (async () => {
-      // A preferência decide se o download+instalação é automático. Ela falhar
-      // (banco trancado no boot) significa "não automático" — nunca o contrário:
-      // executar instalador sem o usuário ter pedido é pior que atualizar depois.
+      // Preferência falha (banco trancado) = "não automático" — nunca o contrário.
       let auto = false
       try {
         auto = await services.updateAutoGet()
@@ -187,13 +170,8 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
         auto = false
       }
 
-      // CHECAGEM NO BOOT, COM RETENTATIVA.
-      //
-      // O pedido é "sempre procurar atualização ao iniciar". Uma falha de rede
-      // no instante do login (VPN subindo, Wi-Fi associando, Tor ainda sem
-      // circuito) não pode deixar o app sem checar a sessão inteira — era o
-      // caso antes: `started` já estava marcado e nada tentava de novo.
-      // Aqui insistimos algumas vezes com backoff enquanto o app está no boot.
+      // CHECAGEM NO BOOT COM RETENTATIVA: falha de rede no login (VPN/Wi-Fi/Tor
+      // subindo) não pode deixar a sessão sem checar — insiste com backoff.
       let outcome = await run({ autoApply: auto, auto })
       for (let tentativa = 1; tentativa <= 3 && outcome?.kind === 'error'; tentativa++) {
         await new Promise((r) => setTimeout(r, 4000 * tentativa))
@@ -201,25 +179,18 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
         outcome = await run({ autoApply: auto, auto })
       }
 
-      // Depois da checagem, se nada foi encontrado a tela de boot sai. Sem isto
-      // ela ficaria presa em "verificando" durante a checagem toda (até 15 s de
-      // timeout do Rust) — o usuário veria a tela parada mesmo com tudo certo.
+      // Nada encontrado → tela de boot sai (não fica presa em "verificando").
       if (mounted.current && stateRef.current.phase === 'checking') {
         // `run` já deixa `later`/`error`/`applied`; só o `none` não muda nada.
         // Aqui garantimos que a tela não fique presa.
         setState((s) => (s.phase === 'checking' ? { ...s, phase: 'idle' } : s))
       }
 
-      // AINDA COM O APP ABERTO: confere de tempos em tempos. Uma sessão de
-      // trabalho longa não deve exigir fechar e abrir o app para receber uma
-      // correção — especialmente porque protocolo diferente entre versões
-      // degrada a chamada de voz.
+      // Recheca periodicamente com o app aberto (protocolo antigo degrada voz).
       const intervalo = setInterval(() => {
         if (!mounted.current) return
-        // Só recheca quando não há nada pendente na tela: um cartão aberto (ou
-        // download em curso) não pode ser trocado por outro. `stalled` também
-        // fica de fora: aquele app JÁ instalou esta versão e reabrir o cartão a
-        // cada ciclo seria o mesmo incômodo do loop, só mais devagar.
+        // Só recheca com nada pendente na tela (cartão/download não troca; e
+        // `stalled` não reabre — seria o loop mais devagar).
         const p = stateRef.current.phase
         if (p !== 'idle' && p !== 'checking') return
         void run({ autoApply: auto, auto })
@@ -271,19 +242,15 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
 const MONO = "'JetBrains Mono', ui-monospace, monospace"
 
 /**
- * Overlay de atualização. `blocking` cobre a tela (durante download/instalação);
- * o cartão de "tem versão nova" é menor e tem botão de pular.
- *
- * Estilo inline porque os dois shells (desktop e mobile) já usam assim, e o CSS
- * global não tem classe de overlay — reaproveitar a `<div className="boot">`
- * faria a barra de progresso do boot aparecer atrás.
+ * Overlay de atualização: `blocking` cobre a tela; cartão "tem versão nova" é
+ * menor com botão de pular. Estilo inline porque os shells usam assim e o CSS
+ * global não tem classe de overlay.
  */
 export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
   if (api.phase === 'idle' || api.phase === 'checking') return null
 
   const blocking = api.phase === 'downloading' || api.phase === 'installing'
-  // `stalled` é um cartão informativo, não um erro de rede: o app está bem, o
-  // instalador publicado é que não corresponde à versão anunciada.
+  // `stalled` é cartão informativo: o app está bem; o instalador publicado não.
   const stalled = api.phase === 'stalled'
   const info = api.info
   const mode = info ? updateModeFor(info.platform) : 'link'

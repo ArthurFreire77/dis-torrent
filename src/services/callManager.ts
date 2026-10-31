@@ -1,6 +1,4 @@
-// CallManager — mesh WebRTC onde todos semeiam (relay) igual BitTorrent
-// Cada peer mantém RTCPeerConnection para cada outro participante (full-mesh).
-// Sinalização via distorrent-core SecureFrame (cifrado) — no browser fallback via localStorage/BroadcastChannel.
+// CallManager — mesh WebRTC full-mesh; sinalização via core (SecureFrame) com fallback no browser.
 
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
@@ -51,24 +49,14 @@ export const CALL_QUALITY_KEY = 'distorrent:call_quality'
 export const QUALITY_ORDER: CallQuality[] = ['480p', '720p', '1080p', '4K']
 
 export const QUALITY_CONSTRAINTS: Record<CallQuality, MediaTrackConstraints> = {
-  // Piso 480p em todas: nunca abaixo de 640x480. FPS mínimo 15 (era 24): o
-  // `min` de 24 dava OverconstrainedError em câmera frontal fraca de celular
-  // — a câmera NEM ABRIA. 15 é o piso de videochamada; o ideal segue pedindo
-  // 60 e o monitor adaptativo rebaixa se a rede reclamar.
+  // Piso 480p/15fps: min 24 dava OverconstrainedError e a câmera nem abria em celular fraco.
   '480p': { width: { min: 640, ideal: 640, max: 1280 }, height: { min: 480, ideal: 480, max: 720 }, frameRate: { min: 15, ideal: 60, max: 120 } },
   '720p': { width: { min: 640, ideal: 1280, max: 1920 }, height: { min: 480, ideal: 720, max: 1080 }, frameRate: { min: 15, ideal: 60, max: 120 } },
   '1080p': { width: { min: 640, ideal: 1920, max: 1920 }, height: { min: 480, ideal: 1080, max: 1080 }, frameRate: { min: 15, ideal: 60, max: 120 } },
   '4K': { width: { min: 640, ideal: 3840, max: 3840 }, height: { min: 480, ideal: 2160, max: 2160 }, frameRate: { min: 15, ideal: 60, max: 120 } },
 }
 
-/**
- * CÂMERA adaptativa: piso 480p, teto 1080p/120fps. `ideal` é pedido, não
- * ordem — o navegador entrega o mais próximo que câmera/driver suportar.
- * ideal 60 (não 120) de propósito: 120 força CPU/GPU e rede em celular;
- * com max:120 o dispositivo que SUPORTA sobe sozinho, e o diagnóstico mostra
- * o limite real via getCapabilities/getSettings (ver probeVideoLimits).
- * O seletor de qualidade vale para CÂMERA e TELA (antes era só tela).
- */
+/** Câmera adaptativa: piso 480p, teto 1080p/60 — ideal é pedido, e o seletor vale p/ câmera e tela. */
 export const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
   width: { min: 640, ideal: 1280, max: 1920 },
   height: { min: 480, ideal: 720, max: 1080 },
@@ -77,12 +65,7 @@ export const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
   frameRate: { min: 15, ideal: 60, max: 120 },
 }
 
-/**
- * Limite REAL do dispositivo (para exibir "seu aparelho entrega até X").
- * Lê capabilities/settings da track viva; sem track, tenta capabilities do
- * dispositivo via getUserMedia temporário? Não — sem track retorna null
- * honesto (diagnóstico mostra "desconhecido, sem câmera ativa").
- */
+/** Limite REAL do dispositivo (capabilities/settings); sem track viva retorna null honesto. */
 export interface VideoDeviceLimits {
   maxWidth: number | null
   maxHeight: number | null
@@ -127,10 +110,7 @@ export function getStoredQuality(): CallQuality {
   return '720p'
 }
 
-// ICE/TURN servers + privacidade: a lÃ³gica vive em ./callIce (mÃ³dulo
-// standalone, testÃ¡vel pelo node:test â€” o callManager nÃ£o Ã© carregÃ¡vel
-// ali por importar a Ã¡rvore de services). Reexporta os nomes que os
-// shells jÃ¡ importam daqui; o uso interno puxa direto do mÃ³dulo.
+// ICE/TURN + privacidade: lógica em ./callIce (módulo standalone testável); reexportado daqui.
 export {
   TURN_URL_KEY,
   isValidTurnUrl,
@@ -174,33 +154,15 @@ export interface CallState {
   relayManual?: boolean
   /** Motivo: 'manual' | 'ice-failed' | 'ice-disconnected' | 'relay-only' | null */
   relayReason?: string | null
-  /**
-   * STREAM LOCAL DE TELA (prévia de quem compartilha).
-   *
-   * A UI precisa desenhar o quadrado da tela para TODOS, inclusive para quem
-   * transmite — e não pode depender de receber o próprio stream pelo mesh
-   * (loopback não existe). Antes o `screenStream` era privado do manager e o
-   * tile local caía no avatar/"COMPARTILHANDO" sem imagem.
-   */
+  /** Stream local de tela: prévia p/ todos, inclusive quem transmite (mesh não tem loopback). */
   localScreenStream?: MediaStream | null
-  /**
-   * STREAM LOCAL DE CÂMERA/MIC.
-   *
-   * A UI desenha o quadrado de quem transmite a partir DESTE campo, não de
-   * `participants[i].stream`. Motivo (bug real): o roster pode ter sido criado
-   * antes do `getUserMedia` (ou no caminho nativo, sem stream nenhum), e o tile
-   * local ficava no avatar mesmo com a câmera ligada e o peer remoto vendo a
-   * imagem. Fonte da verdade da própria mídia é o manager, não o roster.
-   */
+  /** Stream local de câmera/mic: fonte da verdade da UI (roster pode não ter o stream ainda). */
   localStream?: MediaStream | null
   /** `true` = mídia no core Rust (Linux), sem MediaStream na página. */
   nativeMedia?: boolean
 }
 
-// Privacidade Ã— ICE: a lÃ³gica vive em ./callIcePrivacy (mÃ³dulo standalone
-// testÃ¡vel â€” o callManager nÃ£o Ã© carregÃ¡vel pelo node:test unit por importar
-// a Ã¡rvore de services). Reexporta para que shells/testes importem daqui
-// como sempre, sem duplicar fonte.
+// Privacidade×ICE: lógica em ./callIcePrivacy (standalone testável); reexportado daqui.
 export {
   getCallPrivacyMode,
   setCallPrivacyForIce,
@@ -219,14 +181,7 @@ export const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   channelCount: 1,
 }
 
-/**
- * Ajusta o SDP do Opus para voz em TEMPO REAL:
- * - useinbandfec=1: recupera perda sem retransmitir (essencial em 4G);
- * - usedtx=1: para de transmitir em silêncio (economiza banda);
- * - minptime=10 + a=ptime:20: pacotes de 20ms → menor latência;
- * - maxaveragebitrate=32000: qualidade de voz boa com pouca banda.
- * Sem isso o Opus negocia com defaults que soam pior/atrasam em rede ruim.
- */
+/** Afina o SDP do Opus p/ voz em tempo real: FEC, DTX, ptime 20ms, 32kbps. */
 export function tuneOpusSdp(sdp: string): string {
   try {
     if (!sdp || sdp.toLowerCase().indexOf('opus') < 0) return sdp
@@ -284,9 +239,7 @@ export async function createTunedOffer(
   pc: RTCPeerConnection,
   opts?: { iceRestart?: boolean },
 ): Promise<RTCSessionDescriptionInit> {
-  // `iceRestart` renova as credenciais ICE e refaz a conectividade SEM trocar a
-  // sessão (mais barato que recriar o PC e não perde o áudio já fluindo). É o
-  // caminho do reparo de par half-open no mesh de grupo.
+  // iceRestart renova as credenciais ICE sem trocar a sessão — reparo de par half-open.
   const offer = await pc.createOffer(opts?.iceRestart ? { iceRestart: true } : undefined)
   offer.sdp = tuneOpusSdp(offer.sdp ?? '')
   return offer
@@ -299,9 +252,7 @@ export async function createTunedAnswer(pc: RTCPeerConnection): Promise<RTCSessi
   return answer
 }
 
-// Capacidade WebRTC: WebViews móveis sem WebRTC não definem RTCPeerConnection
-// (ReferenceError "Can't find variable: RTCPeerConnection") — detectamos ANTES
-// de qualquer uso para falhar com erro honesto em pt-BR em vez de crashar.
+// Sem RTCPeerConnection no WebView, detecta ANTES do uso p/ falhar com erro honesto.
 export const CALLS_UNAVAILABLE_MSG = 'chamadas de voz/vídeo indisponíveis neste aparelho'
 /** Transmitir tela exige getDisplayMedia (desktop). Mobile/WebView sem isso recebe erro honesto. */
 export const SCREEN_UNAVAILABLE_MSG = 'este aparelho não expõe captura de tela (o Android só libera em WebViews recentes — atualize o Android System WebView; no iPhone/iPad não existe mesmo)';
@@ -316,28 +267,15 @@ export function supportsCalls(): boolean {
     if (typeof RTCPeerConnection !== 'undefined' && RTCPeerConnection
         && typeof navigator !== 'undefined' && (navigator as any).mediaDevices) return true
   } catch { /* cai no teste da voz nativa */ }
-  // Sem WebRTC no WebView (WebKitGTK do Linux), a voz nativa em Rust cobre a
-  // chamada. Sem esta linha o app se anunciava como "indisponível" mesmo com a
-  // voz nativa ativa — que era o sintoma.
+  // Sem WebRTC no WebView (WebKitGTK), a voz nativa em Rust cobre a chamada.
   return nativeVoiceAvailable === true
 }
 
-/**
- * Transmitir tela estilo Discord: desktop e Android (WebView) via
- * `getDisplayMedia`. iOS/iPadOS não expõe a API — o transmissor recebe
- * SCREEN_UNAVAILABLE_MSG honesto; o RECEPTOR continua exibindo vídeo/track
- * normalmente (view-only mobile funciona: ver shells).
- *
- * Detecção honesta e NÃOFatal: só desligamos o botão quando sabemos que não
- * funciona (false negativo = botão morto à toa). `detectScreenEnvironment()`
- * diz o motivo exato (plataforma, permissão, contexto inseguro).
- */
+/** Screen share via getDisplayMedia (desktop/Android); detecção honesta via detectScreenEnvironment(). */
 export function supportsScreenShare(): boolean {
   try {
     if (typeof navigator === 'undefined') return false
-    // Não basta a função existir: no Android o WebView expõe getDisplayMedia e
-    // ela lança `TypeError` na captura. `getScreenShareBackend` já resolve a
-    // plataforma (Android = none, salvo caminho nativo).
+    // Android: getDisplayMedia existe mas lança TypeError; getScreenShareBackend já resolve a plataforma.
     return getScreenShareBackend() !== 'none'
   } catch { return false }
 }
@@ -351,18 +289,11 @@ export function screenShareUnavailableReason(): string | null {
   } catch { return SCREEN_UNAVAILABLE_MSG }
 }
 
-/**
- * Quem captura a tela AGORA: o WebView (`getDisplayMedia`) ou o core nativo em
- * Rust. A UI precisa saber a diferença porque as capacidades não são as mesmas
- * (o caminho nativo não tem janela específica nem áudio do sistema).
- */
+/** Quem captura a tela agora: WebView (getDisplayMedia) ou core nativo — capacidades distintas. */
 export type ScreenShareBackend = 'display-media' | 'native' | 'none'
 export function getScreenShareBackend(): ScreenShareBackend {
   try {
-    // ANDROID PRIMEIRO: o WebView do sistema expõe `getDisplayMedia` mas ela
-    // lança `TypeError` (o wry 0.57 não mapeia display-capture). Olhar só a
-    // presença da função fazia o app oferecer "compartilhar tela" e o usuário
-    // receber "TypeError" ao tocar — mentira de capacidade, que é bug.
+    // ANDROID PRIMEIRO: getDisplayMedia exposta lança TypeError (wry não mapeia display-capture).
     if (isAndroidRuntime()) {
       if (nativeVoiceAvailable === true) return 'native'
       return 'none'
@@ -427,18 +358,9 @@ export interface CallsDiagnosis {
   isWebViewLike: boolean
   level: CallsSupportLevel
 }
-/**
- * Diagnóstico item por item do suporte a chamadas (usado pela mensagem 'none').
- * Não lança: qualquer acesso a global ausente vira `false` em vez de ReferenceError.
- */
+/** Diagnóstico item por item do suporte a chamadas; nunca lança (ausente vira false). */
 export function diagnoseCallsSupport(): CallsDiagnosis {
-  // Relata ao Rust o que a PÁGINA está enxergando. No Linux/WebKitGTK o WebRTC
-  // existe na lib mas vem desligado; sem este relato não há como distinguir
-  // "WebView quebrado" de "build do WebKitGTK sem WebRTC", e a mensagem de
-  // erro acabava apontando para o WebView do sistema — que estava ótimo.
-  //
-  // Usa `services` (não `window.__TAURI__.core.invoke`): esse global só existe
-  // com `withGlobalTauri`, e sem ele o relato nunca saía.
+  // Relata ao Rust o que a PÁGINA enxerga (WebKitGTK pode ter WebRTC desligado); usa services.
   try {
     void services.webrtcReport(
       `RTC=${typeof RTCPeerConnection} md=${typeof (navigator as any).mediaDevices} VideoDecoder=${typeof (globalThis as any).VideoDecoder} VideoEncoder=${typeof (globalThis as any).VideoEncoder} EncodedVideoChunk=${typeof (globalThis as any).EncodedVideoChunk} VideoFrame=${typeof (globalThis as any).VideoFrame} gDM=${typeof (navigator as any).mediaDevices?.getDisplayMedia}`,
@@ -495,12 +417,7 @@ export function diagnoseCallsSupport(): CallsDiagnosis {
 export function canUseRelayCalls(): boolean {
   try { return supportsRelayFallback() || supportsRelayPlayback() } catch { return false }
 }
-/**
- * Mensagem detalhada para support==='none': começa com CALLS_UNAVAILABLE_MSG
- * (compat com testes/busca) + lista O QUE falta item por item + ação.
- * Ex.: "chamadas… indisponíveis neste aparelho: falta WebRTC (…), microfone (…).
- *  WebView desatualizado? atualize o WebView do sistema…"
- */
+/** Mensagem detalhada p/ support==='none': lista o que falta + ação (começa com CALLS_UNAVAILABLE_MSG). */
 export function getCallsUnavailableMessage(): string {
   try {
     const d = diagnoseCallsSupport()
@@ -515,12 +432,7 @@ export function getCallsUnavailableMessage(): string {
     const isLinuxDesktop = (() => {
       try { return !/android|iphone|ipad/i.test(navigator.userAgent) } catch { return false }
     })()
-    // FATO MEDIDO NESTA MÁQUINA (webKitGTK 2.52.6, Ubuntu 24.04):
-    //   secureContext=true, mediaDevices=object, RTCPeerConnection=undefined
-    // mesmo DEPOIS de `WebKitSettings.set_enable_webrtc(true)`. O WebKitGTK do
-    // Ubuntu é compilado SEM a interface JS de WebRTC — o toggle existe na lib
-    // e o `RTCPeerConnection` está no binário, mas não é exposto. Não é WebView
-    // desatualizado, e nenhuma configuração do app resolve.
+    // FATO MEDIDO: WebKitGTK do Ubuntu vem SEM interface JS de WebRTC (toggle não resolve).
     if (native && isLinuxDesktop && !d.hasRTC) {
       return `${CALLS_UNAVAILABLE_MSG}: ${what}. Este é o WebKitGTK do Linux, que vem compilado sem WebRTC — não é falta de atualização, e não há como corrigir pelo app. A voz nativa em Rust também não subiu (sem dispositivo de áudio, ou desligada por DISTORRENT_NO_NATIVE_VOICE=1), então no desktop Linux resta a conversa por texto.`
     }
@@ -534,9 +446,7 @@ export function getCallsUnavailableMessage(): string {
   } catch { return CALLS_UNAVAILABLE_MSG }
 }
 
-// getUserMedia com erro honesto: sem mediaDevices → null; permissão negada ou
-// dispositivo ausente → emite onCallNotice via hook e devolve null para manter
-// a sinalização (chamada "só sinalização" ainda completa, mas avisada).
+// getUserMedia com erro honesto: sem mediaDevices → null; permissão/dispositivo → onCallNotice + null.
 let localMediaNotice: ((msg: string) => void) | null = null
 export function setLocalMediaNotice(cb: ((msg: string) => void) | null) {
   localMediaNotice = cb
@@ -568,11 +478,7 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
     try {
       return await md.getUserMedia(merged)
     } catch (e) {
-      // `OverconstrainedError` = as constraints que pedimos não existem no
-      // aparelho. Antes isto matava a câmera inteira ("não abre"). Agora
-      // DEGRADA em ordem: 720p/60 → 720p/15 → 480p/15 → 480p/30 → sem vídeo.
-      // Áudio nunca sai da jogada: chamada de voz sem microfone é pior que
-      // chamada de voz sem imagem.
+      // OverconstrainedError: degrada em ordem (720p/60 → … → 480p) — áudio nunca sai da jogada.
       if (merged.video && (e as Error)?.name === 'OverconstrainedError') {
         const quedas: MediaTrackConstraints[] = [
           { width: { min: 640, ideal: 1280 }, height: { min: 480, ideal: 720 }, frameRate: { min: 15, ideal: 30 } },
@@ -589,9 +495,7 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
           return await md.getUserMedia({ ...merged, video: false })
         } catch { /* cai no erro honesto abaixo */ }
       }
-      // Permissão da CÂMERA negada, câmera em uso ou inexistente: `getUserMedia`
-      // com {audio,video} é atômico e devolvia `null`, deixando a chamada MUDA
-      // mesmo com microfone bom. Tenta áudio puro antes de desistir.
+      // getUserMedia({audio,video}) é atômico: câmera negada não pode deixar a chamada MUDA — tenta áudio puro.
       if (merged.video && (e as Error)?.name !== 'OverconstrainedError') {
         try {
           const s = await md.getUserMedia({ ...merged, video: false })
@@ -608,21 +512,14 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
 }
 
 // ── Estados ICE honestos ─────────────────────────────────────────────────────
-// O monitor de qualidade (pollStats) não enxerga falha de conectividade; este
-// barramento avisa `failed` de imediato e `disconnected` que persiste além da
-// graça (>5s) para a UI mostrar ICE_RELAY_MSG em vez de silêncio. Sem isso o
-// usuário fica sem áudio e sem saber por quê.
+// Barramento de falha ICE honesta: avisa failed imediato e disconnected >5s (pollStats não enxerga).
 export type IceFailureState = 'failed' | 'disconnected'
 export interface IceFailureInfo { fp: string; callId: string; state: IceFailureState }
-/** Quanto tempo `disconnected` precisa persistir para virar aviso (flaps curtos são normais).
- *  12s (era 5s): no 4G/CGNAT o relay próprio demora para alocar rota — 5s trocava
- *  para o áudio-via-relay (ruim) ANTES de o WebRTC ter chance de conectar. */
+/** disconnected precisa persistir 12s p/ avisar: no 4G o relay demora a alocar (5s era cedo demais). */
 export const ICE_DISCONNECTED_GRACE_MS = 12000
 
 // ── Medidor da mídia (Missão B, passo 1) ─────────────────────────────────────
-// Degrau real por peer, lido do par ICE selecionado (pc.getStats): sem isso,
-// "no 4G" é opinião. `relay` aqui = SOMENTE relay explícito do usuário
-// (hasRelayConfigured) — não há mais TURN público embutido.
+// Degrau real por peer via pc.getStats; "relay" = só relay explícito do usuário (sem TURN embutido).
 export type MediaRung = 'direto-host' | 'direto-srflx' | 'relay' | 'conectando' | 'falhou' | 'sem-rota'
 export const RUNG_LABEL: Record<MediaRung, string> = {
   'direto-host': 'direta (rede local)',
@@ -641,10 +538,7 @@ export interface IceMediaReport {
 }
 export interface DistorrentNatEndpoint { addr: string; source: string }
 
-/**
- * Diagnóstico por peer para o painel em tempo real (ver getCallDiagnostics).
- * Todos os numéricos são null quando indisponíveis — o painel mostra "—".
- */
+/** Diagnóstico por peer p/ painel em tempo real; numéricos null quando indisponíveis ("—"). */
 export interface CallDiagnostics {
   fp: string
   connectionState: string
@@ -764,9 +658,7 @@ export function buildPeerDiagnostics(
           }
         } catch { /* stat individual nunca derruba o painel */ }
       })
-      // Bitrate aproximado: bytes acumulados não dão taxa sem janela temporal;
-      // expõe como null honesto quando não há baseline (o painel mostra "—").
-      // O bitrate real por janela vem do pollStats futuro; aqui não inventamos.
+      // Bitrate sem janela temporal não existe: null honesto (painel mostra "—"); pollStats fará real.
       void aBytes; void vBytes
       if (aPkts + aLost > 0) packetLossPct = Math.round((aLost / (aPkts + aLost)) * 1000) / 10
       else if (typeof packetsLost === 'number' && packetsLost > 0) packetLossPct = null
@@ -835,22 +727,7 @@ function emitIceRecovered(info: IceRecoveredInfo) {
   iceRecoveredListeners.forEach(cb => { try { cb(info) } catch { /* ignore */ } })
 }
 // ── Fallback "áudio via relay" (compatibilidade sem TURN) ───────────────────
-// Cenário real: PC sem UPnP + celular no 4G = ICE nunca conecta (sem
-// host/srflx alcançável, sem TURN próprio). A sinalização completa mas sem áudio.
-// Fallback: captura o mic via MediaRecorder (audio/webm;codecs=opus, fatias de
-// 500ms ≈ 8KB, cabem no limite do frame cifrado) e envia cada fatia pela
-// sinalização existente. Verificação de assinatura em 2026-09-04:
-// - DisTorrentServices NÃO possui `callSignal(fp, callId, payload)` — só
-//   callOffer/callAnswer/callIce (models.ts + tauri.ts + browser.ts).
-// - Por isso o transporte é `callIce(fp, callId, JSON{kind:'audio-chunk'…},
-//   'audio-relay')`: mesmo caminho cifrado do ICE, sem tocar outros arquivos.
-//   Se um futuro engine expuser `callSignal`, o envio tenta ele primeiro via
-//   `(services as any).callSignal` sem quebrar o contrato atual.
-// - No modo browser `callIce` é no-op, então há também BroadcastChannel +
-//   window CustomEvent `distorrent:call-relay` para demo multi-aba local.
-// Receptor: AudioContext com fila por peer + jitter buffer simples; descarta
-// atraso >2s. WebRTC continua preferido: relay só liga se ICE falhar
-// (failed imediato / disconnected >5s via subscribeIceFailures) ou toggle manual.
+// Fallback sem TURN: mic em fatias webm/opus via callIce cifrado + jitter buffer no receptor.
 export const RELAY_TIMESLICE_MS = 500
 export const RELAY_ICE_FAIL_MS = 5000
 export const RELAY_MAX_DELAY_MS = 2000
@@ -887,16 +764,7 @@ function pickRelayMime(): string | undefined {
   return undefined
 }
 
-/**
- * Constrói o MediaRecorder testando CADA formato de verdade.
- *
- * BUG REAL do Android que isto corrige: o código antigo fazia
- * `new MR(stream, {mimeType})` e, no `catch`, caía em `new MR(stream)` — que
- * LANÇA de novo (NotSupportedError) quando o WebView não suporta nenhum codec.
- * A exceção subia, `startRelay` falhava, o relay nunca subia e a chamada
- * ficava presa em "Conectando…" para sempre, sem áudio e sem aviso.
- * Aqui cada tentativa é isolada e o erro final é honesto.
- */
+/** Constrói MediaRecorder testando cada formato; catch antigo lançava de novo e o relay nunca subia. */
 function buildRelayRecorder(MR: any, stream: MediaStream): { rec: any; mime: string } {
   const tried: string[] = []
   const candidates: string[] = []
@@ -944,32 +812,10 @@ export function supportsRelayFallback(): boolean {
   } catch { return false }
 }
 export type CallsSupportLevel = 'full' | 'none'
-/**
- * Chamadas são WebRTC direto ou não são. 'full' = WebRTC ok; 'none' = sem
- * WebRTC neste aparelho.
- *
- * O nível `'relay-only'` foi REMOVIDO de propósito: sem WebRTC não existe
- * chamada com latência aceitável (a voz pelo túnel de sinalização introduz
- * hundreds de ms e o usuário complaintou disso), então o app agora diz a
- * verdade — "chamadas indisponíveis neste aparelho" — em vez de degradar
- * silenciosamente para um modo que não funciona. TURN continua disponível e
- * continua sendo o caminho do 4G/CGNAT: é WebRTC, não relay.
- */
-/**
- * VOZ NATIVA (webrtc-rs + cpal + Opus) — segunda camada de áudio, dentro do
- * core em Rust. Ela existe porque nem todo WebView expõe
- * `RTCPeerConnection` de forma confiável.
- *
- * Quando existe, o CORE conduz a chamada (offer/answer/ICE em Rust) e a
- * WebView não cria `RTCPeerConnection` para aquele par — não cria duas
- * RTP na mesma chamada. Quando não existe, `false` e o caminho do navegador
- * vale integralmente, sem branching espalhado: quem decide, no Rust, é o
- * registro de sessão nativa por (call_id, peer_fp).
- */
+/** Suporte: 'full' (WebRTC) ou 'none' — relay-only removido de propósito (latência inaceitável). */
+/** Voz nativa (Rust): quando presente, o core conduz offer/answer/ICE e a página não cria PC. */
 let nativeVoiceAvailable: boolean | null = null
-/** Rota da chamada NATIVA (o `getRungSummary()` do WebRTC não sabe nada dela:
- *  a mídia está no Rust, então `iceReports` fica vazio e a tela mostrava
- *  "sem rota" mesmo com a chamada conectada). */
+/** Rota da chamada NATIVA (iceReports fica vazio — mídia no Rust — e a tela mostrava "sem rota"). */
 let nativeRoute: string | null = null
 
 /** Consulta cacheada; `force` re-pergunta (dispositivo/engine podem subir depois). */
@@ -990,9 +836,7 @@ export function resetNativeVoiceCache(): void {
 
 export function getCallsSupport(): CallsSupportLevel {
   try { if (supportsCalls()) return 'full' } catch { /* ignore */ }
-  // Sem WebRTC no WebView, a voz nativa ainda pode dar conta — se o core já a
-  // tiver construída. `detectNativeVoice()` alimenta este cache; chamada
-  // síncrona antes do boot só enxerga o que já foi detectado.
+  // Cache da detecção de voz nativa; chamada síncrona só enxerga o que já foi detectado.
   if (nativeVoiceAvailable === true) return 'full'
   return 'none'
 }
@@ -1059,10 +903,7 @@ function logIceState(pc: RTCPeerConnection, fp: string, callId: string) {
           } catch { /* ignore */ }
         } else if (st === 'connected' || st === 'completed') {
           clearGrace()
-          // WebRTC conectou: se estávamos no áudio-via-relay, pode voltar pro WebRTC.
-          // `closed` NÃO entra aqui: o PC é fechado de propósito em `onPeerBack`
-          // (peer caiu/voltou). Tratar isso como "recuperado" marcava a chamada
-          // como conectada, desligava o relay e deixava todo mundo mudo.
+          // WebRTC conectou: volta do áudio-via-relay. closed NÃO é recuperação (PC fechado de propósito).
           emitIceRecovered({ fp, callId })
         }
       } catch { /* monitor nunca derruba a chamada */ }
@@ -1074,23 +915,12 @@ export class CallManager {
   private pcs = new Map<string, RTCPeerConnection>()
   /** Trava de reentrância da câmera (dois cliques = dois getUserMedia vivos). */
   private cameraBusy = false
-  /**
-   * Candidatos ICE recebidos antes da offer/answer ou do próprio `call_incoming`.
-   * A entrega do evento e o trickle ICE podem se cruzar; guardar só por peer
-   * misturava sessões em reingressos rápidos. O call_id isola cada fila e o
-   * flush só consome a fila da chamada que aplicou a descrição remota.
-   */
+  /** Candidatos ICE chegados antes da descrição remota; fila isolada por call_id (flush no apply). */
   private pendingIce = new Map<string, Map<string, RTCIceCandidateInit[]>>()
-  /** Candidatos ICE LOCAIS por peer — reenviados quando o gathering termina,
-   *  para recuperar qualquer candidato que se perdeu no caminho (ver
-   *  `resendLocalIce`). */
+  /** Candidatos ICE LOCAIS por peer — reenviados quando o gathering termina (ver resendLocalIce). */
   private localIce = new Map<string, RTCIceCandidate[]>()
   private pendingOffers = new Map<string, { callId: string; sdp: string }>()
-  /** Chamadas que ESTE lado já aceitou/originou/entrou. A offer de quem liga
-   *  chega quase sempre ANTES do clique em "Aceitar"; sem este registro, a
-   *  fase (promovida a 'connecting' pelo promoteOnSignal) já não era mais
-   *  'incoming' quando o handleOffer rodava, e a chamada CONECTAVA com o ring
-   *  ainda na tela — mídia fluindo sem ninguém atender (bug do e2e). */
+  /** Chamadas que ESTE lado aceitou/originou: offer chega antes do clique em Aceitar (bug do e2e). */
   private acceptedCalls = new Set<string>()
   /** Último SDP de offer aceito por peer (dedup de reenvio / anti-GLARE). */
   private lastRemoteOffer = new Map<string, string>()
@@ -1116,13 +946,7 @@ export class CallManager {
   /** Timeout de 'connecting' sem mídia → reinicia ICE (ICE em silêncio no CGNAT). */
   private nativeVoiceTimer: ReturnType<typeof setInterval> | null = null
   private nativeVoiceSince = -1
-  /**
-   * Chamadas que JÁ acabaram (callId vistos no `cleanup`). Sem isto, aceitar
-   * um toque que morreu enquanto o usuário decidia criava uma chamada fantasma
-   * de 20 s + 30 s — e no caminho nativo, eterna (o core não tinha sessão e o
-   * vigilante não disparava). Também barra o duplo-clique em "Aceitar", que
-   * reenviaria `CallAccept` para um `call_id` já encerrado.
-   */
+  /** Chamadas JÁ acabadas: barra aceite tardio, chamada fantasma e duplo-clique em "Aceitar". */
   private endedCalls = new Set<string>()
   /** callIds com aceite em andamento (duplo clique). */
   private accepting = new Set<string>()
@@ -1145,16 +969,9 @@ export class CallManager {
   private relayRecDedicated = false
   private localStream: MediaStream | null = null
   private screenStream: MediaStream | null = null
-  /**
-   * Sender de áudio da TELA por peer. Existe para ser REUSADO: sem isto, cada
-   * ciclo de compartilhamento criava uma m-line de áudio nova (SDP crescendo,
-   * ICE mais lento e áudio do sistema duplicado). No stop só zeramos a track,
-   * mantendo o sender para o próximo share.
-   */
+  /** Sender de áudio da TELA por peer, REUSADO entre shares (sem ele o SDP crescia a cada ciclo). */
   private screenAudioSenders = new Map<RTCPeerConnection, RTCRtpSender>()
-  /** Atalho legado: 'monitor' (tela) ou 'window' (janela/aba). Espelha
-   *  `screenOptions.source` e existe só para a UI antiga; a fonte de verdade é
-   *  o objeto de opções (que também carrega monitor/áudio/qualidade/FPS). */
+  /** Atalho legado 'monitor'/'window'; fonte de verdade é screenOptions.source. */
   private screenSource: 'monitor' | 'window' = 'monitor'
   // ── Screen share (módulo screenShare.ts) ──────────────────────────────────
   /** Opções completas de compartilhamento (fonte/áudio/qualidade/FPS). */
@@ -1188,16 +1005,7 @@ export class CallManager {
   private quality: CallQuality = getStoredQuality()
   private qualityNotice: string | null = null
   private statsTimer: ReturnType<typeof setInterval> | null = null
-  /**
-   * Timer de RECONCILIAÇÃO do roster de canal.
-   *
-   * Eventos de roster (`voice_joined`/`voice_left`) são frames e podem se
-   * perder (link subindo, fila de eventos da UI com `Lagged`, app suspenso no
-   * Android). Sem reconciliação, o painel da chamada ficava divergente para
-   * sempre: a barra lateral (lê o SQLite) mostrava 3 e o painel mostrava 1.
-   * Aqui o SQLite — que o re-anúncio de 15 s do core mantém atualizado — volta
-   * a ser a fonte de verdade a cada 10 s.
-   */
+  /** Reconciliação do roster a cada 10s: eventos perdidos não deixam o painel divergente. */
   private rosterTimer: ReturnType<typeof setInterval> | null = null
   /** Reparo periódico de par half-open no mesh (ver `repairHalfOpenPairs`). */
   private repairTimer: ReturnType<typeof setInterval> | null = null
@@ -1205,17 +1013,9 @@ export class CallManager {
   private prevLost = new Map<string, number>()
   /** UI pode assinar para exibir toast além do CallState.qualityNotice. */
   public onQualityNotice: ((msg: string) => void) | null = null
-  /**
-   * Avisos de FASE da chamada (recusada/perdida/reconexão falhou) — a UI
-   * assina para exibir toast além do overlay. Diferente do onIceFailed
-   * (diagnóstico), isto é ciclo de vida.
-   */
+  /** Avisos de FASE (recusada/perdida/reconexão) — UI assina p/ toast; é ciclo de vida, não diagnóstico. */
   public onCallNotice: ((msg: string) => void) | null = null
-  /**
-   * Falha de ICE honesta: `failed` imediato ou `disconnected` por >5s.
-   * A UI deve mostrar ICE_RELAY_MSG ("sem rota de áudio direta — tentando via
-   * relay…") e, se persistir/falhar, ICE_FAILED_MSG. Nulo por padrão.
-   */
+  /** Falha de ICE honesta (failed imediato ou disconnected >5s) — UI mostra ICE_RELAY_MSG. */
   public onIceFailed: ((info: IceFailureInfo) => void) | null = null
   /** O ring de chamada entrante sumiu (watchdog/end/rejeição) — o shell limpa
    *  o overlay e para o sfx, que vivem em estado React separado. */
@@ -1235,9 +1035,7 @@ export class CallManager {
   private iceRecoveredOff: (() => void) | null = null
   private relayWindowHandler: ((e: Event) => void) | null = null
 
-  // Parameter property ("constructor(private x)") não é suportada pelo
-  // node --experimental-strip-types (testes unit) — campo explícito tem o
-  // mesmo efeito e mantém o módulo importável pelos testes.
+  // Campo explícito (não parameter property): node --experimental-strip-types não suporta.
   private readonly getIdentity: () => { fingerprint: string; nickname: string } | null
 
   constructor(getIdentity: () => { fingerprint: string; nickname: string } | null) {
@@ -1245,9 +1043,7 @@ export class CallManager {
   }
 
   bind(cb: (s: CallState | null) => void) {
-    // Publica o stream local de TELA junto de CADA emissão de estado. Fazer isso
-    // num ponto só (e não em cada `onUpdate`) evita 30 call sites esquecendo o
-    // campo — que era o motivo de a prévia da tela nunca chegar na UI.
+    // Publica o stream local de TELA em CADA emissão de estado (um ponto só, sem call sites esquecidos).
     this.onUpdate = (s) => {
       if (s) {
         try {
@@ -1260,19 +1056,7 @@ export class CallManager {
           if (withScreen.localStream !== (this.localStream ?? null)) {
             withScreen.localStream = this.localStream ?? null
           }
-          // INVALIDA A REFERÊNCIA DO ROSTER A CADA EMISSÃO.
-          //
-          // BUG QUE ISTO CORRIGE (o mais grave do "conectado mas não vejo
-          // ninguém"): os dois shells memoízam os tiles com
-          // `useMemo(..., [activeCall?.participants])`, e o manager MUTAVA
-          // esse array in-place (`push`/`splice`) emitindo `{ ...st }`. Cópia
-          // rasa = MESMA referência de array = `useMemo` não recalcula. Efeito
-          // medido no relato: o cabeçalho contava "3 na voz" (lê `.length` ao
-          // vivo) enquanto os quadrados — e, no desktop, os elementos
-          // `<audio>` — ficavam presos no roster do primeiro emit. Quem entrava
-          // DEPOIS não aparecia e não falava; quem saía continuava na tela.
-          // Só "consertava" quando outra dep mudava (mute/câmera), o que
-          // explica o "às vezes aparece".
+          // Clona o roster a cada emissão: cópia rasa deixava tiles memoizados presos ("conectado mas não vejo ninguém").
           withScreen.participants = (withScreen.participants ?? []).map((p) => ({ ...p }))
         } catch { /* estado sem o campo: nunca derruba o bus */ }
       }
@@ -1282,20 +1066,12 @@ export class CallManager {
     // identidade já disponível (shells chamam setCallIdentity antes) — base do polite/impolite
     try { const me = this.getIdentity(); if (me && !this.myFp) this.myFp = me.fingerprint } catch { /* ignore */ }
     // escuta eventos do engine (oferta/resposta/ICE + relay via callIce/call_signal)
-    // Descarta o anterior ANTES: se `bind` rodar duas vezes sem `unbind` entre
-    // elas (remount do shell, StrictMode duplo), o listener velho vazava e cada
-    // evento de chamada passava a ser processado 2x — offers duplicadas, PCs
-    // duplos e estado brigando consigo mesmo.
+    // Descarta o bind anterior: remount duplo vazava listener e processava eventos 2x.
     try { this.engineOff?.() } catch { /* ignore */ }
     this.engineOff = services.subscribe((ev: any) => {
       // eventos de sinalização sem fp válido são ignorados (nunca crasham o bus)
       const fpOk = typeof ev?.from_fp === 'string' && ev.from_fp.length > 0
-      // SELF-ECHO de sinalização (modo navegador): o BroadcastChannel devolve
-      // TUDO que esta aba emitiu. handleOffer/Answer/Ice já ignoram from_fp
-      // próprio, mas o promoteOnSignal rodava ANTES deles e a própria offer
-      // ecoada promovia 'outgoing' → 'connecting' sem ninguém ter atendido —
-      // o badge mentia "Conectando…" no lugar de "Chamando…" (reproduzido no
-      // e2e; o engine nativo NÃO ecoa a sinalização do remetente).
+      // SELF-ECHO (browser): promoteOnSignal rodava antes do filtro de fp próprio e o badge mentia "Conectando…".
       if (fpOk && (ev.type === 'call_offer' || ev.type === 'call_answer' || ev.type === 'call_ice')) {
         try {
           const meNow = this.getIdentity()
@@ -1303,9 +1079,7 @@ export class CallManager {
         } catch { /* segue sem identidade */ }
       }
       if (ev.type === 'call_offer' && fpOk) {
-        // Offer fluindo = sinalização viva: tira de outgoing/incoming mesmo se
-        // o frame `call_accepted` se perdeu (causa raiz do "Chamando…" infinito
-        // no lado de quem liga).
+        // Offer fluindo = sinalização viva: sai de outgoing/incoming mesmo sem call_accepted.
         try { if (this.state && (ev as any).call_id === this.state.callId) this.promoteOnSignal(String((ev as any).call_id ?? '')) } catch { /* ignore */ }
         this.handleOffer(ev.from_fp, ev.call_id, ev.sdp)
       }
@@ -1328,19 +1102,12 @@ export class CallManager {
         } catch { /* nunca derruba o bus */ }
       }
       if (ev.type === 'call_incoming' && typeof ev.call_id === 'string') {
-        // SELF-RING: no modo navegador o `callInvite` ecoa o `call_incoming`
-        // de volta para a própria aba que ligou (BroadcastChannel não filtra
-        // remetente). Sem este filtro, quem LIGA via tocar o próprio
-        // telefone — o ring "está ligando…" aparece sobre o overlay da
-        // chamada e intercepta os cliques da UI (bug reproduzido no e2e).
+        // SELF-RING (browser): callInvite ecoa o próprio call_incoming — filtrar o remetente.
         try {
           const meNow = this.getIdentity()
           if (meNow && ev.from_fp === meNow.fingerprint) return
         } catch { /* segue sem identidade */ }
-        // O ring agora tem estado no manager: o watchdog de incoming (60s)
-        // arma de verdade e o overlay nunca mais toca para sempre quando quem
-        // ligou some sem enviar call_ended. Antes o ring vivia só no React
-        // do shell, sem timeout nenhum.
+        // Ring com estado no manager: watchdog de incoming (60s) em vez de timer só no React do shell.
         if (!this.state || !isCallPhaseActive(this.state.phase)) {
           const me = this.getIdentity()
           if (me) {
@@ -1372,16 +1139,7 @@ export class CallManager {
       }
       if (ev.type === 'call_rejected') {
         if (this.state && this.state.callId === ev.call_id) {
-          // RECUSA EM GRUPO/SERVIDOR É INDIVIDUAL.
-          //
-          // BUG REAL (o relato "se um recusar, recusa para todos"): qualquer
-          // `call_reject` caía em `leave()` e encerrava a chamada INTEIRA. Numa
-          // chamada de grupo/servidor quem recusa só não participa — os outros
-          // continuam sendo chamados e a conversa segue.
-          //
-          // `pcs` tem uma conexão POR PEER, então dá para soltar só a de quem
-          // recusou. A distinção é estrutural: mais de um PC vivo (ou uma
-          // chamada que nasceu de canal/grupo) = coletiva.
+          // RECUSA EM GRUPO É INDIVIDUAL: solta só o PC de quem recusou (pcs é por peer).
           const fp = String((ev as { from_fp?: string }).from_fp ?? '')
           const coletiva = this.pcs.size > 1 || this.state.callId.startsWith('voice-')
           if (coletiva) {
@@ -1446,13 +1204,7 @@ export class CallManager {
         const st = this.state
         if (st && st.callId === ev.call_id) {
           const wasIncoming = st.phase === 'incoming'
-          // EM GRUPO, "DESLIGAR" É INDIVIDUAL.
-          //
-          // BUG REAL ("quando alguém desliga, para todos"): qualquer
-          // `call_ended` chamava `leave()` e derrubava a chamada INTEIRA. Num
-          // mesh de 3+, quem sai só deve sair — os outros continuam se ouvindo.
-          // A distinção é estrutural, igual à recusa: mais de um par vivo ou
-          // chamada de canal (`voice-…`) = coletiva.
+          // EM GRUPO, "DESLIGAR" É INDIVIDUAL: call_ended derruba só o par que saiu (mesh 3+).
           const fp = String((ev as { from_fp?: string }).from_fp ?? '')
           const coletiva = this.pcs.size > 1 || st.callId.startsWith('voice-')
           const saiuEu = !!fp && fp === this.myFp
@@ -1500,10 +1252,7 @@ export class CallManager {
         }
       } catch { /* fase nunca derruba o bus */ }
     })
-    // Se o WebRTC conectar depois (TURN demorou), DESLIGA o áudio-via-relay
-    // automaticamente — sem isso a chamada ficava presa em "via relay (latência
-    // alta)" mesmo com rota direta disponível. Não mexe se foi ligado no manual.
-    // Também promove a fase: ICE conectou = mídia ativa ('connected').
+    // WebRTC conectou depois: desliga o áudio-via-relay automático e promove a fase p/ 'connected'.
     try { this.iceRecoveredOff?.() } catch { /* ignore */ }
     try {
       this.iceRecoveredOff = subscribeIceRecovered((info) => {
@@ -1517,19 +1266,9 @@ export class CallManager {
       })
     } catch { this.iceRecoveredOff = null }
     this.ensureRelayTransport()
-    // REPÕE O ESTADO ATUAL NO NOVO ASSINANTE.
-    //
-    // BUG QUE ISTO CORRIGE: abaixo de 768px o `App` troca `ThemeShell` por
-    // `MobileShell` (e vice-versa) — desmonta um, monta o outro, e o novo faz
-    // `bind()` com `activeCall = null`. Como `bind` não reemitia nada, a
-    // chamada continuava viva (PCs, microfone aberto, timers) mas a UI nova
-    // não mostrava NADA: overlay e tiles sumiam, o áudio remoto era desligado
-    // junto com os `<audio>`, e o outro lado seguia ouvindo você. Era a
-    // "chamada fantasma" ao girar o tablet / arrastar a janela.
+    // Repõe o estado no novo assinante: troca de shell (768px) senão a UI ficava vazia ("chamada fantasma").
     try {
-      // Via `onUpdate` e NÃO `cb` direto: o wrapper repõe os streams locais e
-      // clona o roster (senão a UI nova herdaria a mesma referência de array e
-      // os tiles memoizados nunca atualizariam).
+      // Via onUpdate (repõe streams e clona o roster), nunca callback direto.
       if (this.state) this.onUpdate({ ...this.state } as CallState)
     } catch { /* replay é conveniência: nunca derruba o bind */ }
   }
@@ -1588,13 +1327,7 @@ export class CallManager {
     return null
   }
 
-  /**
-   * Watchdog de OUTGOING — corrige o "Chamando…" infinito.
-   * Causa raiz: a fase só saía de `outgoing` via `call_accepted` (accept) ou
-   * sinalização. Se o outro lado nunca atende, está offline, ou o frame de
-   * aceite se perde, nada movia a máquina — overlay preso para sempre.
-   * Aqui: após OUTGOING_TIMEOUT_MS sem sair de `outgoing`, encerra honesto.
-   */
+  /** Watchdog de OUTGOING: encerra honesto se ninguém atende ("Chamando…" infinito). */
   private startOutgoingWatchdog() {
     this.stopOutgoingWatchdog()
     try {
@@ -1616,11 +1349,7 @@ export class CallManager {
     try { if (this.outgoingTimer) clearTimeout(this.outgoingTimer) } catch { /* ignore */ }
     this.outgoingTimer = null
   }
-  /**
-   * Watchdog de INCOMING — corrige o "Recebendo chamada" infinito.
-   * Se quem ligou sumiu (rede caiu) sem `call_ended`, o telefone tocaria
-   * para sempre. Após INCOMING_TIMEOUT_MS vira `missed` honesto.
-   */
+  /** Watchdog de INCOMING: quem ligou sumiu sem call_ended → 'missed' (ring eterno). */
   private startIncomingWatchdog() {
     this.stopIncomingWatchdog()
     try {
@@ -1663,37 +1392,17 @@ export class CallManager {
     try {
       const st = this.state
       if (!st || st.callId !== callId) return
-      // Só o CHAMADOR sai de 'outgoing' com sinalização fluindo. O CALLEE em
-      // ring ('incoming') permanece tocando até clicar em Aceitar — antes, a
-      // própria offer promovia o ring para 'connecting' e o badge mentia
-      // "Conectando…" com o telefone ainda tocando.
+      // Só o CHAMADOR sai de 'outgoing' com sinalização; o ring 'incoming' continua tocando até Aceitar.
       if (st.phase === 'outgoing') this.applyPhase('signal')
     } catch { /* fase nunca derruba o bus */ }
   }
 
-  /**
-   * Watchdog de CONEXÃO — corrige o "Conectando…" infinito atrás de CGNAT.
-   *
-   * O que acontecia: atrás de NAT simétrico o ICE não falha (não chega
-   * `ice-failed`), ele só fica em `checking` para sempre. Sem nenhum timeout, a
-   * fase vivia em 'connecting' indefinidamente: usuário olhando "Conectando…"
-   * com a chamada morta e nenhum aviso. Só o watchdog de RECONEXÃO existia, e
-   * ele só arma quando a fase JÁ virou 'reconnecting'.
-   *
-   * Aqui: ao entrar em 'connecting', se em CONNECT_TIMEOUT_MS nenhum peer tiver
-   * mídia viva, tratamos como rota ausente → reinício de ICE em todos os peers
-   * + 'ice-failed' (→ 'reconnecting'). O orçamento de restarts é limitado e o
-   * watchdog de reconexão encerra a chamada com aviso honesto: sem relay
-   * automático, "não fecha" é uma resposta válida — "fica conectando para
-   * sempre" não é.
-   */
+  /** Watchdog de CONEXÃO: CGNAT deixa o ICE em 'checking' p/ sempre → restart + 'ice-failed'. */
   private startConnectWatchdog() {
     this.stopConnectWatchdog()
     this.connectWatchdogGrants = 0
     try {
-      // callId capturado no START: o corpo comparа antes de agir. Sem isto, um
-      // timer de uma chamada morta que sobrevivesse chamaria `leave()` na
-      // chamada nova (estado cruzado).
+      // callId capturado no START: timer de chamada morta não pode agir na chamada nova.
       const callId = this.state?.callId
       this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
     } catch { /* ignore */ }
@@ -1717,13 +1426,7 @@ export class CallManager {
         }
       }
       if (anyAlive) return
-      // CANAL VAZIO NÃO É FALHA.
-      //
-      // Quem entra num canal de voz sozinho e espera alguém era EXPULSO em
-      // ~50 s ("reconexão falhou"): sem nenhum PC para conectar, o watchdog
-      // tratava a sala vazia como ICE travado. Sala vazia é ociosa, não
-      // quebrada — reagenda e continua no canal. O teto (3 postergações)
-      // mantém a honestidade: com gente na sala e sem rota, ainda avisa.
+      // CANAL VAZIO NÃO É FALHA: sala ociosa não é ICE travado — reagenda (teto de 3 postergações).
       if (this.pcs.size === 0 && st.callId.startsWith('voice-')) {
         if (this.connectWatchdogGrants < 3) {
           this.connectWatchdogGrants++
@@ -1735,10 +1438,7 @@ export class CallManager {
         this.setFailureCause('ninguém conectou a mídia ainda — o canal segue aberto aguardando participantes')
         return
       }
-      // Se algum PC ainda está COLETANDO candidatos, NÃO force nada: em 4G a
-      // alocação no TURN leva segundos e um restart aqui jogaria fora o
-      // gathering em andamento — trocando "demorou" por "nunca fecha". Dá mais
-      // uma janela, com teto, para não virar espera infinita.
+      // ICE ainda COLETANDO: não force restart (jogaria fora o gathering) — dá mais uma janela.
       let stillGathering = false
       for (const pc of this.pcs.values()) {
         if (pc.iceGatheringState === 'gathering') { stillGathering = true; break }
@@ -1760,11 +1460,7 @@ export class CallManager {
     this.connectTimer = null
   }
 
-  /**
-   * Watchdog da reconexão: se NENHUM PC tem mídia viva por RECONNECT_TIMEOUT_MS
-   * (ICE restarts + re-invite falharam), encerra com aviso honesto em vez de
-   * deixar o overlay "reconectando…" para sempre.
-   */
+  /** Watchdog da reconexão: sem mídia viva em RECONNECT_TIMEOUT_MS, encerra com aviso honesto. */
   private startReconnectWatchdog() {
     this.stopReconnectWatchdog()
     try {
@@ -1814,14 +1510,7 @@ export class CallManager {
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) return // não é desta chamada
       p.disconnected = true
-      // TRANSPORTE ≠ MÍDIA.
-      //
-      // `peer_offline` é emitido a cada queda de SESSÃO DE TRANSPORTE (troca de
-      // rede, re-eleição de relay, backoff) — e a mídia WebRTC pode continuar
-      // fluindo por ICE, que é independente. Antes isso promovia a chamada
-      // inteira para `ice-failed` → `reconnecting` → 30 s → `leave()`: flapping
-      // de rede móvel encerrava chamada viva. Agora só marcamos o avatar como
-      // "reconectando" e deixamos o watchdog de mídia decidir pelo PC real.
+      // TRANSPORTE ≠ MÍDIA: peer_offline (queda de transporte) não derruba chamada viva via ICE.
       const pc = this.pcs.get(fp)
       const midiaViva = !!pc && (
         pc.iceConnectionState === 'connected' ||
@@ -1837,11 +1526,7 @@ export class CallManager {
     } catch { /* ignore */ }
   }
 
-  /**
-   * Peer voltou (engine peer_online): se é participante e o PC morreu,
-   * re-cria o PC + dispara nova offer (ICE restart de verdade). O outro lado
-   * (que também pode re-oferecer) resolve glare pelo polite/impolite.
-   */
+  /** Peer voltou (peer_online): re-cria PC + nova offer; glare resolvido por polite/impolite. */
   private onPeerBack(fp: string) {
     try {
       const st = this.state
@@ -1850,11 +1535,7 @@ export class CallManager {
       if (!p) return
       p.disconnected = false
       const pc = this.pcs.get(fp)
-      // `disconnected` do ICE é TRANSITÓRIO (o próprio navegador volta sozinho
-      // em poucos segundos, sem renegociar). Tratá-lo como "morto" aqui
-      // recriava a PC inteira a cada soluço de rede — renegociação completa e
-      // novo glare, que era parte do "cai e volta do nada". Só `closed` e
-      // `failed` exigem PC nova.
+      // ICE 'disconnected' é TRANSITÓRIO (navegador volta sozinho); só 'closed'/'failed' exigem PC nova.
       const dead = !pc
         || pc.connectionState === 'closed'
         || pc.iceConnectionState === 'failed'
@@ -1884,9 +1565,7 @@ export class CallManager {
         // o novo peer só responde — todos os offers vêm de um lado só).
         this.createPC(fp, callId, true).catch(() => {})
       } else if (p.disconnected) {
-        // Já estava na lista, mas marcado como desconectado (caiu e voltou):
-        // antes ficava com o avatar cinza mesmo vivo. `onPeerBack` cuida da
-        // reconexão; aqui só limpamos o estado visual.
+        // Já estava na lista mas desconectado (caiu e voltou): onPeerBack reconecta; limpa o visual.
         p.disconnected = false
       }
       this.onUpdate({ ...st })
@@ -1899,17 +1578,7 @@ export class CallManager {
       if (!st || st.callId !== callId || !fp || fp === this.myFp) return
       const added = addVoiceParticipant(st.participants, fp)
       if (added) this.onUpdate({ ...st })
-      // MESH NO CAMINHO NAVEGADOR: quem entra DEPOIS de mim precisa abrir a
-      // mídia do meu lado também. Antes `voice_joined` só mexia no roster e a
-      // PC só nascia no joiner (`joinVoice`) — quando o anúncio do outro lado
-      // se perdia (link ainda subindo) ou quando os dois entravam no MESMO
-      // instante (cada um lia `voiceStates` antes do outro gravar), ninguém
-      // oferecia e o canal ficava mudo: os dois "conectados", nenhum áudio.
-      //
-      // REGRA DETERMINÍSTICA: só o lado de fingerprint MAIOR oferece — a mesma
-      // do mesh nativo (`voice_mesh_maybe_offer`), para não gerar offer contra
-      // offer. O lado menor espera a offer (que agora sempre vem, porque o
-      // maior reage ao `voice_joined`).
+      // MESH NO BROWSER: só o lado de fp MAIOR oferece ao novo (regra determinística, anti-glare).
       if (
         !(st as any).nativeMedia &&
         !this.pcs.has(fp) &&
@@ -1947,10 +1616,7 @@ export class CallManager {
       const added = addVoiceParticipant(st.participants, fp)
       const changed = updateVoiceParticipantState(st.participants, fp, muted, deafened)
       if (added || changed) this.onUpdate({ ...st })
-      // ANÚNCIO REVERSO do core (quem já estava no canal responde ao meu
-      // VoiceJoin com VoiceState). Sem criar a PC aqui, o joiner na WebView
-      // nunca abre mídia com quem chegou antes dele — o "conectado e mudo".
-      // Mesma regra determinística de quem oferece (eu, o lado maior).
+      // ANÚNCIO REVERSO do core: sem criar PC aqui, o joiner nunca abre mídia com quem chegou antes.
       if (
         added &&
         !(st as any).nativeMedia &&
@@ -1964,11 +1630,7 @@ export class CallManager {
     } catch { /* estado remoto inválido não derruba a chamada */ }
   }
 
-  /**
-   * Sinal dedicado de TELA (frame ScreenShareOffer): o campo sdp carrega um
-   * JSON de estado {screen:'on'|'off'} — quem compartilha fica com badge TELA
-   * em todos os receptores, sem gambiarra nos m-lines de vídeo.
-   */
+  /** Sinal dedicado de TELA: sdp carrega JSON {screen:'on'|'off'} — badge TELA sem gambiarra em m-lines. */
   private onScreenShareSignal(callId: string, fromFp: string, sdpStr: string) {
     try {
       const st = this.state
@@ -2032,11 +1694,7 @@ export class CallManager {
     try { this.lastStats.clear() } catch { /* ignore */ }
     try { this.lastNativeStats = null } catch { /* ignore */ }
     this.prevLost.clear()
-    // Sem fallback de callId aleatório: um id inventado criava uma chamada
-    // fantasma que ninguém na rede conhecia — morria só no watchdog de 45s
-    // com mensagem genérica, escondendo o erro real (ex.: motor sem boot).
-    // E o invite vai ANTES da mídia local: o outro lado ouve o ring na hora,
-    // não depois do prompt de permissão do nosso lado.
+    // Sem callId inventado (chamada fantasma); invite vai ANTES da mídia local (ring imediato).
     const callId = await services.callInvite(targetFps[0] ?? convId, kind)
     this.acceptedCalls.add(callId) // eu originue: offers/respostas fluem já
     for (const fp of targetFps.slice(1)) {
@@ -2044,26 +1702,13 @@ export class CallManager {
       try { await services.callAddParticipant(fp, callId, fp, kind) } catch { /* ring best-effort */ }
     }
 
-    // O CHAMADOR JÁ CONHECE A SALA INTEIRA.
-    //
-    // BUG REAL ("chamo B e C, mas para ele só aparece você"): o roster inicial
-    // era `[{ eu }]` e `addParticipant` só era chamado pelos ATENDENTES. O
-    // chamador nunca registrava os convidados que ele mesmo acabou de chamar —
-    // então o próprio A não sabia que B e C estavam na sala (e os dois nunca
-    // eram apresentados um ao outro). A malha ficava em estrela com o chamador
-    // no centro e ninguém mais se ouvindo.
-    //
-    // Aqui o roster nasce com TODOS os convidados. `announceSelfToRoom` (no
-    // tick de reparo) então troca as apresentações e o mesh fecha completo.
+    // O CHAMADOR JÁ CONHECE A SALA INTEIRA: roster nasce com todos os convidados (mesh em estrela era o bug).
     const convidados = [...new Set(
       [targetFps[0], ...targetFps.slice(1)]
         .filter((fp): fp is string => !!fp && fp !== me.fingerprint),
     )]
 
-    // CHAMADA NATIVA (voz em Rust): o core cuida de offer/answer/ICE e da
-    // mídia. Nada de getUserMedia aqui — o check antigo vinha DEPOIS do
-    // getLocalMedia e a WebView abria um microfone competindo com o do core,
-    // com tracks que nunca eram paradas (mic preso até reiniciar o app).
+    // CHAMADA NATIVA: nada de getUserMedia aqui (mic da página competia com o do core e ficava preso).
     if (nativeVoiceAvailable === true) {
       this.localStream = null
       this.screenStream = null
@@ -2104,17 +1749,12 @@ export class CallManager {
       phase: 'outgoing',
       muted: false,
       deafened: false,
-      // Deriva do track REAL: `getLocalMedia` pode ter degradado para só voz
-      // (câmera negada/ocupada). Antes era `kind === 'video'` e a UI mostrava
-      // câmera ligada sem imagem — o primeiro clique ainda "desligava" uma
-      // câmera que nunca existiu.
+      // Deriva do track REAL: getLocalMedia pode ter degradado p/ só voz (UI mentia "câmera ligada").
       cameraOn: this.hasLiveCamera(),
       sharing: false,
       participants: [
         { fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined },
-        // Convidados no roster desde o início (ver `convidados` acima): sem eles
-        // o próprio chamador não sabia quem estava na sala e a malha ficava em
-        // estrela, sem ninguém se ouvir além dele.
+        // Convidados no roster desde o início (sem eles a malha ficava em estrela).
         ...convidados.map(fp => ({ fp, nickname: fp.slice(0, 6) })),
       ],
       startAt: Date.now(),
@@ -2124,9 +1764,7 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
-    // Watchdogs ANTI-INFINITO: outgoing (sem resposta) + connecting (sem rota).
-    // Antes só existia o de reconexão (que só arma em `reconnecting`) — por
-    // isso "Chamando…"/"Conectando…" ficavam presos para sempre.
+    // Watchdogs ANTI-INFINITO: outgoing (sem resposta) + connecting (sem rota) — antes só o de reconexão.
     this.startOutgoingWatchdog()
     this.ensureRelayTransport()
     this.startQualityMonitor()
@@ -2143,16 +1781,11 @@ export class CallManager {
 
   async joinVoice(communityId: string, channelId: string) {
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
-    // Mesma guarda de `start()`/`acceptInbound()`: entrar num canal de voz com
-    // uma DM ativa sobrescrevia `this.state` e `this.localStream` sem fechar os
-    // PCs da DM nem chamar `callEnd` — o par remoto só saia pelo watchdog dele
-    // (45 s) e o microfone antigo ficava preso (substituído sem `stop()`).
+    // Entrar num canal com DM ativa sobrescrevia estado sem fechar PCs (mic preso até o watchdog do par).
     if (this.state && isCallPhaseActive(this.state.phase) && !this.state.callId.startsWith('voice-')) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar num canal de voz')
     }
-    // Já estou em OUTRO canal de voz: sai antes de entrar. A guarda acima
-    // deixava passar, e o estado/PCs/microfone do canal anterior ficavam vivos
-    // (o usuário aparecia em dois canais e o mic antigo nunca recebia stop).
+    // Já em OUTRO canal de voz: sai antes de entrar (estado/mic do anterior ficavam vivos).
     const alvo = `voice-${communityId}-${channelId}`
     if (
       this.state
@@ -2165,9 +1798,7 @@ export class CallManager {
     // Re-confere a voz nativa AGORA (o engine re-arma a mídia se o áudio
     // subiu depois do boot) — o mesmo reset do start().
     await detectNativeVoice(true)
-    // Anuncia a entrada PRIMEIRO: quem já está no canal precisa saber de nós
-    // ANTES das nossas offers chegarem (gate do auto-register nativo + o
-    // roster da UI). O engine também conecta a mídia nativa aqui (Linux).
+    // Anuncia a entrada PRIMEIRO (gate do auto-register nativo + roster da UI).
     await services.voiceJoin(communityId, channelId)
     const me = this.getIdentity()
     if (!me) return
@@ -2204,14 +1835,7 @@ export class CallManager {
         participants: [{ fp: me.fingerprint, nickname: me.nickname, muted: false }],
         nativeMedia: true,
       } as unknown as CallState
-      // ROSTER SEMEADO PELO ESTADO REAL DO CANAL.
-      //
-      // Antes o caminho nativo começava com "só eu" e crescia apenas por
-      // evento `voice_joined`. Quem já estava no canal quando eu entrei não
-      // dispara evento nenhum para mim (o core só anuncia novos joins), então
-      // o overlay mostrava 1 participante enquanto a sidebar mostrava todos —
-      // o "entrei e não vejo as pessoas". `voiceStates` é a fonte de verdade
-      // (o mesmo SQLite que o core usa para montar a mesh).
+      // Roster semeado pelo voiceStates (fonte de verdade): "entrei e não vejo as pessoas".
       try {
         const states = await services.voiceStates(communityId, channelId)
         for (const [fp, muted, deafened] of states) {
@@ -2233,10 +1857,7 @@ export class CallManager {
       return this.state
     }
 
-    // Caminho navegador: mic local (null honesto sem permissão — a
-    // sinalização segue) e MESH com quem já está no canal. Antes o estado
-    // local vivia sozinho: os watchdogs matavam a "chamada" em ~50s com
-    // "reconexão falhou" porque NUNCA havia mídia entre os participantes.
+    // Caminho navegador: mic local + MESH com quem já está (sem isso os watchdogs matavam em ~50s).
     this.localStream = await getLocalMedia({ audio: true })
     this.state = {
       callId,
@@ -2255,9 +1876,7 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
-    // EU (joiner) ofereço a todos que já estão no canal. Quem entra DEPOIS
-    // oferece de novo a nós (handler voice_joined abaixo) — o anti-glare
-    // polite/impolite de sempre resolve as duas offers no mesmo par.
+    // EU (joiner) ofereço a quem já está; quem entra depois oferece a nós (anti-glare resolve).
     try {
       const states = await services.voiceStates(communityId, channelId)
       for (const [fp] of states) {
@@ -2274,12 +1893,7 @@ export class CallManager {
     // Origem de verdade contínua para o roster (ver startRosterReconcile).
     this.startRosterReconcile(callId, communityId, channelId)
     // DRENA offers retidas durante o `getLocalMedia`/`voiceJoin`.
-    //
-    // BUG QUE ISTO CORRIGE: o estado só nasce no fim do `joinVoice`, mas um par
-    // pode oferecer ANTES disso (entrou no canal no mesmo instante). A offer
-    // ficava em `pendingOffers` e o único dreno era `acceptInbound` — que só
-    // roda em chamada recebida por toque. Resultado: participante "na lista" e
-    // sem áudio, para sempre.
+    // DRENA offers retidas: par pode oferecer antes de o estado nascer (participante "na lista" e mudo).
     try {
       for (const fp of [...this.pendingOffers.keys()]) {
         const pend = this.pendingOffers.get(fp)
@@ -2299,9 +1913,7 @@ export class CallManager {
   }
 
   // ── joinVoiceRelayOnly REMOVIDO ──────────────────────────────────────────
-  // Não existe mais modo relay-only: sem WebRTC a chamada falha honesto em vez
-  // de degradar para áudio pelo túnel de sinalização (latência alta). Ver
-  // `getCallsSupport`, que só devolve 'full' | 'none'.
+  // Sem modo relay-only: sem WebRTC a chamada falha honesto (ver getCallsSupport).
   getQuality(): CallQuality { return this.quality }
 
   getQualityNotice(): string | null { return this.qualityNotice }
@@ -2314,11 +1926,7 @@ export class CallManager {
     try { return supportsRelayFallback() || supportsRelayPlayback() } catch { return false }
   }
 
-  /**
-   * Toggle manual "modo compatibilidade" (UI da chamada).
-   * Liga/desliga o relay sem derrubar o WebRTC (preferido continua ativo).
-   * 3ª tier de áudio: WebRTC direto → TURN-localhost via relay → voz via relay.
-   */
+  /** Toggle manual "modo compatibilidade": liga/desliga o relay sem derrubar o WebRTC. */
   async setRelayMode(on: boolean, reason?: string): Promise<boolean> {
     try {
       if (on) {
@@ -2334,20 +1942,9 @@ export class CallManager {
     } catch { return false }
   }
   // ── toggleRelay/setCompatMode REMOVIDOS ──────────────────────────────────
-  // O botão "R" (modo compatibilidade) saiu da tela de chamada: não existe mais
-  // caminho para ligar o relay de voz a partir da UI. `setRelayMode` continua
-  // aqui, agora inalcançável, caso o transporte volte a fazer sentido. O relay
-  // de ARQUIVOS é outro caminho, intocado.
+  // Botão "R" saiu da UI; setRelayMode inalcançável por segurança; relay de ARQUIVOS é outro caminho.
 
-  /**
-   * Resumo da rota ICE em uma linha, para a tela de chamada mostrar COMO a
-   * mídia está indo. É a informação que responde "por que não conecta?" sem
-   * obrigar o usuário a abrir o diagnóstico:
-   *   - `host`    = IP privado dos dois lados: só funciona na LAN
-   *   - `srflx`   = via STUN: saiu do NAT, mas CGNAT simétrico ainda barra
-   *   - `relay`   = via TURN: é o caminho que fecha atrás de CGNAT
-   *   - `n/d`     = ainda sem par escolhido (o sintoma do loop)
-   */
+  /** Resumo da rota ICE em 1 linha (host/srflx/relay/n-d) — "por que não conecta?" sem abrir diagnóstico. */
   getRungSummary(): string {
     try {
       // Chamada NATIVA: a mídia está no Rust, então `iceReports` (do WebRTC do
@@ -2375,11 +1972,7 @@ export class CallManager {
     } catch { /* nunca derruba a chamada */ }
   }
 
-  /**
-   * Atende uma chamada entrante do lado answerer (a UI chamava só
-   * services.callAccept + setActiveCall manual, sem estado no CallManager —
-   * o relay e o mesh precisam deste estado para funcionar).
-   */
+  /** Atende do lado answerer: relay e mesh precisam do estado no CallManager (não só callAccept). */
   async acceptInbound(callId: string, kind: CallKind, convId: string, fromFp: string, nickname?: string): Promise<CallState> {
     const me = this.getIdentity()
     if (!me) throw new Error('sem identidade')
@@ -2473,16 +2066,7 @@ export class CallManager {
           await this.handleOffer(fromFp, pend.callId, pend.sdp)
         }
       } catch { /* offer pendente nunca derruba o accept */ }
-      // MALHA COMPLETA PARA QUEM ENTRA POR ÚLTIMO.
-      //
-      // Quem atende só conhecia quem ligou. Num grupo, os outros participantes
-      // existem mas este lado não abre PC com eles (ninguém o apresentou), então
-      // B e C não se ouvem — o relato "para ele só tem você".
-      //
-      // `announceSelfToRoom` pede a cada pessoa conhecida que anuncie os demais
-      // a mim (`CallAddParticipant` sem kind = "fulano está na sala"), e já abre
-      // PC na direção dos que eu conheço. Um tick curto cobre o caso de alguém
-      // aceitar no mesmo instante.
+      // MALHA COMPLETA: announceSelfToRoom apresenta os demais ao recém-chegado ("para ele só tem você").
       this.announceSelfToRoom(callId)
       return this.state
     }
@@ -2523,23 +2107,9 @@ export class CallManager {
     this.startQualityMonitor()
     this.ensureRelayTransport()
     this.syncRelayToState()
-    // Sem degradação para áudio-via-relay: o fluxo é WebRTC direto (host/STUN/
-    // TURN) ou falha honesta. Um WebView sem RTCPeerConnection nunca vai
-    // "funcionar meio" — antes ele ficava preso em 'connecting' para sempre,
-    // que era o sintoma reportado no celular.
+    // Sem degradação p/ relay: WebRTC direto ou falha honesta (WebView sem PC ficava em 'connecting' eterno).
     await this.ensureMediaOnAllPCs()
-    // DRENA TODAS AS OFFERS RETIDAS — não só a de quem tocou o telefone.
-    //
-    // BUG QUE ISTO CORRIGE (o "conectado mas não se ouve" do grupo): em
-    // chamada com 3+ pessoas, o convidado recebe offer do host E dos outros
-    // membros (o host faz `callAddParticipant` para todos) antes de clicar em
-    // Aceitar. Todas ficavam em `pendingOffers`, mas o aceite só aplicava a do
-    // `fromFp`. As demais nunca geravam answer: conectava com quem ligou e
-    // ficava mudo com o resto — exatamente o relato.
-    //
-    // `fromFp` vai PRIMEIRO para preservar a ordem histórica (o ring é do
-    // host); os outros entram em seguida, um por vez, para não concorrer com
-    // a mesma `RTCPeerConnection`.
+    // DRENA TODAS AS OFFERS RETIDAS (não só a do host): grupo ficava mudo com os outros membros.
     try {
       const alvos = [fromFp, ...this.pendingOffers.keys()].filter(
         (fp, i, arr) => fp && arr.indexOf(fp) === i,
@@ -2552,9 +2122,7 @@ export class CallManager {
           console.warn(`[call] offer retida de ${fp.slice(0, 8)} falhou ao aplicar: ${(e as Error)?.message ?? e}`)
         })
       }
-      // Offers de OUTRAS chamadas ficam para a chamada delas — mas as desta
-      // chamada para participantes que não estão no roster entram nele, senão
-      // o tile delas não aparece.
+      // Offers de outras chamadas ficam p/ elas; as desta chamada entram no roster (tile aparece).
       for (const fp of alvos) {
         if (!fp || fp === me.fingerprint) continue
         if (!this.state.participants.some((p: any) => p.fp === fp)) {
@@ -2563,18 +2131,14 @@ export class CallManager {
       }
       this.onUpdate({ ...this.state })
     } catch { /* offer pendente nunca derruba o accept */ }
-    // MALHA COMPLETA: pede à sala que apresente quem já está dentro (ver
-    // `announceSelfToRoom`). Cobre o caso em que a offer do outro membro se
-    // perdeu e o `pendingOffers` nunca recebeu nada dele — sem isso os dois
-    // ficam na chamada sem se ouvir.
+    // MALHA COMPLETA: pede à sala que apresente quem já está dentro (cobre offer perdida).
     this.announceSelfToRoom(callId)
     this.startCallForeground()
     return this.state
   }
 
   // ── startRelayOnly REMOVIDO ──────────────────────────────────────────────
-  // Sem WebRTC, `start()` agora lança com a mensagem honesta. Ver
-  // `getCallsSupport`.
+  // Sem WebRTC, start() lança com mensagem honesta (ver getCallsSupport).
 
   private syncRelayToState() {
     if (!this.state) return
@@ -2598,10 +2162,7 @@ export class CallManager {
     try {
       await this.ensureRelayRecorder()
     } catch (e) {
-      // Falhou o microfone/codec: a chamada NÃO pode virar um beco sem saída
-      // silencioso. Sem `relayActive` a fase nunca sairia de "Conectando…".
-      // Ainda dá para RECEBER áudio (playback puro), então mantemos o relay de
-      // pé e avisamos o usuário com o motivo real.
+      // Falha de mic não pode virar beco sem saída: mantém o relay (receber áudio) e avisa o motivo.
       this.relayActive = true
       try {
         this.onCallNotice?.(
@@ -2614,13 +2175,7 @@ export class CallManager {
     this.markRelayConnectedFallback()
     this.syncRelayToState()
   }
-  /**
-   * Áudio relay está TOCANDO de verdade (primeiro chunk decodificado e
-   * agendado). Move a fase para 'connected' — sem isto a chamada relay-only
-   * fica presa em "Conectando…" para sempre, porque não existe
-   * RTCPeerConnection emitindo ICE connected e o evento `media-connected`
-   * nunca chega. Só marca se ainda não estiver connected (idempotente).
-   */
+  /** Áudio relay TOCANDO de verdade → fase 'connected' (sem PC não há media-connected; idempotente). */
   private markRelayAudioLive() {
     try {
       const st = this.state
@@ -2630,16 +2185,7 @@ export class CallManager {
     } catch { /* fase nunca derruba a chamada */ }
   }
 
-  /**
-   * Fallback do relay: marca "conectado" mesmo sem áudio rodando.
-   *
-   * Motivo real: quem fica MUDO durante a chamada (ou com o microfone negado
-   * no aparelho) nunca emite `ondataavailable`, e quem é muteado pelos dois
-   * lados nunca recebe chunk — então o gatilho de áudio nunca dispara e a
-   * chamada ficaria presa em "Chamando…"/"Conectando…" mesmo com o caminho
-   * relay pronto. Aqui, com o transporte de áudio subido (relay ativo +
-   * sinalização fechada), declaramos conectado após um grace curto.
-   */
+  /** Grace do relay: mudo/negado nunca emite chunk — declara conectado após grace curto. */
   private markRelayConnectedFallback() {
     try {
       const st = this.state
@@ -2666,12 +2212,7 @@ export class CallManager {
   private stopRelaySender() {
     try { this.relayRecorder?.stop() } catch { /* ignore */ }
     this.relayRecorder = null
-    // BUG REAL que isto corrige: `ensureRelayRecorder` reaproveita `localStream`
-    // quando ele já tem áudio (para não pedir o mic 2x). Ao desligar o relay,
-    // parar os tracks daquele stream MATAVA o microfone que o WebRTC ainda
-    // usava — a chamada continuava "conectada" mas silenciava para sempre
-    // depois de um fallback de áudio. Agora só paramos os tracks de um stream
-    // DEDICADO (criado só para o relay); o compartilhado fica intacto.
+    // BUG REAL: parar tracks do localStream reaproveitado MATAVA o mic do WebRTC — só stream DEDICADO pode parar.
     const shared = !this.relayRecDedicated
     if (!shared) {
       try { this.relayRecStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
@@ -2810,12 +2351,7 @@ export class CallManager {
     this.relayRecorder = rec
     try { rec.start(RELAY_TIMESLICE_MS) } catch { /* ignore */ }
   }
-  /**
-   * O MediaRecorder emite o 1º chunk COM o cabeçalho WebM e os seguintes SEM —
-   * `decodeAudioData` só decodifica se o cabeçalho estiver presente. Guardamos o
-   * 1º chunk e o prefixamos em todos os demais. Sem isso o fallback "toca
-   * silêncio" no receptor (bug real do modo compatibilidade).
-   */
+  /** 1º chunk do MediaRecorder traz o cabeçalho WebM: guarda e prefixa nos demais (senão toca silêncio). */
   private async encodeRelayChunk(blob: Blob): Promise<string | null> {
     try {
       const buf = new Uint8Array(await blob.arrayBuffer())
@@ -2911,12 +2447,7 @@ export class CallManager {
       this.scheduleRelayPlayback(fromFp)
     } catch { /* ignore */ }
   }
-  /**
-   * Agenda os chunks em sequência no AudioContext (GAPLESS): usa um "playhead"
-   * (`nextTime`) e `src.start(quando)` para encostar um chunk no outro, sem o
-   * silêncio que o encadeamento por `onended` causava. Buracos de seq (perda)
-   * são pulados, e chunk atrasado (>2s) é descartado em vez de tocar velho.
-   */
+  /** Agenda chunks com playhead (GAPLESS): buracos de seq pulados, atraso >2s descartado. */
   private scheduleRelayPlayback(fp: string) {
     try {
       const entry = this.relayQueues.get(fp)
@@ -2940,27 +2471,18 @@ export class CallManager {
         try { src.connect(ctx.destination) } catch { /* ignore */ }
         try { src.start(entry.nextTime) } catch { /* ignore */ }
         entry.nextTime += item.buf.duration
-        // Áudio relay REAL em reprodução: sem isto a fase nunca sai de
-        // 'connecting' (não existe ICE para reportar media-connected) e o
-        // overlay fica "Conectando…" para sempre mesmo com áudio passando.
+        // Áudio relay REAL em reprodução: sem isto a fase nunca sai de 'connecting'.
         this.markRelayAudioLive()
       }
     } catch { /* ignore */ }
   }
 
-  /**
-   * Troca a qualidade de vídeo em chamada (CÂMERA + TELA).
-   * - aplica applyConstraints no track vivo (câmera e/ou tela)
-   * - renegocia cada PC (novo offer) quando em chamada
-   * - se falhar, mantém a qualidade atual e lança erro honesto em pt-BR
-   */
+  /** Troca a qualidade de vídeo (câmera + tela): applyConstraints + renegocia; falha mantém atual. */
   async setQuality(q: CallQuality): Promise<void> {
     const prev = this.quality
     try {
       const tracks: MediaStreamTrack[] = []
-      // A TELA tem degrau próprio (screenShare.ts): trocar a qualidade da câmera
-      // não pode sobrescrever a da tela com constraints de câmera. Quando está
-      // compartilhando, o seletor da tela assume (ver adaptScreenQuality).
+      // TELA tem degrau próprio (screenShare.ts): qualidade da câmera não sobrescreve a da tela.
       const camTrack = this.localStream?.getVideoTracks()[0] ?? null
       if (camTrack && camTrack.readyState === 'live') tracks.push(camTrack)
       for (const track of tracks) {
@@ -3079,9 +2601,7 @@ export class CallManager {
         return 'voz nativa: mídia do Rust ainda sem sessão para esta chamada (offer nativa ainda não criada ou sem VoiceMedia)'
       }
       const io = `saída=${s.packets_out ?? 0} entrada=${s.packets_in ?? 0} plc=${s.plc_frames ?? 0} erros=${s.decode_errors ?? 0}`
-      // Erros de DEVICE vêm antes do estado: "conectado" com o alto-falante
-      // fechado ou o mic sem abrir é exatamente o "conectado e mudo" que não
-      // tinha explicação nenhuma na tela.
+      // Erros de DEVICE vêm antes do estado: explica o "conectado e mudo".
       if (s.speaker_error) return `voz nativa: o alto-falante não abriu (${s.speaker_error}) - o áudio chega mas não sai desta máquina`
       if (s.mic_error && (s.packets_out ?? 0) === 0) return `voz nativa: o microfone não abriu (${s.mic_error}) - este lado está só recebendo`
       if (s.state === 'connected') return `voz nativa conectada via ${s.route} (${io})`
@@ -3094,11 +2614,7 @@ export class CallManager {
     } catch { return 'voz nativa: falha ao inspecionar a mídia do Rust' }
   }
 
-  /**
-   * Causa técnica REAL do estado atual (nunca "erro na chamada" genérico).
-   * Ordem de checagem: sem chamada → sem WebRTC → sem mic/câmera → ICE →
-   * sinalização → gathering → rota. Usado pelo painel e pelos toasts.
-   */
+  /** Causa técnica REAL do estado (nunca genérica): checa chamada→WebRTC→mic→ICE→sinalização→rota. */
   getCallFailureReason(): string {
     try {
       if (this.lastFailureCause) return this.lastFailureCause
@@ -3151,10 +2667,7 @@ export class CallManager {
     } catch { return 'falha desconhecida ao inspecionar a chamada' }
   }
 
-  /**
-   * Diagnóstico completo por peer para o painel em tempo real.
-   * Nunca lança; campos ausentes viram null (painel mostra "—").
-   */
+  /** Diagnóstico completo por peer; nunca lança, ausentes viram null ("—"). */
   async getCallDiagnostics(): Promise<CallDiagnostics[]> {
     const out: CallDiagnostics[] = []
     try {
@@ -3204,14 +2717,7 @@ export class CallManager {
     return out
   }
 
-  /**
-   * resolve "posso atender este toque?" ANTES de falar com o peer.
-   *
-   * Antes o shell chamava `services.callAccept` (o frame já ia pro fio) e só
-   * depois `acceptInbound`, que podia lançar ("já existe uma chamada em
-   * andamento"). Resultado: o chamador conectava sozinho e quem atendeu ficava
-   * sem chamada nenhuma. Agora a validação vem primeiro.
-   */
+  /** Valida "posso atender?" ANTES de falar com o peer (chamador conectava sozinho). */
   canAccept(callId: string): string | null {
     if (this.accepting.has(callId)) return 'aceitando…'
     if (this.endedCalls.has(callId)) return 'essa chamada já foi encerrada'
@@ -3235,19 +2741,10 @@ export class CallManager {
       this.clearIceRestartTimers()
       this.stopNativeVoiceMonitor()
 
-      // Emite o fim primeiro, mas não espera a resposta do core para limpar a
-      // UI e os PCs. O `call_ended` remoto já fecha o overlay; aguardar o invoke
-      // antes do cleanup permitia que uma chamada nova começasse e fosse
-      // apagada pela limpeza atrasada da sessão anterior.
+      // Emite o fim primeiro e limpa sem esperar o core (limpeza atrasada apagava chamada nova).
       let endSignal: Promise<unknown> = Promise.resolve()
       if (cid.startsWith('voice-')) {
-        // CANAL DE VOZ: sem este `voiceLeave` o core NUNCA ficava sabendo — a
-        // sessão nativa (webrtc-rs + cpal + ximagesrc) continuava viva depois do
-        // "desligar", o áudio do canal seguia saindo e a próxima vez que se
-        // entrava no mesmo canal o mesh duplicava em cima da sessão morta.
-        //
-        // `convId` É o channel_id (ver joinVoice); a comunidade é o que sobra
-        // entre o prefixo e o sufixo — funciona mesmo que os ids tenham '-'.
+        // CANAL DE VOZ: sem voiceLeave o core nunca fica sabendo (sessão nativa viva + mesh duplicado).
         const ch = st.convId
         const community = ch && cid.endsWith(`-${ch}`)
           ? cid.slice('voice-'.length, cid.length - `-${ch}`.length)
@@ -3257,10 +2754,7 @@ export class CallManager {
         endSignal = services.callEnd(cid).catch(() => {})
       }
 
-      // Rede de segurança: a captura nativa (câmera/tela) é derrubada pelo
-      // `voice_leave`/`call_end` do core, mas se algum caminho chegou aqui sem
-      // um desses (estado já meio-mortido), o encoder ficava aberto e o
-      // `ximagesrc`/`v4l2src` só soltavam o device reiniciando o app.
+      // Rede de segurança: derruba captura nativa que sobreviveu sem voice_leave/call_end (device preso).
       try {
         if ((st as any).nativeMedia) {
           for (const p of st.participants ?? []) {
@@ -3312,11 +2806,7 @@ export class CallManager {
     }
   }
 
-  /**
-   * Zera TODO o estado do compartilhamento (timer de métricas, monitor de FPS,
-   * timer de recuperação, stream). Chamado em qualquer saída da chamada —
-   * deixar timer vivo depois do `leave` é vazamento clássico de memória.
-   */
+  /** Zera TODO o estado do compartilhamento (timers/stream) — deixar timer vivo é vazamento. */
   private resetScreenRuntime(): void {
     this.stopScreenStatsTimer()
     try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch { /* ignore */ }
@@ -3344,10 +2834,7 @@ export class CallManager {
     if (!this.state) return
     this.state.muted = !this.state.muted
     const muted = this.state.muted
-    // Silencia o mic de TODOS os streams (o compartilhado e o dedicado do
-    // relay). Antes só o `localStream` era silenciado: no modo compatibilidade
-    // o recorder pode estar num stream DEDICADO, e aí o mutar não impedia a
-    // saída de áudio pelo relay — a UI mostrava "mudo" e o outro ouvia.
+    // Silencia o mic de TODOS os streams (compartilhado E dedicado do relay) — UI "mudo" mentia.
     const seen = new Set<MediaStream>()
     for (const s of [this.localStream, this.relayRecStream]) {
       if (!s || seen.has(s)) continue
@@ -3384,17 +2871,7 @@ export class CallManager {
   }
 
   // ── VÍDEO NATIVO (Linux): câmera/tela codificadas no core Rust ──────────
-  //
-  // O WebKitGTK não expõe RTCPeerConnection — a chamada inteira viaja pela
-  // mídia nativa (webrtc-rs). O core já sabe codificar câmera (v4l2) e tela
-  // (xcap) em VP8/H264 e decodificar o que chega; o que faltava era a UI
-  // chamar. Sem isto os botões de câmera/tela no Linux tentavam
-  // getUserMedia/getDisplayMedia (inexistentes) e morriam.
-  //
-  // Sinal remoto: quem está do outro lado (Windows/Android, browser WebRTC)
-  // recebe o vídeo como track normal. Quem está no Linux RECEBE via polling
-  // `voiceVideoFrame` (JPEG do último frame decodificado) — ver
-  // `startNativeVideoMonitor`.
+  // WebKitGTK sem RTCPeerConnection: mídia toda no core; Linux recebe frames JPEG via voiceVideoFrame.
 
   /** Liga/desliga vídeo nativo (câmera ou tela) para todos os pares da call. */
   private async toggleNativeVideo(source: 'camera' | 'screen'): Promise<void> {
@@ -3403,9 +2880,7 @@ export class CallManager {
     const on = source === 'camera' ? !st.cameraOn : !st.sharing
     const targets = st.participants.filter(p => p.fp && p.fp !== this.myFp)
     if (on) {
-      // Monitor: o id do xcap (u32, lado Rust) ainda não é escolhível pela UI
-      // (o picker da tela lista monitores do Tauri por string) — por ora o core
-      // captura o monitor PRIMÁRIO (o mesmo default do grab_screen_frame).
+      // Monitor: id do xcap não é escolhível pela UI ainda — core captura o monitor PRIMÁRIO.
       const monitorId: number | null = null
       let ok = 0
       let lastErr: string | null = null
@@ -3421,9 +2896,7 @@ export class CallManager {
         this.onCallNotice?.(lastErr ? `vídeo nativo falhou: ${lastErr}` : 'vídeo nativo falhou')
         throw new Error(lastErr ? `não foi possível ligar o vídeo nativo: ${lastErr}` : 'não foi possível ligar o vídeo nativo')
       }
-      // O comando aceito só confirma que o pipeline começou. A UI e o sinal
-      // remoto esperam o monitor observar o primeiro frame enviado (video_state
-      // = live), para não anunciar uma câmera/tela preta como ativa.
+      // Comando aceito ≠ mídia no ar: UI/sinal esperam o primeiro frame (video_state = live).
     } else {
       for (const p of targets) {
         try { await services.voiceVideoStop(st.callId, p.fp) } catch { /* par best-effort */ }
@@ -3467,10 +2940,7 @@ export class CallManager {
             } catch { /* frame nunca derruba o bus */ }
           }).catch(() => { /* poll best-effort */ })
         }
-      // 40 ms (~25 fps) e não 150 ms: o encoder nativo entrega 29 fps e a UI
-      // era o gargalo VISUAL — o peer via o vídeo do Linux como slideshow.
-      // O comando devolve resposta meta-only quando não há quadro novo (o
-      // `since_seq` bate), então o custo de IPC é o de um poll, não o do JPEG.
+      // Poll de 40ms (~25fps): a UI era o gargalo visual (vídeo do Linux parecia slideshow).
       }, 40)
     } catch { this.nativeVideoTimer = null }
   }
@@ -3480,14 +2950,7 @@ export class CallManager {
     this.nativeVideoSeqs.clear()
   }
 
-  /**
-   * Reconcilia o roster do canal com o estado real do core a cada 10 s.
-   *
-   * Só ADICIONA (e atualiza mute) — nunca remove: ausência no SQLite pode ser
-   * só um `VoiceJoin` que ainda não chegou, e remover por ausência criaria o
-   * efeito oposto (participante piscando). Remoção continua exclusiva do
-   * `voice_left`, que é um evento explícito.
-   */
+  /** Reconcilia o roster com o core a cada 10s: só ADICIONA/atualiza — remoção é só do voice_left. */
   private startRosterReconcile(callId: string, communityId: string, channelId: string) {
     this.stopRosterReconcile()
     const tick = () => {
@@ -3508,20 +2971,12 @@ export class CallManager {
     try {
       this.rosterTimer = setInterval(tick, 10_000)
     } catch { this.rosterTimer = null }
-    // REPARO DE PAR HALF-OPEN no mesh (o "um escuta, o outro não").
-    //
-    // O roster acima só sincroniza QUEM está na chamada. A mídia entre dois
-    // pares pode ficar assimétrica (offer de A chegou em B, a de B se perdeu):
-    // não havia nada que detectasse isso, e o par ficava mudo até alguém sair e
-    // voltar. Este tick (15 s — depois do roster de 10 s, para não competir)
-    // só age em par NÃO conectado e só do lado de fingerprint maior.
+    // REPARO DE PAR HALF-OPEN: tick de 15s refaz offer do lado de fp maior em par não conectado.
     try {
       this.repairTimer = setInterval(() => {
         const st = this.state
         if (!st || st.callId !== callId) { this.stopRosterReconcile(); return }
-        // Reapresentação periódica: uma entrega perdida do `CallAddParticipant`
-        // deixava dois participantes sem malha entre si para sempre. Um frame
-        // pequeno por par a cada 15 s conserta sozinho.
+        // Reapresentação periódica: entrega perdida de CallAddParticipant deixava pares sem malha p/ sempre.
         this.announceSelfToRoom(callId)
         void this.repairHalfOpenPairs().catch(() => { /* reparo é best-effort */ })
       }, 15_000)
@@ -3535,13 +2990,7 @@ export class CallManager {
     this.repairTimer = null
   }
 
-  /**
-   * Acha o m-line de vídeo do PC. Prefere a que já tem track; senão usa a
-   * m-line criada `recvonly` por `ensureMlines` (chamada de voz) — mas nesse
-   * caso é preciso virar `sendrecv` e renegociar, porque `replaceTrack` sozinho
-   * NÃO muda a direção e o vídeo nunca saía. Era o bug "câmera liga mas só o
-   * vídeo remoto aparece".
-   */
+  /** Acha a m-line de vídeo; se era recvonly, promove a sendrecv + renegocia (replaceTrack não muda direção). */
   private findVideoTransceiver(pc: RTCPeerConnection): RTCRtpTransceiver | null {
     try {
       const withTrack = pc.getTransceivers().find(t => t.sender?.track?.kind === 'video')
@@ -3550,11 +2999,7 @@ export class CallManager {
     } catch { return null }
   }
 
-  /**
-   * Acha o sender de vídeo do PC mesmo quando ele está com track nulo
-   * (câmera desligada via `replaceTrack(null)`). Sem isso, religar a câmera
-   * criaria um m-line novo sem renegociação e o remoto não veria nada.
-   */
+  /** Acha o sender de vídeo mesmo com track nula (religar câmera sem m-line nova). */
   private findVideoSender(pc: RTCPeerConnection): RTCRtpSender | null {
     try {
       return this.findVideoTransceiver(pc)?.sender
@@ -3572,9 +3017,7 @@ export class CallManager {
 
   async toggleCamera() {
     if (!this.state) return
-    // Chamada NATIVA (Linux): o core captura a câmera (v4l2) e codifica em
-    // GStreamer na MESMA PeerConnection webrtc-rs da voz — a página não tem
-    // RTCPeerConnection/getUserMedia aqui.
+    // Chamada NATIVA (Linux): core captura/codifica; página não tem RTCPeerConnection/getUserMedia.
     if ((this.state as any)?.nativeMedia) {
       await this.toggleNativeVideo('camera')
       return
@@ -3585,10 +3028,7 @@ export class CallManager {
     this.cameraBusy = true
     try {
       if (this.state.cameraOn) {
-        // Desliga: para de ENVIAR vídeo (replaceTrack(null) mantém o m-line) e
-        // solta os tracks locais. O remoto para de receber em vez de congelar.
-        // Exceção: compartilhando tela, o sender de vídeo carrega a TELA —
-        // desligar a câmera não pode cortar o compartilhamento dos outros.
+        // Desliga: replaceTrack(null) mantém a m-line; exceção — sender carregando TELA não é cortado.
         const mine = this.localStream
         const camTrack = mine?.getVideoTracks()[0] ?? null
         if (mine) {
@@ -3673,12 +3113,7 @@ export class CallManager {
     this.onUpdate({ ...this.state })
   }
 
-  /**
-   * Transmissão estilo Discord (desktop): compartilha via getDisplayMedia e
-   * renegocia o mesh para cada peer; o receptor exibe como track de vídeo
-   * normal (desktop + mobile view-only). Mobile sem getDisplayMedia lança
-   * SCREEN_UNAVAILABLE_MSG honesto em vez de crash/silêncio.
-   */
+  /** Transmissão estilo Discord (desktop): getDisplayMedia + renegociação por peer; mobile honesto. */
   /** Última linha de texto do doc da função (substituído abaixo). */
   async toggleScreen(): Promise<void> {
     if (this.state?.sharing) {
@@ -3688,29 +3123,14 @@ export class CallManager {
     await this.startScreenShare()
   }
 
-  /**
-   * Compartilhamento de tela P2P (sem servidor de mídia): captura local →
-   * codificação nativa do engine → WebRTC direto peer-a-peer.
-   *
-   * Fontes: tela inteira, janela/aplicativo e monitor específico (o picker
-   * nativo do sistema decide qual; nós dizemos QUAL tipo é permitido). O
-   * áudio do sistema e o microfone são separados: cada um vira sua própria
-   * trilha, então "tela + sistema + mic" funciona e "só tela" não trava.
-   *
-   * `opts` ausente = usa as opções salvas (ver setScreenShareOptions).
-   */
+  /** Screen share P2P: captura local → encode nativo → WebRTC direto; tela/janela/monitor + áudio separado. */
   async startScreenShare(opts?: Partial<ScreenShareOptions>): Promise<void> {
     if (!this.state) return
-    // Caminho NATIVO (Linux/WebKitGTK): captura xcap + encoder GStreamer no
-    // core, na mesma PeerConnection webrtc-rs da voz. Antes este caminho
-    // caía no guard de `pcs.size === 0` com erro de "não codifica vídeo" —
-    // mentira: o core codifica; faltava a chamada.
+    // Caminho NATIVO (Linux): xcap + GStreamer no core (antes caía no guard de pcs.size === 0 — mentira).
     if ((this.state as any)?.nativeMedia) {
       const next = normalizeOptions(opts, this.screenOptions)
       if (next.source === 'window' || next.source === 'monitor') {
-        // O core só sabe capturar a tela inteira (root window/portal). Antes
-        // aceitava `window` e enviava o desktop COMPLETO — o usuário pedia uma
-        // janela e vazava tudo, sem diálogo do SO.
+        // Core só captura a tela INTEIRA: aceitar 'window' vazava o desktop completo.
         const msg = 'no caminho nativo a captura é sempre da tela inteira — janela ou monitor específico não é suportado'
         this.setScreenError('unsupported', msg)
         throw new ScreenShareError('unsupported', msg, false)
@@ -3729,16 +3149,7 @@ export class CallManager {
       this.setScreenError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG)
       throw new ScreenShareError('unsupported', reason ?? SCREEN_UNAVAILABLE_MSG, false)
     }
-    // Voz nativa em Rust (webrtc-rs) NÃO cria RTCPeerConnection: o `pcs` fica
-    // vazio e `seedScreenPeers` não teria para onde enviar. (Chamadas nativas
-    // foram roteadas ACIMA para `toggleNativeVideo` — chegar aqui numa chamada
-    // nativa seria bug de roteamento, não estado do usuário.)
-    //
-    // NÃO é mais erro: a captura é preparada mesmo sem participantes e
-    // `attachLocalStreamToPC` (3622) semeia a tela em TODO PC que nascer
-    // depois. Bloquear aqui era o sintoma "no Windows/Android não captura
-    // tela": o usuário clicava em compartilhar enquanto a chamada ainda
-    // estabilizava e tomava erro — quando a tela só precisava esperar os PCs.
+    // Voz nativa não cria PC — roteado acima p/ toggleNativeVideo; sem PCs não é erro (semeia depois).
     if (this.pcs.size === 0) {
       this.onCallNotice?.('preparando a tela — ela começa a ser enviada quando a chamada conectar')
     }
@@ -3808,11 +3219,7 @@ export class CallManager {
     try {
       return await md.getDisplayMedia(constraints) as MediaStream
     } catch (e) {
-      // Nem todo engine aceita o mesmo conjunto: o Chromium/WebView2 recusa
-      // qualquer `min` em getDisplayMedia (TypeError "min constraints are not
-      // supported") e alguns recusam o `displaySurface` pedido
-      // (OverconstrainedError). Degradar é melhor que dizer que o aparelho não
-      // tem captura: primeiro sem frameRate, depois só {video:true,audio}.
+      // Chromium recusa min/displaySurface em getDisplayMedia: degrada (sem frameRate → {video,audio}).
       const derived = derivedDisplayConstraints(constraints)
       if (!derived) throw e
       try {
@@ -3824,11 +3231,7 @@ export class CallManager {
     }
   }
 
-  /**
-   * Reage ao fim/mute/unmute da track de tela — é o que cobre "usuário parou
-   * pelo botão do sistema", "monitor desconectou" e "janela fechada".
-   * `mute` é NORMAL (troca de monitor, janela minimizada); `ended` é o fim real.
-   */
+  /** Reage a fim/mute da track de tela: mute é NORMAL (troca de monitor), ended é fim real. */
   private watchScreenTrack(track: MediaStreamTrack): void {
     try {
       track.onended = () => { void this.handleScreenEnded() }
@@ -3887,10 +3290,7 @@ export class CallManager {
           pc.addTrack(track, stream)
           needsOffer = true
         }
-        // Áudio (sistema e/ou mic) entra no MESMO offer do vídeo. Antes ele era
-        // anexado DEPOIS da oferta de vídeo: o PC ficava em `have-local-offer`,
-        // o `signalingState !== 'stable'` pulava o addTrack e o áudio do
-        // compartilhamento simplesmente nunca era enviado (tela com som mudo).
+        // Áudio entra no MESMO offer do vídeo: depois de have-local-offer o addTrack era pulado (som mudo).
         for (const atrack of audioTracks) {
           try {
             if (pc.getSenders().some(x => x.track === atrack)) continue
@@ -3929,17 +3329,7 @@ export class CallManager {
     await this.applyScreenSenderTuning()
   }
 
-  /**
-   * Áudio do compartilhamento nos 4 modos (só tela / +sistema / +mic / ambos).
-   *
-   * Sistema e microfone são trilhas SEPARADAS de propósito: nunca se misturam,
-   * cada um é opcional e a falta de um NUNCA derruba o outro nem o vídeo.
-   * `getDisplayMedia` só entrega o áudio do sistema; o mic vem sempre do
-   * `getUserMedia` (é o mesmo mic da chamada, não um segundo dispositivo).
-   *
-   * Devolve as trilhas que devem ir NESTA oferta — quem as anexa é o
-   * `seedScreenPeers`, antes de criar o offer (ver comentário lá).
-   */
+  /** Áudio do share nos 4 modos: sistema e mic são TRILHAS SEPARADAS — falta de um nunca derruba o outro. */
   private async collectScreenAudioTracks(stream: MediaStream): Promise<MediaStreamTrack[]> {
     const mode = this.screenOptions.audio
     const out: MediaStreamTrack[] = []
@@ -4046,11 +3436,7 @@ export class CallManager {
     }
   }
 
-  /**
-   * Aplica opções sem derrubar a captura: resolução/FPS vão na track viva e no
-   * encoder (o receiver não vê interrupção). Trocar a FONTE ou o ÁUDIO exige
-   * recapturar — o engine só permite isso no gesto do usuário.
-   */
+  /** Aplica opções sem derrubar a captura (track viva + encoder); fonte/áudio exigem recaptura. */
   async setScreenShareOptions(patch: Partial<ScreenShareOptions>): Promise<void> {
     const prev = this.screenOptions
     const next = normalizeOptions(patch, this.screenOptions)
@@ -4076,10 +3462,7 @@ export class CallManager {
   private async recaptureScreen(opts: ScreenShareOptions): Promise<void> {
     const wasSharing = !!this.state?.sharing
     try {
-      // Captura a NOVA fonte ANTES de tocar na atual: se o usuário cancelar o
-      // seletor do sistema (ou o SO negar), o compartilhamento que já estava no
-      // ar continua vivo. Antes o stream antigo era parado primeiro e um
-      // cancelamento derrubava a tela de todo mundo.
+      // Captura a NOVA fonte ANTES de tocar na atual: cancelar o seletor não derruba o share no ar.
       const stream = await this.acquireScreenStream(opts)
       const track = stream.getVideoTracks()[0]
       if (!track) {
@@ -4115,10 +3498,7 @@ export class CallManager {
     }
   }
 
-  /**
-   * Recuperação automática: resolução mudou, monitor trocou, encoder engasgou
-   * ou a rede degradou. Nenhum desses casos exige o usuário sair da chamada.
-   */
+  /** Recuperação automática: resolução/monitor/encoder/rede — nenhum caso exige sair da chamada. */
   private scheduleScreenRecovery(reason: string): void {
     if (!this.state?.sharing) return
     if (this.screenRecoveryAttempts >= CallManager.SCREEN_MAX_RECOVERY) {
@@ -4203,11 +3583,7 @@ export class CallManager {
     } catch { /* métrica nunca derruba a captura */ }
   }
 
-  /**
-   * Degradação adaptativa honesta: só desce um degrau quando a rede está
-   * realmente ruim (perda, jitter alto ou FPS enviado bem abaixo do capturado).
-   * 120 FPS só é pedido — nunca reportamos FPS que não foi capturado.
-   */
+  /** Degradação honesta: só desce degrau com perda/jitter/FPS real abaixo do capturado; FPS nunca inventado. */
   private adaptScreenQuality(): void {
     if (this.screenOptions.quality === 'auto') return
     const m = this.screenMetrics
@@ -4279,27 +3655,7 @@ export class CallManager {
     return this.screenSource
   }
 
-  /**
-   * Grupo (mesh real): adiciona um peer à chamada ativa.
-   *
-   * - cria PC iniciador com o novo peer (nossa offer conecta a mídia);
-   * - toca o telefone dele (frame CallAddParticipant COM kind → CallIncoming
-   *   no receptor, que atende normalmente via acceptInbound);
-   * - avisa os demais participantes (frame SEM kind → cada um cria PC ao novo
-   *   peer; o novo só responde offers → sem GLARE).
-   *
-   * ## O que faltava (o "para ele só tem você")
-   *
-   * O aviso era SÓ no sentido "os antigos ficam sabendo do novo". O NOVO nunca
-   * recebia a lista de quem JÁ estava na sala — e, no mesh, quem não conhece um
-   * par não abre PC com ele. Resultado real: A chama B e C, os dois atendem, mas
-   * B só forma malha com A e C só com A (cada um "só vê você"), e B e C não se
-   * ouvem.
-   *
-   * Agora, ao aceitar (`acceptInbound`), o novo recebe um `CallAddParticipant`
-   * SEM kind para cada pessoa que já está na sala: ele abre PC com todos e a
-   * malha fecha completa.
-   */
+  /** Grupo (mesh): adiciona peer — PC iniciador + ring nele + aviso aos demais (sem kind → anti-glare). */
   addParticipant(fp: string, nickname: string) {
     if (!this.state) return
     if (fp === this.myFp) return
@@ -4317,25 +3673,7 @@ export class CallManager {
     this.onUpdate({ ...this.state })
   }
 
-  /**
-   * Pede que a sala se apresente, para a MALHA FECHAR.
-   *
-   * ## O bug que isto corrige
-   *
-   * A chamo B e C (grupo). B atende e só sabe que A existe; C atende e só sabe
-   * que A existe. No mesh, quem não se conhece não abre `RTCPeerConnection` —
-   * então B e C nunca se ouvem, embora os três estejam "na chamada". O sintoma
-   * é exatamente "chamei os dois, mas para ele só aparece você".
-   *
-   * O `addParticipant` já avisa os ANTIGOS sobre o NOVO. Faltava o inverso: o
-   * NOVO precisa saber dos antigos. Aqui cada pessoa conhecida recebe
-   * `CallAddParticipant(sem kind)` para cada OUTRO participante que eu conheço —
-   * ou seja, eu peço "me apresente quem está aí". O receptor do frame (sem kind)
-   * cria PC na direção do novo, e o novo responde à offer.
-   *
-   * Idempotente e barato: um frame pequeno por par conhecido. Roda no aceite e
-   * no tick de reparo do mesh, então uma entrega perdida se conserta sozinha.
-   */
+  /** Pede que a sala se apresente p/ a malha fechar: o NOVO precisa saber dos antigos (idempotente). */
   private announceSelfToRoom(callId: string) {
     const st = this.state
     if (!st || st.callId !== callId || !this.myFp) return
@@ -4379,16 +3717,7 @@ export class CallManager {
     this.ensureMlines(pc)
   }
 
-  /**
-   * Garante que existam m-lines de áudio e vídeo mesmo sem track local.
-   * Por que: com `bundlePolicy: 'max-bundle'`, o Chrome exige um grupo BUNDLE na
-   * SDP — e grupo BUNDLE só é gerado quando existe m-line, que por sua vez só
-   * nasce de uma track. Sem microfone (permissão negada, aparelho sem entrada)
-   * a offer morria com "max-bundle configured but session description has no
-   * BUNDLE group" e a chamada NUNCA saía. Um transceiver recvonly garante a
-   * m-line: quem não tem mídia local ainda recebe a do outro, e quem tem mídia
-   * continua enviando (o addTrack acima já ocupa o sender).
-   */
+  /** Garante m-lines a/v mesmo sem track: max-bundle sem BUNDLE group matava a offer (recvonly cobre). */
   private ensureMlines(pc: RTCPeerConnection) {
     try {
       const kinds = new Set<string>()
@@ -4436,9 +3765,7 @@ export class CallManager {
         const st = (e.streams && e.streams[0]) ?? (e.track ? new MediaStream([(e.track as MediaStreamTrack)]) : null)
         if (st && this.state) attachRemoteTrack(this.state, (s) => this.onUpdate(s), fp, st)
       } catch { /* nunca derruba o bus */ }
-      // Mídia remota CHEGOU: se o ICE já está conectado, promove a fase.
-      // Cobre o caso em que o `iceconnectionstatechange` disparou antes de o
-      // estado da chamada existir (race offer→track→accept).
+      // Mídia remota CHEGOU: promove a fase se ICE já conectou (race offer→track→accept).
       try {
         const st2 = this.state
         if (st2 && st2.callId === callId) {
@@ -4451,10 +3778,7 @@ export class CallManager {
     }
     pc.onicecandidate = (e) => {
       if (!e.candidate) {
-        // Fim do gathering (candidate nulo): reenvia a lista COMPLETA. Se algum
-        // candidato individual se perdeu no caminho (fila do motor cheia, peer
-        // ainda subindo, link caiu), ele chega agora. O WebRTC ignora
-        // candidato duplicado, então reenviar é sempre seguro.
+        // Fim do gathering: reenvia a lista COMPLETA de candidatos (perdidos no caminho chegam agora).
         this.resendLocalIce(fp, pc, callId)
         return
       }
@@ -4465,9 +3789,7 @@ export class CallManager {
       pc.addEventListener('iceconnectionstatechange', () => {
         try {
           if (pc.iceConnectionState === 'failed') void this.tryIceRestart(fp, pc, callId)
-          // Promove para conectado também por aqui (além do subscribeIceRecovered
-          // via logIceState): se o `bind()` ainda não assinou ou o evento se
-          // perdeu, a fase não fica presa.
+          // Promove p/ conectado por aqui também (bind pode ainda não ter assinado / evento perdido).
           if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
             try {
               const st = this.state
@@ -4477,9 +3799,7 @@ export class CallManager {
         } catch { /* monitor nunca derruba a chamada */ }
       })
     } catch { /* ignore */ }
-    // connectionState (nível PC) é mais confiável que iceConnectionState em
-    // alguns WebViews móveis: cobre 'connected' mesmo quando o ICE reporta
-    // 'checking' por alguns segundos.
+    // connectionState (PC) é mais confiável que iceConnectionState em alguns WebViews móveis.
     try {
       pc.addEventListener('connectionstatechange', () => {
         try {
@@ -4498,9 +3818,7 @@ export class CallManager {
   /** Envia um candidato ICE local, remembering-o para reenvio posterior. */
   private sendLocalIce(fp: string, callId: string, cand: RTCIceCandidate, pc: RTCPeerConnection) {
     try {
-      // `close()` não cancela callbacks de ICE já enfileirados. Sem conferir
-      // chamada e instância, um candidato antigo podia contaminar o cache do
-      // mesmo peer e ser reenviado pelo PC da chamada seguinte.
+      // close() não cancela callbacks de ICE enfileirados: confere chamada e instância.
       if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       const list = this.localIce.get(fp) ?? []
       list.push(cand)
@@ -4509,26 +3827,14 @@ export class CallManager {
     } catch { /* monitor nunca derruba a chamada */ }
   }
 
-  /**
-   * Reenvia TODOS os candidatos locais já coletados.
-   *
-   * Por que isso importa mais do que parece: cada `onicecandidate` dispara um
-   * frame único pela fila de sinalização do motor. Se o peer ainda estiver
-   * subindo (comum no CGNAT), o frame pode ser descartado/estourar a fila — e
-   * o candidato perdido é perdido para sempre, porque o ICE local não o
-   * reemite. O candidato de TURN é justamente o último e o mais crítico atrás
-   * de CGNAT: perdê-lo era a diferença entre "às vezes pega" e "não pega".
-   * Duplicata é ignorada pelo WebRTC, então reenviar o conjunto é idempotente.
-   */
+  /** Reenvia TODOS os candidatos locais: frame único pode se perder (TURN é o último e o mais crítico). */
   private resendLocalIce(fp: string, pc: RTCPeerConnection, callId: string) {
     try {
       if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       for (const cand of this.localIce.get(fp) ?? []) {
         void services.callIce(fp, callId, JSON.stringify(cand), cand.sdpMid ?? '0').catch(() => {})
       }
-      // Candidatos que o browser já gathered mas ainda não emitiu (pool
-      // pré-coletado com iceCandidatePoolSize): manda também.
-      // `getLocalCandidates` existe no WebRTC real mas não no lib.dom deste TS.
+      // Candidatos pré-coletados (iceCandidatePoolSize): manda também; getLocalCandidates não está no lib.dom.
       const anyPc = pc as unknown as { getLocalCandidates?: () => Promise<RTCIceCandidate[]> }
       void anyPc.getLocalCandidates?.().then((rest: RTCIceCandidate[] | null | undefined) => {
         if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
@@ -4540,39 +3846,22 @@ export class CallManager {
   }
 
   /**
-   * CHAMADA NATIVA: o core Rust conduz a mídia e o estado dela vive lá
-   * (`voice_media_stats`). Sem este monitor, a fase ficava presa em
-   * "Conectando…" para sempre — o WebRTC do navegador é que emitia
-   * `media-connected`, e no caminho nativo ninguém emitia nada.
-   */
+  /** Monitor da chamada NATIVA: sem ele a fase ficava presa em "Conectando…" (ninguém emite media-connected). */
   private startNativeVoiceMonitor(callId: string) {
     this.stopNativeVoiceMonitor()
-    // -1 = "ainda nao conectou". NUNCA 0: `0` faz `Date.now() - 0` dar ~1.7e12
-    // e qualquer `connecting` posterior a uma conexao boa virava timeout
-    // instantaneo — a chamada morria em <700 ms ao trocar de rede, em vez de
-    // deixar o ICE restart trabalhar.
+    // -1 = "ainda não conectou". NUNCA 0: Date.now()-0 virava timeout instantâneo ao trocar de rede.
     this.nativeVoiceSince = -1
     // Vídeo remoto (frames JPEG do core) na MESMA vida do monitor de voz.
     this.startNativeVideoMonitor(callId)
     const t = setInterval(() => {
       const st = this.state
       if (!st || st.callId !== callId) { this.stopNativeVoiceMonitor(); return }
-      // So espera timeout quando a chamada esta pendente de midia. Depois de
-      // conectada (`-1`), `waited` fica 0 e o vigilante so age em `failed`.
-      //
-      // BUG CORRIGIDO: `nativeVoiceSince` era atribuido `-1` aqui e em mais
-      // nada — `waited` era SEMPRE 0 e o timeout de "sem sessao no core" nunca
-      // disparava. O overlay ficava em "Conectando…" para sempre (o oposto do
-      // que o comentario acima prometia). Agora a contagem comeca no primeiro
-      // tick em que a midia AINDA nao conectou, e zera quando conecta.
+      // Só espera timeout com mídia pendente; BUG CORRIGIDO: nativeVoiceSince nunca era setado (waited sempre 0).
       if (this.nativeVoiceSince < 0) this.nativeVoiceSince = Date.now()
       const waited = this.nativeVoiceSince > 0 ? Date.now() - this.nativeVoiceSince : 0
       void services.voiceMediaStats(callId).then((s) => {
         if (!this.state || this.state.callId !== callId) return
-        // CRITICO 2: o timeout TEM de valer sem sessao no core.
-        // `voiceMediaStats` devolve null quando nao ha sessao (offer perdida,
-        // absorb falhou, SDP recusado). Sair aqui engolia o vigilante de 45 s
-        // e o overlay ficava em "Conectando…" PARA SEMPRE no caminho nativo.
+        // CRÍTICO: timeout vale TAMBÉM sem sessão no core (stats null) — senão "Conectando…" eterno.
         if (!s) {
           if (waited > CallManager.NATIVE_VOICE_TIMEOUT_MS) {
             this.nativeVoiceSince = -1
@@ -4587,9 +3876,7 @@ export class CallManager {
         }
         try { this.lastNativeStats = s } catch { /* ignore */ }
         if (nativeRoute !== s.route) { nativeRoute = s.route; this.onUpdate({ ...this.state }) }
-        // VÍDEO NATIVO: estado honesto vindo do core (encoder/decoder).
-        // "live" com fonte = câmera/tela no ar; "failed" = aviso com o erro
-        // real (Wayland sem portal, câmera travada etc.) em vez de tile preto.
+        // VÍDEO NATIVO: estado honesto do core ("live" = no ar; "failed" = aviso com o erro real).
         try {
           const vs = (s as any).video_state as string | null | undefined
           const vsrc = (s as any).video_source as string | null | undefined
@@ -4628,16 +3915,8 @@ export class CallManager {
           this.nativeVoiceSince = -1
           this.applyPhase('media-connected')
         } else if (this.nativeCallIsDead(s, waited)) {
-          // O ICE que nunca fecha é o caso do CGNAT simétrico. Sem este
-          // timeout a tela ficava em "Conectando…" indefinidamente — que é
-          // exatamente o bug que a versão anterior resolveu no caminho do
-          // WebRTC, e que voltou no caminho nativo.
-          //
-          // BUG CORRIGIDO (o "cai sozinho" do grupo): o agregado do core é o
-          // PIOR par, então UM peer com rota quebrada (`failed`) derrubava a
-          // chamada inteira — inclusive os pares que estavam conectados e
-          // ouvindo. `nativeCallIsDead` só considera a chamada morta quando
-          // nenhum par está conectado (ou o timeout expirou).
+          // ICE que nunca fecha (CGNAT simétrico): sem este timeout, "Conectando…" indefinido no caminho nativo.
+          // BUG CORRIGIDO ("cai sozinho"): agregado do core é o PIOR par — um peer failed não derruba a chamada.
           this.nativeVoiceSince = -1
           this.setFailureCause(
             s.state === 'failed'
@@ -4668,23 +3947,7 @@ export class CallManager {
     this.stopNativeVideoMonitor()
   }
 
-  /**
-   * A chamada nativa está MORTA de verdade?
-   *
-   * `VoiceStats` do core é AGREGADO e adota o PIOR par (de propósito: antes o
-   * `HashMap` sorteava e o estado oscilava). O problema é que o consumidor
-   * tratava `failed` como fatal: num mesh de 3, um único par atrás de NAT
-   * simétrico derrubava a chamada de todos — exatamente o relato "aparece todo
-   * mundo conectado e cai sozinho".
-   *
-   * Regra: só é morta quando NENHUM par está conectado. Com pelo menos um par
-   * conectado e mídia entrando/saindo, a chamada segue e a UI avisa do par
-   * ruim em vez de encerrar. O timeout continua valendo para quando nada
-   * conectou (offer perdida / SDP recusado).
-   *
-   * `peers_connected` só vem de builds novas do core; ausente = build antiga,
-   * e aí mantemos o comportamento conservador anterior (confia no `state`).
-   */
+  /** Nativa morta só quando NENHUM par conecta (agregado do core é o pior par). */
   private nativeCallIsDead(
     s: { state?: string | null; peers_connected?: number | null; peers_total?: number | null },
     waited: number,
@@ -4696,12 +3959,7 @@ export class CallManager {
     return waited > CallManager.NATIVE_VOICE_TIMEOUT_MS
   }
 
-  /** ICE restart com BACKOFF: até MAX_ICE_RESTARTS por peer (1s/4s/9s entre
-   *  tentativas). Antes era 1 tentativa imediata — no 4G/CGNAT o TURN demora
-   *  a alocar e o restart único morria antes de ter rota.
-   *  `force` pula o guard de 'failed': no CGNAT o ICE fica em 'checking'
-   *  para sempre e nunca emite o evento, mas o re-gather ainda é a única
-   *  chance de achar rota. */
+  /** ICE restart com BACKOFF (1s/4s/9s, até MAX_ICE_RESTARTS); force pula guard de 'failed' (CGNAT). */
   private async tryIceRestart(fp: string, pc: RTCPeerConnection, callId: string, force = false) {
     try {
       if (!force && pc.iceConnectionState !== 'failed') return
@@ -4750,24 +4008,7 @@ export class CallManager {
     } catch { /* peer isolado não derruba os demais */ }
   }
 
-  /**
-   * Cria/renegocia a conexão de UM par do mesh.
-   *
-   * ## Regra do mesh que estava faltando: não destruir sessão saudável
-   *
-   * BUG REAL ("numa chamada de grupo um escuta o outro e outro não"): aqui o
-   * PC anterior do par era `close()`ado INCONDICIONALMENTE antes de criar o
-   * novo. Como `createPC` é chamado de vários caminhos (`start`, `joinVoice`,
-   * `onParticipantAdded`, `voice_joined`, `onPeerBack`, retry de ICE), dois
-   * gatilhos próximos fechavam uma conexão que já estava com áudio fluindo e a
-   * nova offer podia nem completar — o par ficava mudo para um dos lados
-   * enquanto os outros dois se ouviam.
-   *
-   * Agora: se já existe PC para este par e ele está **conectado**
-   * (`connected`/`completed`), a chamada vira um no-op. Renegociação legítima
-   * (trocar track, nova mídia) passa por `seedScreenPeers`/`attachLocalStream`,
-   * que usam `replaceTrack` — o caminho certo.
-   */
+  /** Cria/renegocia PC de UM par; PC já conectado NÃO é fechado (bug "um escuta, o outro não"). */
   private async createPC(fp: string, callId: string, initiator: boolean) {
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
     // Medidor: registra os iceServers efetivos (o que foi tentado de verdade).
@@ -4802,15 +4043,7 @@ export class CallManager {
     }
   }
 
-  /**
-   * Re-par pela metade: um lado escuta e o outro não.
-   *
-   * O mesh pode ficar assimétrico (a offer de A chegou em B, mas a de B se
-   * perdeu). Aqui o lado de fingerprint MAIOR refaz a offer — mesma regra
-   * determinística do `voice_joined`, então só UM lado tenta e não há offer
-   * contra offer. Chamado pelo watcher periódico enquanto a chamada estiver
-   * ativa; um par já conectado nunca é tocado.
-   */
+  /** Re-par half-open: lado de fp MAIOR refaz a offer (mesma regra do voice_joined); par conectado intocado. */
   private async repairHalfOpenPairs(): Promise<void> {
     const st = this.state
     if (!st || !isCallPhaseActive(st.phase) || !this.myFp) return
@@ -4866,14 +4099,7 @@ export class CallManager {
       }
       return
     }
-    // RING EM ANDAMENTO: a offer chega ~2s depois do invite, quase sempre
-    // ANTES do usuário clicar em "Aceitar". Negociar aqui fazia a chamada
-    // CONECTAR (e o áudio de quem ligou chegar) com o ring ainda na tela —
-    // o overlay virava "Conectado" sem ninguém atender (bug reproduzido no
-    // e2e; o lado nativo já retém via voice_gate.rs, este é o espelho do
-    // navegador). Retém e o `acceptInbound` aplica no aceite. O critério é o
-    // REGISTRO de aceite (não a fase): o promoteOnSignal já moveu 'incoming'
-    // para 'connecting' antes deste handler rodar.
+    // RING EM ANDAMENTO: offer chega antes do Aceitar — retém (critério = registro de aceite, não fase).
     if (!this.acceptedCalls.has(callId)) {
       if (nativeVoiceAvailable !== true) {
         this.pendingOffers.set(fromFp, { callId, sdp: sdpStr })
@@ -4890,10 +4116,7 @@ export class CallManager {
       try { pc.close() } catch { /* ignore */ }
       this.pcs.delete(fromFp)
       this.localIce.delete(fromFp)
-      // `pendingIce` é da geração de ICE ANTERIOR (ufrag antigo). Deixá-lo
-      // aqui fazia o PC novo receber candidatos que nunca seriam aceitos
-      // (rejeitados em silêncio) — em rede ruim o ICE restart podia nunca
-      // completar e a chamada caía por timeout.
+      // pendingIce da geração ANTERIOR (ufrag antigo): descarta, senão candidatos são rejeitados em silêncio.
       this.pendingIce.delete(fromFp)
       pc = undefined
     }
@@ -4930,9 +4153,7 @@ export class CallManager {
     }
     try {
       await pc.setRemoteDescription(offer)
-      // Uma renegociação pode terminar depois de o usuário já ter encerrado
-      // esta chamada e iniciado outra com o mesmo peer. Sem conferir o ID e a
-      // instância do PC, a resposta antiga podia sair no meio da sessão nova.
+      // Renegociação pode terminar após a chamada já ter mudado: confere ID e instância do PC.
       if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       this.lastRemoteOffer.set(fromFp, sdpStr)
       // candidatos do ofertante podem ter chegado antes desta offer (relay)
@@ -4942,10 +4163,7 @@ export class CallManager {
       if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       await services.callAnswer(fromFp, callId, JSON.stringify(answer)).catch(() => {})
     } catch (e) {
-      // Antes era `/* silent */`: uma falha de setRemoteDescription/createAnswer
-      // deixava o PC pela metade, sem erro e sem log — a chamada ficava muda em
-      // "Conectando…" e não havia como saber por quê. Log honesto: falha de
-      // sinalização é a pista nº1 de "às vezes não pega".
+      // Log honesto de falha de sinalização (antes era silêncio total — "às vezes não pega").
       console.warn(`[call] falha ao responder offer de ${fromFp.slice(0, 8)}: ${(e as Error)?.message ?? e}`)
     }
   }
@@ -4974,9 +4192,7 @@ export class CallManager {
   }
 
   private async handleIce(fromFp: string, callId: string, candidateStr: string, mid: string) {
-    // Callbacks de uma chamada encerrada não podem contaminar a seguinte. Sem
-    // estado local ainda, porém, o ICE pode legitimamente chegar antes do ring
-    // pelo transporte; nesse caso fica numa fila isolada pelo call_id.
+    // Callbacks de chamada encerrada não contaminam a seguinte (fila por call_id).
     if (!fromFp || fromFp === this.myFp || this.endedCalls.has(callId)) return
     if (this.state && this.state.callId !== callId) return
     // Relay "áudio via sinalização" chega pelo mesmo callIce (mid 'audio-relay').
@@ -4998,10 +4214,7 @@ export class CallManager {
       }
     } catch { /* nunca derruba o bus */ }
     const pc = this.pcs.get(fromFp)
-    // O `mid` do frame é necessário para o candidato do lado NATIVO: o Rust
-    // envia o candidato cru e o `mid` separado (`CallIce{mid}`). Sem repassar,
-    // `parseWireCandidate` devolvia `sdpMLineIndex: 0` fixo e candidatos de
-    // m-lines diferentes eram aplicados na primeira — rejeitados em silêncio.
+    // O mid do frame separa o candidato cru do Rust — sem ele, m-lines diferentes caíam na primeira.
     const cand = parseWireCandidate(candidateStr, mid)
     if (!cand) return
     // Sem PC ou sem remoteDescription: GUARDA (não descarta). O flush acontece
@@ -5033,9 +4246,7 @@ export class CallManager {
     try {
       await pc.addIceCandidate(cand)
     } catch (e) {
-      // Antes era `catch {}` puro: um candidato recusado sumia sem rastro e o
-      // diagnóstico mostrava "ICE connected" com a malha muda. Log curto, só
-      // o suficiente para provar o formato/`mid` errado.
+      // Log curto de candidato recusado (antes sumia sem rastro; diagnóstico provava formato/mid errado).
       console.debug(
         `[call] candidato ICE recusado (${cand.sdpMid ?? cand.sdpMLineIndex ?? '?'}): ${(e as Error)?.message ?? e}`,
       )
@@ -5061,17 +4272,12 @@ export class CallManager {
     if (!isAndroidRuntime()) return
     try {
       void import('@tauri-apps/api/core').then(({ invoke }) => {
-        // Android 13+ exige POST_NOTIFICATIONS para o FGS mostrar a notificação
-        // permanente. Sem ela o serviço sobe MUDO (mic aberto sem indicador) e
-        // o usuário não tem como saber que a chamada continua. Pedimos no
-        // momento da chamada, que é quando o pedido faz sentido.
+        // Android 13+: POST_NOTIFICATIONS é exigida p/ o FGS mostrar notificação (pede no momento da chamada).
         void services.notificationPermission().then((state) => {
           if (state === 'prompt') void services.notificationRequestPermission().catch(() => {})
         }).catch(() => {})
         invoke('plugin:callfg|start').catch((e) => {
-          // Antes era `catch(() => {})`: se o FGS não subisse (Android 14
-          // `ForegroundServiceStartNotAllowed`, mic negado → SecurityException),
-          // o microfone era cortado ao minimizar SEM NENHUM aviso.
+          // FGS que não sobe (Android 14) cortava o mic ao minimizar SEM aviso — log honesto.
           this.onCallNotice?.(
             'não consegui manter a chamada em segundo plano — o microfone pode ser cortado ao minimizar',
           )
@@ -5098,10 +4304,7 @@ export class CallManager {
     // O roster é da chamada que está terminando: sem parar o timer, ele
     // continuaria consultando um canal do qual já saímos.
     this.stopRosterReconcile()
-    // Captura NATIVA (câmera/tela) antes de qualquer coisa: o `leave` já pede,
-    // mas `cleanup` também é alcançado por outros caminhos e um encoder
-    // `ximagesrc`/`v4l2src` aberto segura o device até reiniciar o app — e a
-    // chamada SEGUINTE herra "device busy" sem explicação.
+    // Captura NATIVA antes de tudo: encoder aberto segura o device até reiniciar o app ("device busy").
     try {
       const st = this.state
       if ((st as any)?.nativeMedia) {
@@ -5121,10 +4324,7 @@ export class CallManager {
     this.clearIceRestartTimers()
     try { this.lastStats.clear() } catch { /* ignore */ }
     try { this.lastNativeStats = null } catch { /* ignore */ }
-    // Mantém lastFailureCause para o toast pós-fim (getPhase pós-leave);
-    // nova chamada zera (ver start/acceptInbound/joinVoice).
-    // Timer do grace relay antes do stopRelayFull (que já o cancela): garante
-    // que nenhum "connected" chega depois da chamada encerrada.
+    // Mantém lastFailureCause p/ toast pós-fim; timer do grace relay cancelado antes do stopRelayFull.
     this.clearRelayFallbackTimer()
     try { this.stopRelayFull() } catch { /* ignore */ }
     this.badWindows = 0
@@ -5159,10 +4359,7 @@ export class CallManager {
   }
 }
 
-// Detecta a voz nativa uma vez, no carregamento do módulo. Sem `await`: quem
-// chama `getCallsSupport()` no mesmo tick ainda vê 'none' de forma síncrona,
-// quem chama depois já vê 'full'. É fire-and-forget de propósito — não pode
-// travar o boot nem rejeitar.
+// Detecta a voz nativa uma vez no boot, fire-and-forget (não trava nem rejeita).
 void detectNativeVoice()
 
 export const callManager = new CallManager(() => {
@@ -5182,8 +4379,6 @@ let cachedCallIdentity: { fingerprint: string; nickname: string } | null = null
 /** Shells chamam ao carregar/trocar/limpar identidade — sem isso chamadas falham com "sem identidade". */
 export function setCallIdentity(id: { fingerprint: string; nickname: string } | null) {
   cachedCallIdentity = id
-  // Identidade nova = engine novo: a disponibilidade de voz nativa pode ter
-  // mudado (cofre trancado → desbloqueado). Re-pergunta em vez de confiar no
-  // cache do boot.
+  // Identidade nova = engine novo: re-pergunta a voz nativa em vez de confiar no cache do boot.
   void detectNativeVoice(true)
 }

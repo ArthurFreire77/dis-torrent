@@ -1,21 +1,10 @@
 /**
- * Renderizador de markdown no dialeto EXATO do Discord.
- *
- * Por que um parser próprio e não uma lib: o Discord não usa CommonMark. A
- * sintaxe dele éZsingular — `__sublinhado__` (não negrito), `*itálico*`,
- * `**negrito**`, `~~tachado~~`, `# H1`, `-# subtexto`, `||spoiler||`,
- * `/spoiler` e bloco ```. Uma lib genérica erraria metade disso, e o projeto
- * é local-first: não queremos adicionar dependência por um parser de 200 linhas.
- *
- * Parser em duas passagens: PRIMEIRO um scanner de blocos (linha a linha →
- * code block, heading, lista, citação), DEPOIS um scanner inline por linha.
- * Isso é o que permite que `` `code` `` dentro de um bullet não quebre o
- * bullet, e que um ``` abra/feche corretamente mesmo cercado de texto.
- *
- * Segurança: NUNCA produzimos `dangerouslySetInnerHTML`. Saída é árvore React,
- * então React escapa tudo — não existe XSS possível aqui por construção, e
- * `sanitize.ts` (usado nos bots) continua sendo a barreira do texto que vem do
- * motor. URLs passam por `safeUrl()` que só aceita http/https/mailto.
+ * Renderizador de markdown no dialeto EXATO do Discord (parser próprio: a
+ * sintaxe diverge do CommonMark — `__sublinhado__`, `-#`, `||spoiler||` etc).
+ * Duas passagens: scanner de blocos (linha a linha) e scanner inline — é o que
+ * faz `` `code` `` não quebrar o bullet e o fence abrir/fechar direito.
+ * Segurança: nunca gera HTML (árvore React escapa tudo — sem XSS por
+ * construção); URLs passam por `safeUrl()` (só http/https/mailto).
  */
 
 import { Fragment, useState, type ReactNode } from 'react'
@@ -29,8 +18,7 @@ const SAFE_PROTO = /^(https?:|mailto:)/i
 export function safeUrl(raw: string): string | null {
   const s = raw.trim()
   if (!s) return null
-  // Strip de whitespace/control chars que o navegador ignora ao resolver o
-  // esquema ("java\tscript:" continua sendo javascript: no motor).
+  // Strip de whitespace/control chars que o navegador ignora ao resolver o esquema.
   // eslint-disable-next-line no-control-regex
   const stripped = s.replace(/[\u0000-\u0020\s]/g, '')
   if (!SAFE_PROTO.test(stripped)) return null
@@ -139,9 +127,8 @@ type Token =
   | { t: 'br' }
 
 /**
- * Casa um par de delimitadores e devolve os tokens internos.
- * Devolve null se não houver fechamento válido — aí o texto é literal, que é
- * exatamente o comportamento do Discord (`*sem fechamento*` fica com asterisco).
+ * Casa um par de delimitadores e devolve os tokens internos; sem fechamento
+ * válido devolve null (texto literal, como o Discord faz).
  */
 function tryDelimited(
   src: string,
@@ -312,9 +299,7 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- ênfase ----------------------------------------------------------
-    // Ordem importa: primeiro o par (negrito/sublinhado), depois o simples
-    // (itálico). Sem isso `**a**` seria lido como itálico de `*` + resto.
+    // --- ênfase: par (negrito/sublinhado) antes do simples (itálico) ---
     if (ch === '_' || ch === '*') {
       const isDbl = src[i + 1] === ch
       const pair = ch + ch
@@ -622,9 +607,7 @@ function renderBlock(
 
   const flushList = (listKey: string) => {
     if (!listRun.length) return
-    // Aninha por nível de indent: itens com indent maior que o do pai viram
-    // filhos, recursivamente. Índices são posicionais (não-usados como chave de
-    // identidade) porque indent pode repetir em listas separadas.
+    // Aninha itens por nível de indent, recursivamente.
     const renderItems = (items: typeof listRun, depth: number): ReactNode => (
       <ul key={`${listKey}.u${depth}`} style={{ margin: '2px 0', paddingLeft: 20, listStyle: 'none' }}>
         {items.map((it, i) => {

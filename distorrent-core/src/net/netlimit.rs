@@ -1,36 +1,9 @@
-//! Limites de rede centralizados — rate limits, concorrência e tetos de recursos
-//! para TODOS os caminhos de entrada do motor (TCP, discovery UDP, relay, sessões).
-//!
-//! POR QUÊ ESTE MÓDULO EXISTE: o `antispam` limita MENSAGENS (10/10s por peer,
-//! política de conteúdo) e o `authlimit` limita tentativas de VAULT — mas nenhum
-//! dos dois protege o TRANSPORTE. Antes deste módulo:
-//! - cada `accept()` TCP spawnava uma task de handshake sem freio (um host
-//!   malicioso abria milhares de handshakes concorrentes = CPU/RAM);
-//! - um peer AUTENTICADO podia inundar a sessão com frames de 1 MiB a taxa
-//!   ilimitada (o limite por frame não limita a TAXA — limite de mensagens
-//!   por segundo NÃO substitui limite de BYTES por mensagem);
-//! - datagramas de discovery UDP (porta 45900) chegavam sem limite por origem;
-//! - cada Hello NOVO (eph fresco) no relay nascia um respondente novo;
-//! - nada limitava quantos loops de dial outbound viviam ao mesmo tempo.
-//!
-//! Taxa ≠ tamanho: um teto de frames/s não evita um frame de 1 MiB; um teto de
-//! bytes não é isso que impede 10k frames/s de 1 byte. Aqui os dois existem,
-//! INDEPENDENTES, por peer e globais.
-//!
-//! Política de punição em dois andares (deliberada — não punir rajada legítima):
-//! 1. THROTTLE (token bucket apertado): o excedente é DESCARTADO, a sessão
-//!    sobrevive. Transferência de arquivos em LAN alta velocidade apenas perde
-//!    chunks, e o protocolo reenvia (outbox/ACK/fileSwarm já são idempotentes).
-//! 2. KILL (token bucket muito mais largo): só um bug ou flooding deliberado
-//!    chega aqui — a sessão é ENCERRADA com erro explícito.
-//!
-//! Fail-open NUNCA: se o lock estiver envenenado, trata como `Blocked` (o
-//! código usa `unwrap_or_else(|e| e.into_inner())` como o resto do motor —
-//! um pânico num limiter derrubaria o app para se proteger de flood).
-//!
-//! Tudo configurável por env (`DISTORRENT_LIMIT_*`) e legível pela UI/diagnóstico
-//! (`LimitsSnapshot` via comando Tauri `net_limits`). Contadores NUNCA carregam
-//! conteúdo: só quantidades.
+//! Limites de rede centralizados (rate, concorrência e recursos) para TODO o
+//! transporte — o antispam/authlimit não protegem o TRANSPORTE (handshakes
+//! sem freio, frames a taxa ilimitada, UDP sem limite). Taxa e tamanho são
+//! limitados INDEPENDENTES, por peer e globais. Política em dois andares:
+//! THROTTLE (descarta excedente, sessão sobrevive) e KILL (só abuso/bug —
+//! encerra). Fail-closed no lock; tudo configurável via env (`DISTORRENT_LIMIT_*`).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -46,9 +19,7 @@ const MAP_CAP: usize = 8192;
 // Parâmetros
 // ---------------------------------------------------------------------------
 
-/// Todos os tetos do transporte. Defaults calibrados para uso real:
-/// voz ≈ 50 frames/s, arquivo ≈ 100 chunks/s (25 MB/s em LAN), ICE em rajada
-/// de dezenas — com folga 2-3x acima do legítimo e 5x+ abaixo do abuso.
+/// Todos os tetos do transporte, calibrados 2-3x acima do uso legítimo.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Limits {
     /// Conexões TCP INBOUND por IP de origem por janela de 10s.
@@ -73,12 +44,10 @@ pub struct Limits {
     /// Frames de sessão por peer por 10s (throttle — excedente descartado).
     pub frames_per_peer_10s: u32,
     pub frames_per_peer_burst: u32,
-    /// BYTES de sessão por peer por 10s (throttle) — independente do nº de
-    /// frames: 10k frames de 1B e 1 frame de 10 MiB são coisas diferentes.
+    /// BYTES de sessão por peer por 10s (independente do nº de frames).
     pub bytes_per_peer_10s: u64,
     pub bytes_per_peer_burst: u64,
-    /// Frames por peer por 10s no andar de KILL (5x o throttle). Só bug ou
-    /// flooding chega aqui — sessão encerrada.
+    /// Frames por peer por 10s no andar de KILL (5x o throttle).
     pub frames_kill_per_peer_10s: u32,
     /// Bytes por peer por 10s no andar de KILL (5x o throttle).
     pub bytes_kill_per_peer_10s: u64,
@@ -713,8 +682,7 @@ impl NetLimiter {
 
     /// Variante com relógio injetado (testes determinísticos, sem sleep).
     pub fn allow_frame_in_at(&self, peer_fp: &str, wire_bytes: u64, now: Instant) -> FrameVerdict {
-        // Andar de KILL primeiro: se é abuso, mata logo — não perde tempo
-        // contando no throttle (e o throttle não "protege" quem já morreu).
+        // Andar de KILL primeiro: se é abuso, mata logo (sem gastar throttle).
         let kill_frames = !self
             .frames_kill_ip
             .lock()

@@ -1,12 +1,6 @@
 //! Transporte TCP: frames length-prefixed + handshake autenticado + sessão AEAD.
-//!
-//! Sequência do handshake (iniciador A, respondente B):
-//!   A→B  Hello{fp_A, pub_A, nick, na, eph_A, port}
-//!   B→A  HelloAck{fp_B, pub_B, nick, nb, eph_B, sig_B(transcript)}
-//!   A→B  HelloOk{sig_A(transcript)}
-//! Ambos verificam: fingerprint == blake3(pubkey) e assinatura sobre o transcript
-//! (cobre identidades + nonces + chaves efêmeras → anti-MITM, anti-replay).
-//! Sessão: ChaCha20Poly1305, chave = HKDF(X25519(ephA,ephB), salt=na||nb).
+//! Handshake Hello/HelloAck/HelloOk com transcript assinado (anti-MITM,
+//! anti-replay); sessão ChaCha20Poly1305 com chave HKDF(X25519).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,53 +19,30 @@ use crate::protocol::{
 };
 use crate::{DistorrentError, Result};
 
-/// Teto de UM frame do transporte (sessão e handshake).
-///
-/// Público de propósito: qualquer frame cujo tamanho depende de dado do usuário
-/// (perfil com foto/capa, bloco de arquivo) precisa respeitá-lo ANTES de
-/// enviar — estourar aqui faz o RECEPTOR derrubar a sessão inteira, o que
-/// aparece na UI como "o peer caiu" sem causa aparente.
+/// Teto de UM frame (1 MiB): qualquer frame com dado do usuário precisa
+/// respeitá-lo ANTES de enviar — estourar derruba a sessão do RECEPTOR.
 pub const MAX_FRAME: u32 = 1 << 20; // 1 MiB
-/// TCP direto: falha rápido em LAN (8s por perna, 16s total). NÃO MEXER para
-/// cobrir 4G — o caminho só-relay abaixo tem seus próprios timeouts maiores.
-/// Justificativa: aumentar o global atrasaria detecção de peer morto no TCP
-/// (PING_TIMEOUT 25s) sem necessidade; 4G só usa o relay.
+/// TCP direto: falha rápido (8s); 4G usa só-relay com timeouts próprios.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Timeout de leitura por perna SÓ-RELAY (4G lento): RRC wake 2-3s + poll do
-/// manager ~2s + latência MQTT/ntfy 1-2s + atraso lossy 0-3s + jitter
-/// => pior caso ~10s por voo. 30s dá folga ~3x sem afetar o TCP.
-/// VOZ: handshake é 1x por sessão; voz/sinalização pós-handshake usa a sessão
-/// (reader 150s + outer 60s relay) — este 30s NÃO limita voz contínua, só o
-/// estabelecimento. NÃO reduzir: relay_lossy (20% + 0-3s) precisa dos 30s.
+/// Leitura por perna SÓ-RELAY (4G lento, pior caso ~10s/voo): 30s de folga;
+/// NÃO reduzir (relay_lossy 20% + 0-3s precisa dos 30s; só o estabelecimento).
 pub const RELAY_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Retransmissão do Hello do dial: reenvia o MESMO Hello (mesmo eph/nonce,
-/// mesmo transcript) a cada ~1,5s até Ack ou fim da tentativa. 1 Hello perdido
-/// (20% loss, rádio dormindo, subscribe atrasado) não mata mais a tentativa.
-/// 1,5s (era 3s): com poll de ~0,4-1,5s o Ack chega rápido sem perda; 1,5s
-/// recupera perda mais cedo e encurta o estabelecimento no 4G. Duplicatas são
-/// dedupadas pelo manager (mesmo eph) e pelo respondente (mesmo Ack).
+/// Retransmissão do Hello do dial (mesmo transcript) a cada ~1,5s até Ack:
+/// 1 Hello perdido não mata mais a tentativa; duplicatas são dedupadas.
 pub const RELAY_HELLO_RESEND_INTERVAL: Duration = Duration::from_millis(1500);
-/// Teto total do handshake relay. Cabe dentro do RELAY_HANDSHAKE_TIMEOUT=90s
-/// do engine (respondente); o dial usa RELAY_DIAL_ATTEMPT=40s por fora, que
-/// corta o iniciador em ~13 Hellos. ~26 Hellos cabem em 80s no pior caso.
+/// Teto total do handshake relay (80s; cabe dentro dos 90s do engine).
 pub const RELAY_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_secs(80);
 /// Teto do buffer de frames de sessão que chegam ANTES do HelloOk (flush
 /// imediato do peer + reordenação). Acima disso, aborta (anti-DoS).
 const RELAY_EARLY_STASH_CAP: usize = 4 << 20;
 
-/// Janela de reordenação do receptor de sessão. O relay (MQTT/ntfy) NÃO
-/// preserva ordem: MultiRelay publica cada frame em 6 pernas com atraso
-/// 0–3 s, então um frame N+1 pode chegar antes do N. O nonce ChaCha é
-/// sequencial (dir+counter), então sem tolerância um único reorder/perda
-/// dessincronizava o nonce e MATAVA a sessão inteira. Aqui o receptor tenta
-/// decifrar com counters `recv..recv+JANELA` (AEAD autentica; o counter
-/// correto é o único que valida em 2^-128) e entrega em ordem.
+/// Janela de reordenação do receptor de sessão: o relay NÃO preserva ordem e
+/// o nonce é sequencial — sem janela, um reorder dessincronizava e MATAVA a
+/// sessão. Decifra com counters da janela e entrega em ordem.
 pub const SESSION_REORDER_WINDOW: u64 = 256;
-/// Tempo de espera do frame "cabeça" antes de declarar perda e PULAR o gap
-/// (o frame realmente se perdeu — 20% por perna com 6 pernas ≈ 0,006% por
-/// frame, mas acontece). Sessão segue viva; a camada de outbox/ACK reenvia
-/// a DM perdida. 4 s cobre o atraso máximo do relay (0–3 s) com folga.
+/// Espera do frame "cabeça" antes de pular o gap (frame perdido de verdade);
+/// sessão segue viva — outbox/ACK reenvia a DM. 4s cobre o atraso do relay.
 pub const SESSION_GAP_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn write_frame(w: &mut (dyn AsyncWrite + Unpin + Send), bytes: &[u8]) -> Result<()> {
@@ -134,23 +105,14 @@ async fn read_frame_with(
     Ok(buf)
 }
 
-/// Leitura de SESSÃO (pós-handshake): sem timeout curto — o outer
-/// `timeout(ping_timeout)` no reader loop governa. 150s é só rede de proteção
-/// contra hang eterno (maior que RELAY_PING_TIMEOUT=60s e PING_TIMEOUT=25s,
-/// então o outer sempre dispara primeiro).
-/// VOZ (frames pequenos/frequentes): cada frame — voz, ICE, Ping — reseta o
-/// outer; rajada de voz mantém a sessão viva sem Pings. 150s nunca dispara
-/// antes do outer em voz contínua; NÃO reduzir (perda 20% atrasa voos).
+/// Leitura de SESSÃO: 150s só como proteção contra hang — a liveness é
+/// governada pelo outer `timeout(ping_timeout)` (25s/120s), que dispara antes.
 async fn read_frame_session(r: &mut (dyn AsyncRead + Unpin + Send)) -> Result<Vec<u8>> {
     read_frame_with(r, Duration::from_secs(150)).await
 }
 
-/// Leitura com replay: devolve primeiro os wire-bytes (len+body) de frames de
-/// sessão que chegaram ANTES do HelloOk, depois delega ao stream. É o que
-/// permite o flush IMEDIATO pós-handshake (sem os 5s de espera): o iniciador
-/// posta Msg/Ping logo após o HelloOk e, se um frame de sessão reordenar na
-/// frente do HelloOk, ele é guardado aqui em vez de ser descartado como
-/// "lixo" (o descarte dessincronizava o nonce ChaCha e matava a sessão).
+/// Leitura com replay: devolve primeiro frames de sessão chegados ANTES do
+/// HelloOk (sem isso, descartá-los dessincronizava o nonce e matava a sessão).
 struct ReplayRead {
     buf: Vec<u8>,
     pos: usize,
@@ -346,18 +308,9 @@ impl SessionReader {
     /// `recv` + tamanho do plaintext (para métricas de bytes RX sem
     /// re-serializar o frame).
     pub async fn recv_sized<T: DeserializeOwned>(&mut self) -> Result<(T, usize)> {
-        // Sessão NÃO usa o timeout curto de handshake (8s/30s): a liveness é
-        // governada pelo outer `timeout(ping_timeout)` em register_and_run
-        // (25s direto, 120s relay). Inner de 150s nunca dispara antes do outer
-        // — sem isso, sessão relay idle morria em 8s (antes do 1º Ping de 30s).
-        //
-        // Ordenação: o relay reordena (MultiRelay publica N cópias com atraso
-        // 0–3 s e cada perna entrega quando quer). Como o nonce é sequencial,
-        // entregar fora de ordem dessincronizava a sessão. Aqui deciframos com
-        // uma JANELA de counters (o AEAD só valida no counter certo) e
-        // entregamos estritamente em ordem. Gap (frame perdido de verdade) é
-        // pulado após SESSION_GAP_TIMEOUT — a sessão sobrevive e o outbox/ACK
-        // reenvia a DM. Strays de handshake continuam sendo ignorados.
+        // Sessão usa timeout longo (150s): a liveness real é do outer
+        // ping_timeout (25s/120s). Ordenação: decifra com JANELA de counters e
+        // entrega em ordem; gap de perda é pulado após SESSION_GAP_TIMEOUT.
         loop {
             // 1) cabeça já bufferizada? Entrega (fast-path em ordem também cai aqui).
             if let Some(pt) = self.pending.remove(&self.counter) {
@@ -435,8 +388,7 @@ impl SessionReader {
                     }
                 }
                 None => {
-                    // Stray de handshake (Hello/Ack/Ok duplicados) OU lixo:
-                    // não consome nonce e não mata a sessão.
+                    // Stray de handshake OU lixo: não consome nonce, não mata sessão.
                     if serde_json::from_slice::<HandshakeFrame>(&ct).is_ok() {
                         continue;
                     }
@@ -455,25 +407,18 @@ fn build_nonce(dir: u8, counter: u64) -> Nonce {
     Nonce::from(n)
 }
 
-/// Executa handshake sobre stream novo. Retorna sessão cifrada + info do peer.
-/// Versão do protocolo de sessão deste build (anunciada no Hello/HelloAck).
-/// v2 = entende os frames do túnel virtual (TunnelOffer/Answer/Data); v1
-/// NUNCA recebe esses frames (desserializar variante desconhecida derruba
-/// a sessão legada — o gate é `peer_proto_v >= 2` no emissor).
+/// Executa handshake sobre stream novo. `PROTO_V`: v2+ entende o túnel
+/// virtual; variante desconhecida derruba sessão legada (gate no emissor).
 pub const PROTO_V: u32 = 3;
 
-/// Dial furador de NAT (hole punching estilo torrent): conecta A PARTIR da
-/// porta de escuta local (SO_REUSEPORT) para o endpoint público do peer.
-/// Se ambos furarem ao mesmo tempo (coordenado via Punch), NATs full-cone e
-/// restricted deixam passar — sem servidor no caminho de dados.
-/// Retorna Err rápido (8s) se o NAT não colaborar (ex.: simétrico).
+/// Dial furador de NAT: conecta A PARTIR da porta do listener (reuseport) —
+/// furo coordenado via Punch; Err rápido se o NAT não colaborar (simétrico).
 pub async fn punch_dial(local_port: u16, remote: std::net::SocketAddr) -> Result<TcpStream> {
     let socket = match remote.ip() {
         std::net::IpAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
         std::net::IpAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
     };
-    // SO_REUSEPORT (Unix) / SO_REUSEADDR (Windows): discar a partir da MESMA
-    // porta do listener (hole punch). Windows não tem reuseport.
+    // reuseport/reuseaddr: discar a partir da MESMA porta do listener.
     #[cfg(unix)]
     socket.set_reuseport(true)?;
     #[cfg(windows)]
@@ -491,11 +436,8 @@ pub async fn punch_dial(local_port: u16, remote: std::net::SocketAddr) -> Result
     Ok(stream)
 }
 
-/// Probe UDP best-effort "junto" do furo TCP (estilo µTP/STUN). Abre um socket
-/// UDP efêmero e dispara datagramas-máquina ao endpoint do peer: em NATs
-/// endpoint-independent isso abre um pinhole e sinaliza o par; NÃO é transporte
-/// de dados (o TCP segue sendo o transporte). Nunca falha o furo TCP — erro
-/// vira `debug!`. Timeout curto e bounded (~0,6s) para não atrasar os dials.
+/// Probe UDP best-effort do furo TCP (abre pinhole em NATs
+/// endpoint-independent); nunca falha o furo, timeout bounded ~0,6s.
 pub async fn udp_punch_probe(remote: std::net::SocketAddr) {
     use tokio::net::UdpSocket;
     let bind = match remote {
@@ -505,7 +447,7 @@ pub async fn udp_punch_probe(remote: std::net::SocketAddr) {
     let Ok(sock) = UdpSocket::bind(bind).await else {
         return;
     };
-    // magic só p/ identificar ruído de furo (não é protocolo de sessão)
+    // magic só p/ identificar ruído de furo
     const PROBE: &[u8] = b"DisTorrent-PUNCH1";
     for i in 0..3u8 {
         let _ = sock.send_to(PROBE, remote).await;
@@ -513,7 +455,7 @@ pub async fn udp_punch_probe(remote: std::net::SocketAddr) {
             tokio::time::sleep(Duration::from_millis(120)).await;
         }
     }
-    // best-effort: se o par respondeu, o pinhole de volta abriu; não bloqueia.
+    // best-effort: não bloqueia.
     let mut buf = [0u8; 64];
     let _ = tokio::time::timeout(Duration::from_millis(200), sock.recv_from(&mut buf)).await;
     debug!(%remote, "hole punch: probe UDP enviado (best-effort)");
@@ -683,15 +625,9 @@ where
     })
 }
 
-/// Handshake SÓ-RELAY (4G adverso): mesmo protocolo/autenticação do TCP
-/// (Hello/HelloAck/HelloOk + transcript ed25519 + HKDF), mas com:
-/// - leitura por perna de 30s (`RELAY_HANDSHAKE_READ_TIMEOUT`) em vez de 8s;
-/// - iniciador retransmite o MESMO Hello a cada ~3s até Ack ou teto total;
-/// - respondente reenvia o MESMO Ack ao ver Hello duplicado (retransmissão);
-/// - iniciador envia HelloOk 3x (com filtro do manager, extras pós-online são
-///   descartadas — sobrevive a 20% de perda: P(3 perdidos)=0.8%).
-///
-/// Tópico `distorrent_r_<fp>` e envelope inalterados (compat 4.3.1/4.3.2).
+/// Handshake SÓ-RELAY (4G adverso): mesmo protocolo do TCP, com leitura por
+/// perna de 30s, Hello retransmitido, Ack reenviado e HelloOk 3x (sobrevive
+/// a 20% de perda). Tópico/envelope inalterados (compat).
 pub async fn handshake_stream_relay<S>(
     stream: S,
     keypair: Arc<Keypair>,
@@ -763,9 +699,8 @@ where
                             ));
                         }
                         let sig = keypair.sign(&transcript);
-                        // HelloOk 3x: sobrevive a perda sem criar sessão half-open.
-                        // Extras que chegarem após o respondente fechar o handshake
-                        // são descartadas pelo relay_manager_loop (peer já online).
+                        // HelloOk 3x: sobrevive a perda; extras pós-online são
+                        // descartadas pelo manager.
                         for _ in 0..3 {
                             send_json(
                                 &mut write,
@@ -790,14 +725,10 @@ where
                         });
                     }
                     Ok(HandshakeFrame::Hello(peer_hello)) => {
-                        // Dial cruzado (ambos discaram juntos — comum após disconnect
-                        // bilateral): eleição determinística pelo fingerprint, SEM
-                        // retry/jitter (que recolide em livelock simétrico).
-                        // - Menor fp: IGNORA o Hello alheio, reenvia o próprio e segue
-                        //   esperando o Ack (o maior vai virar respondente).
-                        // - Maior fp: DESISTE do dial e VIRA respondente do Hello
-                        //   recebido (mesmo eph/nonce, mesma stream — sem nova
-                        //   tentativa). Converge em 1 rodada.
+                        // Dial cruzado: eleição determinística pelo fingerprint
+                        // (sem retry/jitter, que recolide em livelock). Menor fp
+                        // segue como iniciador; maior vira respondente do Hello
+                        // recebido (mesma stream). Converge em 1 rodada.
                         if peer_hello.fp == my_fp {
                             continue; // auto-Hello (loopback): ignora
                         }
@@ -931,8 +862,7 @@ where
                     }
                 },
                 Err(e) if is_relay_timeout(&e) => {
-                    // Sem Ack em ~3s: Hello se perdeu (loss/rádio/subscribe) —
-                    // reenvia o MESMO Hello (mesmo transcript) e espera de novo.
+                    // Sem Ack: reenvia o MESMO Hello (mesmo transcript) e espera.
                     send_json(&mut write, &HandshakeFrame::Hello(hello.clone())).await?;
                     continue;
                 }
@@ -940,10 +870,8 @@ where
             }
         }
     } else {
-        // Respondente: o primeiro Hello já está na fila (spawn_relay_responder
-        // injeta first_frame), mas espera até 30s por robustez. Frames de
-        // sessão que furaram a fila (corrida no manager) vão ao stash p/
-        // replay, não ao descarte.
+        // Respondente: espera o Hello (até 30s); frames de sessão precoces vão
+        // ao stash p/ replay, não ao descarte.
         let mut stashed: Vec<u8> = Vec::new();
         let hello: Hello = loop {
             let body = read_frame_with(&mut read, RELAY_HANDSHAKE_READ_TIMEOUT).await?;
@@ -1011,18 +939,15 @@ where
                         });
                     }
                     Ok(HandshakeFrame::Hello(dup)) if dup.fp == hello.fp => {
-                        // Mesmo Hello (mesmo eph/nonce) = nosso Ack se perdeu ou o
-                        // dial reenviou por timeout de 3s. Reenvia o MESMO Ack.
+                        // Mesmo Hello: nosso Ack se perdeu — reenvia o MESMO Ack.
                         if dup.eph_pub == hello.eph_pub && dup.nonce == hello.nonce {
                             let _ =
                                 send_json(&mut write, &HandshakeFrame::HelloAck(ack.clone())).await;
                             continue;
                         }
-                        // Hello NOVO (novo dial com eph/nonce diferentes) enquanto o
-                        // respondente antigo ainda vive: falha rápido para o manager
-                        // limpar a entrada e um respondente novo nascer com o Hello
-                        // novo (retransmitido em ~5s). Sem isso o dial novo receberia
-                        // o Ack velho (transcript errado) e travaria até 80s.
+                        // Hello NOVO (outro dial, eph/nonce diferentes): falha
+                        // rápido para o manager eleger respondente novo — sem
+                        // isso o dial novo receberia o Ack velho e travaria 80s.
                         return Err(DistorrentError::Protocol(
                             "novo Hello durante handshake — reeleição".into(),
                         ));
@@ -1038,8 +963,7 @@ where
                     }
                 },
                 Err(e) if is_relay_timeout(&e) => {
-                    // Sem HelloOk em 30s: reenvia o Ack como nudge (cobre Ack
-                    // perdido onde o dial segue reenviando Hello) e espera mais.
+                    // Sem HelloOk: reenvia o Ack como nudge e espera mais.
                     if tokio::time::Instant::now() >= deadline {
                         return Err(DistorrentError::Protocol(
                             "handshake relay timeout (responder)".into(),

@@ -1,36 +1,5 @@
-//! SEGUNDO PLANO DO DESKTOP — bandeja, fechar-para-bandeja, inicialização
-//! automática e notificações nativas.
-//!
-//! ## Por que este módulo existe
-//!
-//! Antes, fechar a janela matava o processo: nenhuma mensagem, chamada ou
-//! notificação chegava depois disso. O app era "abrir para ver se chegou algo".
-//!
-//! Agora o DisTorrent continua vivo **de forma visível**: um ícone na bandeja
-//! do sistema, com menu para abrir, ver o estado real da conexão e sair de
-//! verdade. Não existe processo escondido, nem persistência obscura — o
-//! usuário vê e controla o que está rodando.
-//!
-//! ## Decisões deliberadas (antivírus / transparência)
-//!
-//! - **Inicialização automática** pelo plugin oficial do Tauri
-//!   (`tauri-plugin-autostart`), que grava a chave `Run` do USUÁRIO
-//!   (`HKCU\...\CurrentVersion\Run`) pela API do Windows. Nada de
-//!   `reg.exe`/PowerShell/script — disparar shell para escrever persistência é
-//!   exatamente o padrão que heurística de AV marca como suspeito.
-//! - **Notificações** pelo plugin oficial (`tauri-plugin-notification`), que no
-//!   Windows usa toast WinRT com o AppUserModelID do PRÓPRIO app (o atalho do
-//!   Menu Iniciar criado pelo instalador registra esse ID). Nada de janela
-//!   falsa imitando aviso do Windows, nada de PowerShell toast.
-//! - **Sem evasão**: nenhuma API do Defender é tocada, nenhum processo é
-//!   ocultado, nenhum binário é baixado em runtime.
-//!
-//! ## O que este módulo NÃO decide
-//!
-//! Presença. Conexão ≠ presença: o ícone da bandeja reflete só o estado da
-//! REDE. Se o usuário está "online/ausente/não perturbe" é decidido na camada
-//! de presença (`src/services/appState.ts`), que rebaixa para "ausente" quando
-//! a interface não está em uso — mesmo com o processo conectado.
+//! Segundo plano do desktop: bandeja, autostart e notificações nativas,
+//! sempre de forma visível ao usuário (plugins oficiais, sem evasão de AV).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -47,8 +16,7 @@ use crate::AppState;
 const KV_CLOSE_TO_TRAY: &str = "ui.close_to_tray";
 /// Preferência: abrir já minimizado (bandeja) na inicialização automática.
 const KV_START_MINIMIZED: &str = "ui.start_minimized";
-/// O usuário já decidiu sobre abrir junto com o Windows? (ver `autostart_ensure`).
-/// Sem esta marca o app religaria a cada boot o que ele próprio desligou.
+/// Usuário já decidiu sobre autostart? Sem a marca, o boot religaria o que ele desligou.
 const KV_AUTOSTART_DECIDED: &str = "ui.autostart_decided";
 
 /// Estado do segundo plano do desktop. Um único `manage()` no setup.
@@ -63,9 +31,7 @@ pub struct Background {
     ring_active: AtomicBool,
     /// Chamada cujo toque está ativo (só para diagnóstico/limpeza).
     ring_call: Mutex<Option<String>>,
-    /// id da notificação → conversa que ela representa (para abrir a conversa
-    /// certa ao clicar). O id é estável por conversa, então uma mensagem nova
-    /// SUBSTITUI a notificação anterior daquela conversa (sem pilha de avisos).
+    /// id da notificação → conversa (id estável: mensagem nova substitui a anterior).
     notif_targets: Mutex<HashMap<i32, String>>,
     /// Não-lidas agregadas mostradas no tooltip da bandeja.
     unread: AtomicUsize,
@@ -208,12 +174,7 @@ pub fn autostart_set(
     autostart_is_enabled(&app)
 }
 
-/// Ligamento automático do autostart + estado REAL do SO.
-///
-/// O ligamento em si acontece uma vez no `init` do segundo plano; este comando
-/// repete a regra de forma idempotente para a UI pedir o estado já reconciliado
-/// (útil quando o `init` rodou antes do `AppState` existir). Depois de
-/// `autostart_set` nada mais é automático.
+/// Reconcilia o autostart de forma idempotente e devolve o estado REAL do SO.
 #[tauri::command]
 pub fn autostart_ensure(app: AppHandle, state: State<AppState>) -> Result<bool, String> {
     if kv_bool(&state, KV_AUTOSTART_DECIDED, false) {
@@ -235,20 +196,14 @@ pub fn autostart_ensure(app: AppHandle, state: State<AppState>) -> Result<bool, 
     }
 }
 
-/// Marca que o usuário tomou uma decisão sobre o autostart.
-///
-/// Sem isto o `autostart_ensure` religaria a cada boot o que ele desligou —
-/// um checkbox impossível de desmarcar.
+/// Marca a decisão do usuário sobre autostart (evita religar a cada boot).
 #[tauri::command]
 pub fn autostart_mark_decided(state: State<AppState>, enabled: bool) -> Result<(), String> {
     kv_set_bool(&state, KV_AUTOSTART_DECIDED, enabled);
     Ok(())
 }
 
-/// Id estável e positivo por chave (mesma fórmula do `notificationRules.ts` do
-/// frontend: `notificationIdFor`). Repetir a conta aqui é o que permite o Rust
-/// SUBSTITUIR o aviso da conversa que o JS criou, e vice-versa — sem dois avisos
-/// para a mesma conversa.
+/// Id estável e positivo por chave (mesma fórmula do JS) para substituir avisos.
 pub fn notification_id_for(key: &str) -> i32 {
     let mut h: i32 = 5381;
     for b in key.as_bytes() {
@@ -257,8 +212,7 @@ pub fn notification_id_for(key: &str) -> i32 {
     (h.unsigned_abs() % 2_000_000_000) as i32 + 1
 }
 
-/// Mostra a notificação do sistema. `id` é estável por conversa (quem chama
-/// calcula), então a mensagem nova SUBSTITUI a anterior em vez de empilhar.
+/// Mostra a notificação do sistema com id estável (substitui, não empilha).
 #[tauri::command]
 pub fn notification_show(
     app: AppHandle,
@@ -272,8 +226,7 @@ pub fn notification_show(
     notification_show_inner(&app, id, title, body, conversation, silent, false)
 }
 
-/// Versão sem `State` — usada pelo pump de eventos do motor, que precisa
-/// notificar mesmo quando a UI nunca chamou nada (janela escondida/Android).
+/// Versão sem `State` para o pump do motor notificar com a janela escondida.
 pub fn notification_show_inner(
     app: &AppHandle,
     id: i32,
@@ -287,8 +240,7 @@ pub fn notification_show_inner(
         bg.remember_target(id, conversation.as_deref());
     }
     let mut builder = app.notification().builder().id(id).title(title).body(body);
-    // Android: canais SEPARADOS (mensagem × chamada) — o usuário silencia um
-    // sem silenciar o outro nas configurações do sistema.
+    // Android: canais separados (mensagem × chamada) para silenciar um sem o outro.
     #[cfg(target_os = "android")]
     {
         // O toque no aviso remove a notificação na hora.
@@ -324,15 +276,8 @@ pub fn notification_cancel(app: AppHandle, bg: State<Background>, id: i32) {
     let _ = app.notification().remove_active(vec![id]);
 }
 
-/// Espelha no Rust as preferências de aviso que vivem no `localStorage`.
-///
-/// O aviso nativo é disparado pelo MOTOR (para funcionar com a janela
-/// escondida), e o motor não tem acesso ao `localStorage` da WebView. Sem este
-/// espelho, "silenciar canal"/"desligar notificações" na UI não teria efeito
-/// com o app no fundo — o usuário desligaria e continuaria recebendo.
-///
-/// `policy` é o JSON produzido por `notificationPolicyJson()` no frontend:
-/// `{ "default": "all|mentions|none", "channels": {id: level}, "servers": [id] }`.
+/// Espelha as preferências de aviso do localStorage para o Rust (o motor não
+/// vê a WebView). `policy`: `{"default":..., "channels":{id:level},"servers":[id]}`.
 #[tauri::command]
 pub fn notify_prefs_set(
     state: State<AppState>,
@@ -383,8 +328,7 @@ pub fn notification_request_permission(app: AppHandle) -> String {
     }
 }
 
-/// Abre (e foca) a janela principal. Usado pela bandeja e pelo clique na
-/// notificação.
+/// Abre (e foca) a janela principal — bandeja e clique na notificação.
 #[tauri::command]
 pub fn app_show_window(app: AppHandle) {
     show_window(&app);
@@ -408,8 +352,7 @@ pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {
             engine.shutdown();
         }
     }
-    // A bandeja some junto com o processo; remover antes evita um ícone órfão
-    // no Windows por alguns segundos.
+    // Remover a bandeja antes evita ícone órfão no Windows por alguns segundos.
     #[cfg(desktop)]
     {
         if let Ok(mut t) = bg.tray.lock() {
@@ -423,25 +366,17 @@ pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {
 
 /// Intervalo de um toque de chamada.
 const RING_INTERVAL: Duration = Duration::from_millis(1800);
-/// Teto de segurança: nenhum toque fica ativo além disso (a sinalização de
-/// chamada recebida expira em ~60 s; se a UI não parar, o Rust para).
+/// Teto de segurança: se a UI não parar o toque, o Rust para sozinho.
 const RING_MAX: Duration = Duration::from_secs(90);
 
-/// TOQUE DE CHAMADA dirigido pelo RUST (desktop/Windows).
-///
-/// BUG que isto corrige: o toque era um `setInterval` da página disparando
-/// WebAudio. Com a janela escondida na bandeja, o Chromium **estrangula
-/// timers** de páginas ocultas (1×/min depois de alguns minutos) — o telefone
-/// "tocava" uma vez e depois ficava mudo, justamente no cenário de segundo
-/// plano que a gente acabou de habilitar. Aqui quem marca o ritmo é o processo
-/// nativo (thread própria); a página só toca o bipe a cada evento recebido.
+/// Toque de chamada dirigido pelo RUST: timers de página oculta sofrem
+/// throttling do Chromium; a thread nativa não sofre throttling.
 #[tauri::command]
 pub fn call_ring_start(app: AppHandle, bg: State<Background>, call_id: String) {
     if let Ok(mut c) = bg.ring_call.lock() {
         *c = Some(call_id);
     }
-    // Já tocando: mantém o loop existente (evita dois toques sobrepostos quando
-    // o mesmo `call_incoming` é reenviado).
+    // Já tocando: mantém o loop (evita dois toques sobrepostos).
     if bg.ring_active.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -471,8 +406,7 @@ pub fn call_ring_stop(bg: State<Background>) {
     }
 }
 
-/// Estado REAL da rede para o tooltip da bandeja. Não é presença: o tooltip
-/// diz "conectado" mesmo que o usuário esteja ausente para os contatos.
+/// Estado REAL da rede para o tooltip da bandeja (não é presença).
 #[tauri::command]
 pub fn background_set_connection(
     bg: State<Background>,
@@ -528,8 +462,7 @@ fn autostart_apply<R: tauri::Runtime>(app: &AppHandle<R>, enabled: bool) -> Resu
     }
 }
 
-/// No Android não existe autostart de app (o sistema não permite). Devolver
-/// erro honesto é melhor que um botão que finge funcionar.
+/// No Android não existe autostart: erro honesto em vez de botão que finge.
 #[cfg(mobile)]
 fn autostart_is_enabled<R: tauri::Runtime>(_app: &AppHandle<R>) -> Result<bool, String> {
     Ok(false)
@@ -554,25 +487,21 @@ fn tray_available(bg: &Background) -> bool {
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
-        // `unminimize` só existe no desktop: no Android o `WebviewWindow` não
-        // expõe essa API e o build quebrava (E0599) — o app mobile nunca fica
-        // minimizado nesse sentido, então basta mostrar/focar.
+        // `unminimize` só existe no desktop (Android: E0599); lá basta mostrar/focar.
         #[cfg(desktop)]
         {
             let _ = w.unminimize();
         }
         let _ = w.set_focus();
     }
-    // A janela voltou: a camada de presença sobe de "ausente" para o que o
-    // usuário escolheu (`src/services/appState.ts`).
+    // Janela voltou: a camada de presença sobe de "ausente" para o estado escolhido.
     let _ = app.emit(
         "distorrent://activity",
         serde_json::json!({ "active": true }),
     );
 }
 
-/// Avisa a UI que a janela saiu da tela (bandeja). Chamado do close handler e
-/// do comando `app_hide_to_tray`.
+/// Avisa a UI que a janela saiu da tela (bandeja).
 pub fn emit_hidden(app: &AppHandle) {
     let _ = app.emit(
         "distorrent://activity",
@@ -593,9 +522,7 @@ fn refresh_tray(bg: &Background) {
         "DEGRADED" => ("conexão instável", "🟡"),
         _ => ("sem conexão", "⚪"),
     };
-    // Tooltip e item de status mostram só o estado da REDE. A presença do
-    // usuário é outra coisa (e fica na UI): o ícone não pode dizer "online"
-    // só porque o processo está conectado.
+    // Tooltip mostra só o estado da REDE; presença fica na UI.
     let tip = if unread > 0 {
         format!("DisTorrent — {net} · {unread} não lida(s)")
     } else {
@@ -696,8 +623,7 @@ fn install_tray(app: &AppHandle, bg: &Background) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Chamado no `setup()` do builder, DEPOIS de `AppState`/`Background` estarem
-/// gerenciados.
+/// Chamado no `setup()`, depois de `AppState`/`Background` gerenciados.
 pub fn init(app: &AppHandle) {
     // Preferências persistidas (fonte de verdade entre reinícios).
     if let Some(state) = app.try_state::<AppState>() {
@@ -711,16 +637,9 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // ABRIR JUNTO COM O WINDOWS (padrão LIGADO).
-    //
-    // Um mensageiro que só recebe quando o usuário lembra de abrir não serve:
-    // sem autostart, mensagem/ligação chega enquanto o app está fechado e o
-    // peer cai no relay até o timeout. O `autostart_ensure` liga só no
-    // PRIMEIRO boot (ou enquanto o usuário nunca mexeu no checkbox) e respeita
-    // a decisão dele depois — ver `KV_AUTOSTART_DECIDED`.
-    //
-    // Silencioso de propósito: falhar aqui (política de máquina, sandbox) não
-    // pode impedir o app de abrir; a UI mostra o estado REAL do SO.
+    // Autostart (padrão LIGADO): mensageiro que só recebe com o app aberto não
+    // serve. Liga só no primeiro boot e respeita `KV_AUTOSTART_DECIDED`;
+    // falha aqui não pode impedir o app de abrir.
     #[cfg(desktop)]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -739,9 +658,7 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Bandeja: se a plataforma não suportar (Linux sem appindicator), o app
-    // segue funcionando — só o fechar-para-bandeja fica indisponível, e a UI
-    // mostra isso (nada de mentir que minimiza).
+    // Bandeja: sem suporte na plataforma, o app segue sem fechar-para-bandeja.
     #[cfg(desktop)]
     if let Some(bg) = app.try_state::<Background>() {
         if let Err(e) = install_tray(app, bg.inner()) {
@@ -749,8 +666,7 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Android: canais de notificação. Criar de novo é idempotente (o Android
-    // preserva as escolhas de som/importância do usuário).
+    // Android: criar canais é idempotente (escolhas do usuário são preservadas).
     #[cfg(mobile)]
     {
         use tauri_plugin_notification::{Channel, Importance};
@@ -761,9 +677,7 @@ pub fn init(app: &AppHandle) {
         if let Err(e) = app.notification().create_channel(messages) {
             tracing::warn!("canal de mensagens não criado: {e}");
         }
-        // Canal SEPARADO de chamada: prioridade máxima + som de toque. Sem ele,
-        // a chamada caía no canal de mensagem (importância alta, mas sem o
-        // tratamento de "ligação") e o Android podia agrupar silenciosamente.
+        // Canal separado de chamada: sem ele a chamada caía como mensagem comum.
         let calls = Channel::builder("distorrent_calls", "Chamadas")
             .description("Chamadas de voz e vídeo recebidas")
             .importance(Importance::High)
@@ -773,9 +687,7 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Clique/atalho na notificação → abre a janela e avisa a UI qual conversa
-    // abrir. O roteamento acontece no frontend (que sabe navegar); o Rust só
-    // informa o que o SO reportou.
+    // Clique na notificação → abre a janela; o Rust só informa, a UI roteia.
     let handle = app.clone();
     let _ = app.notification().on_action(move |p| {
         let action = p.action_id().to_string();
@@ -800,16 +712,8 @@ pub fn init(app: &AppHandle) {
         }
     });
 
-    // ABRIR JUNTO COM O WINDOWS: aparece a JANELA, não a bandeja.
-    //
-    // O padrão é "abrir normal". `start_minimized` só esconde quando o usuário
-    // LIGOU "iniciar minimizado" explicitamente nas configurações — e a flag
-    // `start_minimized` só é considerada se a preferência estiver marcada.
-    //
-    // BUG REAL (o app "abria em segundo plano" ao ligar o PC): o autostart
-    // registra `--minimized` como argumento, e bastava a flag chegar para a
-    // janela ir para a bandeja. Agora, além da preferência, conferimos se ela
-    // foi DECIDIDA pelo usuário: sem decisão, o boot mostra a janela.
+    // BUG REAL corrigido: `--minimized` do autostart sozinho escondia a janela;
+    // agora só minimiza se o usuário DECIDIU isso na preferência.
     let pediu_minimizado = std::env::args().any(|a| a == "--minimized");
     let deve_minimizar = pediu_minimizado
         && app
@@ -820,10 +724,7 @@ pub fn init(app: &AppHandle) {
         if deve_minimizar {
             let _ = w.hide();
         } else {
-            // Explícito e idempotente: abrir junto com o Windows deve MOSTRAR o
-            // app. `unminimize` só existe no DESKTOP (no Android o
-            // `WebviewWindow` não expõe a API e o build quebrava com E0599) —
-            // lá a janela nunca está "minimizada" nesse sentido.
+            // Boot deve MOSTRAR o app; `unminimize` só existe no desktop (E0599).
             let _ = w.show();
             #[cfg(desktop)]
             {

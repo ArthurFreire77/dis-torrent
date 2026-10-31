@@ -1,19 +1,9 @@
 // ESTADO DO APLICATIVO — conexão, atividade e presença são TRÊS coisas.
-//
-// O bug conceitual que este módulo corrige: o app tratava "o processo está com
-// socket aberto" como "o usuário está online". Com segundo plano de verdade
-// (bandeja/minimizado), isso mentia para os contatos: você ficava "online"
-// para todo mundo enquanto estava dormindo com o app minimizado.
-//
-// Aqui:
-//   • `connection`  = o motor P2P consegue falar com a rede? (fato técnico)
-//   • `activity`    = a janela está visível e em foco? (fato técnico)
-//   • `presence`    = o que o usuário escolheu mostrar (decisão dele)
-//
-// A presença EFETIVA é derivada dos três: em segundo plano, "online" cai para
-// "ausente" (a menos que o usuário peça explicitamente para continuar online).
-// Nada aqui inventa estado: se o motor está desconectado, `connection` é
-// 'DISCONNECTED' e a UI mostra isso.
+// O bug corrigido: "processo com socket aberto" era tratado como "usuário
+// online" (mentia com o app minimizado). Aqui: `connection` = motor fala com
+// a rede; `activity` = janela visível/em foco; `presence` = escolha do
+// usuário. A presença EFETIVA deriva dos três (2º plano cai para "ausente").
+// Nada inventa estado.
 
 import { services } from './index'
 import type { NetworkState, PresenceStatus } from './models'
@@ -43,8 +33,7 @@ export interface AppStateSnapshot {
 
 type Listener = (s: AppStateSnapshot) => void
 
-// Emissor compartilhado (`shared/emitter.ts`): um listener quebrado não pode
-// derrubar os outros, e o cancelamento pode ser chamado duas vezes (StrictMode).
+// Emissor compartilhado: listener quebrado não derruba os outros.
 const snapshotEmitter = createEmitter<AppStateSnapshot>()
 
 let connection: NetworkState = 'DISCONNECTED'
@@ -90,8 +79,7 @@ function syncPresence() {
   emit()
   if (lastAnnounced === next) return
   lastAnnounced = next
-  // Best-effort: sem identidade/engine o core recusa e está tudo bem — a
-  // próxima transição tenta de novo. Nunca "finge" que anunciou.
+  // Best-effort: sem identidade/engine o core recusa; próxima transição tenta.
   void services.presenceSet(next, '', '').catch(() => {})
 }
 
@@ -131,8 +119,8 @@ function syncConnection(next: NetworkState, peers: number) {
 }
 
 /**
- * Reflete o estado da REDE na bandeja/tooltip. Só o desktop tem bandeja, e o
- * tooltip mostra conexão — nunca presença (ver `background.rs`).
+ * Reflete o estado da REDE na bandeja/tooltip (só desktop; tooltip mostra
+ * conexão, nunca presença).
  */
 function pushTray() {
   if (!backgroundSupported) return
@@ -159,8 +147,7 @@ async function refreshNetwork() {
 }
 
 /**
- * Liga tudo. Idempotente: os dois shells (desktop e mobile) chamam, e só a
- * primeira chamada instala listeners.
+ * Liga tudo. Idempotente: só a primeira chamada instala listeners.
  */
 export function initAppState() {
   if (started) return
@@ -175,8 +162,7 @@ export function initAppState() {
     window.addEventListener('blur', onVis)
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('beforeunload', () => setActivity('background'))
-    // Tauri: a janela escondida na bandeja não dispara `blur` em todo engine —
-    // o evento nativo cobre o caso.
+    // Tauri: janela na bandeja não dispara `blur` em todo engine — evento nativo cobre.
     if (isTauri()) {
       void import('@tauri-apps/api/event')
         .then(({ listen }) => listen<{ active: boolean }>('distorrent://activity', (e) => {
@@ -186,32 +172,25 @@ export function initAppState() {
     }
   }
 
-  // Conexão: evento do motor (instantâneo) + sondagem periódica (convergência
-  // depois de suspensão/rede nova).
+  // Conexão: evento do motor (instantâneo) + sondagem periódica (convergência).
   unsubEngine = services.subscribe((ev) => {
     if (ev.type === 'state_changed') syncConnection(ev.state, ev.online_peers)
   })
   void refreshNetwork()
   netTimer = setInterval(() => { void refreshNetwork() }, 20000)
 
-  // Preferências de segundo plano reais (bandeja/autostart) — só no desktop
-  // nativo. No navegador puro isso é tudo indisponível, e a UI diz isso.
+  // Preferências de segundo plano reais (bandeja/autostart) — só desktop nativo.
   if (services.kind === 'native' && !isAndroid()) {    void services.backgroundPrefs()
       .then((p) => { backgroundSupported = p.tray; emit(); pushTray() })
       .catch(() => { backgroundSupported = false })
-    // O Rust precisa saber ANTES do primeiro fechamento de janela: quem guarda
-    // "fechar para a bandeja" é ele (a preferência também fica no kv, mas o
-    // cache do processo é atualizado aqui).
+    // Rust precisa saber ANTES do primeiro fechamento de janela (cache do processo).
     const p = getPrefs()
     void services.backgroundPrefsSet({
       closeToTray: p.closeToTray,
       startMinimized: p.startMinimized,
     }).catch(() => {})
-    // ABRIR JUNTO COM O WINDOWS.
-    //
-    // O Rust liga no boot (uma vez, respeitando a decisão do usuário). Aqui só
-    // espelhamos o estado REAL do SO na preferência local — a UI nunca mostra
-    // "ligado" se o Windows recusou (política de máquina/antivírus).
+    // ABRIR JUNTO COM O WINDOWS: o Rust liga no boot; aqui só espelhamos o
+    // estado REAL do SO na preferência local (nunca mostrar "ligado" se recusou).
     void services.autostartEnsure()
       .then((on) => {
         const cur = getPrefs()
@@ -220,21 +199,15 @@ export function initAppState() {
       .catch(() => { /* sem autostart nesta plataforma: a UI diz isso */ })
   }
 
-  // ESPELHO DAS PREFERÊNCIAS DE AVISO NO CORE.
-  //
-  // O aviso nativo (Windows toast / notificação do Android) é disparado pelo
-  // MOTOR Rust: é ele quem recebe o frame de mensagem/chamada mesmo com a
-  // janela escondida ou o app em segundo plano no Android — o listener do
-  // WebView não roda nesses casos. O motor não enxerga o localStorage da
-  // página, então sem este espelho desligar "notificações do sistema" na UI
-  // não teria efeito nenhum fora da tela.
+  // ESPELHO DAS PREFERÊNCIAS DE AVISO NO CORE: o aviso nativo é disparado pelo
+  // MOTOR Rust (que não enxerga o localStorage) — sem este espelho, desligar
+  // "notificações do sistema" não teria efeito fora da tela.
   if (services.kind === 'native') {
     const p = getPrefs()
     void services
       .notifyPrefsSet(p.notifySystem, p.notifyPreview, notificationPolicyJson())
       .catch(() => {})
-    // E a cada mudança do checkbox (o usuário liga/desliga com o app aberto;
-    // o motor precisa do novo valor ANTES de a janela ser escondida).
+    // E a cada mudança do checkbox (o motor precisa antes de esconder a janela).
     const offPrefs = subscribePrefs(() => {
       const cur = getPrefs()
       void services
@@ -243,12 +216,8 @@ export function initAppState() {
     })
     prefsUnsub = () => { try { offPrefs() } catch { /* ignore */ } }
 
-    // ANDROID: serviço em primeiro plano que mantém o processo vivo.
-    //
-    // Sem ele o Android congela/mata o processo assim que a tela apaga e
-    // nenhuma mensagem ou chamada chega — "a notificação só funciona com o app
-    // aberto". Só sobe com as notificações do sistema ligadas (se o usuário não
-    // quer aviso, não faz sentido gastar bateria para ficar conectado).
+    // ANDROID: serviço em primeiro plano mantém o processo vivo com a tela
+    // apagada; só sobe com notificações do sistema ligadas (poupar bateria).
     if (isAndroid()) {
       void services.backgroundServiceSet(p.notifySystem).catch(() => {})
     }

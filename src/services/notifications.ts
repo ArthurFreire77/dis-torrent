@@ -1,19 +1,8 @@
 // NOTIFICAÇÕES DO SISTEMA — o aviso que aparece fora do DisTorrent.
-//
-// Regras de honestidade que este módulo segue:
-//  • Só notifica o que o motor REALMENTE recebeu (`message_new`,
-//    `call_incoming`). Nada de aviso otimista nem de "mensagem entregue".
-//  • Uma notificação por CONVERSA: mensagem nova atualiza a mesma notificação
-//    (contador + última prévia) em vez de empilhar 20 avisos.
-//  • Dedupe por id de mensagem: evento repetido/reaplicado não vira aviso duas
-//    vezes.
-//  • Privacidade: com "mostrar prévias" desligado, o corpo é genérico. Nada de
-//    texto de conversa na tela de bloqueio.
-//  • Em primeiro plano o aviso é a própria UI (badge/som) — o SO só é acionado
-//    quando a janela está em segundo plano.
-//
-// O clique abre a conversa certa: o Rust guarda id→conversa e devolve no
-// evento `distorrent://notification-action` (ver `background.rs`).
+// Regras: só notifica o que o motor RECEBEU; 1 notificação por conversa
+// (atualiza contador+prévia); dedupe por id; prévia genérica se desligada;
+// em primeiro plano quem avisa é a UI. O clique abre a conversa guardada
+// pelo Rust (`distorrent://notification-action`).
 
 import { services } from './index'
 import { appStateSnapshot, setTrayUnread } from './appState'
@@ -82,13 +71,11 @@ export function notifyMessage(n: MessageNotice): boolean {
   if (!n.conversationId || !n.id) return false
   if (seen.seen(`msg:${n.id}`)) return false
 
-  // Preferência por canal/servidor (Silenciar / Menções / Todas) — a MESMA
-  // decisão que a UI usa. Nada de aviso de canal silenciado.
+  // Preferência por canal/servidor — mesma decisão que a UI usa.
   const level = levelFor(n.conversationId, n.serverId)
   if (!levelAllows(level, n.mentioned)) return false
 
-  // Em primeiro plano NA conversa aberta o usuário está lendo: não conta como
-  // não-lida nem gera aviso (antes o contador da bandeja subia junto).
+  // Em primeiro plano NA conversa aberta o usuário está lendo: sem aviso.
   if (inForeground() && openConversation === n.conversationId) return false
 
   const prev = perConv.get(n.conversationId)
@@ -130,11 +117,8 @@ interface ShowArgs {
 
 function show(a: ShowArgs): boolean {
   if (services.kind !== 'native') return false
-  // ANDROID: plugin próprio (`msgnotif`) que mostra a FOTO do remetente e usa
-  // `MessagingStyle` (nome em destaque + mensagem empilhada). O plugin oficial
-  // só aceita `drawable` do APK como ícone grande — a foto vem do swarm em
-  // base64 — e usa `BigTextStyle`, que não destaca quem mandou: era o aviso
-  // "sem o nome e sem a foto". Falha cai no aviso comum, nunca em silêncio.
+  // ANDROID: plugin próprio (`msgnotif`) com foto do remetente e
+  // MessagingStyle (nome em destaque). Falha cai no aviso comum.
   if (isAndroidRuntime()) {
     const avatar = buscarAvatarDoAviso(a.conversation)
     void invoke('plugin:msgnotif|show', {
@@ -166,12 +150,8 @@ function show(a: ShowArgs): boolean {
 }
 
 /**
- * Foto (base64) do remetente para o aviso nativo.
- *
- * Vem do cache em memória de `shared/avatar` — o mesmo que o avatar da UI usa.
- * Se ainda não estiver lá, dispara `profileList()` em segundo plano para a
- * PRÓXIMA mensagem já sair com foto. Não bloqueia o aviso: foto é enfeite,
- * mensagem é o conteúdo.
+ * Foto (base64) do remetente, do cache de avatares; aquece o cache em
+ * background se faltar. Não bloqueia o aviso.
  */
 function buscarAvatarDoAviso(convId: string | undefined): string {
   if (!convId) return ''
@@ -244,9 +224,8 @@ export function notifyIncomingCall(a: { callId: string; title: string }): boolea
   const body = getPrefs().notifyPreview
     ? 'Chamada recebida — abra o DisTorrent para atender ou recusar'
     : 'Chamada recebida'
-  // ANDROID: notificação de CHAMADA própria (tela cheia + Atender/Recusar).
-  // O aviso genérico não tem full-screen intent nem botões — era o "não
-  // aparece / fica uma merdinha" do relato. Falha cai no aviso comum.
+  // ANDROID: notificação de CHAMADA própria (tela cheia + Atender/Recusar);
+  // falha cai no aviso comum.
   void services
     .callNotifyShow(a.callId, a.title, body)
     .catch(() => {})
@@ -307,11 +286,10 @@ function dispatchOpen(convId: string) {
 
 let startWired = false
 
-/**
- * Liga o ouvinte do clique na notificação. Idempotente.
- * No Android/desktop o Rust emite `distorrent://notification-action` com a
- * conversa que ele mesmo guardou (não confiamos em payload de terceiros).
- */
+  /**
+   * Liga o ouvinte do clique na notificação. Idempotente; o Rust emite
+   * `distorrent://notification-action` com a conversa que ele mesmo guardou.
+   */
 export function initNotifications() {
   if (startWired) return
   startWired = true
@@ -329,14 +307,9 @@ export function initNotifications() {
     ))
     .catch(() => { /* shell sem o evento: clique só foca a janela */ })
 
-  // ANDROID — "Atender"/"Recusar" tocados na notificação de chamada.
-  //
-  // Dois caminhos:
-  //  1. app JÁ estava vivo → o Kotlin publica o evento `action` do plugin;
-  //  2. app foi ABERTO pelo toque (boot a frio) → a intenção ficou guardada e
-  //     é drenada UMA vez em `pendingAction`.
-  // Sem o caminho 2, tocar em "Atender" com o processo morto só abria o app e a
-  // chamada continuava tocando.
+  // ANDROID — "Atender"/"Recusar" da notificação: via plugin (app vivo) ou
+  // drenando a intenção guardada UMA vez (boot a frio), senão a chamada
+  // continuava tocando com o processo morto.
   void import('@tauri-apps/api/core')
     .then(async ({ addPluginListener }) => {
       await addPluginListener<{ call_id?: string; action?: string }>(

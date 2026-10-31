@@ -1,9 +1,6 @@
-// DownloadManager — fila de downloads gerenciada sobre o FileSwarm.
-// Responsável por: progresso com velocidade, pause/resume/cancel/retry
-// reais (não solta mais pedidos de chunk quando pausado), validação de
-// integridade blake3 do arquivo MONTADO antes de salvar, notificação de
-// conclusão e persistência da fila no localStorage (sobrevive a restart).
-// A regra de estados vive em downloadQueue.ts (pura e testada).
+// DownloadManager — fila de downloads sobre o FileSwarm: progresso/velocidade,
+// pause/resume/cancel/retry reais, validação blake3 antes de salvar, notificação
+// de conclusão e fila persistida no localStorage. Estados em downloadQueue.ts.
 
 import { fileSwarm } from './fileSwarm'
 import { sleep } from '../shared/async.ts'
@@ -36,12 +33,9 @@ class DownloadManager {
   /** fileId → item da fila. */
   private items = new Map<string, DownloadItem>()
   private running = new Set<string>()
-  // `kick` remove o id de `running` no `.finally` ENQUANTO o `finalize` ainda
-  // roda (é `void this.finalize(...)` + return). O proximo poll de `onChunk`
-  // — ou um resume/retry/load do usuario — entrava de novo e iniciava um
-  // SEGUNDO finalize concorrente: duas montagens, dois base64, dois save_file.
-  // O segundo batia no guard `saving` do fileSwarm, lanceava, e o item ia para
-  // `failed` mesmo com o primeiro tendo dado certo. Este set fecha a corrida.
+  // Guard contra finalize concorrente: `kick` remove de `running` antes do
+  // `finalize` acabar, e um novo poll/resume iniciava um SEGUNDO finalize
+  // (item ia para `failed` mesmo com o primeiro tendo dado certo).
   private finalizing = new Set<string>()
   private pausedFps = new Set<string>()
   private cancelled = new Set<string>()
@@ -59,11 +53,8 @@ class DownloadManager {
       const status = rehydrateStatus(it.status)
       this.items.set(it.file_id, { ...it, status, speedBps: 0 })
     }
-    // Re-kick SÓ depois de a fila inteira estar montada e num tick seguinte:
-    // antes o `kick` rodava no meio do `for` e o `runLoop` encontrava
-    // `fileSwarm.files` vazio (o anúncio/mensagem chega depois do boot) e
-    // marcava `failed` por "anúncio ainda não chegou". O laço agora ESPERA o
-    // anúncio em vez de desistir (ver `runLoop`).
+    // Re-kick num tick seguinte: antes o `runLoop` achava o swarm vazio (o
+    // anúncio chega depois do boot) e marcava `failed`; agora ele ESPERA o anúncio.
     const pendentes = [...this.items.values()].filter((i) => i.status === 'queued')
     if (pendentes.length > 0) {
       setTimeout(() => {
@@ -100,8 +91,7 @@ class DownloadManager {
     if (existing) {
       if (existing.status === 'completed') return existing
       if (existing.status === 'cancelled' || existing.status === 'failed') {
-        // re-enfileirar é um NOVO ciclo de vida (a máquina guarda terminais
-        // para ações do usuário); resetamos direto e o laço recomeça.
+        // Re-enfileirar = NOVO ciclo de vida.
         this.resetToQueued(existing)
       }
       return existing
@@ -180,14 +170,9 @@ class DownloadManager {
   }
 
   /**
-   * Remove da fila tudo que já acabou (completed/failed/cancelled).
-   *
-   * Solta também os CHUNKS do swarm: `fileSwarm.files` guardava cada arquivo
-   * com o `Map<data>` inteiro em RAM (até 200 MB por arquivo) e o
-   * `distorrent:filemeta:*` no localStorage crescia para sempre — e como
-   * `restoreLocalFiles()` re-registrava tudo a cada boot, o cache LRU do spool
-   * sofria churn de evicção constante. Só libera os chunks; o item continua
-   * re-adicionável (o metadado fica, para o re-download).
+   * Remove da fila tudo que acabou, e solta os CHUNKS do swarm (antes ficavam
+   * até 200 MB em RAM e o filemeta crescia para sempre). Item continua
+   * re-adicionável.
    */
   clearFinished(): void {
     const done: string[] = []
@@ -286,10 +271,8 @@ class DownloadManager {
         if (!it) return
         const sf = fileSwarm.files.get(fileId)
         if (!sf) {
-          // O anúncio chega por mensagem/evento DEPOIS do boot. Antes isto era
-          // `fail` imediato ("anúncio ainda não chegou") e o item morria sem
-          // retry. Agora espera até ANNOUNCE_WAIT_MS e só então falha —
-          // honesto, com a causa certa.
+          // Anúncio chega DEPOIS do boot: espera até ANNOUNCE_WAIT_MS antes de
+          // falhar (antes era `fail` imediato sem retry).
           if (now() - waitStartedAt > ANNOUNCE_WAIT_MS) {
             this.setStatus(it, 'fail', 'o anúncio deste arquivo não chegou — o remetente pode estar offline; toque em retomar')
             return
@@ -330,10 +313,8 @@ class DownloadManager {
           this.emit()
         }
 
-        // sem seeder + sem progresso por muito tempo → failed honesto.
-        // A poda roda antes: `seeders` agora ENCOLHE quando um peer para de se
-        // manifestar, então esta condição é alcançável (antes só crescia e o
-        // item ficava "baixando 0%" para sempre).
+        // Sem seeder + sem progresso por muito tempo → failed honesto
+        // (`pruneSeeders` faz `seeders` encolher, tornando isto alcançável).
         fileSwarm.pruneSeeders(sf)
         if (sf.seeders.size === 0 && have < sf.chunks) {
           if (noSeederSince === null) noSeederSince = now()
@@ -387,11 +368,9 @@ class DownloadManager {
       this.persist()
       this.emit()
       this.notifyDone(cur)
-      // Arquivo já está em disco. Os bytes da RAM não servem mais, mas o
-      // BITFIELD fica: o card continua mostrando "100%/Baixado" (antes voltava
-      // a 0%) e o peer segue sendo um seeder de verdade (os bytes voltam do
-      // spool quando alguém pedir). `releaseChunks` aqui era o bug: apagava o
-      // spool e deixava o anúncio mentindo.
+      // Arquivo em disco: bytes da RAM não servem, mas o BITFIELD fica — o card
+      // mostra "100%" e o peer segue sendo seeder (`releaseChunks` aqui apagava
+      // o spool e deixava o anúncio mentindo).
       try { fileSwarm.markDownloaded(fileId) } catch { /* best-effort */ }
     } catch (e: any) {
       const cur = this.items.get(fileId)

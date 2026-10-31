@@ -1,15 +1,6 @@
-//! Túnel virtual UDP (LAN estilo Radmin, Fase 1): handshake X25519 efêmero
-//! autenticado por ed25519 via frames relay + datagramas ChaCha20Poly1305.
-//!
-//! Fase 1 carrega os pacotes em `SecureFrame::TunnelData` (pelo relay que já
-//! existe) — prova cripto + endereçamento + ping. O UDP direto entra na
-//! Fase 2; TCP sobre o túnel na Fase 3. IP virtual determinístico `fd9d::/8`
-//! derivado do fingerprint: sem servidor de alocação, sem colisão prática.
-//!
-//! Segurança: efêmeras novas por sessão (sem forward secrecy entre sessões
-//! antigas — rekey na Fase 4), transcript assinado cobre fps + efêmeras +
-//! nonces (anti-MITM/replay), nonces de datagrama estritamente crescentes com
-//! janela anti-replay de 64, AAD amarra direção (remetente→destinatário).
+//! Túnel virtual UDP (LAN estilo Radmin): handshake X25519 autenticado por
+//! ed25519 via relay + datagramas ChaCha20Poly1305 (nonces crescentes,
+//! anti-replay, AAD de direção). IP virtual determinístico `fd9d::/8` por fp.
 
 use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -145,20 +136,12 @@ pub struct TunnelSession {
     pub created_ms: i64,
     /// Bytes cifrados enviados — base do rekey por volume (Fase 4).
     pub tx_bytes: AtomicU64,
-    /// Último datagrama que ESTE lado abriu com sucesso (epoch ms).
-    ///
-    /// POR QUE EXISTE ("manda uma mensagem, funciona, depois para e só
-    /// religando resolve"): o túnel era marcado como pronto assim que a chave
-    /// era derivada — sem nenhuma prova de que o OUTRO lado consegue abrir.
-    /// Quando a resposta do handshake se perdia (relay/4G/half-open), um lado
-    /// ficava com sessão e o outro não; o lado com sessão passava a mandar
-    /// mensagem/ACK/Ack por um túnel que o destino descartava em silêncio, e
-    /// **nada** voltava. O link continuava `Online` (Ping vai fora do túnel) e
-    /// o estado só se limpava reiniciando o app, porque o mapa de sessões é
-    /// em memória. Com esta marca, o túnel só transporta tráfego depois de
-    /// PROVAR que abre o que o peer manda; sem prova, quem carrega é o caminho
-    /// normal (relay/direto), que sempre funcionou.
+    /// Último datagrama aberto com sucesso (prova real de vida) — o túnel era
+    /// dado "pronto" só por chave derivada; half-open ficava em silêncio.
     last_rx_ms: AtomicI64,
+    /// Último envio (contrapeso do last_rx_ms): sem ele, túnel OCIOSO seria
+    /// derrubado a cada varredura (churn eterno de handshake).
+    last_tx_ms: AtomicI64,
     key: [u8; 32],
     send_ctr: AtomicU64,
     recv: std::sync::Mutex<RecvWindow>,
@@ -170,8 +153,9 @@ impl TunnelSession {
             peer_fp,
             created_ms: crate::identity::now_ms(),
             tx_bytes: AtomicU64::new(0),
-            // 0 = nunca abrimos nada por aqui (sessão ainda NÃO provada).
+            // 0 = nunca abrimos/enixamos nada por aqui.
             last_rx_ms: AtomicI64::new(0),
+            last_tx_ms: AtomicI64::new(0),
             key,
             send_ctr: AtomicU64::new(1),
             recv: std::sync::Mutex::new(RecvWindow {
@@ -181,23 +165,48 @@ impl TunnelSession {
         }
     }
 
-    /// O túnel pode transportar tráfego agora?
-    ///
-    /// Duas janelas, e as duas importam:
-    ///  - `grace`: logo após o handshake o túnel ainda não teve chance de
-    ///    provar nada, mas é justamente quando ele costuma funcionar — então
-    ///    carregar é permitido por um tempo curto.
-    ///  - `ttl`: uma vez provado, continua valendo enquanto o peer mandar
-    ///    algo por ele. Depois disso, a rota está morta de um lado.
-    ///
-    /// Sem prova e fora da carência ⇒ `false`: o chamador usa o caminho
-    /// normal em vez de sumir com a mensagem.
-    pub fn is_proven(&self, now_ms: i64, grace_ms: i64, ttl_ms: i64) -> bool {
+    /// O túnel pode transportar tráfego? A pergunta é "provei que funciona?":
+    /// prova recente, carência do handshake, ocioso (sem evidência de falha)
+    /// ou envio dentro da janela de resposta. "Mandei e nada voltou" = não.
+    pub fn is_proven(&self, now_ms: i64, grace_ms: i64, ttl_ms: i64, probe_ms: i64) -> bool {
         let rx = self.last_rx_ms.load(Ordering::SeqCst);
-        if rx > 0 {
-            return now_ms.saturating_sub(rx) <= ttl_ms;
+        let tx = self.last_tx_ms.load(Ordering::SeqCst);
+        // 1. prova recente
+        if rx > 0 && now_ms.saturating_sub(rx) <= ttl_ms {
+            return true;
         }
-        now_ms.saturating_sub(self.created_ms) <= grace_ms
+        // 2. carência do handshake
+        if now_ms.saturating_sub(self.created_ms) <= grace_ms {
+            return true;
+        }
+        // 3. nada depois da última prova = ocioso, não quebrado
+        if tx <= rx {
+            return true;
+        }
+        // 4. saiu algo depois da prova e nada voltou: dá a janela de resposta
+        now_ms.saturating_sub(tx) <= probe_ms
+    }
+
+    /// Túnel comprovadamente MORTO (≠ `is_proven`: envio sem resposta pode
+    /// estar em voo). Sem esta separação, a varredura causava renegociação
+    /// eterna em quem só está logado.
+    pub fn is_dead(&self, now_ms: i64, grace_ms: i64, dead_ms: i64) -> bool {
+        // Nunca enviou nada depois da criação: ocioso, não morto.
+        let tx = self.last_tx_ms.load(Ordering::SeqCst);
+        if tx == 0 {
+            return false;
+        }
+        let rx = self.last_rx_ms.load(Ordering::SeqCst);
+        if tx <= rx {
+            // O último envio tem prova correspondente: nada a declarar.
+            return false;
+        }
+        // Enviou e nunca voltou (ou voltou antes deste envio): espera o prazo
+        // longo antes de concluir morte, para não confundir atraso com queda.
+        if now_ms.saturating_sub(self.created_ms) <= grace_ms {
+            return false;
+        }
+        now_ms.saturating_sub(tx) > dead_ms
     }
 
     /// Marca que este lado ABRIU um datagrama do peer (prova real de vida).
@@ -232,6 +241,9 @@ impl TunnelSession {
             )
             .map_err(|_| DistorrentError::Crypto("tunel: falha ao cifrar".into()))?;
         self.tx_bytes.fetch_add(ct.len() as u64, Ordering::SeqCst);
+        // Registra o ENVIO: é o que distingue "ocioso" de "mandei e não voltou".
+        self.last_tx_ms
+            .store(crate::identity::now_ms(), Ordering::SeqCst);
         Ok((ctr, ct))
     }
 
@@ -263,8 +275,7 @@ impl TunnelSession {
                 },
             )
             .map_err(|_| DistorrentError::Crypto("tunel: autenticação falhou".into()))?;
-        // Abriu de verdade = prova de que ESTA chave serve nos dois sentidos.
-        // Só aqui a sessão pode passar a carregar tráfego (ver `is_proven`).
+        // Abriu de verdade = a chave serve nos dois sentidos (ver `is_proven`).
         self.mark_rx(crate::identity::now_ms());
         Ok(pt)
     }
@@ -277,9 +288,7 @@ pub struct TunnelPending {
     pub created_ms: i64,
 }
 
-/// Envelope do plaintext dentro do túnel (Fase 2+): frame inteiro ou
-/// fragmento com remontagem. Ping/pong da Fase 1 viraram `Full(b"ping:<id>")`
-/// — o receptor decide pelo prefixo, igual antes.
+/// Envelope do plaintext do túnel: frame inteiro, fragmento ou inválido.
 pub enum TunMsg {
     Full(Vec<u8>),
     Frag {
@@ -491,24 +500,102 @@ mod tests {
 
     #[test]
     fn tunel_so_carrega_depois_de_provar() {
-        let key = [3u8; 32];
-        let s = TunnelSession::new("peer".into(), key);
-        let t0 = s.created_ms;
+        const GRACE: i64 = 8_000;
+        const TTL: i64 = 45_000;
+        const PROBE: i64 = 10_000;
+        // Relógio REAL como base: `seal`/`mark_rx` estampam `now_ms()`, então
+        // deslocamentos sintéticos sobre `created_ms` não valem depois de um
+        // envio. Aqui a base é agora e os casos avançam no tempo.
+        let s = TunnelSession::new("peer".into(), [3u8; 32]);
+        let t0 = crate::identity::now_ms();
+
         // Recém-criado: dentro da carência, pode carregar (é quando costuma dar certo).
-        assert!(s.is_proven(t0, 8_000, 45_000), "carência precisa valer");
-        assert!(s.is_proven(t0 + 7_000, 8_000, 45_000));
-        // Passou a carência sem NENHUMA prova: não carrega mais (era o
-        // "uma mensagem funciona, depois emudece até reiniciar").
+        assert!(s.is_proven(t0, GRACE, TTL, PROBE), "carência precisa valer");
+        assert!(s.is_proven(t0 + 7_000, GRACE, TTL, PROBE));
+
+        // OCIOSO (nunca enviei nada): continua valendo. Derrubar aqui puniria
+        // quem só está logado e viraria renegociação a cada varredura.
         assert!(
-            !s.is_proven(t0 + 9_000, 8_000, 45_000),
-            "túnel sem prova não pode transportar tráfego"
+            s.is_proven(t0 + 120_000, GRACE, TTL, PROBE),
+            "túnel ocioso não é túnel quebrado"
         );
-        // Abriu um datagrama do peer = prova real: volta a valer.
-        s.mark_rx(t0 + 9_000);
-        assert!(s.is_proven(t0 + 9_000, 8_000, 45_000));
-        assert!(s.is_proven(t0 + 50_000, 8_000, 45_000));
-        // Prova vencida (peer parou de mandar por 45s): cai de novo.
-        assert!(!s.is_proven(t0 + 60_000, 8_000, 45_000));
+
+        // Mandei e nada voltou: depois da janela de resposta, NÃO carrega mais.
+        // Era o "uma mensagem funciona, depois emudece até reiniciar".
+        s.seal("eu", "peer", b"msg").unwrap();
+        assert!(
+            s.is_proven(t0, GRACE, TTL, PROBE),
+            "dentro da janela de resposta ainda dá tempo"
+        );
+        assert!(
+            !s.is_proven(t0 + 30_000, GRACE, TTL, PROBE),
+            "enviou e não voltou nada: rota morta, usa o caminho normal"
+        );
+
+        // Voltou algo: prova real dos dois sentidos → vale de novo.
+        s.mark_rx(crate::identity::now_ms());
+        assert!(s.is_proven(crate::identity::now_ms(), GRACE, TTL, PROBE));
+    }
+
+    /// `is_dead` só dispara em "mandei, nada voltou, prazo folgado" — nunca em
+    /// ocioso nem em envio ainda em voo.
+    ///
+    /// É a diferença que impede renegociação eterna: derrubar por "sem prova
+    /// agora" fazia o túnel nascer e morrer a cada varredura.
+    #[test]
+    fn tunel_so_e_morto_quando_envio_nao_volta_no_prazo() {
+        const GRACE: i64 = 8_000;
+        const DEAD: i64 = 120_000;
+
+        // Ocioso desde sempre: nunca é morto (nada para provar).
+        let ocioso = TunnelSession::new("peer".into(), [7u8; 32]);
+        let t0 = crate::identity::now_ms();
+        assert!(!ocioso.is_dead(t0 + 3_600_000, GRACE, DEAD));
+
+        // Enviou algo: dentro do prazo ainda não é morte (pode estar em voo).
+        let mudo = TunnelSession::new("peer".into(), [8u8; 32]);
+        mudo.seal("eu", "peer", b"msg").unwrap();
+        let agora = crate::identity::now_ms();
+        assert!(
+            !mudo.is_dead(agora + 30_000, GRACE, DEAD),
+            "30s de atraso não é morte — relay/4G é lento"
+        );
+        // Passado o prazo folgado sem nada voltar: morto, vale renegociar.
+        assert!(
+            mudo.is_dead(agora + DEAD + 1_000, GRACE, DEAD),
+            "mandei e nada voltou no prazo: renegocia"
+        );
+
+        // Voltou algo DEPOIS do envio: não é morto (o envio foi provado).
+        let vivo = TunnelSession::new("peer".into(), [9u8; 32]);
+        vivo.seal("eu", "peer", b"msg").unwrap();
+        vivo.mark_rx(crate::identity::now_ms());
+        assert!(!vivo.is_dead(crate::identity::now_ms() + DEAD * 5, GRACE, DEAD));
+    }
+
+    /// A prova vence: envio depois da última prova, sem resposta, derruba —
+    /// e o ocioso NÃO pode cair nesta regra.
+    #[test]
+    fn tunel_ocioso_nao_e_derrubado_mas_mudo_e() {
+        const GRACE: i64 = 8_000;
+        const TTL: i64 = 45_000;
+        const PROBE: i64 = 10_000;
+        let s = TunnelSession::new("peer".into(), [5u8; 32]);
+        let t0 = crate::identity::now_ms();
+
+        // Ocioso desde o começo, muito depois da carência: segue válido.
+        assert!(s.is_proven(t0 + 600_000, GRACE, TTL, PROBE));
+
+        // Envio sem resposta depois disso: janela esgotada = morto.
+        s.seal("eu", "peer", b"x").unwrap();
+        let agora = crate::identity::now_ms();
+        assert!(!s.is_proven(agora + PROBE + 5_000, GRACE, TTL, PROBE));
+
+        // A prova real devolve a confiança.
+        s.mark_rx(agora);
+        assert!(s.is_proven(agora, GRACE, TTL, PROBE));
+        // E continua valendo dentro do ttl.
+        assert!(s.is_proven(agora + 30_000, GRACE, TTL, PROBE));
     }
 
     #[test]

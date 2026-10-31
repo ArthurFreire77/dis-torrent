@@ -1,24 +1,8 @@
 //! Limite de tentativas de autenticação — proteção contra descoberta de senha/token.
 //!
-//! Onde roda: no `distorrent-core`, dentro do processo nativo. O JavaScript da UI
-//! NUNCA participa da decisão — recarregar a página, recarregar o app ou
-//! manipular headers não cria uma janela nova.
-//!
-//! O que é medido: tentativas FALSAS por janela deslizante, não requisições.
-//! Um desbloqueio legítimo no meio da janela não consome orçamento, então um
-//! usuário que digita a senha certa na 5ª tentativa entra normalmente — o
-//! contador de falhas zera no acerto.
-//!
-//! A chave combina a identidade da conta (fingerprint, quando há vault) com a
-//! origem da chamada. Um app de desktop é uma origem só, então a proteção real
-//! contra força bruta é a combinação `conta + origem + processo`: trocar de
-//! cabeçalho HTTP, forjar `Origin` ou recarregar a página não muda a chave, e
-//! encerrar o processo zera o contador — o que é o comportamento honesto de
-//! um aplicativo local: não existe servidor onde persistir o contador.
-//!
-//! O que NUNCA é registrado: a senha, o token, o blob do cofre ou qualquer
-//! prefixo deles. O log de auditoria carrega só fingerprint da conta, origem,
-//! contagem e o tempo de espera restante.
+//! Decisão 100% no core nativo (a UI nunca participa). Mede falhas por janela
+//! deslizante, chave = conta + origem; acerto zera o orçamento e o lockout
+//! dobra por reincidência. Nada de senha/token/blob entra em logs.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -30,8 +14,7 @@ pub const DEFAULT_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Máximo de tentativas FALSAS dentro da janela. A 4ª falha bloqueia.
 pub const DEFAULT_MAX_FAILURES: u32 = 3;
 
-/// Quanto tempo o bloqueio dura depois de estourar o limite. Cresce por
-/// reincidência: quem insiste espera cada vez mais.
+/// Duração do bloqueio após estourar o limite — dobra por reincidência.
 pub const DEFAULT_LOCKOUT: Duration = Duration::from_secs(60);
 
 /// Teto do crescimento progressivo (15 min).
@@ -76,12 +59,8 @@ impl Bucket {
         }
     }
 
-    /// Pena para o próximo bloqueio. O PRIMEIRO estouro usa a pena base; a
-    /// partir do segundo, dobra por reincidência, até o teto.
-    ///
-    /// `strikes` é o número de bloqueios JÁ installer, então a primeira
-    /// penalidade usa `strikes - 1` como expoente. Sem esse `-1` a primeira
-    /// pena saía dobrada e o primeiro erro do usuário custava o dobro.
+    /// Lockout dobra por reincidência até o teto; o `-1` no expoente evita
+    /// que a PRIMEIRA pena saia dobrada.
     fn lockout_for(&self, base: Duration) -> Duration {
         let prior = self.strikes.saturating_sub(1).min(10);
         let factor = 1u32.checked_shl(prior).unwrap_or(u32::MAX);
@@ -89,12 +68,8 @@ impl Bucket {
     }
 }
 
-/// Registra uma tentativa FALHA.
-///
-/// Semântica de "3 tentativas": as tentativas 1, 2 e 3 acontecem normalmente.
-/// A 3ª falha é a que **instala** o bloqueio, de modo que a 4ª chamada é a
-/// primeira barrada. A 3ª ainda responde "senha incorreta" — a senha estava
-/// errada de fato, e mentir para o usuário sobre isso só confunde.
+/// Registra uma tentativa FALHA: a N-ésima falha instala o bloqueio; a 3ª
+/// ainda responde "senha incorreta" de verdade, sem mentir ao usuário.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FailureOutcome {
     /// O bloqueio foi instalado NESTA chamada.
@@ -116,10 +91,7 @@ impl FailureOutcome {
     }
 }
 
-/// Limite de tentativas por chave (`conta|origem`).
-///
-/// `std::sync::Mutex` porque o shell Tauri é multi-thread e o comando de
-/// desbloqueio roda fora do event loop.
+/// Limitador por chave (`conta|origem`).
 #[derive(Debug)]
 pub struct AuthLimiter {
     inner: Mutex<HashMap<String, Bucket>>,
@@ -154,8 +126,7 @@ impl AuthLimiter {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Verifica se a chave pode tentar agora. **Chame ANTES** de gastar o
-    /// Argon2id, para que um atacante bloqueado nem alcance o KDF.
+    /// Chama ANTES de gastar o Argon2id: bloqueado nem chega ao KDF.
     pub fn check(&self, key: &str) -> Decision {
         self.check_at(key, Instant::now())
     }
@@ -178,8 +149,7 @@ impl AuthLimiter {
         }
     }
 
-    /// Registra uma tentativa FALHA e devolve o desfecho: se o bloqueio acabou
-    /// de ser instalado, por quanto tempo, e quantas tentativas restam.
+    /// Registra falha e devolve se o bloqueio foi instalado, a pena e o restante.
     pub fn record_failure(&self, key: &str) -> FailureOutcome {
         self.record_failure_at(key, Instant::now())
     }
@@ -226,8 +196,7 @@ impl AuthLimiter {
         }
     }
 
-    /// Registra um SUCESSO: zera o histórico. Um usuário que erra duas vezes e
-    /// acerta na terceira entra e não fica com bloqueio pendente.
+    /// Sucesso zera o histórico — errar 2× e acertar na 3ª não deixa bloqueio pendente.
     pub fn record_success(&self, key: &str) {
         let mut map = self.lock();
         if let Some(bucket) = map.get_mut(key) {
@@ -265,9 +234,7 @@ impl AuthLimiter {
         format!("{account}|{origin}")
     }
 
-    /// Remove chaves ociosas. Chamado pelo shell periodicamente — o mapa é
-    /// limitado pelo número de identidades no device, mas ejetar o que está
-    /// fora da janela evita crescimento em SessionLong.
+    /// Ejeta chaves ociosas (o shell chama periodicamente p/ conter o mapa).
     pub fn sweep(&self, keep_under: Duration) {
         let now = Instant::now();
         let mut map = self.lock();

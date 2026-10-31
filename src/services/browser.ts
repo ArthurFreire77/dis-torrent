@@ -1,9 +1,6 @@
-// Modo navegador (npm run dev sem Tauri): 100% funcional localmente.
-// - Identidade ed25519 REAL
-// - Mensagens DM e canal funcionais (persistidas em localStorage, broadcast cross-tab)
-// - Presença real via heartbeat + BroadcastChannel (online/offline correto)
-// - Eventos engine simulados com fidelidade ao distorrent-core (message_new, message_status, peer_online/offline, etc)
-// Não inventa peers fake: online = heartbeat recente (<15s) ou BroadcastChannel ativo.
+// Modo navegador (npm run dev sem Tauri): 100% funcional localmente —
+// identidade ed25519 real, DM/canal em localStorage, presença por heartbeat
+// e eventos fiéis ao core. Online = heartbeat recente, sem peers fake.
 
 import type {
   AuditEntry,
@@ -35,9 +32,7 @@ import type {
 import { validateNameLocal, randomNameLocal } from '../core/security/names'
 import { createIdentity, type UserIdentity } from '../core/identity/identity'
 import { LocalDriver } from '../core/storage/localDriver'
-// Versão real do package.json — o modo navegador antes hardcodava '0.2.0-web'
-// e a tela Sobre mentia sobre a build. Rollup tree-shakeia o JSON: só `version`
-// entra no bundle.
+// Versão real do package.json (antes hardcodava '0.2.0-web' e a tela Sobre mentia).
 import { version as APP_VERSION } from '../../package.json'
 import { profileContentHash } from './profileRevision'
 import { SessionDriver } from '../core/storage/sessionDriver'
@@ -132,10 +127,7 @@ function setFriends(status: string, list: FriendView[]): void {
 // ---------- Event bus + BroadcastChannel ----------
 type CB = (ev: EngineEvent) => void
 const listeners = new Set<CB>()
-// Dedupe: eventos entregues via `listeners` não devem ser re-entregues via
-// window 'distorrent:bus' (emit faz os dois). Marcamos o objeto; o listener de
-// window em subscribe() pula os marcados, mas ainda recebe eventos externos
-// (ex.: testes que disparam window.dispatchEvent direto).
+// Dedupe: evento já entregue via `listeners` não re-entrega via window bus.
 const viaListeners = new WeakSet<object>()
 let bc: BroadcastChannel | null = null
 try {
@@ -448,9 +440,7 @@ function pushMessageDirect(msg: StoredMessage) {
 // ---------- Implementação DisTorrentServices ----------
 
 // =====================================================================
-// CAMADA SOCIAL v3 — implementação local (localStorage + BroadcastChannel).
-// Mesma OBSERVÁVEL das commands nativas: a UI chama exatamente o mesmo
-// contrato e não muda de caminho entre navegador e app.
+// CAMADA SOCIAL v3 — implementação local, mesmo contrato observável do nativo.
 // =====================================================================
 
 const RX_BASE = 'social:reactions'
@@ -506,9 +496,7 @@ export const browserServices: DisTorrentServices = {
   vaultUnlock: () =>
     Promise.reject(new Error('cofre disponível no app nativo')),
 
-  // Endereços locais. No browser puro o IP de LAN não é descobrível com
-  // segurança (WebRTC painfully). `localhost` é honesto; `lan` fica null e a
-  // UI diz que não há endereço de rede disponível — melhor que inventar um.
+  // No browser o IP de LAN não é descobrível com segurança; `lan: null` é honesto.
   localAddresses: (port) => {
     const p = port ?? (Number(window.location.port) || 5173)
     return Promise.resolve({
@@ -768,8 +756,7 @@ export const browserServices: DisTorrentServices = {
     })
   },
 
-  // Modo navegador: não há rede, então o único estado honesto é "eu conectado"
-  // e os demais membros offline. Inventar "relay" aqui seria mentira.
+  // Modo navegador: sem rede, o único estado honesto é "eu conectado".
   communityMembers: (cid) => {
     const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const me = store.load()
@@ -1000,9 +987,7 @@ export const browserServices: DisTorrentServices = {
         if (Date.now() - v.ts < PRESENCE_TTL_MS) cb({ type: 'peer_online', fp, nickname: v.nickname } as any)
       }
     } catch { /* ignore */ }
-    // Compat: eventos disparados direto no window (fora do emit, ex.: testes
-    // e2e, fileSwarm legado) ainda chegam aqui. Os que já passaram por
-    // `listeners` são pulados via WeakSet — sem entrega dupla, sem perda.
+  // Dedupe: evento que já passou por `listeners` não re-entrega (WeakSet).
     const onBus = (e: Event) => {
       const detail = (e as CustomEvent).detail as EngineEvent
       if (detail && typeof detail === 'object' && viaListeners.has(detail)) return
@@ -1169,12 +1154,8 @@ export const browserServices: DisTorrentServices = {
     } catch { /* silent */ }
     return Promise.resolve(callId)
   },
-  // Aceite/recusa/fim ERAM no-ops: as outras abas nunca ficavam sabendo que
-  // a chamada acabou, e o overlay do outro lado ficava preso em "Conectado"
-  // para sempre — bloqueando qualquer ligação seguinte ("já existe uma
-  // chamada em andamento"). Agora os mesmos eventos que o engine nativo
-  // emite (ver tauri.ts: call_accepted/call_rejected/call_ended) viajam
-  // pelo BroadcastChannel da demo multi-aba.
+  // Aceite/recusa/fim emitem os mesmos eventos do engine nativo pelo
+  // BroadcastChannel — antes eram no-ops e o overlay do outro lado travava.
   callAccept: (callId, _fromFp) => {
     try { emit({ type: 'call_accepted', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
     return Promise.resolve()
@@ -1292,9 +1273,7 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
 
-  // Segurança / moderação — modo navegador: regras/auditoria/reputação locais
-  // (localStorage por identidade). Sem motor P2P não há enforcement remoto;
-  // o app nativo aplica no core. Honesto: funciona entre abas locais.
+  // Segurança/moderação: regras/auditoria/reputação locais (localStorage por identidade).
   serverRulesGet: (cid) => {
     try {
       const raw = localStorage.getItem(`distorrent:rules:${cid}`)
@@ -1373,9 +1352,7 @@ export const browserServices: DisTorrentServices = {
     Promise.resolve(validateNameLocal(kind, raw, existing ?? [])),
   randomName: () => Promise.resolve(randomNameLocal()),
 
-  // --- cofre portátil / janela de mensagens / métricas / cache (5.4) ---
-  // Modo browser = dev sem motor nativo: janela e cache funcionam sobre
-  // localStorage; cofre/backups/wipe exigem o app nativo (erros honestos).
+  // Browser/dev: janela e cache sobre localStorage; cofre/backups exigem o nativo.
   messagesWindow: (convId, beforeTs, limit) => Promise.resolve(
     readMsgs()
       .filter((m) => m.conv_id === convId && (beforeTs == null || m.ts < beforeTs))
@@ -1450,17 +1427,13 @@ export const browserServices: DisTorrentServices = {
     } catch { /* ignore */ }
     return Promise.resolve()
   },
-  // Voz nativa NÃO existe no browser: o áudio é o `RTCPeerConnection` da
-  // própria página. Devolver false/null mantém a UI no mesmo caminho de antes,
-  // sem nenhum branching novo.
+  // Voz nativa NÃO existe no browser: o áudio é o RTCPeerConnection da página.
   voiceMediaAvailable: () => Promise.resolve(false),
   voiceMediaStats: () => Promise.resolve(null),
   voiceSetMuted: () => Promise.resolve(),
   voiceSetDeafened: () => Promise.resolve(),
   voiceHangup: () => Promise.resolve(),
-  // Vídeo nativo idem: no browser a página tem RTCPeerConnection e o
-  // getUserMedia/getDisplayMedia fazem o papel. Os stubs devolvem o mesmo
-  // que o nativo devolveria sem a camada (erro honesto / null).
+  // Vídeo nativo idem: stubs devolvem erro honesto/null para a UI usar a página.
   voiceVideoStart: () => Promise.reject(new Error('vídeo nativo indisponível no navegador')),
   voiceVideoStop: () => Promise.resolve(),
   voiceVideoFrame: () => Promise.resolve(null),
@@ -1588,8 +1561,7 @@ export const browserServices: DisTorrentServices = {
       m.ts > (cursors[m.conv_id]?.last_read_ts ?? 0)).length
   },
 
-  // Segundo plano NÃO existe no navegador puro: sem bandeja, sem toast do SO.
-  // Devolvemos o estado honesto (nada de botão que finge funcionar).
+  // Segundo plano NÃO existe no navegador puro: estado honesto, nada finge funcionar.
   backgroundPrefs: async () => ({
     close_to_tray: false,
     start_minimized: false,
@@ -1600,8 +1572,7 @@ export const browserServices: DisTorrentServices = {
   backgroundPrefsSet: async () => {},
   autostartGet: async () => false,
   autostartSet: async () => false,
-  // No navegador não existe "abrir junto com o Windows": devolver `false` é a
-  // verdade, e a UI não mostra um botão que não faria nada.
+  // No navegador não existe autostart: `false` é a verdade.
   autostartEnsure: async () => false,
   notificationShow: async () => {},
   notificationCancel: async () => {},
@@ -1667,8 +1638,7 @@ export const browserServices: DisTorrentServices = {
     fp, display_name: '', about: '', avatar_b64: '', banner_b64: '', accent: '', updated_at: 0,
   },
   profileList: async () => Object.values(loadAll<ProfileView>(PROFILE_BASE)),
-  // No navegador não existe rede P2P: isto é um no-op honesto, não uma
-  // sincronização fingida.
+  // No navegador não há rede P2P: no-op honesto, não sincronização fingida.
   profileSyncNow: async () => { /* sem peers no modo navegador */ },
   nicknameSet: async (communityId, fp, nickname) => {
     const all = loadAll<string>('social:nicknames')
@@ -1797,9 +1767,8 @@ export const browserServices: DisTorrentServices = {
     emit({ type: 'poll_updated', community_id: communityId, channel_id: channelId, poll_id: pollId })
   },
   pollTally: async (pollId) => {
-    // `social:votes[polllId]` guarda os ÍNDICES escolhidos por quem votou, não as
-    // contagens por opção. Somar em um contador por opção — senão 1 voto em
-    // "Tokio" produzia counts[0]=0 e a barra mostrava 0%.
+    // `social:votes` guarda ÍNDICES escolhidos, não contagens — somar por opção
+    // aqui, senão a barra mostrava 0%.
     const chosen: number[] = loadAll<number[]>('social:votes')[pollId] ?? []
     const poll = loadAll<PollView>(POLLS_BASE)[pollId]
     const nOpts = poll?.options?.length ?? 0
@@ -1870,8 +1839,7 @@ function appendLocalAudit(communityId: string, action: string, target: string, r
 }
 
 async function formatSafetyNumber(fpA: string, pubA: string, fpB: string, pubB: string): Promise<string> {
-  // SHA-256 no browser (o core usa BLAKE3 — números SÓ coincidem no nativo;
-  // aqui serve para comparação local entre abas).
+  // SHA-256 no browser (core usa BLAKE3 — números só coincidem no nativo).
   const [x, y] = fpA <= fpB ? [[fpA, pubA], [fpB, pubB]] : [[fpB, pubB], [fpA, pubA]]
   const data = new TextEncoder().encode(`storm/safety-number/v1|${x[0]}|${x[1]}|${y[0]}|${y[1]}`)
   const d = await crypto.subtle.digest('SHA-256', data as BufferSource)

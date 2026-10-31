@@ -1,17 +1,7 @@
 // Canais de um servidor — FONTE ÚNICA DE VERDADE.
-//
-// O bug: a UI recebia a lista de canais de DOIS lugares ao mesmo tempo e
-// juntava as duas com um merge manual. `communities_list` (o servidor embutido
-// no objeto CommunityView) devolve `channels: [id, nome][]` de TODOS os canais
-// do servidor, e `channel_list` devolve os mesmos canais de novo com tipo,
-// categoria, tópico e posição. Os dois vêm da MESMA tabela `channels`.
-//
-// Cada merge manual da UI tinha um filtro de duplicata diferente — e um deles
-// (o painel de bot, ThemeShell.tsx) não tinha filtro nenhum. Resultado: o
-// mesmo canal aparecia duas vezes dependendo de onde você olhasse.
-//
-// A correção não é esconder: é existir UM lugar que decide qual lista vale e
-// deduplica por id E por nome normalizado. Todo mundo consome este módulo.
+// O bug: a UI juntava `communities_list` (resumo) com `channel_list` (completo)
+// com merges manuais diferentes — um sem filtro duplicava canais. Aqui existe
+// UM lugar que decide qual lista vale e deduplica por id e nome normalizado.
 
 import type { ChannelMeta } from '../services/models'
 
@@ -27,17 +17,9 @@ function norm(name: string): string {
 }
 
 /**
- * Une a lista resumida (`CommunityView.channels`) com a lista completa
- * (`channel_list`) em UMA lista de canais, sem duplicatas.
- *
- * Regras, em ordem de prioridade:
- *  1. A lista completa vence: ela tem tipo, categoria, tópico e posição.
- *  2. Um id presente nas duas aparece UMA vez, com os dados da completa.
- *  3. Um id só na resumida aparece com os dados que existirem (para o caso de
- *     o servidor ainda não ter respondendo a `channel_list`).
- *  4. Deduplicação por NOME normalizado também: `cid-geral` e `outrocid-geral`
- *     são o mesmo canal para o usuário, mesmo com ids diferentes.
- *  5. Ordem final por `position`, depois por nome — determinístico.
+ * Une a lista resumida (`CommunityView.channels`) com a completa (`channel_list`)
+ * sem duplicatas: a completa vence, dedupe por id e por nome normalizado,
+ * ordem por position → nome → id.
  */
 export function mergeChannels(
   summary: readonly (readonly [string, string])[] | undefined,
@@ -45,8 +27,7 @@ export function mergeChannels(
 ): ChannelMeta[] {
   const byId = new Map<string, ChannelMeta>()
 
-  // 1) base: a lista resumida entra primeiro, para preservar a ordem original
-  //    quando a completa não trouxer o canal (item 3).
+  // 1) base: resumida primeiro (preserva a ordem quando a completa não traz o canal)
   const summaryList = summary ?? []
   summaryList.forEach((entry, idx) => {
     const [id, name] = entry
@@ -61,19 +42,14 @@ export function mergeChannels(
     })
   })
 
-  // 2) a completa SOBREPÕE a resumida (item 1) — é a fonte de verdade do tipo,
-  //    categoria, tópico e posição.
+  // 2) a completa sobrepõe a resumida (tipo/categoria/tópico/posição).
   for (const c of full ?? []) {
     if (!c?.id || !c?.name) continue
     byId.set(c.id, c)
   }
 
-  // 3) dedup por nome normalizado (item 4).
-  //
-  //   Quando dois canais normalizam para o mesmo nome, o sobrevivente é
-  //   escolhido por `betterSurvivor` — NÃO pela ordem de entrada. Sem isso,
-  //   a mesma lista entregue em ordens diferentes produzia sobreviventes
-  //   diferentes, e a sidebar mudava de ordem entre renders.
+  // 3) dedup por nome normalizado: sobrevivente por `betterSurvivor` (não pela
+  //    ordem de entrada — senão a sidebar mudava entre renders).
   const byName = new Map<string, ChannelMeta>()
   for (const c of byId.values()) {
     const key = norm(c.name)
@@ -93,11 +69,8 @@ export function mergeChannels(
 }
 
 /**
- * Escolhe qual dos dois canais homônimos fica. Determinístico e sem ordem de
- * entrada:
- *   1. o que tem metadados reais (veio de `channel_list`) vence o que veio só
- *      do resumo — o resumo não tem tipo, categoria nem tópico;
- *   2. empate: o id menor, para que a escolha não dependa de nada externo.
+ * Escolhe o sobrevivente entre homônimos: metadados reais vencem o resumo;
+ * empate → id menor (determinístico).
  */
 function betterSurvivor(a: ChannelMeta, b: ChannelMeta): boolean {
   const aFull = isFullRow(a)
@@ -112,12 +85,9 @@ function isFullRow(c: ChannelMeta): boolean {
 }
 
 /**
- * Ordem total e determinística: posição, depois nome normalizado, depois id.
- *
- * O id no desempate final é obrigatório. `localeCompare` devolve 0 para nomes
- * que só diferem em caixa ('ALFA' vs 'alfa'), e sem um desempate final a
- * ordem herdava da ordem de entrada — a mesma lista em ordens diferentes
- * produzia resultados diferentes, e a posição na sidebar "saltava".
+ * Ordem total: posição, nome normalizado, id. O id no desempate final é
+ * obrigatório (`localeCompare` dá 0 para 'ALFA' vs 'alfa' — sem ele a posição
+ * na sidebar "saltava" entre renders).
  */
 function compareChannels(a: ChannelMeta, b: ChannelMeta): number {
   const pa = a.position ?? 0
@@ -130,10 +100,7 @@ function compareChannels(a: ChannelMeta, b: ChannelMeta): number {
   return 0
 }
 
-/**
- * Canais agrupados por categoria, na ordem em que aparecem.
- * Usado pelo painel de configurações para não despejar tudo numa lista só.
- */
+/** Canais agrupados por categoria, na ordem em que aparecem. */
 export function groupByCategory(
   channels: readonly ChannelMeta[],
 ): { category: string; channels: ChannelMeta[] }[] {

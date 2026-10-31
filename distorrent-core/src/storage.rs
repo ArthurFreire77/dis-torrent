@@ -72,9 +72,8 @@ pub struct RoleRow {
     pub position: i64,
 }
 
-/// Bot da comunidade (v4) — token é o credential do bot local.
-/// v6: `config` (JSON do runtime web) sincroniza no CommunityState; o token
-/// é MASCARADO para não-donos na camada do engine (não viaja para membros).
+/// Bot da comunidade (v4) — token é o credential do bot local; config (v6)
+/// sincroniza no CommunityState e o token é mascarado para não-donos.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BotRow {
     pub id: String,
@@ -103,7 +102,7 @@ pub struct BotPatch {
     pub avatar: Option<String>,
     pub role_id: Option<Option<String>>,
     pub online: Option<bool>,
-    /// v6: JSON do runtime web (prefixo/comandos/escopos/webhook). Cap 16KB.
+    /// v6: JSON do runtime web. Cap 16KB.
     pub config: Option<String>,
 }
 
@@ -144,8 +143,7 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     cols.iter().any(|c| c == column)
 }
 
-/// Migrações. v2: mensagens de canal não são conversas — remove a FK de
-/// messages sem perder dados (erro FOREIGN KEY constraint failed).
+/// Migrações (v2..v8): sem perder dados nem quebrar FK em bancos antigos.
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
     conn.execute_batch(SCHEMA_V1)?;
@@ -227,9 +225,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     if version.as_str() < "4" {
-        // v4: canais completos (topic/category/kind) + cargos, bots e
-        // assignments (estilo Discord) para sincronização P2P.
-        // `kind` já existe no schema base — ALTER só quando a coluna faltar.
+        // v4: canais completos + cargos, bots e assignments (estilo Discord).
         if !column_exists(conn, "channels", "topic") {
             conn.execute_batch("ALTER TABLE channels ADD COLUMN topic TEXT NOT NULL DEFAULT '';")?;
         }
@@ -254,10 +250,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     if version.as_str() < "5" {
-        // v5: moderação + anti-spam (Storm camada de segurança).        // server_rules: 1 linha por comunidade (regras definidas pelo dono).
-        // audit_log: append-only de ações de moderação (quem/quando/porquê).
-        // reputation: score de confiança por peer (novo/confiável/suspeito/banido).
-        // reports: denúncias de usuários (reporter → alvo + motivo + estado).
+        // v5: moderação + anti-spam (rules, audit_log, reputation, reports).
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS server_rules (
                community_id TEXT PRIMARY KEY,
@@ -303,13 +296,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     if version.as_str() < "6" {
-        // v6: wizard de servidores + bots conectados à web.
-        // communities.description/category/icon — metadados do fluxo guiado;
-        // messages.bot_id — mensagens postadas POR BOT (display; assinatura
-        //   continua sendo do host);
-        // bots.config — JSON do runtime web (prefixo, comandos REST, escopos,
-        //   webhook) — sincroniza no CommunityState para membros (token
-        //   é mascarado na camada do engine).
+        // v6: wizard de servidores (meta da comunidade), messages.bot_id e
+        // bots.config (JSON do runtime web).
         if !column_exists(conn, "communities", "description") {
             conn.execute_batch(
                 "ALTER TABLE communities ADD COLUMN description TEXT NOT NULL DEFAULT '';",
@@ -337,18 +325,9 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     if version.as_str() < "7" {
-        // v7: threads.
-        //
-        // `messages.thread_id` é obrigatório para as queries de thread
-        // (índice + filtro). Precisa ser um bloco de versão PROPRIO, e não
-        // uma coluna a mais dentro do bloco v6: quem já estava em v6 nunca
-        // executa o `if version < "6"`, ficava sem a coluna, e aí TODA
-        // leitura de mensagem quebrava em InvalidColumnIndex(9) — o app
-        // abria com o histórico vazio e nenhuma mensagem carregava.
-        //
-        // O `column_exists` continua aqui de propósito: o bloco é
-        // idempotente, então um banco que já tem a coluna (instalação
-        // criada direto do SCHEMA_V1 novo) apenas pula o ALTER.
+        // v7: threads. Bloco PRÓPRIO (não dentro do v6): quem já estava em v6
+        // nunca executava o bloco e ficava sem a coluna — quebrava TODA
+        // leitura de mensagem. `column_exists` mantém o bloco idempotente.
         if !column_exists(conn, "messages", "thread_id") {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';",
@@ -362,13 +341,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    // v8: silenciamento de CONTA (mute global).
-    //
-    // Antes, `mute` só decrementava a pontuação de reputação — e nenhum
-    // caminho de leitura consumia essa pontuação, então silenciar um usuário
-    // não impedia nada: ele escrevia, floodava e seguia normalmente. Isto dá
-    // ao mute um prazo real, consultado pelo portão de fala do MOTOR (não da
-    // UI), para que ban/time-out de servidor e mute de conta coexistam.
+    // v8: silenciamento de CONTA — mute ganha prazo real consultado pelo
+    // portão de fala do MOTOR (antes só decrementava score que ninguém lia).
     if !column_exists(conn, "reputation", "muted_until") {
         conn.execute_batch(
             "ALTER TABLE reputation ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0;",
@@ -594,10 +568,7 @@ impl Store {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Nomes das tabelas existentes. Usado por testes de migração e por
-    /// qualquer diagnóstico que precise relatar o schema real em vez do
-    /// esperado — um schema divergente é exatamente o que costuma explicar
-    /// "funciona no meu banco, quebra no do usuário".
+    /// Nomes das tabelas existentes (testes de migração e diagnóstico de schema).
     pub fn table_names(&self) -> Vec<String> {
         let conn = self.locked();
         let Ok(mut st) = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'") else {
@@ -634,14 +605,11 @@ impl Store {
         Ok(())
     }
 
-    /// Lista `(key, value)` cujo prefixo bate. Usado para restaurar convites
-    /// pendentes no boot: um join que não foi confirmado (host offline) não
-    /// pode desaparecer quando o app fecha — era exatamente o caso "colei o
-    /// token, o servidor não apareceu e ao reabrir tive de colar de novo".
+    /// Lista `(key, value)` por prefixo (restaura convites pendentes no boot:
+    /// join não confirmado não pode sumir quando o app fecha).
     pub fn kv_list_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
         let conn = self.locked();
-        // LIKE com escape: `_` e `%` são curinga no SQL. O prefixo aqui é
-        // sempre literal (`join.pending.`), mas escapar evita surpresa futura.
+        // LIKE com escape: curingas do SQL são tratados como literal.
         let escaped = prefix
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -852,8 +820,8 @@ impl Store {
         Ok(())
     }
 
-    /// v7: insere mensagem dentro de uma THREAD (thread_id preenchido). A
-    /// conversa continua sendo o canal pai — o thread_id é o filtro da UI.
+    /// v7: insere mensagem dentro de uma THREAD (thread_id = filtro da UI;
+    /// a conversa continua sendo o canal pai).
     pub fn insert_message_in_thread(
         &self,
         m: &MessageEnvelope,
@@ -896,9 +864,8 @@ impl Store {
         Ok(rows)
     }
 
-    /// v6: insere mensagem postada POR UM BOT (bot_id para display). A
-    /// assinatura/autor real continua sendo quem postou (host) — o bot_id
-    /// serve só para a UI renderizar com badge/avatar de bot.
+    /// v6: mensagem postada POR UM BOT (bot_id só para display; a assinatura
+    /// real continua sendo do host).
     pub fn insert_message_as_bot(
         &self,
         m: &MessageEnvelope,
@@ -957,10 +924,8 @@ impl Store {
         Ok(())
     }
 
-    /// Janela de mensagens (paginação por ts): as `limit` mais recentes
-    /// ANTES de `before_ts` (None = as mais recentes no geral), em ordem
-    /// crescente. É o caminho da UI — `messages_list` (tudo até 500) fica
-    /// para compat.
+    /// Janela de mensagens (paginação por ts) — caminho da UI; `messages_list`
+    /// fica para compat.
     pub fn list_messages_window(
         &self,
         conv_id: &str,
@@ -1017,19 +982,11 @@ impl Store {
         Ok(())
     }
 
-    /// Teto de tentativas de reenvio por mensagem.
+    /// Teto de tentativas de reenvio.
     ///
-    /// BUG que isto corrige: o laço de retransmissão era ILIMITADO. O `outbox`
-    /// tem `attempts` e `next_try` desde sempre, mas `pending_outbox` ignorava
-    /// as duas colunas e `bump_outbox` nunca era chamada em lugar nenhum — ou
-    /// seja, o backoff existia no schema e não existia no código. Pior: o
-    /// `revert_stale_sent_to_pending` comparava `ts` (data de CRIAÇÃO da
-    /// mensagem) com o corte, então passados 20s a mensagem satisfazia a
-    /// condição para sempre e voltava a PENDING a cada flush de 5s. Como o
-    /// receptor rejeitava o reenvio no anti-spam (e portanto não mandava Ack),
-    /// o ciclo nunca terminava: era o "recebo a mesma mensagem infinitas
-    /// vezes". Com teto, uma mensagem que não foi confirmada vira `failed`
-    /// visível em vez de martelar o peer para sempre.
+    /// BUG corrigido: retransmissão ILIMITADA (backoff existia só no schema,
+    /// não no código; mensagem voltava a PENDING a cada flush e nunca acabava
+    /// — "recebo a mesma mensagem infinitas vezes"). Com teto, vira `failed`.
     pub const OUTBOX_MAX_ATTEMPTS: i64 = 12;
 
     /// Mensagens prontas para reenvio AGORA: respeita o backoff (`next_try`) e
@@ -1054,18 +1011,29 @@ impl Store {
         Ok(rows)
     }
 
-    /// Marca uma tentativa: incrementa `attempts` e agenda o próximo reenvio
-    /// com backoff. É o que CONVERTE o laço de 5s em reenvio com sono.
+    /// Marca uma tentativa: incrementa `attempts` com backoff CRESCENTE
+    /// (15, 30, 60, 120…s) — `+15s` fixo esgotava o orçamento antes de o
+    /// relay reconectar (30s–2min) e dava X vermelho em contato online.
     pub fn bump_outbox(&self, msg_id: &str) -> Result<()> {
+        let attempts: i64 = self
+            .locked()
+            .query_row(
+                "SELECT attempts FROM outbox WHERE msg_id=?1",
+                params![msg_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        // 15s * 2^n, teto de 8 min por tentativa.
+        let passo = (15_000i64).saturating_mul(1i64 << attempts.min(6));
+        let espera = passo.min(8 * 60 * 1000);
         self.locked().execute(
             "UPDATE outbox SET attempts=attempts+1, next_try=?2 WHERE msg_id=?1",
-            params![msg_id, crate::identity::now_ms() + 15_000],
+            params![msg_id, crate::identity::now_ms() + espera],
         )?;
         Ok(())
     }
 
-    /// Mensagens que estouraram o orçamento: marca `failed` e tira da fila,
-    /// para o usuário ver que NÃO vai acontecer em vez de esperar para sempre.
+    /// Mensagens que estouraram o orçamento: marca `failed` e tira da fila.
     pub fn give_up_outbox(&self, peer_fp: &str) -> Result<Vec<String>> {
         let ids = {
             let conn = self.locked();
@@ -1088,11 +1056,8 @@ impl Store {
         Ok(ids)
     }
 
-    /// Varredor anti-buraco-negro (upgrade relay→direta, troca de sessão):
-    /// mensagens out em sending/sent com ts mais velho que o corte e SEM ack
-    /// voltam a PENDING + outbox. Receptor dedupa por id (INSERT OR IGNORE),
-    /// então reenvio é seguro. Corte típico: 20s (relay RTT ~2s; além disso
-    /// é perda certa, ex.: enviada pelo relay velho após o peer upgradear).
+    /// Varredor anti-buraco-negro: out sem ack mais velho que o corte volta a
+    /// PENDING + outbox (receptor dedupa, reenvio é seguro).
     pub fn revert_stale_sent_to_pending(
         &self,
         peer_fp: &str,
@@ -1100,11 +1065,8 @@ impl Store {
     ) -> Result<Vec<String>> {
         let ids = {
             let conn = self.locked();
-            // `NOT EXISTS (outbox)`: agora toda mensagem sai para o outbox já no
-            // envio (o Ack é quem a remove). Sem este filtro, o varredor de 20s
-            // regravava `pending` por cima de mensagens que já estavam na fila,
-            // com backoff correto — a UI piscava "pendente/enviado" à toa e o
-            // backoff era zerado a cada tique (martelo no peer).
+            // `NOT EXISTS (outbox)`: sem este filtro o varredor regravava
+            // `pending` por cima de mensagens já enfileiradas (backoff zerado).
             let mut st = conn.prepare(
                 "SELECT id FROM messages
                  WHERE direction='out' AND status IN ('sending','sent') AND ts < ?1
@@ -1124,8 +1086,7 @@ impl Store {
         Ok(ids)
     }
 
-    /// Ao cair a conexão: mensagens out não-confirmadas voltam a PENDING e
-    /// voltam para o outbox. Retorna ids re-enfileirados.
+    /// Ao cair a conexão: out não-confirmadas voltam a PENDING + outbox.
     pub fn revert_unacked_to_pending(&self, peer_fp: &str) -> Result<Vec<String>> {
         // coleta os ids com o lock em escopo próprio — os métodos abaixo
         // re-adquirem o Mutex (não é reentrante).
@@ -1372,9 +1333,8 @@ impl Store {
         Ok(rows)
     }
 
-    /// Comunidade dona de um canal. Mensagem de canal guarda `conv_id == channel_id`,
-    /// então é isto que resolve "de qual servidor é esta conversa" — o que a
-    /// autorização de moderador precisa antes de qualquer decisão.
+    /// Comunidade dona de um canal (resolve "de qual servidor é esta conversa"
+    /// antes de qualquer decisão de autorização de moderador).
     pub fn channel_community(&self, channel_id: &str) -> Result<Option<String>> {
         let conn = self.locked();
         let mut st = conn.prepare("SELECT community_id FROM channels WHERE id=?1")?;
@@ -1397,12 +1357,9 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Grava a ordem final de um conjunto de canais, em UMA transação.
-    ///
-    /// Rejeita ids que não pertencem à comunidade: um reordenamento é um frame
-    /// de rede, e sem esta checagem um dono de servidor A conseguiria reordenar
-    /// (ou tocar) canais do servidor B só por listar os ids. Também trava o
-    /// tamanho para não transformar o frame num laço de escrita ilimitado.
+    /// Grava a ordem final dos canais numa transação; rejeita ids de outra
+    /// comunidade (frame de rede — sem a checagem, um dono reordenava canais
+    /// alheios) e trava o tamanho do frame.
     pub fn channels_reorder(&self, community_id: &str, ids: &[String]) -> Result<()> {
         if ids.len() > 256 {
             return Err(crate::DistorrentError::Protocol(
@@ -1587,16 +1544,9 @@ impl Store {
         Ok(())
     }
 
-    /// Ajusta reputação de forma atômica: `delta` no score, +1 report se `is_report`.
-    /// Retorna `(trust, score, reports)` resultante. Transições: score<=-30 banido,
-    /// <=-10 suspeito, >=20 (e era novo) confiável, suspeito que volta a >=0 vira novo.
-    /// Silencia a conta inteira até `until_ms` (0 = levanta o silêncio).
-    ///
-    /// Escopo de CONTA, não de servidor: um moderador de um servidor não pode
-    /// silenciar o comportamento da pessoa nos outros servidores, mas quem tem
-    /// poder sobre a conta (ou o próprio dono, contra si mesmo) sim. Por isso
-    /// isto vive ao lado da reputação, e não em `timeouts` (que é por
-    /// comunidade).
+    /// Ajusta reputação atomicamente; transições: ≤-30 banido, ≤-10 suspeito,
+    /// ≥20 confiável, suspeito ≥0 vira novo. Silencia a CONTA (não o servidor)
+    /// até `until_ms` — por isso vive ao lado da reputação, não em timeouts.
     pub fn mute_set(&self, fp: &str, until_ms: i64) -> Result<()> {
         // Garante a linha: um usuário nunca moderado não tem registro ainda.
         self.locked().execute(
@@ -1826,11 +1776,8 @@ impl Store {
         Ok(rows)
     }
 
-    /// Eu participo desta chamada?
-    ///
-    /// Usado pelo gate de sinalização: uma chamada de GRUPO pode incluir gente
-    /// que não é amiga e cujo grupo ainda não foi sincronizado localmente. Se o
-    /// `call_id` está numa chamada em que EU estou, a sinalização é legítima.
+    /// Eu participo desta chamada? Gate de sinalização: em chamada de grupo a
+    /// sinalização de não-amigos é legítima se EU estou na chamada.
     pub fn is_in_call(&self, call_id: &str, fp: &str) -> bool {
         self.locked()
             .query_row(
@@ -1901,15 +1848,9 @@ impl Store {
         Ok(rows)
     }
 
-    /// Canais de voz em que ESTE fingerprint está (todos, de todas as
-    /// comunidades). Usado pelo re-anúncio periódico de presença de voz.
-    ///
-    /// POR QUE PRECISA: `VoiceJoin` era enviado UMA vez, só para peers que já
-    /// estivessem `Online` naquele instante (`link_tx` devolve `None` fora de
-    /// `Online` e o `SendToPeer` vira no-op silencioso). Quem abria o app e
-    /// entrava no canal logo depois — o caso normal com Tor/relay, que leva
-    /// segundos para estabelecer — nunca era visto pelos outros, e como não há
-    /// reenvio, a lista de participantes ficava assimétrica PARA SEMPRE.
+    /// Canais de voz em que ESTE fp está (re-anúncio periódico de presença:
+    /// VoiceJoin único perdia quem abrisse o app depois — lista ficava
+    /// assimétrica para sempre).
     pub fn my_voice_states(&self, fp: &str) -> Result<Vec<(String, String, bool, bool)>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -1928,22 +1869,16 @@ impl Store {
         Ok(rows)
     }
 
-    /// Remove TODAS as linhas de voz deste fingerprint.
-    ///
-    /// Chamado no boot: `voice_states` é persistente e não tinha expiração.
-    /// Fechar o app (ou cair) durante uma chamada deixava a linha gravada, e no
-    /// próximo boot o usuário aparecia "na voz" sozinho — e no Linux o
-    /// `voice_join` ainda abria sessão nativa com esses fantasmas.
+    /// Remove TODAS as linhas de voz deste fp (boot: sem expiração, fechava
+    /// app em chamada deixava "fantasma na voz" que abria sessão nativa).
     pub fn clear_my_voice_states(&self, fp: &str) -> Result<()> {
         self.locked()
             .execute("DELETE FROM voice_states WHERE fp=?1", params![fp])?;
         Ok(())
     }
 
-    /// Remove as linhas de voz de OUTRO fingerprint e devolve os canais de onde
-    /// ele saiu. Usado quando o peer cai: sem isso o participante ficava
-    /// "na voz" para sempre (a linha só era apagada por um `VoiceLeave`
-    /// explícito, que nunca chega quando o processo morre).
+    /// Remove linhas de voz de OUTRO fp (peer caiu sem VoiceLeave e ficava
+    /// "na voz" para sempre) e devolve os canais de onde ele saiu.
     pub fn drop_peer_voice_states(&self, fp: &str) -> Result<Vec<(String, String)>> {
         let conn = self.locked();
         let mut st =
@@ -2090,8 +2025,7 @@ impl Store {
         Ok(())
     }
 
-    /// Apaga UMA mensagem (moderação). Retorna a comunidade dona via canal,
-    /// se a mensagem for de um canal (`channel_community`), para checagem de permissão.
+    /// Apaga UMA mensagem (moderação); permissão checada via `channel_community`.
     pub fn delete_message_by_id(&self, msg_id: &str) -> Result<usize> {
         Ok(self
             .locked()
@@ -2195,8 +2129,8 @@ impl Store {
         Ok(true)
     }
 
-    /// Apaga o cargo e limpa dependências: assignments somem e bots ficam
-    /// sem cargo (role_id NULL). Proteção de "-everyone" é papel do engine.
+    /// Apaga o cargo e limpa dependências em transação (assignments somem,
+    /// bots ficam sem cargo). Proteção de "-everyone" é papel do engine.
     pub fn role_delete(&self, community_id: &str, role_id: &str) -> Result<usize> {
         // transação: cargo, assignments e vínculos de bots somem JUNTOS
         let mut conn = self.locked();
@@ -2630,15 +2564,14 @@ impl Store {
 
     // ---------- stormvault: coleta (export) e mesclagem (import) ----------
 
-    /// Acesso cru à conexão para o módulo stormvault (mesmo crate, escopo
-    /// fechado — a UI NUNCA vê isto; passa pelos commands do Tauri).
+    /// Acesso cru à conexão para o stormvault (mesmo crate; UI nunca vê isto).
     pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.locked();
         f(&conn)
     }
 
-    /// Coleta a conta inteira para o `.stormvault`. Whitelist de settings
-    /// evita exportar segredos/estado de device por acidente.
+    /// Coleta a conta inteira para o `.stormvault`; whitelist evita exportar
+    /// segredos por acidente.
     pub(crate) fn stormvault_collect(
         &self,
         secret_hex: Option<String>,
@@ -2861,19 +2794,16 @@ impl Store {
         }
     }
 
-    /// Mescla os dados do cofre importado. Política: NADA local mais recente
-    /// é sobrescrito — mensagens por id (dedup + conflito mantém local),
-    /// amigos/canais/cargos por upsert com não-vazio vencendo, settings só
-    /// preenchem chaves ausentes (preferências do device têm precedência).
+    /// Mescla o cofre importado: NADA local mais recente é sobrescrito
+    /// (mensagens dedup por id com conflito mantendo local; amigos/canais por
+    /// upsert com não-vazio vencendo; settings só preenchem chaves ausentes).
     pub(crate) fn stormvault_merge(
         &self,
         data: &crate::stormvault::StormVaultData,
         report: &mut crate::stormvault::ImportReport,
     ) -> Result<()> {
-        // mensagens em LOTES (uma transação por lote): importar 200k msgs numa
-        // transação única seguraria o Mutex do banco (rede/UI inteiras) por
-        // minutos. Lote de 2000 = cada commit é rápido e o progresso é parcial
-        // mesmo se o app cair no meio.
+        // mensagens em LOTES (2000/transação): importar tudo numa transação
+        // única seguraria o Mutex do banco por minutos; lote mantém UI viva.
         const MSG_BATCH: usize = 2000;
         for chunk in data.messages.chunks(MSG_BATCH) {
             let mut conn = self.locked();
@@ -2888,8 +2818,7 @@ impl Store {
                     .optional()?;
                 match existing {
                     // dedup por id; mesma id com conteúdo diferente = conflito
-                    // (id é hash de autor+conv+ts+corpo+rand — colisão real ~0;
-                    // mantém local, defensivo contra cofre adulterado)
+                    // (mantém local; defensivo contra cofre adulterado)
                     None => {
                         if tx.execute(
                             "INSERT INTO messages(id,conv_id,author_fp,body,ts,sig,direction,status,bot_id)
@@ -2924,7 +2853,7 @@ impl Store {
         let tx = conn.transaction()?;
 
         // conversas: OR IGNORE (locais têm precedência; título local é
-        // preferência do device — "não sobrescrever dados mais recentes")
+        // preferência do device)
         for c in &data.conversations {
             if tx.execute(
                 "INSERT OR IGNORE INTO conversations(id,kind,title,peer_fp,created_at)
@@ -2986,8 +2915,7 @@ impl Store {
             }
         }
 
-        // peers (endereços para reconectar): preenche vazios, nunca apaga;
-        // last_seen é MAX (dado mais recente vence, sem rollback)
+        // peers: preenche vazios, nunca apaga; last_seen é MAX (sem rollback)
         for p in &data.peers {
             if tx.execute(
                 "INSERT INTO peers(fp,pubkey_hex,nickname,addr,last_seen,origin)
@@ -3004,11 +2932,9 @@ impl Store {
             }
         }
 
-        // comunidades: OR IGNORE em TUDO (base, canais, cargos, bots, membros,
-        // assignments). O cofre NUNCA sobrescreve estado local — canal
-        // renomeado aqui, cargo promovido aqui e token de bot revogado aqui
-        // sobrevivem ao import; o host re-sync completa o que faltar.
-        // Exceção: instalação limpa (tabelas vazias) absorve o cofre inteiro.
+        // comunidades: OR IGNORE em tudo — cofre NUNCA sobrescreve estado
+        // local (o host re-sync completa o que faltar); instalação limpa
+        // absorve o cofre inteiro.
         for cm in &data.communities {
             let community_new = tx.execute(
                 "INSERT OR IGNORE INTO communities(id,name,owner_fp,created_at,description,category,icon) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -3049,7 +2975,7 @@ impl Store {
                     )?;
                 }
             }
-            // regras do servidor: updated_at maior vence (dado com recência real)
+            // regras do servidor: updated_at maior vence
             if let Some(rules) = data.rules.iter().find(|r| r.community_id == cm.id) {
                 let local_ts: i64 = tx
                     .query_row(
@@ -3104,8 +3030,8 @@ impl Store {
             }
         }
 
-        // audit_log e reports: append-only por id (OR IGNORE — resolução local
-        // de denúncia nunca é revertida por backup)
+        // audit_log e reports: append-only por id (resolução local de denúncia
+        // nunca é revertida por backup)
         for e in &data.audit {
             if tx.execute(
                 "INSERT OR IGNORE INTO audit_log(id,community_id,actor_fp,action,target_fp,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -3234,6 +3160,60 @@ mod tests {
         assert_eq!(
             m.status, "failed",
             "mensagem sem confirmação precisa ficar visível como falha"
+        );
+    }
+
+    /// O BACKOFF precisa crescer: com `+15s` fixo, 12 tentativas acabavam em
+    /// ~3 minutos e a mensagem virava `failed` ANTES de o relay reconectar
+    /// (30s–2min) — o X vermelho aparecia num contato que estava online.
+    ///
+    /// Aqui provamos a janela total: soma dos intervalos com o mesmo teto de
+    /// tentativas precisa passar de 30 minutos.
+    #[test]
+    fn backoff_do_outbox_cresce_e_da_janela_util() {
+        let store = Store::open_in_memory().unwrap();
+        let kp = crate::identity::Keypair::generate();
+        let me = kp.identity("me");
+        let conv = store
+            .ensure_dm_conversation(&me.fingerprint, "peerfp000002", "Peer")
+            .unwrap();
+        let env = MessageEnvelope::new(&kp, &conv.id, "oi");
+        store.insert_message(&env, "out", "pending").unwrap();
+        store.enqueue_outbox(&env.id, "peerfp000002").unwrap();
+
+        // Mede o intervalo REAL de cada tentativa lendo `attempts` + `next_try`
+        // juntos: a diferença de `next_try` satura no teto (fica 0), então ela
+        // não serve para provar crescimento.
+        let mut esperas: Vec<i64> = Vec::new();
+        for _ in 0..Store::OUTBOX_MAX_ATTEMPTS {
+            let antes = crate::identity::now_ms();
+            store.bump_outbox(&env.id).unwrap();
+            let (next, _): (i64, i64) = store
+                .locked()
+                .query_row(
+                    "SELECT next_try, attempts FROM outbox WHERE msg_id=?1",
+                    params![env.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            esperas.push(next - antes);
+        }
+
+        // Cresce até o teto de 8 min e depois fica plano (o teto é intencional).
+        let crescimento: Vec<i64> = esperas.iter().copied().filter(|e| *e < 480_000).collect();
+        assert!(
+            crescimento.windows(2).all(|w| w[0] <= w[1]),
+            "backoff precisa crescer até o teto, veio {esperas:?}"
+        );
+        assert!(
+            esperas[0] < 20_000 && esperas.iter().any(|e| *e >= 60_000),
+            "começa curto e cresce de verdade, veio {esperas:?}"
+        );
+        let total: i64 = esperas.iter().sum();
+        assert!(
+            total >= 30 * 60 * 1000,
+            "a janela total precisa passar de 30 min para sobreviver a uma \
+             reconexão por relay (era ~3 min com +15s fixo), veio {total} ms"
         );
     }
 

@@ -1,13 +1,7 @@
-// Regras PURAS do sistema de arquivos P2P do DisTorrent.
-//
-// Ficam separadas de `fileSwarm.ts` de propósito: aquele módulo importa
-// `services` (que resolve Tauri x navegador no import) e depende de DOM, então
-// não roda em `node --test`. Aqui não entra nada de rede, DOM ou IPC — só as
-// decisões que determinam se um arquivo é aceito, como os blocos são
-// identificados, se um seeder ainda vale e como o progresso é calculado.
-//
-// Foi justamente nessas regras que moraram os bugs do "download em 0% para
-// sempre", então elas precisam de teste unitário de verdade.
+// Regras PURAS do sistema de arquivos P2P: aceitação de arquivo, identificação
+// de blocos, validade de seeder e progresso. Separadas de `fileSwarm.ts` para
+// rodar em `node --test` (aquele importa `services` e depende de DOM). Foi
+// aqui que moraram os bugs do "download em 0% para sempre".
 
 export const CHUNK = 256 * 1024
 
@@ -32,11 +26,8 @@ export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_MB) >= 1024
   : `${Math.round(MAX_FILE_MB)} MB`
 
 /**
- * Validação anti-DoS compartilhada (envio local e anúncio remoto).
- *
- * `chunks` TEM que ser exatamente `ceil(size / CHUNK)`: um peer que anuncia
- * `size: 1024` com `chunks: 999999` faria a UI iterar um array gigante.
- * Retorna a mensagem de erro ou `null` se válido.
+ * Validação anti-DoS: `chunks` TEM que ser exatamente `ceil(size / CHUNK)`
+ * (peer com chunks absurdos faria a UI iterar array gigante).
  */
 export function validateAnnounce(size: number, chunks: number): string | null {
   if (!Number.isFinite(size) || size < 0) return 'tamanho de arquivo inválido'
@@ -52,23 +43,13 @@ export function chunkCountFor(size: number): number {
   return Math.max(1, Math.ceil(size / CHUNK))
 }
 
-/**
- * Tamanho esperado do bloco `index` de um arquivo de `size` bytes.
- *
- * O último bloco é o resto. Validar ISTO no receptor é o que impede um peer de
- * responder 3 bytes no índice 5 e o arquivo final sair com tamanho errado (o
- * hash do arquivo inteiro só acusaria no fim, depois de baixar tudo).
- */
+/** Tamanho do bloco `index`: o último é o resto (validar no receptor). */
 export function expectedChunkSize(index: number, chunks: number, size: number): number {
   if (index < 0 || index >= chunks) return -1
   return index === chunks - 1 ? size - index * CHUNK : CHUNK
 }
 
-/**
- * Texto de tamanho de anexo. A matemática vive em `shared/bytes.ts` (fonte
- * única, compartilhada com o cartão de update); aqui só mantemos o nome
- * histórico que o resto do app importa.
- */
+/** Tamanho de anexo; matemática real em `shared/bytes.ts` (nome histórico aqui). */
 export function formatFileSize(size: number): string {
   return formatSize(size)
 }
@@ -135,11 +116,8 @@ export interface FileMsgMeta {
 }
 
 /**
- * Seeder ainda vale? Podado por inatividade.
- *
- * Antes `seeders` só crescia: um peer que fechava o app continuava sendo
- * escolhido, estourava os 5 s de timeout e queimava tentativa de chunk — o
- * download ficava em 0% para sempre em vez de virar "sem peers".
+ * Seeder ainda vale? Podado por inatividade — antes `seeders` só crescia: peer
+ * fechado continuava sendo escolhido e o download ficava em 0% para sempre.
  */
 export function seederIsStale(lastSeen: number, now: number, idleMs: number): boolean {
   if (lastSeen <= 0) return false
@@ -155,8 +133,7 @@ export function swarmProgress(have: number, chunks: number): number {
 /** Nome seguro para exibição/salvamento: basename, sem traversal. */
 export function safeFileName(raw: string): string {
   const base = String(raw ?? '').split(/[\\/]/).pop()?.trim() ?? ''
-  // Remove caracteres de controle (0x00-0x1F) sem literal no regex: o lint
-  // (`no-control-regex`) barra o intervalo escrito à mão.
+  // Remove caracteres de controle sem literal no regex (lint barra intervalo à mão).
   const cleaned = Array.from(base).filter((c) => c.charCodeAt(0) > 31).join('').slice(0, 200)
   if (!cleaned || cleaned === '.' || cleaned === '..' || cleaned.startsWith('.')) return ''
   return cleaned

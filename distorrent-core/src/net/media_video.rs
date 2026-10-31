@@ -1,20 +1,6 @@
-//! Video NATIVO (GStreamer) — encoder e decoder do caminho de video da chamada.
-//!
-//! Linux only, mesma política de `media_voice`: o WebRTC do navegador continua
-//! sendo o dono nas outras plataformas.
-//!
-//! POR QUE GSTREAMER E NAO "so um encoder": a chamada nativa precisa de três
-//! coisas que o `webrtc-rs` não dá pronto —
-//!   1. codificar a câmera (v4l2src) ou a tela (appsrc alimentado pelo xcap) em
-//!      VP8/H264 e entregar quadros codificados ao `TrackLocalStaticSample`;
-//!   2. decodificar o RTP que chega e entregar frames para a UI;
-//!   3. fazer isso SEM travar o worker tokio de áudio/RTP.
-//! GStreamer cuida de captura/conversão/codec. O `TrackLocalStaticSample`
-//! empacota os quadros codificados em RTP e SRTP; não se deve inserir um RTP
-//! payloader do GStreamer antes dele (isso encapsularia RTP dentro de RTP).
-//!
-//! REGRA QUE NÃO SE QUEBRA: o payload type do decoder tem que ser o PT **real**
-//! negociado no SDP. Ver [`rtp_caps`] e [`VideoDecoder::new_with_pt`].
+//! Vídeo NATIVO (GStreamer) — encoder/decoder do vídeo da chamada, Linux only.
+//! Regras: PT do decoder = PT REAL do SDP (ver `rtp_caps`); nunca inserir
+//! payloader RTP antes do `TrackLocalStaticSample` (RTP dentro de RTP).
 
 use std::time::Duration;
 
@@ -25,30 +11,21 @@ use gstreamer_app::AppSrc;
 
 // ---------------------------------------------------------------- parametros
 
-/// Dimensao de envio do video. 720p MEDIDO a 29 fps com `ximagesrc` (tela) e
-/// a camera aguenta o mesmo. 640x480 era o que fazia a imagem do peer chegar
-/// do tamanho de um selo — e o `scaleResolutionDownBy` do adaptive acabava
-/// piorando quem ja estava pequeno.
+/// Dimensão de envio: 720p medido a 29 fps; 640x480 chegava tamanho de selo.
 const CAPTURE_W: u32 = 1280;
 const CAPTURE_H: u32 = 720;
-/// Fallback para dispositivo que nao negoceia 720p (webcam antiga, encoder
-/// lento, driver sem superficie): a chamada fica em 480p em vez de preta.
+/// Fallback 480p para webcam/encoder que não negocia 720p — melhor que preto.
 const FALLBACK_W: u32 = 640;
 const FALLBACK_H: u32 = 480;
-/// Bitrate alvo do VP8/H264 em kbps. 720p com 800 kbps (o valor antigo de
-/// camera) gerava blocos visiveis em qualquer movimento; 2.5 Mbps e o que
-/// uma chamada 720p precisa para nao derreter.
+/// Bitrate VP8/H264: 800 kbps gerava blocos em qualquer movimento.
 const CAMERA_KBPS: u32 = 2500;
-/// Tela tem mais conteudo estatico: um pouco mais de bitrate, mesmo perfil.
+/// Tela tem mais conteúdo estático: um pouco mais de bitrate.
 const SCREEN_KBPS: u32 = 3500;
-/// Teto de frames em voo no encoder: acima disso, prefere perder quadro a
-/// acumular latência.
+/// Teto de frames em voo: prefere perder quadro a acumular latência.
 const ENCODER_QUEUE: u32 = 2;
-/// RTP precisa chegar inteiro ao depayloader: se qualquer fragmento de um
-/// frame for descartado, todo o frame se perde. A fila é limitada para não
-/// deixar a latência crescer sem limite se o decoder ficar preso.
+/// RTP precisa chegar inteiro ao depayloader; teto contra latência infinita.
 const RTP_QUEUE: u32 = 512;
-/// Teto de frames no sink de decode: a UI só quer o MAIS RECENTE.
+/// Teto no sink de decode: a UI só quer o frame MAIS RECENTE.
 const SINK_QUEUE: u32 = 2;
 
 // ---------------------------------------------------------------- caps RTP
@@ -70,10 +47,8 @@ pub fn rtp_caps(mime: &str, pt: u8, sprop: Option<&str>) -> String {
     c
 }
 
-/// Extrai `sprop-parameter-sets` de um SDP.
-///
-/// Sem isso o decoder H264 fica PRETO até o peer mandar SPS/PPS in-band — e
-/// muitos não mandam. Ver `media_voice::spawn_video_recv`.
+/// Extrai `sprop-parameter-sets` do SDP — sem isso o decoder H264 fica PRETO
+/// até o peer mandar SPS/PPS in-band (e muitos não mandam).
 pub fn extract_h264_sprop(sdp: &str) -> Option<String> {
     for line in sdp.lines() {
         if line.contains("a=fmtp:") && line.to_ascii_lowercase().contains("h264") {
@@ -105,14 +80,8 @@ impl VideoCodec {
             VideoCodec::Vp8
         }
     }
-    /// Como [`VideoCodec::from_mime`], mas NÃO inventa: devolve `None` para
-    /// VP9/AV1/qualquer outro codec que este módulo não codifica.
-    ///
-    /// `from_mime` colapsa tudo que não é H264 em VP8. Usado para escolher o
-    /// payload type do ENVIO, isso produzia um bitstream VP8 rotulado com o PT
-    /// negociado de VP9/AV1 — o par decodificava lixo (preto ou pixelizado) e
-    /// o erro parecia "rede". Aqui o chamador prefere VP8, depois H264, e
-    /// falha com mensagem explícita se o par não aceitar nenhum dos dois.
+    /// Não inventa codec: `None` para VP9/AV1 (PT colapsado gerava bitstream
+    /// VP8 sob PT estrangeiro — o par decodificava lixo).
     pub fn supported_from_mime(m: &str) -> Option<Self> {
         let l = m.to_ascii_lowercase();
         if l.contains("vp8") {
@@ -133,16 +102,14 @@ impl VideoCodec {
 
 // ---------------------------------------------------------------- gst init
 
-/// `gst::init()` é idempotente mas pode falhar; memoizado para não repetir o
-/// parse do registry a cada chamada.
+/// `gst::init()` memoizado (idempotente, evita reparse do registry).
 fn gst_init() -> Result<(), String> {
     static ONCE: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| gstreamer::init().map_err(|e| format!("GStreamer não inicializou: {e}")))
         .clone()
 }
 
-/// `Some(nome)` se o elemento existe no registry — usado para fallback
-/// (avdec_h264 vs openh264dec, etc) sem falhar o pipeline inteiro.
+/// `Some(nome)` se o elemento existe — para fallback sem quebrar o pipeline.
 fn has_element(name: &str) -> bool {
     if gst_init().is_err() {
         return false;
@@ -159,17 +126,12 @@ pub struct VideoEncoder {
     sink: AppSink,
     /// Só no modo tela por appsrc (xcap). `None` na câmera e no ximagesrc.
     appsrc: Option<AppSrc>,
-    /// `true` = o pipeline CAPTA SOZINHO (`v4l2src` ou `ximagesrc`) e o laço
-    /// de envio só precisa puxar. `false` = appsrc alimentado pelo xcap.
+    /// `true` = o pipeline captura sozinho e o laço de envio só puxa.
     self_feeding: bool,
 }
 
-/// Devices V4L2 em ordem numérica (`/dev/video0`, `/dev/video1`, ...).
-///
-/// Hardcodar `/dev/video0` quebrou em duas frentes medidas: (1) webcam que
-/// aparece como `video1` porque `video0` é um nó de metadados da mesma câmera
-/// (UVC sempre cria o par) ou de outra câmera IR; (2) notebook com câmera em
-/// `video2` depois de uma placa de captura. Enumerar custa um `read_dir`.
+/// Devices V4L2 em ordem: hardcodar `/dev/video0` quebra (nó de metadados,
+/// câmera em video1/video2). Enumerar custa um `read_dir`.
 pub fn camera_devices() -> Vec<String> {
     let mut names: Vec<(u32, String)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/dev") {
@@ -183,37 +145,25 @@ pub fn camera_devices() -> Vec<String> {
     names.sort_by_key(|(num, _)| *num);
     let list: Vec<String> = names.into_iter().map(|(_, p)| p).collect();
     if list.is_empty() {
-        // Sem /dev/video*: devolve o caminho histórico para o erro do GStreamer
-        // ser o mesmo que o usuário já sabe ler.
+        // Sem /dev/video*: caminho histórico para o erro do GStreamer ser legível.
         vec!["/dev/video0".to_string()]
     } else {
         list
     }
 }
 
-/// Monta o encoder da CÂMERA, tentando os devices e taxas que existem de fato.
-///
-/// Dois modos de falha cobertos aqui, ambos medidos:
-///  - `not-negotiated`: o caps pedia `framerate=15/1` e a webcam só oferece
-///    30/1 (UVC comum). Antes o pipeline morria e a câmera nunca ligava.
-///  - MJPG puro: webcam barata que só entrega `image/jpeg` — `videoconvert`
-///    não decodifica JPEG, então sem `jpegdec` o pipeline não negociada.
-///
-/// A primeira combinação que ENTREGA UM QUADRO ganha: `set_state(Playing)`
-/// por si só não prova nada (o v4l2src entra em Playing e quebra no preroll).
+/// Monta o encoder da CÂMERA tentando devices/taxas reais; cobre `not-negotiated`
+/// (framerate errado) e webcam só-MJPG. Ganha a 1ª combinação que ENTREGA QUADRO
+/// (`set_state(Playing)` sozinho não prova nada).
 pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     gst_init()?;
-    // Taxas a tentar, na ordem: a pedida, depois as que as UVC realmente têm.
-    // 20/10 caíram: webcam que faz 20/10 quase sempre faz 30/15, e cada taxa
-    // a mais custa 1.5s × formatos na falha — a varredura passava de 1 min.
+    // Taxas: a pedida + as UVC reais (cada taxa extra custa 1.5s na falha).
     let mut rates: Vec<u32> = vec![fps, 30, 15];
     rates.dedup();
     let devices = camera_devices();
     let mut errs: Vec<String> = Vec::new();
     let mut wedged: Vec<String> = Vec::new();
-    // 720p primeiro; 480p só entra se NENHUMA combinação de 720p funcionar
-    // (webcam antiga/driver sem superfície) — chamada em 480p é melhor que
-    // chamada sem imagem.
+    // 720p primeiro; 480p só se nenhuma combinação 720p funcionar.
     let resolutions: [(u32, u32); 2] = [(CAPTURE_W, CAPTURE_H), (FALLBACK_W, FALLBACK_H)];
     for (ri, (w, h)) in resolutions.iter().enumerate() {
         let last_res = ri + 1 == resolutions.len();
@@ -222,21 +172,15 @@ pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
                 continue; // device mudo nas anteriores: não insiste
             }
             let last_dev = i + 1 == devices.len();
-            // Teto de falhas por device: hardware saudável conecta na 1ª ou
-            // 2ª combinação (MJPG primeiro); 6 falhas seguidas = device morto
-            // ou travado (firmware wedged entrega zero quadros mas às vezes
-            // cospe erro de negociação entre um silêncio e outro). Sem teto,
-            // a varredura queimava 1 min+ num device morto.
+            // Teto de 6 falhas por device: device morto/travado não deve
+            // queimar 1 min+ de varredura.
             let mut failures = 0u32;
             let mut silences = 0u32;
             let mut first_combo = true;
             for rate in rates.iter() {
-                // MJPG primeiro: YUYV 720p@30 (55 MB/s) não cabe no USB2, e o
-                // raw era tentado antes e queimava 1.5s+ por combinação à toa.
-                // MJPG cabe e é universal em UVC; raw fica de fallback.
+                // MJPG primeiro: YUYV 720p@30 não cabe no USB2; MJPG é universal em UVC.
                 for raw in [false, true] {
-                    // Primeira combinação do device ganha janela maior (3s):
-                    // firmware frio demora para entregar o 1º quadro.
+                    // 1ª combinação ganha janela maior: firmware frio demora o 1º quadro.
                     let proof_ms = if first_combo { 3000 } else { 1500 };
                     first_combo = false;
                     match try_camera_pipeline(codec, dev, *rate, raw, *w, *h, proof_ms) {
@@ -262,7 +206,7 @@ pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
                             }
                         }
                     }
-                    // Última carta do último device/resolução: taxa livre.
+                    // Último device/resolução: tenta taxa livre.
                     if last_res && last_dev && rate == rates.last().unwrap() && raw {
                         for livre in [false, true] {
                             match try_camera_pipeline(codec, dev, 0, livre, *w, *h, 1500) {
@@ -292,10 +236,9 @@ pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     Err(msg)
 }
 
-/// Uma tentativa de pipeline de câmera. `rate == 0` = sem filtro de framerate.
-/// `proof_ms` = quanto esperar pelo 1º quadro codificado. Devolve
-/// `(mensagem, silencioso)` no erro: silencioso = pipeline montou e rodou,
-/// mas zero quadros (device travado), diferente de erro de negociação.
+/// Uma tentativa de pipeline de câmera (`rate==0` = sem filtro; `proof_ms` =
+/// espera pelo 1º quadro). Erro "silencioso" = montou mas zero quadros (device
+/// travado), distinto de falha de negociação.
 fn try_camera_pipeline(
     codec: VideoCodec,
     device: &str,
@@ -331,8 +274,8 @@ fn try_camera_pipeline(
          max-buffers=4 drop=true"
     );
     let mut enc = build_encoder(&desc, true).map_err(|e| (e, false))?;
-    // Prova real: um quadro codificado chega? Sem isto, um pipeline que monta
-    // e morre no preroll (device ocupado, caps impossível) passaria por válido.
+    // Prova real: um quadro codificado tem de chegar (pipeline que monta e
+    // morre no preroll passaria por válido).
     let t0 = std::time::Instant::now();
     while t0.elapsed() < Duration::from_millis(proof_ms) {
         if enc.poll_encoded_frame(Duration::from_millis(100)).is_some() {
@@ -347,24 +290,14 @@ fn try_camera_pipeline(
     Err(detail)
 }
 
-/// Monta o encoder de TELA.
-///
-/// X11 com `ximagesrc`: o pipeline captura sozinho, dentro do GStreamer.
-/// MEDIDO nesta máquina: 29 fps a 1280x720 — contra 0.5 fps do caminho
-/// xcap+appsrc. O xcap usa `XGetImage` sem MIT-SHM e converte 2M pixels em
-/// Rust (`get_pixel24_32_rgba`); o `image::resize(Triangle)` sozinho custava
-/// 1 fps e a conversão RGBA→RGB mais outro. `ximagesrc` resolve os três.
-///
-/// Sem `ximagesrc` (Wayland sem portal, ou elemento ausente): cai no
-/// `appsrc` alimentado pelo `grab_screen_frame` (xcap) — o pipeline antigo.
+/// Monta o encoder de TELA: X11 usa `ximagesrc` (29 fps medidos vs 0.5 do
+/// xcap+appsrc); sem portal/elemento, cai no appsrc alimentado pelo xcap.
 pub fn new_screen(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
     gst_init()?;
     let enc = video_encoder(codec, SCREEN_KBPS)?;
     let caps = encoded_caps(codec);
     if has_element("ximagesrc") && std::env::var_os("DISPLAY").is_some() {
-        // use-damage=false: o padrão (true) faz o ximagesrc mandar atualização
-        // parcial da tela, e o RTP/webrtc-rs não entende delta — a imagem do
-        // peer rachava. false manda o quadro inteiro sempre.
+        // use-damage=false: delta frames do ximagesrc rachavam a imagem no RTP.
         let desc = format!(
             "ximagesrc use-damage=false ! videoconvert ! videoscale ! \
              video/x-raw,format=I420,width={CAPTURE_W},height={CAPTURE_H},framerate={fps}/1 ! \
@@ -373,10 +306,8 @@ pub fn new_screen(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
              max-buffers=4 drop=true"
         );
         if let Ok(mut e) = build_encoder(&desc, true) {
-            // Prova real igual à da câmera: ximagesrc que monta mas não
-            // entrega (Wayland sem portal, DISPLAY errado, permissão) virava
-            // tela preta anunciada como ativa. Sem quadro em 1.5s, cai no
-            // appsrc (xcap) em vez de mentir.
+            // Prova real igual à da câmera: sem quadro em 1.5s, cai no appsrc
+            // (xcap) em vez de anunciar tela preta como ativa.
             let t0 = std::time::Instant::now();
             let mut live = false;
             while t0.elapsed() < Duration::from_millis(1500) {
@@ -407,14 +338,9 @@ pub fn new_screen(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
 fn video_encoder(codec: VideoCodec, bitrate_kbps: u32) -> Result<String, String> {
     match codec {
         VideoCodec::Vp8 => Ok(
-            // cpu-used negativo = MAIS qualidade (gasta mais CPU). Medido: -8 a
-            // 1280x720 segura 29 fps. threads=4 paraleliza o encode.
-            // lag-in-frames=0 corta a latência do look-ahead.
-            // error-resilient: `partitions` deixa cada partição do quadro ser
-            // decodificada sozinha — em P2P pacote RTP se perde e sem isso a
-            // imagem inteira racha até o próximo keyframe.
-            // keyframe-max-dist: um keyframe a cada ~2 s em 30 fps (60), o
-            // suficiente para recuperar de perda sem gastar bitrate à toa.
+            // cpu-used negativo = mais qualidade; threads=4; lag-in-frames=0
+            // corta latência. error-resilient: partição sobrevive a perda de
+            // pacote RTP. keyframe-max-dist=60: keyframe a cada ~2 s.
             "vp8enc deadline=1 cpu-used=-8 threads=4 lag-in-frames=0 \
              error-resilient=default+partitions keyframe-max-dist=60".to_string(),
         ),
@@ -452,8 +378,7 @@ fn build_encoder(desc: &str, self_feeding: bool) -> Result<VideoEncoder, String>
     let appsrc = pipeline
         .by_name("vesrc")
         .and_then(|e| e.downcast::<AppSrc>().ok());
-    // ximagesrc/v4l2src alimentam sozinhos. Só o caminho appsrc (xcap) precisa
-    // do ponto de entrada externo — se não achou, o pipeline está errado.
+    // ximagesrc/v4l2src se alimentam sozinhos; só o appsrc precisa de entrada externa.
     if !self_feeding && appsrc.is_none() {
         return Err("appsrc do encoder de tela ausente".into());
     }
@@ -469,19 +394,15 @@ fn build_encoder(desc: &str, self_feeding: bool) -> Result<VideoEncoder, String>
 }
 
 impl VideoEncoder {
-    /// O pipeline captura sozinho (v4l2src/ximagesrc)? Quando `true`, o laço
-    /// de envio NÃO deve alimentar o encoder — só puxar os quadros.
+    /// O pipeline captura sozinho? Quando `true`, o envio NÃO alimenta, só puxa.
     pub fn self_feeding(&self) -> bool {
         self.self_feeding
     }
 }
 
 impl VideoEncoder {
-    /// Empurra um frame RGBA de tela (do xcap) no encoder. Só em encoder de tela.
-    ///
-    /// `block=false` + `max-buffers=2` no appsrc: quando o encoder atrasa, o frame
-    /// é DESCARTADO em vez de acumular latência — o comportamento certo para
-    /// videochamada (tela parada vale mais que tela com 2 s de atraso).
+    /// Empurra frame RGBA de tela (xcap); `block=false` + max-buffers baixo
+    /// DESCARTA frame atrasado em vez de acumular latência.
     pub fn push_screen_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
         if self.self_feeding {
             return Err("push_screen_frame chamado em encoder auto-alimentado".into());
@@ -489,9 +410,8 @@ impl VideoEncoder {
         let Some(src) = self.appsrc.as_ref() else {
             return Err("encoder sem appsrc".into());
         };
-        // O appsrc recebe RGBA CRU, na resolução do monitor: é o `videoscale`
-        // do pipeline que reduz. Redimensionar em Rust (image::resize Triangle)
-        // custava 1 fps MEDIDO — mais caro que todo o resto do vídeo somado.
+        // RGBA cru na resolução do monitor: o `videoscale` do pipeline reduz
+        // (resize em Rust custava 1 fps medido — mais que todo o resto).
         let need = (w as usize) * (h as usize) * 4;
         if rgba.len() < need {
             return Err(format!(
@@ -517,10 +437,8 @@ impl VideoEncoder {
         Some(map.as_slice().to_vec())
     }
 
-    /// Último erro publicado no bus do encoder, se houver.
-    ///
-    /// Um pipeline quebrado não devolve sample — sem esta checagem, o chamador só
-    /// via "parou de chegar pacote" e não sabe se foi device, codec ou pipeline.
+    /// Último erro do bus do encoder (pipeline quebrado não devolve sample —
+    /// sem isso o chamador só vê "parou de chegar pacote").
     pub fn take_error(&mut self) -> Option<String> {
         let Some(bus) = self.pipeline.bus() else {
             return None;
@@ -530,8 +448,7 @@ impl VideoEncoder {
         let Some(msg) = iter.next() else {
             return None;
         };
-        // `Message` em 0.22 não tem `parse`: o erro vem na estrutura, campo
-        // "debug".
+        // Em gst 0.22 `Message` não tem `parse`: erro vem na estrutura, campo "debug".
         let detail = msg
             .structure()
             .and_then(|st| st.get::<String>("debug").ok())
@@ -543,11 +460,8 @@ impl VideoEncoder {
         Some(format!("encoder de vídeo [{domain}]: {detail}"))
     }
 
-    /// Para o pipeline e FECHA o device.
-    ///
-    /// `set_state(Null)` é o que realmente libera o v4l2. Sem ele a próxima
-    /// `new_camera` falha com "device busy" — e o sintoma é "liguei a câmera de novo
-    /// e ela não abre mais".
+    /// Para o pipeline e FECHA o device: sem `set_state(Null)` a próxima
+    /// `new_camera` falha com "device busy" (câmera não religa).
     pub fn stop(&mut self) {
         let _ = self.pipeline.set_state(gstreamer::State::Null);
     }
@@ -574,11 +488,8 @@ impl VideoDecoder {
         Self::new_with_pt(codec, 96, sprop_h264)
     }
 
-    /// Com o PT REAL do SDP remoto.
-    ///
-    /// PT errado => `rtp*depay` rejeita todo pacote => tela preta SEM NENHUM
-    /// erro. Foi o caso mais confuso que debugamos: funcionava contra o nosso
-    /// próprio build (VP8 em 96) e falhava contra Android (H264 em 102).
+    /// Decoder com o PT REAL do SDP: PT errado = depay rejeita tudo = tela
+    /// preta SEM erro nenhum (caso VP8@96 ok vs Android H264@102).
     pub fn new_with_pt(
         codec: VideoCodec,
         pt: u8,
@@ -645,9 +556,7 @@ impl VideoDecoder {
         let sample = self.sink.try_pull_sample(gst::ClockTime::from_nseconds(
             timeout.as_nanos().min(u64::MAX as u128) as u64,
         ))?;
-        // As dimensões vêm dos CAPS do sample. SemCaps não significa frame
-        // ruim: às vezes o appsink entrega um sample sem caps quando o
-        // pipeline só teve uma reneguração.
+        // Dimensões vêm dos caps; sample sem caps não é frame ruim (renegociação).
         let Some(caps) = sample.caps() else {
             return None;
         };
@@ -658,7 +567,7 @@ impl VideoDecoder {
         let h = st.get::<i32>("height").unwrap_or(0).max(1) as u32;
         let map = sample.buffer()?.map_readable().ok()?;
         let bytes = map.as_slice().to_vec();
-        // RGBA do GStreamer vs RGB esperado pela UI: normaliza pelo tamanho.
+        // RGBA vs RGB esperado pela UI: normaliza pelo tamanho.
         let want_rgb = (w as usize) * (h as usize) * 3;
         let rgba = bytes.len() >= want_rgb * 2 && bytes.len() >= (w as usize) * (h as usize) * 4;
         let out = if rgba && bytes.len() == (w as usize) * (h as usize) * 4 {
@@ -707,9 +616,8 @@ impl Drop for VideoDecoder {
 
 // ---------------------------------------------------------------- captura de tela
 
-/// Lista de monitores em cache, atualizada a cada dois segundos para perceber
-/// hotplug sem enumerar outputs a cada quadro. Retorna uma cópia curta para o
-/// chamador não manter o lock durante a captura.
+/// Monitores em cache (2 s): percebe hotplug sem enumerar por quadro; cópia
+/// curta para não segurar o lock durante a captura.
 fn monitors() -> Option<Vec<xcap::Monitor>> {
     type Cache = Option<(std::time::Instant, Vec<xcap::Monitor>)>;
     static MONS: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
@@ -721,7 +629,7 @@ fn monitors() -> Option<Vec<xcap::Monitor>> {
     if stale {
         match xcap::Monitor::all() {
             Ok(list) => *guard = Some((std::time::Instant::now(), list)),
-            // Uma falha transitória não descarta a última lista conhecida.
+            // Falha transitória não descarta a última lista de monitores.
             Err(e) => tracing::warn!("[video] xcap não enumerou monitores: {e}"),
         }
     }
@@ -731,23 +639,15 @@ fn monitors() -> Option<Vec<xcap::Monitor>> {
         .filter(|monitors| !monitors.is_empty())
 }
 
-/// Captura um frame da tela em **RGBA, na resolução real do monitor**.
-///
-/// Sem resize e sem conversão de formato: o `videoscale`/`videoconvert` do
-/// pipeline de encode fazem isso em C, ordens de magnitude mais rápido. A
-/// versão anterior reduzia com `image::resize(Triangle)` e convertia RGBA→RGB
-/// num laço Rust — os dois juntos derrubavam o compartilhamento de tela para
-/// ~0.5 fps em 1080p.
-///
-/// `None` = este tick falhou (Wayland sem portal, monitor sumiu, etc).
+/// Frame da tela em RGBA, resolução real: sem resize/conversão em Rust (o
+/// pipeline faz em C; isso derrubava o share a ~0.5 fps). `None` = tick falhou.
 pub fn grab_screen_frame(monitor: Option<u32>) -> Option<(Vec<u8>, u32, u32)> {
     let mons = monitors()?;
     if mons.is_empty() {
         return None;
     }
-    // CLONE (Monitor e' Clone) e solta o Mutex ANTES de capturar: sob Wayland
-    // sem portal, `capture_image()` pode bloquear por segundos — segurar o lock
-    // nesse ponto congelaria o grab dos OUTROS peers da chamada.
+    // CLONE e solta o Mutex ANTES de capturar: em Wayland sem portal
+    // `capture_image()` pode bloquear segundos e congelaria os outros peers.
     let want = match monitor {
         Some(id) => mons
             .iter()
@@ -763,8 +663,7 @@ pub fn grab_screen_frame(monitor: Option<u32>) -> Option<(Vec<u8>, u32, u32)> {
     let shot = match want.capture_image() {
         Ok(s) => s,
         Err(e) => {
-            // Wayland sem xdg-desktop-portal cai aqui sempre. A captura pode
-            // ser tentada por frame e por peer, então limita o log a 1 aviso/10s.
+            // Wayland sem portal cai aqui por frame/peer: loga 1 aviso/10s.
             static LAST_CAPTURE_WARNING: std::sync::OnceLock<
                 std::sync::Mutex<Option<std::time::Instant>>,
             > = std::sync::OnceLock::new();
@@ -786,8 +685,7 @@ pub fn grab_screen_frame(monitor: Option<u32>) -> Option<(Vec<u8>, u32, u32)> {
 
 // ---------------------------------------------------------------- jpeg
 
-/// RGB -> JPEG para o preview da UI. Chamado FORA do worker de áudio (o
-/// `media_voice` faz isso num `spawn_blocking` dedicado).
+/// RGB -> JPEG para o preview da UI; fora do worker de áudio (spawn_blocking).
 pub fn jpeg_encode(rgb: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     if rgb.len() < (w as usize) * (h as usize) * 3 {
         return Err(format!(
@@ -825,9 +723,8 @@ mod tests {
 
     #[test]
     fn only_implemented_codecs_are_selected_for_sending() {
-        // VP9/AV1 são anunciados no SDP pelo MediaEngine, mas o encoder só
-        // produz VP8/H264. Escolher o PT deles gravava VP8 sob um PT estrangeiro
-        // (o par decodificava lixo) — por isso o filtro tem de devolver None.
+        // VP9/AV1 são anunciados no SDP mas o encoder não produz; PT deles
+        // gravava VP8 sob PT estrangeiro — filtro deve devolver None.
         assert_eq!(
             VideoCodec::supported_from_mime("video/VP8"),
             Some(VideoCodec::Vp8)

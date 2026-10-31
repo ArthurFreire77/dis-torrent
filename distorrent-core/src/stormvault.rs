@@ -1,30 +1,12 @@
-//! Cofre portável `.stormvault` — a conta INTEIRA (identidade + histórico +
-//! contatos + comunidades + configurações) num único arquivo cifrado,
-//! migrável entre dispositivos SEM servidor central.
-//!
-//! Formato (v1):
-//! ```text
-//! magic "DSVT" | versão u16be | hdr_len u32be | header JSON | payload
-//! payload = salt(16) || nonce(12) || ciphertext(ChaCha20Poly1305)
-//! ```
-//! - Header é plaintext (versionado) e entra como AAD do AEAD — trocar
-//!   qualquer campo do header invalida a cifra (anti-adulteração).
-//! - `payload_hash` (blake3 do body — plaintext comprimido) é verificado
-//!   PÓS-decrypt como defesa em profundidade (o AEAD já autenticou);
-//!   `payload_len` dá detecção rápida de truncamento ANTES da KDF
-//!   (arquivo truncado/bitrot não gasta Argon2).
-//! - Chave: Argon2id (m=19MiB, t=2, p=1 — OWASP, igual ao vault local) →
-//!   HKDF-SHA256 com domínio separada (`stormvault/v1`). Modo "key" (backup
-//!   automático): deriva de chave em RAM (ver `backup_key_for`), sem KDF
-//!   cara — o cofre local continua sendo o fator de proteção.
-//! - Payload comprimido com zstd quando vale a pena (histórico em JSON
-//!   comprime ~10x). Voz/vídeo já comprimidos não são afetados (não entram).
-//!
-//! Merge na importação: NÃO sobrescreve dados mais recentes — mensagens são
-//! deduplicadas por id (INSERT OR IGNORE, id = hash do conteúdo+autor+ts),
-//! amigos/canais/cargos entram por upsert "novo valor não-vazio vence",
-//! configurações locais têm precedência. Conflito de identidade com
-//! fingerprint DIFERENTE é recusado (multi-conta existe para isso).
+//! Cofre portável `.stormvault` — conta inteira num arquivo cifrado migrável
+//! sem servidor. Formato v1: magic "DSVT" | versão | header JSON (plaintext,
+//! entra como AAD — anti-adulteração) | salt || nonce || ChaCha20Poly1305.
+//! Hash/len do payload dão detecção rápida de truncamento antes da KDF.
+//! Chave: Argon2id + HKDF ("stormvault/v1"); modo "key" deriva de chave em
+//! RAM para backup automático. Payload comprimido com zstd quando compensa.
+//! Import mescla sem sobrescrever dados recentes (mensagens por id dedup,
+//! upsert "não-vazio vence", settings locais têm precedência); fp diferente
+//! é recusado.
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
@@ -171,10 +153,8 @@ pub struct ImportReport {
 
 // ---------------- coleta (export) ----------------
 
-/// Chave de backup automático: deriva da secret da identidade em RAM.
-/// Qualquer device que desbloqueie a MESMA conta deriva a mesma chave —
-/// backups são portáveis junto com a identidade, e o fator de proteção
-/// continua sendo a senha do cofre local (ninguém sem a senha chega aqui).
+/// Chave de backup automático: blake3 do segredo em RAM — mesmo device
+/// desbloqueado deriva a mesma chave; a proteção real é o cofre local.
 pub fn backup_key_for(secret_hex: &str) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"distorrent/stormvault/backup-key/v1");
@@ -183,9 +163,8 @@ pub fn backup_key_for(secret_hex: &str) -> [u8; 32] {
     out
 }
 
-/// Coleta a conta inteira do Store para o payload do cofre.
-/// `secret_hex`: chave privada se o export deve carregar a identidade
-/// (None = export de dados sem a chave — mesclável num device que já tem a conta).
+/// Coleta a conta inteira do Store; `secret_hex` = Some quando o export
+/// deve carregar a identidade.
 pub fn collect(
     store: &Store,
     secret_hex: Option<String>,
@@ -243,9 +222,8 @@ fn seal_container(
     let mut nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    // header ANTES do ciphertext: entra no AAD (anti-tamper de cabeçalho).
-    // payload_hash cobre o BODY (plaintext comprimido): detecta adulteração
-    // de conteúdo mesmo que o AEAD passe (defesa em profundidade).
+    // header entra no AAD (anti-tamper); payload_hash cobre o body como
+    // defesa em profundidade.
     let header = StormVaultHeader {
         v: FORMAT_VERSION,
         app: "distorrent".into(),
@@ -293,8 +271,7 @@ fn aad_bytes(header_json: &[u8]) -> Vec<u8> {
     aad
 }
 
-/// Lê o header sem descriptografar — para a UI mostrar de quem é o cofre
-/// antes de pedir a senha. Não expõe nada sensível (fp é hash público).
+/// Lê o header sem descriptografar (a UI mostra de quem é o cofre; fp é público).
 pub fn read_header(bytes: &[u8]) -> Result<StormVaultHeader> {
     let (header_json, _payload) = split_container(bytes)?;
     serde_json::from_slice(&header_json)
@@ -343,7 +320,7 @@ pub fn open_with_password(bytes: &[u8], password: &str) -> Result<StormVaultData
     open_payload(&header, &key, rest, &header_json)
 }
 
-/// Abre com chave derivada (backup automático).
+/// Abre com chave derivada (modo backup automático, sem KDF caro).
 pub fn open_with_key(bytes: &[u8], key: &[u8; 32]) -> Result<StormVaultData> {
     let (header_json, payload) = split_container(bytes)?;
     let header: StormVaultHeader = serde_json::from_slice(&header_json)
@@ -404,12 +381,9 @@ fn verify_container_shape(header: &StormVaultHeader, payload: &[u8]) -> Result<(
 
 // ---------------- mesclagem (import) ----------------
 
-/// Importa um arquivo `.stormvault` aberto com senha. Se o device está limpo,
-/// instala a identidade (a senha do arquivo vira a senha do cofre local);
-/// se já tem a MESMA conta, só mescla os dados. Conta diferente → recusa.
-/// Importa um arquivo `.stormvault` aberto com senha. Se o device está limpo,
-/// instala a identidade (a senha do arquivo vira a senha do cofre local);
-/// se já tem a MESMA conta, só mescla os dados. Conta diferente → recusa.
+/// Importa `.stormvault` com senha: device limpo instala a identidade (a
+/// senha do arquivo vira a do cofre local); mesma conta só mescla; conta
+/// diferente → recusa.
 pub fn import_with_password(store: &Store, bytes: &[u8], password: &str) -> Result<ImportReport> {
     let data = open_with_password(bytes, password)?;
     let installing = store.load_identity().is_none();
@@ -472,8 +446,8 @@ fn derive_password_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     derive_password_key_with_params(password, salt, 19_456, 2, 1)
 }
 
-/// Parâmetros lidos do header ( Cofres futuros com m/t/p diferentes abrem
-/// certo; valores absurdos viram erro honesto em vez de OOM).
+/// Parâmetros KDF do header, com limites — cofres futuros com m/t/p
+/// diferentes abrem; valores absurdos viram erro honesto em vez de OOM.
 fn kdf_params_from(header: &StormVaultHeader) -> Result<(u32, u32, u32)> {
     let v = &header.kdf_params;
     let m = v.get("m").and_then(|x| x.as_u64()).unwrap_or(19_456) as u32;

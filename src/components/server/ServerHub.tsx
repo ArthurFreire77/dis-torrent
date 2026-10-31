@@ -1,28 +1,9 @@
-// Hub de servidores — o MESMO fluxo no desktop e no celular.
-//
-// ## Por que um componente só
-//
-// O desktop tinha três caminhos para a mesma tarefa (rail "+" → modal legado →
-// wizard; menu do servidor → "Convidar pessoas" → modal inline; Configurações →
-// Convites → outro componente) e cada um montava o convite do seu jeito. Um
-// deles passava o fingerprint de QUEM GERAVA o convite, o que torna o token
-// inútil para terceiros; outro montava o link com `window.location.origin`, que
-// no Tauri é `http://tauri.localhost` (endereço que não existe fora do WebView).
-//
-// O celular tinha o caminho certo (só convite, sem criação) mas sem botão de
-// colar, sem estado de carregamento por membro e sem silenciar.
-//
-// Aqui há um fluxo único, com `mode`:
-//   - `desktop`: pode CRIAR servidor e entrar por convite;
-//   - `mobile`:  só entra por convite (decisão de produto: criar exige
-//                recursos que só o desktop tem — nomes/canais/cargos).
-//
-// Regras de honestidade que o componente carrega:
-//   - `joinCommunity` devolve "pedido enviado", NÃO "membro": a UI mostra
-//     "aguardando confirmação do dono" até o evento `community_joined` chegar;
-//   - o estado de cada membro vem de `communityMembers` (link real), nunca do
-//     fato de o nome estar na lista;
-//   - silenciar é preferência local de notificação: não mexe em rede.
+// Hub de servidores — o MESMO fluxo no desktop e no celular (`mode`):
+// desktop pode criar e entrar por convite; mobile só entra (decisão de produto).
+// Unifica três caminhos desktop de convite que antes divergiam (um gerava token
+// com o fp do criador — inútil a terceiros; outro usava `tauri.localhost`).
+// Honestidade: `joinCommunity` devolve "pedido enviado" (não "membro"); estado
+// de membro vem de `communityMembers`; silenciar é preferência local.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ic } from '../../shared/icons'
@@ -78,9 +59,8 @@ export function summarize(members: MemberPairing[]): { online: number; total: nu
   return { online, total, pending }
 }
 
-// `copyText`/`readClipboard` agora vivem em `shared/clipboard.ts` (fonte única —
-// o BotConfigPanel tinha uma terceira cópia silenciosa). Importados para uso
-// local E reexportados: os shells e o formulário de convite já importam daqui.
+// `copyText`/`readClipboard` em `shared/clipboard.ts` (fonte única); reexportados
+// pois shells e formulário de convite já importam daqui.
 import { copyText, readClipboard } from '../../shared/clipboard'
 export { copyText, readClipboard }
 
@@ -262,11 +242,8 @@ export function MemberPairingList({
 // ---------------------------------------------------------------- convite
 
 /**
- * Painel de convite de um servidor: gera, copia TOKEN (principal) e link
- * (secundário), e explica a diferença.
- *
- * O token é o mecanismo confiável: funciona por qualquer app de mensagens e
- * não exige esquema registrado no sistema operacional. O link é um atalho.
+ * Painel de convite: gera, copia TOKEN (principal — funciona por qualquer app,
+ * sem depender de esquema registrado) e link (atalho secundário).
  */
 export function InvitePanel({
   communityId,
@@ -297,8 +274,7 @@ export function InvitePanel({
     if (busy) return
     setBusy(true)
     try {
-      // Sem `memberFp`: convite ABERTO. Passar o próprio fingerprint criava um
-      // token que só o criador conseguia usar.
+      // Sem `memberFp`: convite ABERTO (fp próprio criava token inútil a terceiros).
       const v = await services.makeInviteLink(communityId)
       setInvite(v)
     } catch (e) {
@@ -418,12 +394,8 @@ export function InvitePanel({
 // ---------------------------------------------------------------- entrada
 
 /**
- * Entrada por token: campo, colar, validação e estado de espera.
- *
- * O estado vai de `idle` → `validating` → `waiting` (o core aceitou o token e
- * está tentando o host) → `joined` (o host confirmou e o servidor veio no
- * `CommunityState`). Nunca pula de `validating` para "membro": isso era o que
- * fazia a UI fechar o modal sem servidor nenhum.
+ * Entrada por token: `idle` → `validating` → `waiting` → `joined` (host
+ * confirmou). Nunca pula para "membro" — isso fechava o modal sem servidor.
  */
 export function JoinServerForm({
   onJoined,
@@ -459,9 +431,7 @@ export function JoinServerForm({
     setPhase('validating')
     try {
       const cid = await services.joinCommunity(cleaned)
-      // O core já validou assinatura/expiração/fingerprint. O que falta é o
-      // host confirmar. Mostramos "aguardando" e deixamos o evento
-      // `community_joined` levar ao servidor.
+      // Core validou o token; falta o host confirmar — o evento leva ao servidor.
       setPhase('waiting')
       setJoinedName(cid)
     } catch (e) {
@@ -470,8 +440,7 @@ export function JoinServerForm({
     }
   }, [cleaned, phase])
 
-  // Confirmação real: o host respondeu com o estado. Só então a entrada está
-  // concluída.
+    // Confirmação real do host via `community_joined`.
   useEffect(() => {
     if (phase !== 'waiting') return
     const un = services.subscribe((ev) => {
@@ -484,8 +453,7 @@ export function JoinServerForm({
         }
       }
     })
-    // Rede lenta: não deixa o usuário preso sem saída. O join persiste no
-    // SQLite e é reenviado assim que o dono aparecer — a UI diz isso.
+    // Timeout honesto: o join persiste e é reenviado quando o dono aparecer.
     const timeout = window.setTimeout(() => {
       setPhase('idle')
       setPasteMsg(
@@ -577,10 +545,7 @@ export function JoinServerForm({
 
 // ---------------------------------------------------------------- painel
 
-/**
- * Painel de um servidor: identidade, membros com estado real, convite e
- * silenciamento. É o conteúdo de "detalhes" nos dois shells.
- */
+/** Painel de um servidor: identidade, membros reais, convite e silenciamento. */
 export function ServerDetails({
   community,
   members,
@@ -700,10 +665,7 @@ export function ServerDetails({
 
 // ---------------------------------------------------------------- modal
 
-/**
- * Modal de servidores (desktop). Mantém o padrão visual do app: `ui.Modal`,
- * mesmos tokens, sem CSS paralelo.
- */
+/** Modal de servidores (desktop): padrão visual do app (`ui.Modal`). */
 export function ServerHubModal({
   open,
   onClose,

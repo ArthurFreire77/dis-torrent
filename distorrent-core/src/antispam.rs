@@ -1,15 +1,7 @@
-//! Anti-spam P2P — Storm camada de segurança.
-//!
-//! Pipeline (barato primeiro, caro por último):
-//! 1. `RateLimiter` (token bucket por peer/canal) — flood.
-//! 2. `DuplicateDetector` (blake3 do corpo + janela) — mensagens repetidas.
-//! 3. `LinkFilter` — domínios maliciosos + encurtadores.
-//! 4. `ProofOfWork` — captcha leve p/ novatos em servidores públicos.
-//! 5. `Reputation` — novo / confiável / suspeito / banido + shadow-ban.
-//!
-//! Tudo em memória no engine; decisões são `Allow | Warn | Drop | Ban`.
-//! O receptor SEMPRE revalida assinatura antes (anti-spoof) — spam nunca
-//! passa na frente de autenticidade.
+//! Anti-spam P2P — pipeline barato→caro: rate limit (token bucket), dedup
+//! (blake3 + janela), filtro de links, PoW para novatos e reputação com
+//! shadow-ban. Veredito `Allow | Warn | Drop | Ban`; assinatura é revalidada
+//! antes (anti-spoof).
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};

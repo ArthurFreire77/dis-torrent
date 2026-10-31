@@ -1,34 +1,6 @@
-//! Cancelamento de eco acustico (AEC) e supressao de ruido para a voz nativa.
-//!
-//! AEC = "o microfone hears the speaker". Sem isto, com caixa de som, o par do
-//! outro lado ouve a sua propria voz com atraso. E' o que mais pesa para a voz
-//! nativa "se comportar como o Discord".
-//!
-//! ## O que a API do speexdsp REALMENTE e' (lida na fonte, nao adivinhada)
-//!
-//! A especificacao original citava `echo_ctl(..., SetSize, 200)`,
-//! `filter_length_ms` e `tail_length_ms`. **Nenhum desses existe.** A API real
-//! do speexdsp e':
-//!
-//! ```c
-//! SpeexEchoState *speex_echo_state_init(int frame_size, int filter_length);
-//! void speex_echo_cancellation(SpeexEchoState*, const spx_int16_t *rec,
-//!                              const spx_int16_t *play, spx_int16_t *out);
-//! int  speex_echo_ctl(SpeexEchoState*, int request, void *ptr);
-//! ```
-//!
-//! - `filter_length` e' em **AMOSTRAS**, nao ms. Nao existe `tail_length_ms`:
-//!   o "tamanho do eco" e' unico e e' esse `filter_length`. O retardo que o
-//!   filtro ainda alcanca e' derivado dele, e o unico ajuste fino disponivel.
-//! - `rec` = microfone (o sinal com o eco), `play` = REFERENCIA (o que o
-//!   alto-falante esta tocando). Sem `play` correto o filtro adaptativo aprende
-//!   a prever a sua voz real e a apaga — por isso `EchoCanceller` abaixo so
-//!   roda o AEC quando a referencia esta de fato chegando (ver `STALE_LIMIT`).
-//!
-//! `aec-rs` -> `aec-rs-sys`, que **traz o codigo C do speexdsp e compila com
-//! cmake**. O crate `speexdsp` da crates.io so expoe o resampler, e o
-//! `speexdsp-sys` original exige `libspeexdsp-dev` + pkg-config + bindgen
-//! (indisponivel aqui sem root). Por isso `aec-rs`, e nao `speexdsp`.
+//! AEC/supressão de ruído (speexdsp via `aec-rs`) para a voz nativa.
+//! Cuidado: `filter_length` é em AMOSTRAS (não existe `tail_length_ms`), e
+//! sem a referência correta do speaker o filtro apaga a voz real.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -38,36 +10,20 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// 20 ms por quadro.
 pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * 20; // 960
 
-/// Comprimento do filtro adaptativo, em ms.
-///
-/// O manual do speexdsp pede 100–500 ms. Abaixo de ~100 ms o filtro nao cobre
-/// a cauda acustica (alto-falante + caixa + microfone). 200 ms fica no meio da
-/// faixa: cabe o eco de uma caixa de som comum sem inflar a CPU.
+/// Comprimento do filtro adaptativo: 200 ms cobre a cauda acústica sem inflar CPU.
 pub const FILTER_LENGTH_MS: u32 = 200;
 /// `filter_length` em amostras — a API real pede amostras.
 pub const FILTER_LENGTH: i32 = ((SAMPLE_RATE / 1000) * FILTER_LENGTH_MS) as i32; // 9600
 
-/// Capacidade do anel de referencia: ~1,3 s de audio. Ampla o bastante para
-/// absorver jitter entre os dois streams (48 kHz em relogios independentes),
-/// curta o bastante para que um ring buffer estourado nao vire latencia.
+/// Anel de ~1,3 s: absorve jitter entre relógios sem virar latência.
 const REF_CAPACITY: usize = SAMPLE_RATE as usize * 13 / 10;
 
-/// Quadros consecutivos sem referencia ANTES de jogar fora o filtro adaptativo.
-///
-/// Enquanto nao chega referencia, o filtro fica "olhando" um silencio que nao
-/// existe no alto-falante. Depois de ~200 ms (10 quadros) de Reference, ele ja
-/// teria adaptado para o silencio; quando o alto-falante volta, os primeiros
-/// quadros podem suffering de sobre-subtracao — e sobre-subtracao e' exatamente
-/// o modo de falha que "apaga a voz real". Descartar o estado e' mais honesto
-/// que tentar adivinhar.
+/// Quadros sem referência antes de descartar o filtro (evita apagar voz real
+/// por sobre-subtração quando o speaker volta).
 const STALE_LIMIT: u32 = 10;
 
-/// Anel de referencia do alto-falante.
-///
-/// Alimentado pelo callback de playout com **exatamente** os samples que
-/// foram escritos no device, e lido pelo envio a 48 kHz. Descarte-do-mais-
-/// antigo: se os dois relogios derivarem, o anel nunca cresce (latencia) e
-/// sempre contem o audio mais recente, que e' o que o filtro precisa.
+/// Anel de referência do speaker: recebe exatamente os samples do playout,
+/// descarta-o-mais-antigo para nunca crescer nem atrasar.
 #[derive(Debug)]
 pub struct RefRing {
     buf: Mutex<VecDeque<i16>>,
@@ -88,8 +44,7 @@ impl RefRing {
         }
     }
 
-    /// Empurra audio tocando. Chamado na thread realtime de playout: o lock e'
-    /// tomado por poucos microssegundos e nunca se mantem em espera.
+    /// Empurra áudio tocando; lock curtíssimo na thread realtime de playout.
     pub fn push(&self, s: &[i16]) {
         let mut q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         q.extend(s.iter().copied());
@@ -98,8 +53,7 @@ impl RefRing {
         }
     }
 
-    /// Retira ate `n` amostras. Devolve `false` se nao havia referencia
-    /// suficiente — o chamador entao NAO roda o AEC.
+    /// Retira até `n` amostras; `false` = sem referência, chamador NÃO roda AEC.
     pub fn take(&self, n: usize, out: &mut [i16]) -> bool {
         let mut q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         if q.len() < n {
@@ -121,18 +75,10 @@ impl RefRing {
     }
 }
 
-/// Supressao de ruido ligada por padrao?
-///
-/// `false`: o AEC faz o trabalho dele e o ruido de sala segue para o par, que
-/// e' o preco de nunca apagar a voz local. Ver `new_opts`.
+/// NS desligado por padrão: o risco de apagar a voz local supera o ganho.
 pub const DEFAULT_NS: bool = false;
 
-/// Estado do AEC de UMA sessao.
-///
-/// `aec_rs::Aec` guarda ponteiro cru (`*mut SpeexEchoState`) e portanto nao e'
-/// `Send`. O `Send` e' declarado aqui porque o objeto e' movido para dentro de
-/// UM unico task de envio e nunca e' compartilhado entre tasks: nao ha como dois
-/// threads chamem `cancel_echo` ao mesmo tempo.
+/// Estado do AEC de uma sessão; `Send` seguro pois vive em UM task só.
 struct Inner {
     aec: aec_rs::Aec,
 }
@@ -152,20 +98,12 @@ pub struct EchoCanceller {
 }
 
 impl EchoCanceller {
-    /// `play_ref` e' o anel alimentado pelo playout. `enabled=false` deixa o
-    /// microfone passar intacto (fones de ouvido: nao ha eco acustico para
-    /// cancelar, e o filtro so custaria CPU e risco).
+    /// `play_ref` = anel do playout; sem AEC (fone) o mic passa intacto.
     pub fn new(play_ref: std::sync::Arc<RefRing>, enabled: bool) -> Self {
         Self::new_opts(play_ref, enabled, DEFAULT_NS)
     }
 
-    /// `ns` = preprocessor do speexdsp (supressao de ruido).
-    ///
-    /// MEDICAO IMPORTANTE: ligado, ele treats um sinal de voz *estacionario*
-    /// como ruido e apaga ~43 dB da fala local (ver aec-probe, cenario 5).
-    /// Voz real e' nao-estacionaria e sofre menos, mas o caso e' grave demais
-    /// para deixar ligado sem prova. `DEFAULT_NS` decide o que entra no
-    /// binario; ver o relatorio.
+    /// NS do speexdsp apaga ~43 dB de fala estacionária (medido) — default é off.
     pub fn new_opts(play_ref: std::sync::Arc<RefRing>, enabled: bool, ns: bool) -> Self {
         Self {
             inner: enabled.then(|| Self::make(ns)),
@@ -194,10 +132,7 @@ impl EchoCanceller {
         }
     }
 
-    /// Processa um quadro do microfone.
-    ///
-    /// Retorna o audio a enviar. Sem AEC, ou sem referencia, devolve `mic`
-    /// intacto — nunca silencio, nunca metade do sinal.
+    /// Processa um quadro do mic; sem AEC/referência devolve `mic` intacto.
     pub fn process<'a>(&'a mut self, mic: &'a [i16]) -> &'a [i16] {
         debug_assert_eq!(mic.len(), FRAME_SAMPLES);
         if self.inner.is_none() {
@@ -211,8 +146,7 @@ impl EchoCanceller {
         if !have {
             self.starved += 1;
             if self.starved >= STALE_LIMIT {
-                // Referencia morreu (alto-falante fechado, call encerrada):
-                // joga o filtro fora em vez de manter um estado divergido.
+                // Referência morta: descarta o filtro (estado divergido apagaria a voz).
                 self.inner = None;
                 self.starved = 0;
                 self.rebuilt = 1;
@@ -227,8 +161,7 @@ impl EchoCanceller {
         &self.out
     }
 
-    /// Tenta religar o AEC depois de uma referencia morta. Chamado pelo loop de
-    /// envio; so' o rebuilda se ja houver referencia de novo.
+    /// Rearma o AEC após referência morta, só quando ela voltar.
     pub fn maybe_rearm(&mut self, enable: bool) {
         if enable && self.inner.is_none() && self.play_ref.available() >= FRAME_SAMPLES {
             self.rebuilt += 1;
@@ -265,11 +198,8 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// Voz sintética: ruido -> 3 formantes, com pausas, normalizada.
-    ///
-    /// Sinal harmônico puro e' PATOLOGICO para um filtro adaptativo: ele trava
-    /// e o resultado da medicao mente. Isso custou duas rodadas de medicao
-    /// errada antes de o gerador ficar realista.
+    /// Voz sintética realista: sinal harmônico puro trava o filtro e mente
+    /// na medição (custou duas rodadas erradas).
     fn voz(n: usize, semente: u32, rms: f32) -> Vec<f32> {
         let mut x = semente | 1;
         let bruto: Vec<f32> = (0..n)
@@ -335,8 +265,7 @@ mod tests {
         out.iter().map(|v| (v * g).clamp(-1.0, 1.0)).collect()
     }
 
-    /// Roda o pipeline inteiro. Devolve (energia media ANTES, energia media
-    /// DEPOIS) em dBFS, medidos so depois da convergencia do filtro.
+    /// Roda o pipeline AEC; devolve (dBFS antes, dBFS depois) pós-convergência.
     fn medir(usar_aec: bool, delay_ms: usize, eco_gain: f32, quadros: usize) -> (f64, f64) {
         const PULAR: usize = 100; // 2 s para o filtro adaptativo convergir
         let delay = (SAMPLE_RATE as usize / 1000) * delay_ms;
@@ -375,8 +304,7 @@ mod tests {
         (antes / n, depois / n)
     }
 
-    /// O teste pedido: toca uma referencia, devolve o microfone com esse eco
-    /// atrasado, e compara a energia ANTES e DEPOIS do AEC.
+    /// Compara energia antes/depois do AEC com eco atrasado injetado.
     #[test]
     fn aec_reduz_eco_antes_e_depois() {
         const Q: usize = 200; // 4 s
@@ -393,8 +321,7 @@ mod tests {
         );
     }
 
-    /// Sem alto-falante nao ha eco acustico: o microfone passa INTACTO.
-    /// E' o requisito "pular com seguranca quando nao ha alto-falante".
+    /// Sem alto-falante não há eco: mic passa INTACTO (requisito de segurança).
     #[test]
     fn sem_referencia_o_microfone_passa_intacto() {
         let ring = Arc::new(RefRing::new());
@@ -446,8 +373,7 @@ mod tests {
         assert!(r.available() <= REF_CAPACITY, "ring estourou a capacidade");
     }
 
-    /// Referencia morta por muito tempo descarta o filtro adaptativo, para um
-    /// estado divergido nunca overdeletar a voz quando o alto-falante volta.
+    /// Referência morta longa descarta o filtro (evita overdelete na volta).
     #[test]
     fn referencia_morta_descarta_o_filtro() {
         let ring = Arc::new(RefRing::new());

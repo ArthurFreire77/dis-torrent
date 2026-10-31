@@ -73,12 +73,9 @@ interface AutoItemMobile {
   fp?: string
 }
 
-// `isImageName`/`isVideoName` vêm de `fileRules` (fonte única): a lista de
-// extensões era copiada aqui e já divergia do desktop (faltava `heic`/`ico`).
+// `isImageName`/`isVideoName` vêm de `fileRules` (fonte única das extensões).
 import { isImageName, isVideoName } from '../services/fileRules'
-// Os tetos de auto-carregamento (12MB imagem / 40MB vídeo) vivem em
-// `mediaAutoFetchCap` no fileSwarm — é lá que o `prepareMedia` decide, e o
-// desktop usa a MESMA constante. Duplicar aqui fazia os dois divergirem.
+// Tetos de auto-carregamento vivem em `mediaAutoFetchCap` (fileSwarm), compartilhados.
 
 const t = {
   rail: '#0f1115', sidebar: '#1a1d23', main: '#14161a', composer: '#1f2126',
@@ -103,8 +100,7 @@ function avatarColor(fp: string): string {
   return palette[h % palette.length]
 }
 
-// memo: avatar/dot puros — antes recriavam DOM virtual a cada render do shell
-// (cada tecla no composer, cada chunk do swarm, cada poll de 3s).
+// memo: avatar/dot puros — evita recriar DOM a cada render do shell.
 const Avatar = memo(function Avatar({ name, fp, size, avatarB64, accent }: { name: string; fp: string; size: number; avatarB64?: string; accent?: string }) {
   const initial = (name || '?').trim().charAt(0).toUpperCase()
   return (
@@ -120,9 +116,7 @@ const PeerDot = memo(function PeerDot({ on, ring }: { on: boolean; ring?: string
   return <span style={{ position: 'absolute', right: -2, bottom: -2, width: 12, height: 12, borderRadius: '50%', background: on ? t.green : '#80848e', border: `3px solid ${ring ?? t.main}` }} />
 })
 
-// Linhas memoizadas — JSX idêntico ao das helpers antigas (convRow/serverRow/
-// friendRow), só que como componentes memo: linhas cujas props não mudaram
-// pulam o re-render (antes TODAS eram recriadas a cada setState do shell).
+// Linhas memoizadas: props iguais pulam re-render (antes eram todas recriadas).
 const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete }: {
   c: Conversation
   online: boolean
@@ -191,16 +185,8 @@ const FriendRow = memo(function FriendRow({ f, online, avatarB64, onOpen, onRemo
   )
 })
 
-// Item de mensagem memoizado — JSX idêntico ao map inline antigo (texto +
-// cartão de arquivo com Baixar/progresso). Props primitivas (pct/done/
-// announced) para o memo detectar mudança real de progresso; o parse do corpo
-// e o lookup no swarm acontecem 1x por mensagem no useMemo pai (antes: a cada
-// tecla digitada no composer e a cada chunk recebido).
-//
-// O cartão mora em `components/FileCard.tsx` (MESMO componente do desktop):
-// aqui ele só ganha o enquadramento do tema do celular. Antes eram dois cards
-// que divergiam — o celular não mostrava velocidade e o desktop não mostrava
-// prévia.
+// Item de mensagem memoizado; parse/lookup 1x por mensagem no useMemo pai.
+// Cartão em `components/FileCard.tsx` (o MESMO do desktop, com tema mobile).
 function MobileFileCard({ m, mine, fmeta, pct, speed, status, error, announced, previewUrl, onDownload, onRetry }: {
   m: StoredMessage
   mine: boolean
@@ -408,11 +394,7 @@ function LockScreen({ nickname, onUnlock }: { nickname: string; onUnlock: (id: I
 
 // ---------- tela de carregamento (boot) ----------
 
-// Antes era `<div style={{height:'100dvh',background:t.main}}/>`: uma tela
-// CINZA VAZIA enquanto a identidade e o motor P2P subiam. No desktop, onde o
-// boot mexe em keyring do SO + SQLite + listener de rede, isso levava
-// segundos e o app parecia travado. Agora tem barra, texto e — se demorar
-// demais — aviso honesto em vez de silêncio.
+// Tela de boot com barra/texto/aviso — não deixa o app parecer travado.
 function BootScreen({ native }: { native: boolean }){
   const [slow, setSlow] = useState(false)
   useEffect(() => {
@@ -480,12 +462,7 @@ export default function MobileShell() {
   const [addingFriend, setAddingFriend] = useState(false)
   const [friendErr, setFriendErr] = useState<string | null>(null)
   const friendInputRef = useRef<HTMLInputElement | null>(null)
-  // T1: sem bloqueio global sending — permite digitar/enviar a proxima durante o envio.
-  // So barra duplo-submit da MESMA tecla Enter em <300ms.
-  //
-  // Por CONVERSA, não por relógio global: um único instante descartava o envio
-  // para B feito logo depois do envio para A (o `return` acontece antes de
-  // limpar o input), e o Enter parecia morto ao trocar de conversa.
+  // T1: envio é por CONVERSA (não relógio global) + barra duplo-Enter <300ms.
   const lastSendByConvRef = useRef<{ conv: string; at: number }>({ conv: '', at: 0 })
   const [searchQ, setSearchQ] = useState('')
   // --- camada social (5.5) ---
@@ -516,14 +493,12 @@ export default function MobileShell() {
   const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
-  // PRIVACIDADE × CHAMADAS (mesma regra do ThemeShell): o ICE do WebRTC não
-  // passa pelo SOCKS5 do app — em proxy/full os SERVIDORES PÚBLICOS de
-  // STUN/TURN ficam fora da lista e a UI avisa que a chamada não é anônima.
+  // PRIVACIDADE × CHAMADAS (mesma regra do ThemeShell): ICE WebRTC não passa
+  // pelo SOCKS5 — a UI avisa que a chamada não é anônima.
   const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
   useEffect(() => {
     setCallPrivacyForIce(privacyMode)
-    // Estado EFETIVO do proxy (relay roteando por SOCKS5 de fato?) — o modal
-    // não pode vender "proxy ativado" com o proxy morto (fail-closed).
+    // Estado EFETIVO do proxy (fail-closed): o modal não vende "ativado" morto.
     services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
   }, [privacyMode])
   // --- proxy SOCKS5 (modo proxy/Tor): endereço + teste online + ativação ---
@@ -551,8 +526,7 @@ export default function MobileShell() {
 
   async function refreshPrivacyExtras(mode?: PrivacyMode) {
     try {
-      // endereço do MODO-ALVO (proxy × Tor): sem isto, escolher Tor trazia o
-      // default do SOCKS5 (1080) e "Ativar" gravava a porta errada.
+      // endereço do MODO-ALVO (proxy × Tor): sem isto gravava a porta errada.
       const pc = await services.proxyAddrGet(mode)
       setProxyAddr(pc.addr)
       setProxyIsDefault(pc.is_default)
@@ -576,8 +550,7 @@ export default function MobileShell() {
 
   async function saveProxyAndActivate(mode: PrivacyMode) {
     try {
-      // grava na chave do modo-alvo antes de trocar o modo (ordem inversa
-      // faria o motor re-rotar o relay com o endereço antigo)
+      // grava na chave do modo-alvo antes de trocar o modo (relay re-rotala)
       await services.proxyAddrSet(proxyAddr.trim(), mode)
       const r = await services.privacySet(mode)
       setPrivacyMode(r.mode)
@@ -590,8 +563,7 @@ export default function MobileShell() {
   }
 
   function pickPrivacyMode(pm: PrivacyMode) {
-    // proxy/Tor: pede o IP do proxy + teste online ANTES de ativar (nunca
-    // liga proxy às cegas). Os outros modos aplicam direto.
+    // proxy/Tor: pede IP + teste online ANTES de ativar (nunca liga às cegas).
     if (pm === 'proxy' || pm === 'full') {
       setProxyPendingMode(pm)
       setProxyTestOk(null); setProxyTestErr(null)
@@ -621,11 +593,7 @@ export default function MobileShell() {
   const [previews, setPreviews] = useState<Record<string, string>>({})
   const previewsRef = useRef<Record<string, string>>({})
   const previewUrlsRef = useRef<string[]>([])
-  /**
-   * Publica a blob URL no estado. Substituindo uma prévia anterior, revoga a
-   * URL velha — sem isso cada retry de um card que falhou deixava um blob
-   * órfão segurando o arquivo inteiro na memória do WebView.
-   */
+  /** Publica a blob URL; revoga a anterior (evita blob órfão na memória). */
   const mountPreview = useCallback((fileId: string, blob: Blob) => {
     if (previewsRef.current[fileId]) return
     const url = URL.createObjectURL(blob)
@@ -640,8 +608,7 @@ export default function MobileShell() {
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
   const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
-  // Seleção por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`): a tela é um quadrado
-  // próprio e precisa de fixação/expansão independentes da pessoa.
+  // Seleção por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`): tela e pessoa separados.
   const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [isMuted, setIsMuted] = useState(false)
@@ -675,9 +642,7 @@ export default function MobileShell() {
     }).catch(() => setPhase('create'))
   }, [])
 
-  // link de convite público: a URL de boot foi centralizada em App.tsx
-  // (services/deepLink). Aqui só consumimos o que estiver pendente quando o
-  // app está destravado — inclusive convite que chega com o app JÁ aberto.
+  // Convite por deep link: consome a URL pendente com o app destravado.
   useEffect(() => {
     if (phase !== 'app') return
     const token = consumeInvite() ?? peekInvite()
@@ -728,9 +693,7 @@ export default function MobileShell() {
     try {
       unCount = downloadManager.subscribe((items) => {
         try { setDlCount(items.filter(i => i.status === 'queued' || i.status === 'downloading' || i.status === 'verifying' || i.status === 'saving').length) } catch { /* ignore */ }
-        // Mesma assinatura alimenta o cartão de arquivo: progresso, velocidade e
-        // motivo de falha por arquivo. Antes o card só lia o bitfield do swarm e
-        // ficava congelado quando o download pausava ou falhava.
+        // Mesma assinatura alimenta o cartão de arquivo (velocidade/erro reais).
         try {
           const next: Record<string, { pct: number; speed: number; status: string; error?: string }> = {}
           for (const it of items) {
@@ -758,8 +721,7 @@ export default function MobileShell() {
     }
     return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone }
   }, [])
-  // Conversa aberta = aviso daquela conversa cancelado; clique na notificação
-  // abre a conversa certa (id vem do shell nativo).
+  // Conversa aberta cancela o aviso dela; clique na notificação abre a conversa.
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
   // Mapa conversa → peer (a notificação precisa do fp para achar a foto).
   useEffect(() => {
@@ -769,11 +731,7 @@ export default function MobileShell() {
   }, [conversations])
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
 
-  // ANDROID: "Atender"/"Recusar" tocados na notificação de chamada.
-  //
-  // A ação morria no nativo (botão só abria o app). Aqui ela vira a mesma
-  // chamada de `handleIncomingAccept`/`handleIncomingReject` — é o
-  // `callManager` quem sinaliza (SDP/ICE vive na página).
+  // ANDROID: botões da notificação de chamada viram chamadas do callManager.
   useEffect(() => onCallNotificationAction((callId, action) => {
     const inc = incomingCall
     if (!inc || inc.call_id !== callId) return
@@ -813,9 +771,7 @@ export default function MobileShell() {
     if (q === '480p' || q === '720p' || q === '1080p' || q === '4K') setCallQuality(q)
   }, [activeCall?.quality])
 
-  // Quadrados da chamada (mesma regra pura do desktop). A mídia do "eu" vem do
-  // manager — no mobile o roster também pode não ter o stream local, e era por
-  // isso que quem transmitia não via a própria câmera.
+  // Quadrados da chamada (regra pura do desktop); mídia do "eu" vem do manager.
   const callTilesMobile = useMemo(() => buildCallTiles({
     participants: (activeCall?.participants ?? []) as any[],
     myFp: identity?.fingerprint ?? null,
@@ -828,9 +784,7 @@ export default function MobileShell() {
       nativeMedia: !!(activeCall as any).nativeMedia,
     } : null,
   }), [
-    // Ver o comentário do `onUpdate` no callManager: o roster é clonado para
-    // que este memo veja `push`/`splice`. Sem isso, quem entra depois não
-    // ganhava tile (e no desktop, sem tile, não há `<audio>` = silêncio).
+    // O roster é clonado no onUpdate do callManager (memo depende da referência).
     activeCall?.participants,
     activeCall?.sharing,
     activeCall?.cameraOn,
@@ -867,9 +821,7 @@ export default function MobileShell() {
 
   useEffect(() => {
     if (pinnedTileId && !callTilesMobile.some((tile) => tile.id === pinnedTileId)) setPinnedTileId(null)
-    // Tela cheia fantasma (mesmo bug do desktop): `buildCallTiles` sintetiza o
-    // tile local mesmo sem chamada, então o id do quadrado expandido nunca
-    // "deixava de existir". Sair da chamada fecha a tela cheia aqui.
+    // Tela cheia fantasma (mesmo bug do desktop): limpa ao sair da chamada.
     if (!activeCall && expandedTileId) setExpandedTileId(null)
   }, [callTilesMobile, pinnedTileId])
   useEffect(() => {
@@ -890,20 +842,13 @@ export default function MobileShell() {
     } catch { setTurnMsg('não foi possível salvar neste aparelho.') }
   }
 
-  // GARGALO 1 (polling redundante): antes refreshFriends rodava a cada 3s via
-  // setInterval + 1x por evento de amizade + 1x por ação do usuário — cada um =
-  // 3 chamadas friendsList + 3 setState + re-render total. Agora: coalescing com
-  // no máximo 1 execução/5s (leading imediato = sync ao vivo preservado,
-  // trailing único absorve a tempestade), polling espaçado p/ 10s e pausado com
-  // a aba oculta (WebView em background não gasta bateria).
+  // GARGALO 1: coalescing de refreshFriends (máx 1/5s), polling 30s, pausa oculta.
   const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []) } catch { /* ignore */ } }, [])
   const refreshFriends = useMemo(() => coalesceAsyncRefresh(refreshFriendsImpl, 5000), [refreshFriendsImpl])
   async function refreshCommunities() { try { setCommunities(await services.communitiesList() ?? []) } catch { /* ignore */ } }
   useEffect(() => { if (phase !== 'app') return; refreshFriends(); refreshCommunities(); const id = window.setInterval(() => { if (!document.hidden) refreshFriends() }, 30000); return () => window.clearInterval(id) }, [phase, refreshFriends])
   useEffect(() => () => refreshFriends.cancel(), [refreshFriends])
-  // GARGALO 2 (fileSwarm.onChange): 1 setState por chunk de 256KB (4 em
-  // paralelo = tempestade de re-renders da árvore inteira). Throttle de 300ms
-  // com trailing: progresso continua ao vivo, sem render por chunk.
+  // GARGALO 2: throttle de 300ms no fileSwarm.onChange (evita render por chunk).
   useEffect(() => {
     const notify = throttleTrailing(() => setFileList([...fileSwarm.files.values()]), 300)
     swarmNotifyRef.current = notify
@@ -912,12 +857,8 @@ export default function MobileShell() {
     setFileList([...fileSwarm.files.values()])
     return () => { notify.cancel(); swarmNotifyRef.current = () => {}; fileSwarm.onChange = prev }
   }, [])
-  // Prévia de MÍDIA (imagem + vídeo): monta blob URL para cada arquivo
-  // completo sem prévia. `prepareMedia` reidrata do spool em disco ANTES de
-  // qualquer rede — o que já foi baixado numa sessão anterior renderiza
-  // sozinho ao abrir o app, sem baixar de novo e sem se importar com o cap
-  // de tamanho. Acima do cap e sem nada em disco, o card mostra o botão.
-  // URLs revogados no unmount.
+  // Prévia de MÍDIA: blob por arquivo completo; prepareMedia reidrata do disco
+  // antes da rede (respeita o cap). URLs revogados no unmount.
   const previewFetchingRef = useRef<Map<string, number>>(new Map())
   useEffect(() => {
     for (const sf of fileSwarm.files.values()) {
@@ -931,8 +872,7 @@ export default function MobileShell() {
         mountPreview(sf.file_id, blob)
         continue
       }
-      // uma tentativa por vez por arquivo; `tries` limita a repetição pra
-      // rede ruim não virar tempestade de requisições
+      // uma tentativa por vez por arquivo (rede ruim não vira tempestade)
       const tries = previewFetchingRef.current.get(sf.file_id) ?? 0
       if (tries >= 3) continue
       previewFetchingRef.current.set(sf.file_id, tries + 1)
@@ -948,9 +888,8 @@ export default function MobileShell() {
     for (const u of previewUrlsRef.current) { try { URL.revokeObjectURL(u) } catch { /* ignore */ } }
     previewUrlsRef.current = []
   }, [])
-  // O corpo da MENSAGEM já traz os metadados do arquivo (file_id/name/size/
-  // chunks/hash). Registra o swarm a partir da mensagem, SEM depender do frame
-  // FileAnnounce separado (que podia se perder e travava em "aguardando anúncio").
+  // O corpo da MENSAGEM já traz os metadados do arquivo; registra o swarm sem
+  // depender do FileAnnounce separado (que podia se perder).
   useEffect(() => {
     let changed = false
     for (const m of messages) {
@@ -1010,8 +949,7 @@ export default function MobileShell() {
     if (ev.type === 'group_synced') { refreshConvos(); refreshCommunities() }
     if (ev.type === 'call_incoming') {
       const fp = ev.from_fp
-      // SELF-RING (modo navegador): eco do próprio invite não toca o telefone
-      // de quem ligou (ver filtro irmão no callManager bind).
+    // SELF-RING: eco do próprio invite não toca o telefone de quem ligou.
       if (fp && identity?.fingerprint && fp === identity.fingerprint) return
       // Nome, nunca fingerprint: "Ana está ligando" é reconhecível, um fp não.
       const known = peers.find((p) => p.fp === fp)?.nickname
@@ -1024,8 +962,7 @@ export default function MobileShell() {
         setIncomingCall(ev)
       }
       if (myPresence !== 'dnd') sfxRingStart()
-      // Com a tela apagada/outro app na frente, o aviso do sistema é o que
-      // faz a chamada aparecer (o overlay da UI está atrás).
+      // Com a tela apagada, o aviso do sistema faz a chamada aparecer.
       notifyIncomingCall({ callId: ev.call_id, title: known || fp.slice(0, 8) })
     }
     if (ev.type === 'call_ended') {
@@ -1037,9 +974,7 @@ export default function MobileShell() {
       const ok = fileSwarm.onAnnounce(ev.file_id, ev.name, ev.size, ev.chunks, ev.hash, ev.from_fp, (ev as any).chunk_hashes ?? undefined)
       if (!ok && fileSwarm.lastError) setError(fileSwarm.lastError)
       swarmNotifyRef.current()
-      // Mídia que acabou de chegar: busca (SEM salvar em Downloads) só para
-      // RENDERIZAR inline. `prepareMedia` respeita o cap e reidrata do disco.
-      // Arquivos não-mídia continuam baixando SÓ no toque em "Baixar".
+      // Mídia nova: busca só para renderizar inline (sem salvar; respeita cap).
       if (ok && (isImageName(ev.name) || isVideoName(ev.name))) {
         const sf = fileSwarm.files.get(ev.file_id)
         if (sf) void fileSwarm.prepareMedia(sf).then(() => swarmNotifyRef.current()).catch(() => {})
@@ -1050,10 +985,7 @@ export default function MobileShell() {
   })
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, selConv])
 
-  // GARGALO 3 (listas sem memo): estes derivados rodavam a cada render — cada
-  // tecla no composer, cada chunk do swarm, cada poll. Com useMemo só
-  // recalculam quando a fonte muda; combinados às linhas memo, teclas e chunks
-  // não recriam mais as listas.
+  // GARGALO 3: derivados em useMemo (só recalculam quando a fonte muda).
   const selConvObj = useMemo(() => conversations.find(c => c.id === selConv) ?? null, [conversations, selConv])
   const peerTitle = useMemo(() => selConvObj?.title || peers.find(p => p.fp === selPeerFp)?.nickname || selPeerFp || '', [selConvObj, peers, selPeerFp])
   const activeComm = useMemo(() => selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null, [communities, selCommunity])
@@ -1073,28 +1005,20 @@ export default function MobileShell() {
   const netOnline = peerCount > 0 && (netState === 'CONNECTED' || netState === 'DISCONNECTED')
   const pillColor = !nativeKind ? t.accent : netState === null ? t.yellow : netOnline ? t.green : netState === 'DISCONNECTED' ? '#80848e' : t.yellow
   const pillLabel = !nativeKind ? 'LOCAL' : netState === null ? 'INICIANDO…' : netOnline ? 'ONLINE' : stateLabel[netState as NetworkState]
-  // CONTAGEM DE PESSOAS ONLINE NA REDE (amigos E membros de servidor com sessão
-  // viva) — não "amigos online". O número aparece SEMPRE, inclusive 0: é
-  // informação honesta e é o que o usuário pediu para ver no celular.
+  // Contagem = peers com sessão viva (amigos + membros), não "amigos online";
+  // "0" aparece: é informação honesta.
   const onlineLabel = `${pillLabel} · ${peerCount}`
   const privacyLabel = PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode
 
-  // Callbacks estáveis (useCallback com deps estáveis) para as linhas memo
-  // receberem props referenciais constantes — sem isso o memo não seguraria.
+  // Callbacks estáveis (useCallback) para as linhas memo manterem props iguais.
   const openDm = useCallback(async (fp: string, nick?: string) => { if (!fp || fp.trim() === '') { setError('Selecione um amigo válido'); return } try { const conv = await services.dmOpen(fp.trim(), (nick || fp).trim()); setSelCommunity(null); setSelPeerFp(fp.trim()); setSelConv(conv.id); setTab('chats'); refreshConvos() } catch (e: any) { setError(String(e?.message ?? e)) } }, [refreshConvos])
   const openConv = useCallback((c: Conversation) => { setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp) }, [])
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => { if (!confirm(`Apagar conversa com ${title}?`)) return; try { await services.conversationDelete(id); if (isSelected) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshConvos])
   const removeFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Remover ${nickname || fp} dos amigos?`)) return; try { await services.friendRemove(fp); refreshFriends(); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   const blockFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Bloquear ${nickname || fp}? As mensagens recebidas serão rejeitadas.`)) return; try { await services.friendBlock(fp); refreshFriends(); refreshConvos(); setNotice('Participante bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
-  // v6: a fila real mora no downloadManager (progresso/pausa/resume/validação);
-  // o painel abre para acompanhar. O card continua lendo o fileSwarm (sincronizado).
+  // v6: fila real no downloadManager; painel para acompanhar; card lê o swarm.
   const downloadFile = useCallback((fileId: string) => {
-    // Mesma ação do desktop (`services/downloadAction`): pausa retoma, falha
-    // tenta de novo, arquivo já completo passa pela fila para verificar o hash
-    // antes de gravar. Antes cada shell decidia sozinho e eles divergiam.
-    //
-    // NÃO abre a central de downloads: o cartão já mostra barra/%/velocidade e
-    // o painel abrindo por cima de todo download atrapalha a conversa.
+    // Mesma ação do desktop (`services/downloadAction`), com hash; não abre painel.
     const cur = fileSwarm.files.get(fileId)
     if (!cur) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
     setError(null)
@@ -1114,13 +1038,7 @@ export default function MobileShell() {
   async function startCall(kind: 'voice' | 'video') {
     if (callActionBusy) return
     if (!selConv) return
-    // GRUPO: chama TODOS os membros, não só o "peer da conversa".
-    //
-    // BUG REAL ("ele só fica comigo, os outros não entram"): aqui o alvo era
-    // sempre `selPeerFp ?? selConvObj?.peer_fp`. Numa conversa de grupo esse
-    // campo é vazio (ou o do criador), então só UMA pessoa era chamada — o
-    // resto do grupo nunca recebia invite e a chamada nunca virava grupo.
-    // O desktop já fazia `groupMembers`; o celular não.
+    // GRUPO: chama TODOS os membros (antes só o peer da conversa recebia invite).
     let fps: string[] = []
     if (selConvObj?.kind === 'group') {
       try {
@@ -1145,9 +1063,7 @@ export default function MobileShell() {
     if (!incomingCall || callActionBusy) return
     const support = getCallsSupport()
     if (support === 'none') { setError(getCallsUnavailableMessage()); return }
-    // Valida ANTES de avisar o peer: se o frame CallAccept sair e o
-    // `acceptInbound` recusar, o chamador conecta sozinho e quem atendeu fica
-    // sem chamada nenhuma (estado dos dois divergentes).
+    // Valida ANTES de avisar o peer (evita estados divergentes entre os dois).
     const bloqueio = callManager.canAccept(incomingCall.call_id)
     if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
     setCallActionBusy(true)
@@ -1202,8 +1118,7 @@ export default function MobileShell() {
 
   async function send() {
     const raw = input.trim()
-    // Comando de barra: comportamento igual ao desktop (executa e posta o
-    // texto de resposta na conversa, sem mandar para o peer como comando).
+    // Comando de barra: executa local e posta a resposta (igual desktop).
     if (raw.startsWith('/') && !/\s/.test(raw.split('\n')[0]!)) {
       const first = raw.split('\n')[0] ?? ''
       const sp = first.indexOf(' ')
@@ -1213,7 +1128,10 @@ export default function MobileShell() {
       setInput('')
       if (out && selConv) {
         const convId = selConv
-        const communityId = selCommunity
+        // `selCommunity` não prova que é canal; membership real é a única fonte.
+        const communityId = selCommunity && communities.some(c =>
+          c.id === selCommunity && c.channels.some(([cid]) => cid === convId),
+        ) ? selCommunity : null
         const myFp2 = identity?.fingerprint ?? ''
         const ts2 = Date.now()
         const optimistic: StoredMessage = { id: `pending-${ts2}`, conv_id: convId, author_fp: myFp2, body: out, ts: ts2, sig: 'pending', direction: 'out', status: 'sending' }
@@ -1233,7 +1151,10 @@ export default function MobileShell() {
     // Antiduplo-SUBMIT por conversa (ver `lastSendByConvRef`).
     if (lastSendByConvRef.current.conv === convId && now - lastSendByConvRef.current.at < 300) return
     lastSendByConvRef.current = { conv: convId, at: now }
-    const communityId = selCommunity
+    // `selCommunity` não prova que é canal; membership real é a única fonte.
+    const communityId = selCommunity && communities.some(c =>
+      c.id === selCommunity && c.channels.some(([cid]) => cid === convId),
+    ) ? selCommunity : null
     const myFp = identity?.fingerprint ?? ''
     const ts = Date.now()
     const tempId = `pending-${ts}`
@@ -1244,7 +1165,7 @@ export default function MobileShell() {
     setError(null)
     try {
       const m = communityId ? await services.sendChannelMessage(communityId, convId, body) : await services.messageSend(convId, body)
-      // Substitui o otimista pelo definitivo (match por tempId; fallback body+ts proximo no hook).
+      // Substitui o otimista pelo definitivo (match por tempId, com fallback).
       replaceOptimistic(tempId, m)
       // Resposta inline: o motor guarda o vínculo e difunde para os peers.
       if (replyToMsg) {
@@ -1355,9 +1276,7 @@ export default function MobileShell() {
   async function respond(fp: string, ok: boolean) { try { await services.friendRespond(fp, ok); refreshFriends() } catch (e: any) { setError(String(e?.message ?? e)) } }
   async function copyMyFp() { await navigator.clipboard?.writeText(identity?.fingerprint ?? '').catch(() => {}); setError(null); setNotice('Fingerprint copiado!'); window.setTimeout(() => setNotice(null), 2500) }
 
-  // Envio de arquivo no celular: <input type=file> real (funciona no browser e
-  // no WebView mobile) + shareFile do swarm + mensagem com botão Baixar.
-  // Faltava TUDO isso — o botão + era decorativo e nenhum evento era tratado.
+  // Envio de arquivo no celular: input real + shareFile do swarm + mensagem.
   async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return
     try {
@@ -1371,28 +1290,15 @@ export default function MobileShell() {
     e.target.value = ''
   }
 
-  // Entrada por convite: fluxo ÚNICO pelo `JoinServerForm` (mesmo componente do
-  // desktop) dentro do sheet de convite. Havia aqui um segundo caminho
-  // (`joinInvite` + `inviteBusy` + `inviteError`) que nenhum botão alcançava e
-  // cujas mensagens de erro nunca eram renderizadas. Removido: o sheet já
-  // mostra o erro real, e "validado ≠ membro" continua explicado no formulário.
+  // Entrada por convite: fluxo ÚNICO pelo `JoinServerForm` (mesmo do desktop).
 
-  // Nós de mensagem memoizados: parse do corpo + lookup no swarm rodam 1x por
-  // mensagem quando messages/fileList mudam (fileList atualiza no máx 1x/300ms
-  // via throttle). Linhas com props iguais pulam o re-render (React.memo).
-  //
-  // v5.5: cada linha carrega a camada SOCIAL real (reações, edição, exclusão,
-  // fixar, resposta) via `useSocialWindow` — uma chamada em LOTE por janela.
+  // Nós de mensagem memoizados: parse/lookup 1x por mensagem; social em lote.
   // canal de servidor? (definido aqui porque `messageNodes` já precisa dele)
   const isChannel = !!selCommunity
   /** A conversa aberta é um grupo de DM? (afeta cabeçalho e painel de membros) */
   const isGroupConv = selConvObj?.kind === 'group'
   /**
-   * Membros do grupo aberto — vem do MOTOR.
-   *
-   * No mobile o grupo era tratado como DM: o subtítulo dizia "online/offline" e
-   * não havia como ver quem estava nele. O roster real está no SQLite
-   * (`groupMembers`), então perguntamos a ele.
+   * Membros do grupo aberto — vem do MOTOR (SQLite), não tratado como DM.
    */
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [showGroupPanel, setShowGroupPanel] = useState(false)
@@ -1407,9 +1313,7 @@ export default function MobileShell() {
         const mems = await services.groupMembers(selConv)
         if (!vivo) return
         setGroupMemberCount(mems.length)
-        // Guarda nome E fp: sem isto o nome de quem mandou caía no título da
-        // conversa (que num grupo é o NOME DO GRUPO) e todas as mensagens
-        // apareciam assinadas como "Grupo ...".
+        // Guarda nome E fp: sem isto as mensagens saíam assinadas com o nome do grupo.
         const map: Record<string, string> = {}
         for (const m of mems as Array<{ fp?: string; nickname?: string }>) {
           if (m?.fp) map[m.fp] = m.nickname || ''
@@ -1510,8 +1414,7 @@ export default function MobileShell() {
     setTimeout(() => { try { composerRef.current?.setSelectionRange(caret, caret); composerRef.current?.focus() } catch { /* ignore */ } }, 0)
   }
 
-  // Perfis (avatar + cor de destaque) — paridade Discord: o autor aparece com
-  // a identidade que ELE configurou, não com a cor gerada pelo fingerprint.
+  // Perfis (avatar + cor): o autor usa a identidade que ele configurou.
   const [profilesByFp, setProfilesByFp] = useState<Record<string, ProfileView>>({})
   useEffect(() => {
     let alive = true
@@ -1522,9 +1425,7 @@ export default function MobileShell() {
     }
     load()
     const h = window.setInterval(load, 15000)
-    // O mobile não escutava `profile_changed`: uma foto nova levava até 15 s
-    // para aparecer e, se o poll falhasse, não aparecia nunca. Mesmo padrão do
-    // ThemeShell — a reconciliação periódica continua sendo a rede de segurança.
+    // O mobile escuta `profile_changed` (foto nova aparecia até 15s tarde).
     const un = services.subscribe((ev: any) => {
       if (ev.type !== 'profile_changed') return
       setProfilesByFp(prev => ({ ...prev, [ev.fp]: ev.profile }))
@@ -1532,14 +1433,8 @@ export default function MobileShell() {
     return () => { alive = false; window.clearInterval(h); un() }
   }, [])
   /**
-   * Nome de um membro do grupo/canal aberto.
-   *
-   * Ordem: apelido no servidor (roster) → perfil → apelido do peer conhecido.
-   * Devolve '' quando não sabe — o chamador mostra o fingerprint curto, que é
-   * honesto ("não sei quem é") em vez de repetir o nome do grupo.
-   *
-   * Fica DEPOIS de `profilesByFp` de propósito: o resolvedor lê o estado de
-   * perfis, que é declarado mais abaixo no componente.
+   * Nome de membro do grupo/canal: roster → perfil → peer; '' se não sabe.
+   * Declarado após `profilesByFp` de propósito (o resolvedor lê esse estado).
    */
   const resolveMemberName = useCallback((fp: string): string => {
     if (!fp) return ''
@@ -1605,16 +1500,7 @@ export default function MobileShell() {
 
   const messageNodes = useMemo(() => messages.map((m, idx) => {
     const mine = m.direction === 'out'
-    // NOME DO AUTOR — nunca o título da conversa em GRUPO.
-    //
-    // BUG REAL (no grupo, toda mensagem aparecia como "Grupo SECO"): aqui o
-    // fallback era `selConvObj?.title`, que numa DM é o nome do contato mas num
-    // grupo é o NOME DO GRUPO. Resultado: as mensagens de todos os membros
-    // saíam assinadas com o nome do grupo — inclusive as suas.
-    //
-    // A ordem correta é a mesma do desktop: apelido no servidor → perfil →
-    // apelido do peer → fingerprint curto. Em DM o título continua servindo de
-    // último recurso (é o nome do contato).
+    // NOME DO AUTOR — nunca o título do GRUPO; ordem igual ao desktop.
     const authorName = mine
       ? identity?.nickname ?? 'você'
       : (isChannel
@@ -1631,9 +1517,7 @@ export default function MobileShell() {
       const sf = fileSwarm.files.get(fmeta.file_id)
       announced = !!sf
       pct = sf ? fileSwarm.progress(sf) : 0
-      // A fila do `downloadManager` tem o estado REAL (velocidade, pausa,
-      // erro). O bitfield do swarm só sabe "quantos blocos eu tenho" — ele não
-      // congela o número ao pausar e não explica uma falha.
+      // A fila do downloadManager tem o estado REAL (velocidade/pausa/erro).
       const q = dlByFile[fmeta.file_id]
       if (q) {
         pct = q.pct
@@ -1803,9 +1687,7 @@ export default function MobileShell() {
   function renderMobileSheets() {
     return (
       <>
-        {/* Painel do GRUPO: membros reais, renomear e remover.
-            Fica aqui porque o sheet é o mesmo padrão dos outros painéis do
-            mobile (busca, fixadas, salvas, thread). */}
+        {/* Painel do GRUPO: membros reais, renomear e remover. */}
         {showGroupPanel && isGroupConv && selConv && sheetWrap(
           selConvObj?.title || 'Grupo',
           <GroupPanel
@@ -1920,11 +1802,7 @@ export default function MobileShell() {
           </div>
         ), () => { setShowThread(false); setThreadFor(null); setThreadId(null) })}
 
-        {/* PERFIL — mesmo componente do desktop, inclusive EDIÇÃO.
-            Antes este sheet era só leitura: no celular não havia como definir
-            nome, foto nem "sobre", então a foto nunca saía daqui. O
-            `ProfileModal` já tem tudo (compressão do avatar, revisão,
-            `onSaved`) — reusar evita as duas implementações divergirem. */}
+        {/* PERFIL — mesmo `ProfileModal` do desktop, inclusive edição. */}
         {profilePeer && (
           <ProfileModal
             fp={profilePeer.fp}
@@ -1970,8 +1848,7 @@ export default function MobileShell() {
     )
   }
 
-  // ATUALIZAÇÃO ANTES DE ENTRAR (mesmo gate do desktop). Só aparece quando há
-  // versão nova; falha de rede não atrapalha o boot.
+  // UpdateGate (mesmo do desktop): só com versão nova; não trava o boot.
   const updateGate = useUpdateGate(true)
 
   if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen native={services.kind === 'native'} />} /><UpdateOverlay api={updateGate} /></>)
@@ -2003,9 +1880,7 @@ export default function MobileShell() {
           </div>
           {!isChannel && (
             <>
-              {/* Sem hard-disable: o clique sempre responde. Se o WebView não tiver
-                  WebRTC/permissão, `startCall` mostra o diagnóstico real em vez de
-                  o botão ficar morto e sem explicação (o `callsSupport` é snapshot de render). */}
+              {/* Sem hard-disable: o clique mostra o diagnóstico real. */}
               <span title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
                 <button aria-label="Chamada de voz" title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? undefined : { opacity: 0.75, color: t.red }} onClick={() => startCall('voice')}><Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" size={17} /></button>
               </span>
@@ -2104,11 +1979,7 @@ export default function MobileShell() {
               <span style={{ fontSize: 13, fontWeight: 800, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={15} /> : <Icon d={Icons.phone} size={15} />} Em chamada • {fmtCallDuration(callDuration)} • {(activeCall.participants ?? []).length} na sala</span>
               </span>
-              {/* QUEM ESTÁ NA CHAMADA — nomes, não só o número.
-                  O pedido é "ver quando as pessoas já estão na call": com
-                  "3 na sala" você sabe que há gente, mas não QUEM. A lista vem
-                  do roster real da chamada (`participants`), com o nome
-                  resolvido por apelido/perfil. */}
+              {/* QUEM ESTÁ NA CHAMADA — nomes, não só o número (roster real). */}
               {callPanelSize !== 'compact' && (activeCall.participants ?? []).length > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   {(activeCall.participants ?? []).map((p: any) => {
@@ -2138,9 +2009,7 @@ export default function MobileShell() {
                   })}
                 </div>
               )}
-              {/* HONESTIDADE (proxy/full): a mÃ­dia WebRTC sai direto (UDP do
-                  WebView), fora do proxy/Tor do app â€” nÃ£o apresentar o modo
-                  como protetor da chamada. */}
+              {/* HONESTIDADE (proxy/full): mídia WebRTC sai direto (UDP), fora do proxy. */}
               {(privacyMode === 'proxy' || privacyMode === 'full') && (
                 <span
                   title="A mÃ­dia (Ã¡udio/vÃ­deo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes veem seu IP real. Mensagens e arquivos seguem protegidos."
@@ -2172,15 +2041,10 @@ export default function MobileShell() {
               {(((activeCall as any)?.qualityNotice as string | undefined) || qualityError) && (
                 <span role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }}>{qualityError ?? ((activeCall as any)?.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}</span>
               )}
-              {/* `disabled` escondia o porquê: no Android o botão não tem
-                  getDisplayMedia, mas o usuário só descobria tentando e não
-                  acontecendo nada. Deixar clicável + mensagem honesta é melhor —
-                  é o mesmo padrão do desktop. */}
+              {/* Sem `disabled`: no Android o clique explica a ausência de getDisplayMedia. */}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>}
-            {/* Quadrados da chamada no mobile: MESMO modelo do desktop
-                (`callTiles.ts`) e mesmo componente. A tela ganha quadrado
-                próprio; fixar/expandir vale para pessoa E para tela. */}
+            {/* Quadrados da chamada: mesmo modelo do desktop (`callTiles.ts`). */}
             {(() => {
               if (callTilesMobile.length === 0) return null
               const cols = pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
@@ -2190,9 +2054,7 @@ export default function MobileShell() {
                     <div
                       key={tile.id}
                       style={{
-                        // TELA CHEIA é overlay (ScreenStage), não um quadrado
-                        // maior: no celular "expandir" dentro do painel de 46vh
-                        // continuava pequeno.
+                        // TELA CHEIA é overlay (ScreenStage), não quadrado maior.
                         height: callPanelSize === 'compact' ? 92 : tile.kind === 'screen' ? 168 : 124,
                         transition: 'height 180ms ease',
                       }}
@@ -2215,8 +2077,7 @@ export default function MobileShell() {
           </div>
         )}
 
-        {/* TELA CHEIA no mobile: mesmo overlay do desktop. O painel (e os
-            `<audio>` remotos) continua montado atrás. */}
+        {/* TELA CHEIA no mobile: mesmo overlay do desktop (áudio segue atrás). */}
         {stageTileMobile && (
           <ScreenStage
             tile={stageTileMobile}
@@ -2352,8 +2213,7 @@ export default function MobileShell() {
                 el.style.height = `${Math.min(140, el.scrollHeight)}px`
                 const caret = el.selectionStart ?? v.length
                 setActiveAutocomplete(activeToken(v, caret))
-                // avisa o outro lado que estou digitando (throttled 2s, como o
-                // desktop) — sem isto o indicador mobile nunca apareceria
+                // avisa o outro lado que estou digitando (throttled 2s)
                 notifyTyping(v)
               }}
               onKeyDown={e => {
@@ -2522,9 +2382,7 @@ export default function MobileShell() {
           })
           return (
             <>
-              {/* MOBILE É INVITE-ONLY. Criar servidor exige o assistente
-                  completo (canais/cargos/regras), que só existe no desktop —
-                  esconder o botão sem esconder a rota era o bug anterior. */}
+              {/* MOBILE É INVITE-ONLY: o assistente de criação só existe no desktop. */}
               <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                 <button
                   onClick={() => { setInviteInput(''); setShowInvite(true) }}
@@ -2709,10 +2567,7 @@ export default function MobileShell() {
 
         {tab === 'profile' && <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 4px 8px' }}>
-            {/* FOTO DO PRÓPRIO PERFIL — tocável.
-                O celular só EXIBIA o perfil: não havia como definir nome, foto
-                nem "sobre" daqui, então a foto nunca saía deste aparelho. O
-                mesmo `ProfileModal` do desktop é usado (uma implementação só). */}
+            {/* FOTO DO PRÓPRIO PERFIL — tocável, abre o `ProfileModal` do desktop. */}
             {identity && <button
               type="button"
               aria-label="Editar meu perfil"
@@ -2923,8 +2778,7 @@ export default function MobileShell() {
             <div style={{ fontSize: 12, color: t.muted, lineHeight: 1.5, marginBottom: 4 }}>
               Cole o token que você recebeu. Ele funciona em qualquer aparelho — o link é só um atalho.
             </div>
-            {/* O campo/colar/validação vêm do MESMO componente do desktop: um
-                caminho só, com botão de colar de verdade e mensagens claras. */}
+            {/* Campo/colar/validação: o MESMO `JoinServerForm` do desktop. */}
             <JoinServerForm
               autoToken={inviteInput || null}
               compact

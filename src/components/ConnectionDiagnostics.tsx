@@ -162,6 +162,15 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
                     {p.last_relay_error && <div>relay: {p.last_relay_error} · {p.relay_attempts ?? 0}x</div>}
                   </div>
                 )}
+                {/* ONLINE mas sem entregar: a causa está na REJEIÇÃO do receptor,
+                    não no link. Antes o painel mostrava "conectado" e nada mais,
+                    e o motivo morria num log invisível. */}
+                {(p.last_reject || (p.send_gave_up ?? 0) > 0) && (
+                  <div data-testid="diag-peer-reject" style={{ fontSize: 10.5, color: t.yellow, marginTop: 5, lineHeight: 1.5, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {p.last_reject && <div>recusado pelo peer: {p.last_reject}</div>}
+                    {(p.send_gave_up ?? 0) > 0 && <div>{p.send_gave_up} mensagem(ns) nossa(s) não saíram</div>}
+                  </div>
+                )}
               </div>
             ))}
           </div>

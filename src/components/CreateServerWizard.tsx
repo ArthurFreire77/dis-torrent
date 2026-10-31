@@ -1,25 +1,8 @@
-// ASSISTENTE DE CRIAÇÃO DE SERVIDOR.
-//
-// ## Por que este arquivo é pequeno agora
-//
-// Ele tinha 1191 linhas e fazia cinco trabalhos: catálogo de modelos/ícones,
-// validação de nome (com limite 60 divergente do core, que usa 64), os quatro
-// passos de formulário, o resumo lateral e a criação. Era impossível testar
-// qualquer regra e qualquer mudança no passo 3 arriscava o passo 1.
-//
-// Agora:
-//   - `wizardModel.ts`      → dados + regras PURAS (testadas em Node);
-//   - `wizardSteps.tsx`     → passo 1 (identidade);
-//   - `wizardChannelSteps.tsx` → passos 2-4 (canais, cargos, regras);
-//   - `wizardSummary.tsx`   → resumo lateral;
-//   - este arquivo          → estado da sessão, navegação e criação.
-//
-// ## Contrato que NÃO pode mudar (o shell depende)
-//   - `onCreated(communityId)` é chamado UMA vez, e só depois de o servidor
-//     existir de verdade;
-//   - reabrir o modal reseta tudo;
-//   - o modal não fecha enquanto `busy`;
-//   - o convite é wildcard (`000000000000`) para valer em qualquer aparelho.
+// ASSISTENTE DE CRIAÇÃO DE SERVIDOR — estado da sessão, navegação e criação.
+// Regras puras/dados em wizardModel.ts; passos em wizardSteps*.tsx; resumo em
+// wizardSummary.tsx (antes 1191 linhas em um arquivo só).
+// Contrato que NÃO muda: `onCreated(id)` UMA vez e só com servidor existente;
+// reabrir reseta tudo; modal não fecha com `busy`; convite wildcard (000000000000).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ic, type IconName } from '../shared/icons'
@@ -95,8 +78,7 @@ export default function CreateServerWizard({
     setCreatedId('')
   }, [open])
 
-  // Trocar de passo volta o scroll ao topo. Sem isso, ir do passo 1 (alto) para
-  // o passo 3 (curto) deixa a pessoa no meio do vazio.
+  // Troca de passo volta o scroll ao topo (passos altos → curtos deixavam no vazio).
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0
   }, [step])
@@ -116,8 +98,8 @@ export default function CreateServerWizard({
   const validosCount = channels.length - channelErrors.filter((e) => e !== null).length
 
   /**
-   * O que impede de seguir. Não é só um booleano: a lista é o que aparece na
-   * tela. Botão desabilitado sem dizer o porquê obriga a pessoa a adivinhar.
+   * O que impede de seguir — a lista aparece na tela (botão mudo obrigava a
+   * adivinhar).
    */
   const pendencias = useMemo((): string[] => {
     if (step === 0) {
@@ -141,9 +123,8 @@ export default function CreateServerWizard({
   // ---------- mutações ----------
 
   /**
-   * Modelo preenche descrição, ícone e canais. NÃO mexe no nome: é a única
-   * coisa que a pessoa necessariamente escreveu sozinha, e sobrescrever o que
-   * ela digitou é o pior que um botão de "atalho" pode fazer.
+   * Modelo preenche descrição/ícone/canais; NÃO mexe no nome (única coisa que
+   * a pessoa escreveu — sobrescrever é o pior que um atalho pode fazer).
    */
   function aplicarModelo(id: string) {
     const m = MODELOS.find((x) => x.id === id)
@@ -177,7 +158,7 @@ export default function CreateServerWizard({
   }
 
   function removeChannel(i: number) {
-    // Guarda de 1 já está no botão; repetir aqui protege contra clique duplo.
+    // Guard de 1 repetido aqui: protege contra clique duplo.
     setChannels((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
   }
 
@@ -220,9 +201,7 @@ export default function CreateServerWizard({
         validos.map((c) => c.name),
         {
           description: description.trim() || undefined,
-          // O backend guarda `icon` como texto livre e exibe a inicial do nome
-          // quando está vazio. Mandamos o NOME do ícone, não um emoji: é o que
-          // identifica a categoria escolhida e sobrevive a uma troca de fonte.
+          // `icon` é texto livre no backend: mandamos o NOME do ícone (não emoji).
           icon: iconId,
           category: modeloId ?? undefined,
           rulesText: rulesText.trim() || undefined,
@@ -236,9 +215,8 @@ export default function CreateServerWizard({
           })),
         },
       )
-      // Convite público do wizard: o link precisa valer para qualquer pessoa,
-      // não ficar preso ao fingerprint do aparelho que criou o servidor.
-      // O wildcard é o formato já aceito pelo Rust e pelo modo navegador.
+      // Convite público wildcard: vale em qualquer aparelho (formato aceito
+      // pelo Rust e pelo modo navegador).
       const token = await services.makeInvite(id, '000000000000')
       setCreatedId(id)
       setInviteUrl(
@@ -328,8 +306,7 @@ export default function CreateServerWizard({
     )
   })()
 
-  // Título STÁVEL em todos os passos, para o diálogo não trocar de nome a cada
-  // etapa. Quem dá o contexto é o `StepHead` dentro do conteúdo.
+  // Título estável em todos os passos (o contexto fica no `StepHead` interno).
   const subtitulo = concluido ? 'Pronto. O convite está abaixo.' : 'Leva menos de um minuto.'
 
   return (
@@ -362,8 +339,7 @@ export default function CreateServerWizard({
         <WizardStepper step={step} visited={visited} busy={busy} onGo={goTo} />
 
         <div className="csw-cols" style={layout.cols} ref={mainRef}>
-          {/* `role="group"` + `aria-label` para o leitor de tela anunciar a troca
-              de contexto, não só a troca de texto. */}
+          {/* `role="group"` para o leitor de tela anunciar a troca de contexto. */}
           <div
             className="csw-main"
             style={layout.main}

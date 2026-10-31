@@ -1,27 +1,7 @@
-//! Broker em memória do peer-relay (intermediário).
-//!
-//! Quando a conexão direta entre dois peers falha (CGNAT), um peer ONLINE e
-//! alcançável atua como intermediário: recebe `PeerRelayPut` (tópico + bytes
-//! opacos) e devolve em `PeerRelayGet` (drenando o tópico). NADA vai a disco
-//! nem à UI — só um cache efêmero em memória, com caps anti-DoS.
-//!
-//! ## Controle de acesso (F1)
-//!
-//! O tópico é o endereço do DONO (`distorrent_r_<fp>`). O modelo é
-//! "A publica no tópico de B e B lê o próprio tópico": `put` aceita qualquer
-//! remetente autenticado, mas `get` SÓ serve o tópico ao seu dono — a
-//! fingerprint autenticada na sessão do requester é a capability. Assim um
-//! peer qualquer não consegue drenar (`get`) o tópico de outro par. O
-//! intermediário não aprende nada além do tópico (destino, necessário p/
-//! rotear) e dos corpos, que são ciphertext E2E A↔B (ver F3 em `relay.rs`).
-//!
-//! Caps (anti-DoS), todos por broker:
-//! - `MAX_BODY_BYTES`: tamanho máximo de um corpo aceito (descarta acima);
-//! - `MAX_MSGS_PER_TOPIC` / `MAX_TOPIC_BYTES`: por tópico, descarta os mais
-//!   antigos quando estoura;
-//! - `MAX_TOPICS`: nº máximo de tópicos; evicta o mais antigo (por sequência);
-//! - `MAX_TOTAL_BYTES`: teto global de memória; evicta tópicos antigos;
-//! - `MAX_RELAY_DATA_BYTES`: teto do `PeerRelayData` serializado (ver F6).
+//! Broker em memória do peer-relay: recebe `PeerRelayPut` e devolve em
+//! `PeerRelayGet` (só o DONO do tópico drena — fp autenticado é a capability);
+//! intermediário não vê nada além de ciphertext E2E. Caps anti-DoS por corpo,
+//! tópico e memória global.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -43,9 +23,8 @@ pub const MAX_TOPICS: usize = 1024;
 pub const MAX_TOPIC_NAME: usize = 128;
 /// Teto global de memória do broker (soma de todos os tópicos).
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
-/// (F6) Teto do `PeerRelayData` JÁ SERIALIZADO. Protege contra inflação por
-/// escaping JSON (corpos com bytes de controle) mantendo o frame da sessão
-/// abaixo de `MAX_FRAME` (1 MiB).
+/// (F6) Teto do `PeerRelayData` serializado (protege de inflação de JSON
+/// por escaping; mantém o frame abaixo de `MAX_FRAME` = 1 MiB).
 pub const MAX_RELAY_DATA_BYTES: usize = 512 * 1024;
 
 /// Uma fila FIFO por tópico. `seq` = ordem de inserção/uso p/ eviction.
@@ -90,11 +69,8 @@ impl PeerRelayBroker {
         }
     }
 
-    /// Guarda `body` no tópico. `sender_fp` é o remetente autenticado (o
-    /// `put` é permitido a qualquer peer — o modelo é todos publicarem no
-    /// tópico de quem vai ler). Devolve `false` se tópico/corpo excedem os
-    /// limites duros (sem crescer estado). Caps por tópico/global descartam
-    /// os mais antigos.
+    /// Guarda `body` no tópico (qualquer remetente autenticado); `false` se
+    /// tópico/corpo excedem os limites duros. Caps descartam os mais antigos.
     pub fn put(&self, _sender_fp: &str, topic: &str, body: &str) -> bool {
         if topic.is_empty() || topic.len() > MAX_TOPIC_NAME || body.len() > MAX_BODY_BYTES {
             return false;
@@ -160,9 +136,8 @@ impl PeerRelayBroker {
         true
     }
 
-    /// (F1) Drena (remove e devolve) o tópico SOMENTE se `requester_fp` for o
-    /// dono do tópico (`distorrent_r_<requester_fp>`). Qualquer outro peer
-    /// recebe vazio e o tópico permanece intacto — impede drenar tópico alheio.
+    /// (F1) Drena o tópico SOMENTE se o requester for o dono — impede drenar
+    /// tópico alheio (não-dono recebe vazio e o tópico fica intacto).
     pub fn get(&self, requester_fp: &str, topic: &str, _req_id: u32) -> Vec<String> {
         let Some(owner) = topic_owner(topic) else {
             return Vec::new();
@@ -206,9 +181,7 @@ impl PeerRelayBroker {
     }
 }
 
-/// (F6) Garante que o `PeerRelayData` serializado caiba no teto seguro,
-/// descartando os últimos corpos até caber. Assim o frame da sessão nunca
-/// estoura `MAX_FRAME` (1 MiB) por inflação de JSON.
+/// (F6) Descarta os últimos corpos até o `PeerRelayData` caber no teto.
 pub fn fit_relay_data(mut bodies: Vec<String>) -> Vec<String> {
     fn serialized_len(bodies: &[String]) -> usize {
         serde_json::to_vec(&crate::protocol::SecureFrame::PeerRelayData {

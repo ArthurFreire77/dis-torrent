@@ -1,21 +1,7 @@
-// Painel de configuração de bot — 3 abas, validação por campo.
-//
-// O que mudou em relação à versão anterior (um formulário único de 560px com
-// tudo empilhado):
-//   • token mascarado por padrão, com olho/copiar/gerar-novo e confirmação
-//     destrutiva explícita — o token nunca aparece inteiro por padrão nem vai
-//     para o log;
-//   • prefixo, avatar, cargo e status online na aba Credenciais;
-//   • comandos REST viraram lista recolhível "N de 16", com teste POR comando
-//     (antes só testava o primeiro da lista) e erro no campo, não num banner;
-//   • escopos agrupados por categoria + webhook opcional na terceira aba;
-//   • rodapé fixo com Cancelar/Salvar sempre visível;
-//   • zero emoji: o avatar é inicial colorida derivada do id do bot.
-//
-// Este arquivo injeta um `<style>` próprio porque estado de hover /
-// focus-visible / active não se expressa em `style` inline. Tudo que é
-// clicável tem os quatro estados, e o modal cabe em 360px sem overflow
-// horizontal (maxWidth 100%, rodapé e grade com flexWrap).
+// Painel de configuração de bot — 3 abas, validação por campo: token mascarado
+// (olho/copiar/regen com confirmação destrutiva), comandos REST com teste por
+// comando e erro no campo, escopos agrupados + webhook, rodapé fixo.
+// `<style>` próprio porque hover/focus-visible/active não se expressam inline.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { services } from '../services'
@@ -27,8 +13,8 @@ import {
   type BotCommandDef,
 } from '../services/botCommands'
 import { groupByCategory } from '../app/channels'
-// `copyBestEffort` vem de `shared/clipboard` (fonte única): antes esta tela tinha
-// a sua própria cópia silenciosa, que dizia "copiado" sem ter copiado.
+// `copyBestEffort` de `shared/clipboard` (fonte única — antes havia cópia local
+// que dizia "copiado" sem ter copiado).
 import { copyBestEffort as copyToClipboard } from '../shared/clipboard'
 import {
   Button,
@@ -163,10 +149,8 @@ const css = `
 
 .bcp-token{ font-family:'JetBrains Mono', monospace; font-size:13px; color:${ui.text}; word-break:break-all; background:${ui.input}; border:1px solid ${ui.border}; border-radius:${ui.radius}; padding:11px 12px; min-width:0 }
 
-/* Hover/active por cima do Button/IconButton de ui.tsx, que fixam o background
-   por style inline. O seletor é descendente e não "> button": o Tooltip insere
-   um span entre o wrapper e o botão, então um seletor de filho direto nunca
-   casaria com os botões só-de-ícone. */
+/* Hover/active sobre o Button/IconButton de ui.tsx (background inline).
+   Seletor descendente: o Tooltip insere um span entre wrapper e botão. */
 .bcp-h-sec:hover button:not(:disabled){ background:${ui.surfaceHover} !important; border-color:${ui.borderStrong} !important }
 .bcp-h-succ:hover button:not(:disabled){ background:${ui.successHover} !important }
 .bcp-h-dan:hover button:not(:disabled){ background:${ui.dangerHover} !important }
@@ -174,13 +158,11 @@ const css = `
 .bcp-h-ghost:hover button:not(:disabled){ background:${ui.surfaceHover} !important; color:${ui.heading} !important }
 .bcp-h:active button:not(:disabled){ filter:brightness(.92) }
 
-/* Abaixo de ~560px o título do Card e o botão de ação disputam a mesma linha e o
-   título quebra uma palavra por linha. O cabeçalho do Card (primeiro div do
-   section) passa a envolver e a ação desce para a linha de baixo. */
+/* Abaixo de ~560px o título do Card e o botão disputam a linha: envolver e
+   descer a ação (flex-basis 100% com !important por causa do inline). */
 @media (max-width: 560px) {
   .bcp-panel section > div:first-child{ flex-wrap:wrap }
-  /* Card fixa flex:1 / min-width:0 no titulo por style inline, entao o
-     flex-basis precisa de !important para derrubar a acao para a linha de baixo. */
+  /* Card fixa flex:1/min-width:0 inline — precisa de !important. */
   .bcp-panel section > div:first-child > div{ flex-basis:100% !important }
 }
 
@@ -199,9 +181,8 @@ const TABS: { id: TabId; label: string; icon: IconName }[] = [
 type TestState = { status: 'busy' | 'ok' | 'err'; text: string }
 
 /**
- * Confirmação de ação destrutiva (gerar token novo, remover comando,
- * descartar edições). `uid: '__close__'` é o caso especial de fechar com
- * alterações não salvas — não é um comando, é o botão de fechar do painel.
+ * Confirmação de ação destrutiva (regen de token, remover comando, descartar
+ * edições); `uid: '__close__'`... na prática `kind: 'discard'` cobre o fechar.
  */
 type Confirm =
   | { kind: 'regen'; title: string; body: string; confirmLabel: string }
@@ -245,9 +226,8 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
   const tablistRef = useRef<HTMLDivElement | null>(null)
 
   /**
-   * Troca de aba e leva o foco junto. Sem mover o foco, a segunda pressa de
-   * seta era calculada a partir do botão ainda focado (o antigo) e saltava para
-   * a aba errada. A seta também deveria focar a nova aba, como todo tablist.
+   * Troca de aba e leva o foco junto (sem isso a seta recalculava do botão
+   * antigo e saltava para a aba errada).
    */
   function goToTab(next: TabId) {
     setTab(next)
@@ -303,11 +283,9 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
 
   const groupedChannels = useMemo(() => groupByCategory(channels), [channels])
 
-  // TODO(canal-duplicado): o chamador em ThemeShell.tsx:2725 monta `channels`
-  // com um merge manual que devolve o mesmo canal duas vezes. A correção é
-  // trocar esse merge por `mergeChannels` de src/app/channels.ts no chamador
-  // (outro agente está nisso). Aqui consumimos `channels` como chega, agrupado
-  // por `groupByCategory` — mascarar a duplicata aqui esconderia o bug.
+  // TODO(canal-duplicado): o merge manual de `channels` em ThemeShell.tsx
+  // devolve o mesmo canal duas vezes — trocar por `mergeChannels` no chamador.
+  // Aqui consumimos como chega: mascarar aqui esconderia o bug.
 
   // ---- Comandos ----
 
@@ -366,7 +344,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     }
   }
 
-  // ---- Teste POR comando (a versão antiga só testava o primeiro da lista) ----
+  // ---- Teste POR comando (antes só testava o primeiro da lista) ----
 
   async function testRow(r: CmdRow) {
     const e = rowErrors(r)
@@ -1142,8 +1120,8 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
                 busy={regenBusy}
                 onClick={() => {
                   if (!confirm) return
-                  // O diálogo fecha em TODOS os caminhos: confirmar apagar um
-                  // comando deixava o modal aberto por cima do painel.
+                  // Diálogo fecha em TODOS os caminhos (confirmar apagar deixava
+                  // o modal aberto por cima do painel).
                   if (confirm.kind === 'regen') {
                     setConfirm(null)
                     void regenToken()

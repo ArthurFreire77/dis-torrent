@@ -1,15 +1,6 @@
-//! Cliente STUN mínimo (RFC 5389) sobre UDP — descobre o endpoint PÚBLICO
-//! (ip:porta) do nosso NAT. Essencial sob CGNAT, onde UPnP/NAT-PMP costumam
-//! falhar (o gateway mapeável está a vários saltos). Sem crate nova.
-//!
-//! Só Binding (request/response); nada de autenticação/ICE. É best-effort:
-//! qualquer erro/timeout vira `None` e o engine segue no hole punch normal.
-//! Kill-flag: `DISTORRENT_STUN=0` desliga a consulta.
-//!
-//! Observação honesta: STUN sobre UDP revela o IP público, mas a PORTA é do
-//! binding UDP — o transporte de dados é TCP (porta diferente atrás de CGNAT).
-//! Por isso o engine usa só o IP do STUN + a porta TCP (UPnP/ext ou a escuta
-//! fixa estilo torrent), nunca a porta UDP como alvo de furo TCP.
+//! Cliente STUN mínimo (RFC 5389, só Binding) sobre UDP — descobre o IP
+//! público sob CGNAT. Best-effort (erro vira `None`); `DISTORRENT_STUN=0`
+//! desliga. Engine usa só o IP (a porta UDP não serve para furo TCP).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Mutex as StdMutex, OnceLock};

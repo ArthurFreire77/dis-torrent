@@ -1,13 +1,10 @@
-// Tipos espelhados do distorrent-core (Rust) — contrato único entre UI e motor.
-// Nada aqui é mock: reflete exatamente o que o engine produce.
+// Tipos espelhados do distorrent-core (Rust) — contrato único UI↔motor, nada mock.
 
 export type NetworkState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING'
 
 export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed' | 'ok'
 
-// Modos de privacidade — minimalista.
-// normal = sem cripto, encrypted = com cripto, proxy = com cripto + 1 proxy (esconde IP),
-// full = Tor via SOCKS5 do daemon local (o nº de saltos é do Tor — padrão 3, o app não controla)
+// Modos de privacidade: normal | encrypted | proxy (esconde IP) | full (Tor SOCKS5).
 
 export type PrivacyMode = 'normal' | 'encrypted' | 'proxy' | 'full'
 
@@ -80,11 +77,7 @@ export interface PrivacySettings {
   udp_discovery: boolean
   metadata_padding: boolean
   traffic_obfuscation: boolean
-  /**
-   * O relay está DE FATO roteando por SOCKS5 agora? (nativo; no browser é
-   * sempre false). Fail-closed: em proxy/full com `false`, o relay fica OFF —
-   * a UI mostra o estado EFETIVO, não só o modo escolhido.
-   */
+  /** Relay está DE FATO roteando por SOCKS5? Fail-closed: false = relay OFF. */
   proxy_effective: boolean
 }
 
@@ -139,6 +132,11 @@ export interface PeerView {
   direct_attempts?: number
   relay_attempts?: number
   announce_seen_ms?: number
+  /** Motivo de REJEIÇÃO do último frame deste peer (link existe mas receptor recusou). */
+  last_reject?: string | null
+  last_reject_ms?: number
+  /** Nossas mensagens que desistiram de sair para este peer. */
+  send_gave_up?: number
 }
 
 export interface NetDiag {
@@ -249,13 +247,7 @@ export interface CommunityView {
   is_owner?: boolean
 }
 
-/**
- * Estado REAL de pareamento de um membro do servidor.
- *
- * `pending_join` só aparece quando o convite foi aceito localmente mas o host
- * ainda não confirmou (não é "membro": é "pedido em andamento"). A UI não pode
- * pintar isto como conectado.
- */
+/** Estado REAL de pareamento de um membro (`pending_join` ≠ conectado). */
 export type MemberPairingState =
   | 'connected'
   | 'relay'
@@ -393,9 +385,7 @@ export interface ReactionSummary {
   reactors: string[]
   /** a reação inclui VOCÊ (contador destacado) */
   mine: boolean
-}
-
-export interface MsgMetaView {
+}export interface MsgMetaView {
   msg_id: string
   conv_id: string
   reply_to: string
@@ -434,11 +424,8 @@ export interface ProfileView {
 }
 
 /**
- * Campos editáveis do perfil.
- *
- * `remove_avatar`/`remove_banner` são necessários porque `avatar_b64: ''`
- * sempre significou "mantenha a foto atual" (no store e no core). Sem uma flag
- * explícita não existia como APAGAR a foto pela interface.
+ * Campos editáveis do perfil. `remove_avatar`/`remove_banner` existem porque
+ * `''` significa "mantenha a foto atual" — sem flag não havia como apagar.
  */
 export interface ProfilePatch {
   display_name: string
@@ -565,9 +552,8 @@ export interface DisTorrentServices {
   vaultStatus(): Promise<{ has_identity: boolean; has_vault: boolean }>
   vaultUnlock(password: string): Promise<Identity>
   /**
-   * Endereços alcançáveis deste computador: `localhost` (só aqui) e o IP de
-   * LAN (celular na mesma rede). `localhost` no celular é o próprio celular —
-   * por isso os dois são expostos separadamente, e nunca um no lugar do outro.
+   * Endereços alcançáveis: `localhost` (só aqui) e IP de LAN (celular).
+   * Expostos separadamente — nunca um no lugar do outro.
    */
   localAddresses(port?: number): Promise<LocalAddresses>
   networkStatus(): Promise<NetworkStatusView>
@@ -577,11 +563,8 @@ export interface DisTorrentServices {
   /** Relata ao Rust o que a página enxerga de WebRTC (diagnóstico do WebKitGTK). */
   webrtcReport(info: string): Promise<void>
 
-  // ---- Atualização automática (GitHub Releases) ----
-  //
-  // O Rust só busca/baixa; a decisão de versão é pura em `updater.ts`. O
-  // download passa por `update_download`, que confere o SHA-256 do asset antes
-  // de o arquivo poder ser executado.
+  // Atualização: Rust busca/baixa; decisão de versão é pura em `updater.ts`
+  // e o download confere o SHA-256 antes de poder ser executado.
   updateCheck(): Promise<import('./updater').UpdateInfo>
   /** Salva em `data_dir/updates` e devolve o caminho absoluto. */
   updateDownload(url: string, name: string, digest: string): Promise<string>
@@ -609,9 +592,8 @@ export interface DisTorrentServices {
   communityMembers(communityId: string): Promise<MemberPairing[]>
   createCommunity(name: string, channels: string[], opts?: CreateCommunityOptions): Promise<string>
   /**
-   * Token de convite. `memberFp` é OPCIONAL: sem ele o convite é ABERTO
-   * (qualquer portador entra). Passar o próprio fingerprint gera um token
-   * inútil para terceiros — era o bug do fluxo antigo.
+   * Token de convite. Sem `memberFp` é ABERTO; passar o próprio fp gerava
+   * token inútil para terceiros (bug do fluxo antigo).
    */
   makeInvite(communityId: string, memberFp?: string): Promise<string>
   /** Convite com token + link já montados no core (sem `tauri.localhost`). */
@@ -692,8 +674,7 @@ export interface DisTorrentServices {
   callOffer(targetFp: string, callId: string, sdp: string): Promise<void>
   callAnswer(targetFp: string, callId: string, sdp: string): Promise<void>
   callIce(targetFp: string, callId: string, candidate: string, mid: string): Promise<void>
-  /** Grupo: avisa o peer sobre novo participante da chamada (mesh real).
-   *  `kind` não-vazio faz o receptor TOCAR (ring do novo convidado). */
+  /** Grupo: avisa o peer sobre novo participante; `kind` não-vazio toca o ring. */
   callAddParticipant(targetFp: string, callId: string, fp: string, kind: string): Promise<void>
   /** Sinal dedicado de tela: avisa o receptor que o vídeo é TELA (badge). */
   screenShareOffer(targetFp: string, callId: string, sdp: string): Promise<void>
@@ -745,22 +726,19 @@ export interface DisTorrentServices {
   mediaSafetyGet(): Promise<MediaSafetySettings>
   mediaSafetySet(stripExif: boolean, blockExecutables: boolean): Promise<void>
 
-  // Voz NATIVA (webrtc-rs + cpal + Opus). Leitura/controle apenas: a
-  // negociação acontece no core, em Rust. No browser (e em qualquer build sem
-  // a camada) `voiceMediaAvailable` é false e os demais viram no-op, então o
-  // WebRTC do navegador continua responsável — sem mudança de comportamento.
+  // Voz NATIVA (webrtc-rs + cpal + Opus): só leitura/controle — a negociação
+  // é no core em Rust. Sem a camada, os métodos são no-op e o WebRTC do
+  // navegador segue responsável.
   voiceMediaAvailable(): Promise<boolean>
   voiceMediaStats(callId: string): Promise<VoiceMediaStats | null>
   voiceSetMuted(callId: string, muted: boolean): Promise<void>
   voiceSetDeafened(callId: string, deafened: boolean): Promise<void>
   voiceHangup(callId: string): Promise<void>
-  // Vídeo NATIVO (Linux): liga/desliga o envio de câmera/tela pelo core
-  // (GStreamer + webrtc-rs) e faz polling do frame remoto decodificado.
+  // Vídeo NATIVO (Linux): liga/desliga envio de câmera/tela e faz polling do frame remoto.
   voiceVideoStart(callId: string, peerFp: string, source: 'camera' | 'screen', monitorId?: number | null): Promise<string>
   voiceVideoStop(callId: string, peerFp: string): Promise<void>
   voiceVideoFrame(callId: string, peerFp: string, sinceSeq?: number | null): Promise<NativeVideoFrame | null>
-  // Teste de microfone NATIVO sem chamada (Linux: o WebKitGTK não tem
-  // getUserMedia, então o teste da UI mede o nível direto do cpal).
+  // Teste de mic NATIVO sem chamada (Linux: WebKitGTK não tem getUserMedia).
   voiceMicTestStart(): Promise<number>
   voiceMicTestLevel(testId: number): Promise<number>
   voiceMicTestStop(testId: number): Promise<void>
@@ -788,9 +766,8 @@ export interface DisTorrentServices {
   presenceSet(status: PresenceStatus, custom: string, customEmoji: string): Promise<void>
   presenceList(): Promise<PresenceView[]>
 
-  // ---- segundo plano / notificações do sistema ----
-  // No navegador puro tudo isso é indisponível (não existe bandeja nem toast),
-  // e as implementações devolvem o estado honesto em vez de fingir.
+  // Segundo plano/notificações: no navegador é tudo indisponível e as
+  // implementações devolvem estado honesto em vez de fingir.
   backgroundPrefs(): Promise<BackgroundPrefsView>
   backgroundPrefsSet(patch: { closeToTray?: boolean; startMinimized?: boolean }): Promise<void>
   autostartGet(): Promise<boolean>
@@ -809,12 +786,8 @@ export interface DisTorrentServices {
   notificationPermission(): Promise<string>
   notificationRequestPermission(): Promise<string>
   /**
-   * Espelha no core as preferências de aviso (sistema/prévia/política).
-   *
-   * O aviso nativo é disparado pelo motor Rust — ele precisa saber que o
-   * usuário DESLIGOU as notificações (ou silenciou um canal), mesmo com a
-   * janela escondida, senão o checkbox da UI não teria efeito nenhum fora da
-   * tela. `policy` é o JSON de `notificationPolicyJson()`.
+   * Espelha no core as preferências de aviso: o aviso nativo é disparado pelo
+   * motor Rust, que precisa saber mesmo com a janela escondida.
    */
   notifyPrefsSet(system: boolean, preview: boolean, policy?: string | null): Promise<void>
   /** Sobe/derruba o serviço que mantém o app conectado com a tela apagada. */
@@ -962,14 +935,9 @@ export interface ReputationView {
 }
 
 /**
- * Estado da camada de voz NATIVA (webrtc-rs + cpal + Opus), espelhando
- * `distorrent_core::net::media_voice::VoiceStats`. Nomes em snake_case porque o
- * struct é serializado direto pelo Rust.
- *
- * `null` em `voiceMediaStats` = a chamada NÃO é nativa (ou não há mídia
- * nativa neste aparelho). Nesse caso a UI usa o relatório de
- * `RTCPeerConnection` do navegador — o caminho que já funciona em
- * Windows/Android/macOS.
+ * Estado da camada de voz NATIVA, espelhando `VoiceStats` do Rust (snake_case
+ * serializado direto). `null` em `voiceMediaStats` = chamada não nativa; a UI
+ * usa então o relatório de `RTCPeerConnection` do navegador.
  */
 export interface VoiceMediaStats {
   /** "idle" | "connecting" | "connected" | "failed" */
@@ -984,11 +952,9 @@ export interface VoiceMediaStats {
   plc_frames: number
   decode_errors: number
   rtt_ms: number | null
-  /** Último erro de abertura do microfone (cpal) — Some com packets_out 0
-   *  = este lado não envia áudio. */
+  /** Último erro de abertura do microfone (cpal); com packets_out 0 = não envia áudio. */
   mic_error?: string | null
-  /** Último erro de ABERTURA do alto-falante (Linux nativo). `Some` com
-   *  pacotes chegando = o áudio chega e não sai desta máquina. */
+  /** Último erro de ABERTURA do alto-falante; com pacotes chegando = não sai desta máquina. */
   speaker_error?: string | null
   /** Vídeo nativo: "off" | "starting" | "live" | "failed". */
   video_state?: string | null
@@ -1000,21 +966,14 @@ export interface VoiceMediaStats {
   frames_in?: number | null
   frames_out?: number | null
   /**
-   * Quantos pares da chamada estão em `connected`/total AGORA.
-   *
-   * `state` acima é o PIOR par (de propósito: o HashMap não tinha ordem
-   * estável). Sem esta contagem o consumidor tratava `failed` de UM par como
-   * "a chamada morreu" e derrubava todos — o "cai sozinho" do grupo.
+   * Pares da chamada em `connected`/total AGORA. `state` é o PIOR par de
+   * propósito; sem esta contagem, `failed` de UM par derrubava a chamada toda.
    */
   peers_connected?: number | null
   peers_total?: number | null
 }
 
-/**
- * Frame de vídeo REMOTO decodificado pela camada nativa (Linux). `jpeg` é
- * base64 (payload de imagem); resposta "meta-only" (sem jpeg) quando a UI
- * pede com since_seq e o frame não mudou.
- */
+/** Frame de vídeo REMOTO decodificado (Linux); meta-only quando não mudou. */
 export interface NativeVideoFrame {
   jpeg?: string
   w: number

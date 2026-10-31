@@ -84,10 +84,7 @@ const stateLabel: Record<NetworkState, string> = {
   CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
 }
 
-// Modelos de servidor agora vivem DENTRO do `CreateServerWizard` (é lá que o
-// usuário escolhe, com ícone/descrição/canais aplicados de uma vez). A lista
-// `SERVER_TEMPLATES`/`pickTemplate` que existia aqui era o resquício do wizard
-// legado: nada a consumia e o botão de modelo não fazia o que prometia.
+// Modelos de servidor vivem no `CreateServerWizard` (wizard legado removido).
 
 
 function avatarColor(fp: string): string {
@@ -117,11 +114,7 @@ function PeerDot({ s }: { s: NetworkState }) {
 
 // ---------- telas de conta ----------
 
-// Tela de boot. Antes era um `<div>` cinza VAZIO: no desktop o boot mexe em
-// keyring do SO + SQLite + listener de rede, e o app ficava parado numa tela
-// sem explicação (a usuária chamou de "tela cinza"). Agora tem barra, texto e
-// aviso honesto se demorar. Estilo em `src/styles/mobile.css` (.boot*), para
-// valer desde o primeiro paint.
+// Tela de boot com barra/texto/aviso — não deixa o app parecer travado.
 function BootScreen(){
   const [slow, setSlow] = useState(false)
   useEffect(() => {
@@ -193,11 +186,7 @@ function CreateAccount({ onDone }: { onDone: (identity: Identity) => void }) {
     }
   }
 
-  /**
-   * Já tem conta em outro aparelho? Importa direto daqui — sem criar conta
-   * nova e sem digitar fingerprint. Escolhe o .stormvault, digita a senha do
-   * cofre e o app entra com a identidade que estava no arquivo.
-   */
+  /** Importa conta de outro aparelho a partir de um arquivo .stormvault. */
   async function importVault() {
     if (services.kind !== 'native') {
       setErr('importar cofre precisa do app instalado (nativo)')
@@ -272,14 +261,7 @@ function LockScreen({ nickname, onUnlock }: { nickname: string; onUnlock: (ident
     } finally { setBusy(false) }
   }
 
-  /**
-   * Já tem conta em outro aparelho? Importa direto daqui — sem criar conta
-   * nova e sem digitar fingerprint.
-   *
-   * NOTA: usa campos na TELA, nunca `window.prompt`. No Linux/WebKitGTK o
-   * prompt() vem desabilitado e devolve null — o import morria em silêncio
-   * (o usuário não entendia nada: botão clicado, nada acontecia).
-   */
+  /** Importa cofre .stormvault; usa campos na tela (prompt() falha no WebKitGTK). */
   async function handleImport() {
     if (services.kind === 'native') {
       const f = await new Promise<File | null>((resolve) => {
@@ -460,8 +442,7 @@ function fmtShortDuration(ms: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`
 }
 
-/** Ponte entre a aba legada (`serverTab`) e as seções novas. Sai quando o
- *  menu do servidor for migrado por completo. */
+/** Ponte entre a aba legada (`serverTab`) e as seções novas (temporário). */
 const SECTION_IDA: Record<string, 'visao-geral' | 'canais' | 'cargos' | 'membros' | 'bots'> = {
   geral: 'visao-geral',
   canais: 'canais',
@@ -498,9 +479,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [jumpTarget, setJumpTarget] = useState<string | null>(null)
   const [loadingOlder, setLoadingOlder] = useState(false)
 
-  // --- contadores reais de não-lida / menção -----------------------------
-  // O motor é a fonte da verdade: consultamos unreadCount/unreadMentions em vez
-  // de adivinhar pelo estado local (que mentiria depois de um reconnect).
+  // Contadores reais de não-lida/menção: o motor é a fonte da verdade.
   const refreshUnread = useCallback(async () => {
     if (!selConv) return
     try {
@@ -522,7 +501,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   }, [refreshUnread])
 
   // Pula para uma mensagem: recarrega a janela ao redor dela e rola até lá.
-  // Sem isto a busca/pin abria, listava e não levava o usuário a lugar nenhum.
   const jumpToMessage = useCallback(async (convId: string, msgId: string) => {
     try {
       const target = messages.find(m => m.id === msgId)
@@ -584,9 +562,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   }
   async function refreshPrivacyExtras(mode?: PrivacyMode) {
     try {
-      // Sempre pede o endereço do MODO-ALVO: escolher "Tor" enquanto o modo
-      // salvo é outro antes trazia o default do SOCKS5 (1080) — e "Ativar"
-      // gravava 1080 no lugar do 9050 do Tor.
+      // pede o endereço do MODO-ALVO (Tor usa 9050, proxy 1080)
       const pc = await services.proxyAddrGet(mode)
       setProxyAddr(pc.addr)
       setProxyIsDefault(pc.is_default)
@@ -610,8 +586,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   async function saveProxyAndActivate(mode: PrivacyMode) {
     try {
-      // grava na chave do modo-alvo e só então troca o modo (o motor
-      // re-rotala o relay na hora; ordem inversa usaria o endereço antigo)
+      // grava na chave do modo-alvo ANTES de trocar o modo (relay re-rotala)
       await services.proxyAddrSet(proxyAddr.trim(), mode)
       const r = await services.privacySet(mode)
       setPrivacyMode(r.mode)
@@ -624,8 +599,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   }
 
   function pickPrivacyMode(pm: PrivacyMode) {
-    // proxy/Tor: pede o IP do proxy + teste online ANTES de ativar (regra do
-    // produto: nunca liga proxy às cegas). Os outros modos aplicam direto.
+    // proxy/Tor: pede IP + teste online ANTES de ativar (nunca liga às cegas).
     if (pm === 'proxy' || pm === 'full') {
       setProxyPendingMode(pm)
       setProxyTestOk(null); setProxyTestErr(null)
@@ -650,7 +624,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [view, setView] = useState<'amigos'|'servidores'>('amigos')
   const [showInvite, setShowInvite] = useState(false)
   const [showCreateServer, setShowCreateServer] = useState(false)
-  // v6 — assistente de servidor, fila de downloads e config de bot (modais raiz).
+  // v6 — modais raiz: assistente de servidor, fila de downloads, config de bot.
   const [showDownloads, setShowDownloads] = useState(false)
   const [dlCount, setDlCount] = useState(0)
   const [configBotId, setConfigBotId] = useState<string | null>(null)
@@ -672,10 +646,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [newPollQ, setNewPollQ] = useState('')
   const [newPollOpts, setNewPollOpts] = useState('')
   const [showPollForm, setShowPollForm] = useState(false)
-  // v6: o assistente (CreateServerWizard) tem o próprio formulário; os estados
-  // legados do passo 'create' antigo (`createdServerId`, `createdServerToken`)
-  // foram removidos — nada os lia e manter os setters dava a impressão de que
-  // o fluxo antigo ainda existia.
+  // v6: assistente tem o próprio formulário; estados legados do passo antigo removidos.
   const [serverFlow, setServerFlow] = useState<'choose'|'create'|'join'|'invite'>('choose')
   const [friendsTab, setFriendsTab] = useState<'online'|'todos'|'pendentes'|'bloqueados'|'adicionar'>('online')
   const [unreadServers, setUnreadServers] = useState<Set<string>>(new Set())
@@ -683,23 +654,14 @@ export default function ThemeShell({ designId }: {designId:string}){
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const lastTypingSent = useRef(0)
   const [serverMenuOpen, setServerMenuOpen] = useState(false)
-  /** Erro próprio do modal de convite. Antes caía no `error` global, que fica
-   * atrás do modal — o usuário via o botão falhar sem explicação. */
+  /** Erro próprio do modal de convite (não cai no `error` global, atrás do modal). */
   const [inviteTokenError, setInviteTokenError] = useState<string | null>(null)
-  /**
-   * Token recebido por deep link OU colado no modal de convite, aguardando o
-   * shell estar pronto. Uma variável só: `joinToken`/`joinBusy`/`submitJoinInvite`
-   * eram um segundo fluxo paralelo e inalcançável (o `ServerHubModal` já faz a
-   * entrada por convite), e manter os dois fazia o botão do modal antigo falhar
-   * em silêncio.
-   */
+  /** Token de convite (deep link ou modal) aguardando o shell ficar pronto. */
   const [inviteFromLink, setInviteFromLink] = useState<string | null>(null)
   /** Pareamento REAL por servidor selecionado (não derivado de lista). */
   const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
 
-  // Convite recebido por deep link: abre o fluxo de entrada assim que a
-  // identidade está destravada. Antes o convite com o app aberto era perdido
-  // porque os efeitos liam a URL uma única vez na montagem.
+  // Convite por deep link: consome a URL pendente assim que a identidade abre.
   useEffect(() => {
     if (phase !== 'app') return
     const token = consumeInvite() ?? peekInvite()
@@ -717,9 +679,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     })
   }, [])
 
-  // Estado de pareamento do servidor selecionado — a evidência real usada pelo
-  // painel e pelo modal. Reconsulta a cada 5s (barato: leitura de links em
-  // memória no Rust) e em eventos de rede.
+  // Pareamento do servidor selecionado: reconsulta a cada 5s e em eventos de rede.
   useEffect(() => {
     setMemberPairing([])
     if (!selCommunity) return
@@ -755,30 +715,22 @@ export default function ThemeShell({ designId }: {designId:string}){
       }
     })
   }, [communities, selCommunity, memberPairing])
-  // A leitura de `?invite=` foi centralizada em `App.tsx` (services/deepLink):
-  // dois efeitos lendo a URL em momentos diferentes era o que fazia o convite
-  // ser processado duas vezes no boot e ZERO vezes com o app já aberto.
+  // Leitura de `?invite=` centralizada em App.tsx (services/deepLink).
 
   const [oldPass, setOldPass] = useState('')
   const [newPass, setNewPass] = useState('')
   const [friendRequests, setFriendRequests] = useState<{fp:string,nickname:string}[]>([])
   const [friendsAccepted, setFriendsAccepted] = useState<{fp:string,nickname:string}[]>([])
-  // O core tem `blocked` (4 usos em engine.rs: is_blocked/friend_block), mas a UI
-  // nunca buscava esse status — refreshFriends so pedia pending_in/accepted/
-  // pending_out. Bloquear um peer sumia da lista sem lugar para desfazer.
+  // Amigos bloqueados: o core tem `blocked`, mas a UI nunca buscava esse status.
   const [friendsBlocked, setFriendsBlocked] = useState<{fp:string,nickname:string}[]>([])
   const [showProfile, setShowProfile] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
-  // PRIVACIDADE × CHAMADAS: o ICE do WebRTC não passa pelo SOCKS5 do app —
-  // em proxy/full os SERVIDORES PÚBLICOS de STUN/TURN ficam FORA da lista
-  // (terceiros não podem ver o IP que o modo promete esconder) e a UI
-  // avisa que a chamada não é anônima. Propaga a cada mudança de modo,
-  // venha de onde vier (boot, modal, troca manual).
+  // PRIVACIDADE × CHAMADAS: ICE WebRTC não passa pelo SOCKS5 — STUN/TURN
+  // públicos ficam fora e a UI avisa que a chamada não é anônima.
   const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
   useEffect(() => {
     setCallPrivacyForIce(privacyMode)
-    // Estado EFETIVO (relay roteando por SOCKS5 de fato?) para o modal não
-    // vender "proxy ativado" quando o proxy está morto (relay fail-closed).
+    // Estado EFETIVO do proxy (fail-closed): o modal não vende "ativado" morto.
     services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
   }, [privacyMode])
   // --- Canais / Cargos / Bots ---
@@ -804,10 +756,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
   const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
-  // Fixar/expandir por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`), e não por fp:
-  // a tela e a pessoa têm quadrados separados e precisam de seleção própria.
-  // `pinnedCallFp`/`expandedCallPin` eram indexados por participante e por isso
-  // a tela nunca podia ser fixada sozinha.
+  // Fixar/expandir por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`): tela e pessoa
+  // têm quadrados separados e precisam de seleção própria.
   const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [showAddToCall, setShowAddToCall] = useState(false)
@@ -837,9 +787,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const swarmNotifyRef = useRef<() => void>(() => {})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  // Registra arquivos pelo METADADO que já vem no corpo da mensagem — sem
-  // depender do FileAnnounce separado (que podia se perder e travava em
-  // "aguardando anúncio do swarm…").
+  // Registra arquivos pelo metadado da mensagem, sem depender do FileAnnounce.
   useEffect(() => {
     let changed = false
     for (const m of messages) {
@@ -867,7 +815,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               setIdentity(unlocked); setPhase('app')
             }).catch(() => setPhase('lock'))
           } else {
-            // tem identidade sem senha mas identityGet falhou (ex: keyring indisponível) → tenta de novo após 300ms, senão mostra erro honesto mas NÃO apaga
+            // tem identidade sem senha mas identityGet falhou → retry 300ms, senão erro honesto
             services.identityGet().then(retry => {
               if (retry) { setIdentity(retry); setPhase('app') }
               else setPhase('create')
@@ -932,29 +880,21 @@ export default function ThemeShell({ designId }: {designId:string}){
   useEffect(() => { refreshExtras(selCommunity) }, [selCommunity, communities.length])
   useEffect(() => { if (phase === 'app') { refreshFriends(); refreshCommunities() } }, [phase])
 
-  // CallManager bind + timers; runtime de BOTS (só responde se eu for o dono —
-  // o próprio runtime confere owner_fp) e avisos de chamada (recusada/perdida).
+  // CallManager bind + timers; runtime de bots e avisos de chamada.
   useEffect(() => {
     callManager.bind((s: any) => {
       setActiveCall(s)
-      // A barra da sidebar "Voz conectada" era um estado paralelo que o overlay
-      // não limpava: sair da chamada pelo botão do overlay deixava a barra (e
-      // seus botões mortos) na tela. Deriva do estado REAL da chamada.
+      // Barra "Voz conectada" deriva do estado REAL da chamada (não estado paralelo).
       if (!s || !String(s.callId ?? '').startsWith('voice-')) setVoiceChannel(null)
       if (s) {
         setIsMuted(!!s.muted)
         setIsDeafened(!!s.deafened)
       }
     })
-    // Sonda UNAICA de WebRTC no boot: reporta ao Rust o que a página enxerga.
-    // Sem isto não há como provar se o WebKitGTK entregou RTCPeerConnection, e
-    // a mensagem de erro acabava culpando o WebView do sistema à toa.
+    // Sonda única de WebRTC no boot: reporta ao Rust o que a página enxerga.
     try { diagnoseCallsSupport() } catch { /* só diagnóstico */ }
-    // Prova de que o AppState está registrado: TODO comando que pega
-    // State<AppState> morre com "state not managed" se um segundo `.setup()`
-    // tiver sobrescrito o que faz o `manage()`. Um segundo `.setup()` no
-    // Tauri SUBSTITUI o anterior — foi exatamente o bug que quebrou o
-    // "Criar conta".
+    // Prova de AppState registrado: 2º `.setup()` no Tauri substitui o anterior
+    // e quebrava tudo que usa State<AppState>.
     try {
       void services.identityGet()
         .then(() => console.info('[distorrent-probe] AppState OK — identity_get respondeu'))
@@ -980,9 +920,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         window.setTimeout(() => setNotice(null), 6000)
       } catch { /* toast nunca quebra */ }
     }
-    // O watchdog do manager (60s) ou um call_ended remoto encerram o ring
-    // também no shell — antes o sfx e o overlay tocavam para sempre quando
-    // quem ligou sumia sem desligar.
+    // Watchdog do manager ou call_ended remoto encerram o ring também no shell.
     const unIncomingGone = callManager.onIncomingGone
     callManager.onIncomingGone = (callId: string) => {
       setIncomingCall((cur) => (cur && cur.call_id === callId ? null : cur))
@@ -1011,11 +949,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (q === '480p' || q === '720p' || q === '1080p' || q === '4K') setCallQuality(q)
   }, [activeCall?.quality])
 
-  // ---- Quadrados da chamada (pessoa + tela) -------------------------------
-  // Regra pura em `callTiles.ts` (testável no node:test). Aqui só ligamos os
-  // dados REAIS: a própria mídia vem do manager (`localStream`/
-  // `localScreenStream`), nunca do roster — era o motivo de quem transmite não
-  // ver a própria câmera.
+  // ---- Quadrados da chamada: regra pura em `callTiles.ts`; mídia vem do manager.
   const callTiles = useMemo(() => buildCallTiles({
     participants: (activeCall?.participants ?? []) as any[],
     myFp: identity?.fingerprint ?? null,
@@ -1028,10 +962,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       nativeMedia: !!(activeCall as any).nativeMedia,
     } : null,
   }), [
-    // A REFERÊNCIA muda a cada emissão porque o `callManager` clona o roster
-    // no `onUpdate` (ver o comentário lá). Sem esse clone, `push`/`splice`
-    // in-place deixavam este memo "congelado" no roster do primeiro emit: o
-    // cabeçalho contava 3 e só existia tile de 1.
+    // A referência do roster muda a cada emit (callManager clona no onUpdate).
     activeCall?.participants,
     activeCall?.sharing,
     activeCall?.cameraOn,
@@ -1042,9 +973,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     identity?.fingerprint,
   ])
 
-  // MÍDIA REAL, não fase de sinalização. O badge só fica verde quando existe
-  // track viva (áudio/vídeo remoto ou local) — a fase é promovida pelo primeiro
-  // par que conecta e mentia "Conectado" num mesh com metade das pessoas muda.
+  // Mídia REAL, não fase: badge verde só com track viva (local ou remota).
   const mediaLive = useMemo(() => {
     if (!activeCall) return false
     const parts = (activeCall.participants ?? []) as any[]
@@ -1058,21 +987,14 @@ export default function ThemeShell({ designId }: {designId:string}){
     return !!localTracks?.some((t) => t?.readyState === 'live')
   }, [activeCall?.participants, (activeCall as any)?.localStream])
 
-  // TELA CHEIA FANTASMA: `buildCallTiles` sempre sintetiza o tile local quando
-  // existe fingerprint, MESMO com `participants: []` e sem chamada. Sem este
-  // gate, expandir o próprio quadrado e sair da chamada deixava uma tela cheia
-  // preta ("Tela cheia: você") cobrindo o app — e o botão Sair dela chamava
-  // `leave()` sem estado (no-op). O id do tile fantasma nunca "deixava de
-  // existir", então o efeito de limpeza não o pegava.
+  // TELA CHEIA FANTASMA: tile local existe mesmo sem chamada; limpa ao sair.
   useEffect(() => {
     if (activeCall) return
     setExpandedTileId(null)
     setPinnedTileId(null)
   }, [activeCall])
 
-  // Fixação/expansão só valem enquanto a transmissão existir. Sem isto, parar
-  // o compartilhamento deixava `expandedTileId` apontando para um id morto e a
-  // tela cheia ficava aberta sobre um stream que não existe mais.
+  // Fixação/expansão só valem enquanto a transmissão existir (limpa id morto).
   const visibleCallTiles = useMemo(() => {
     const valid = callTiles.map((tile) => tile.id)
     const pin = pinnedTileId && valid.includes(pinnedTileId) ? pinnedTileId : null
@@ -1116,9 +1038,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     const t = setInterval(() => setCallDuration(Math.floor((Date.now() - activeCall.startAt) / 1000)), 1000)
     return () => clearInterval(t)
   }, [activeCall?.callId])
-  // PERF: fileSwarm.onChange disparava 1 setState por chunk de 256KB (4 em
-  // paralelo = tempestade de re-renders). Throttle de 300ms com trailing:
-  // progresso continua ao vivo, sem render por chunk. Visual inalterado.
+  // PERF: throttle de 300ms no fileSwarm.onChange (evita render por chunk).
   useEffect(() => {
     const notify = throttleTrailing(() => setFileList([...fileSwarm.files.values()]), 300)
     swarmNotifyRef.current = notify
@@ -1137,12 +1057,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
   }, [voiceChannel])
 
-  // FILA REAL DE DOWNLOADS → barra do cartão.
-  //
-  // O desktop mostrava só `have.size / chunks` do swarm, que NÃO tem velocidade
-  // nem estado (parado/erro/salvando). Quem pausava ou falhava via um número
-  // congelado sem explicação. Aqui o card lê a fila (`downloadManager`), que é
-  // a mesma fonte do painel: progresso, KB/s e motivo do erro.
+  // FILA REAL DE DOWNLOADS → barra do cartão (progresso, KB/s e erro reais).
   useEffect(() => {
     const un = downloadManager.subscribe((items) => {
       const next: Record<string, { pct: number; speed: number; status: string; error?: string }> = {}
@@ -1154,10 +1069,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     return () => { try { un() } catch { /* ignore */ } }
   }, [])
 
-  // PRÉVIA DE MÍDIA no desktop (paridade com o celular): imagem/vídeo aparece
-  // no balão, sem salvar em Downloads e sem baixar de novo o que já está no
-  // spool em disco. Antes o desktop só mostrava um cartão com "Baixar" — o
-  // mesmo arquivo que o celular já exibia.
+  // PRÉVIA DE MÍDIA no desktop: imagem/vídeo no balão, sem salvar em Downloads.
   const mountPreview = useCallback((fileId: string, blob: Blob) => {
     if (previewsRef.current[fileId]) return
     let url = ''
@@ -1192,8 +1104,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   useEngineEvents((ev) => {
     if (ev.type === 'state_changed' || ev.type === 'peer_online' || ev.type === 'peer_offline' || ev.type === 'peer_discovered') refreshNet()
-    // mensagem em QUALQUER conversa atualiza a lista (antes só a aberta entrava e
-    // a lista de conversas nunca atualizava — DM nova só aparecia após restart)
+    // mensagem em QUALQUER conversa atualiza a lista de conversas (não só a aberta)
     if (ev.type === 'message_new') {
       const cid = (ev as unknown as { community_id?: string }).community_id
         ?? communities.find(c => c.channels.some(([id]) => id === ev.conv_id))?.id
@@ -1206,9 +1117,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       }
       refreshConvos()
       if (notify && socialPresence[identity?.fingerprint ?? ''] !== 'dnd') sfxMessage()
-      // Aviso do SISTEMA (toast/notificação) quando a janela não está em uso.
-      // O gerenciador decide por atividade + preferências; aqui só passamos o
-      // contexto que o shell já tem (canal, autor, menção).
+      // Aviso do sistema quando a janela não está em uso (o gerenciador decide).
       if (notify) {
         const evAny = ev as unknown as { id?: string; author_fp?: string; body?: string; ts?: number }
         const chName = cid
@@ -1269,13 +1178,9 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
     if (ev.type === 'call_incoming') {
       const fp = ev.from_fp
-      // SELF-RING (modo navegador): o eco do próprio invite não pode tocar o
-      // telefone de quem ligou — o ring sobreposto interceptava os botões da
-      // chamada ativa (ver filtro irmão no callManager bind).
+      // SELF-RING: eco do próprio invite não toca o telefone de quem ligou.
       if (fp && identity?.fingerprint && fp === identity.fingerprint) return
-      // NOME, nunca fingerprint: o ring precisa ser reconhecível ("Ana está
-      // ligando"), senão o usuário não sabe quem é. Ordem: peer conhecido →
-      // amigo aceito → DM/conversa → nick do envelope do frame (v6+) → fp.
+      // NOME, nunca fingerprint: resolve peer → amigo → conversa → envelope → fp.
       const known = peers.find((p) => p.fp === fp)?.nickname
         || friendsAccepted.find((f) => f.fp === fp)?.nickname
         || peerNickCacheRef.current[fp]
@@ -1285,21 +1190,17 @@ export default function ThemeShell({ designId }: {designId:string}){
         setIncomingCall({ ...ev, nickname: known })
       } else {
         setIncomingCall(ev)
-        // resolução assíncrona (peer ainda não carregado no tick): preenche
-        // quando chegar, sem perder o ring que já está tocando.
+        // resolução assíncrona: preenche quando o peer carregar, sem perder o ring
       }
       if (socialPresence[identity?.fingerprint ?? ''] !== 'dnd') sfxRingStart()
-      // Fora da tela, o ring silencioso do WebView pode ser estrangulado: o
-      // aviso do sistema garante que a chamada apareça.
+      // Fora da tela, o ring silencioso pode ser estrangulado: aviso do sistema garante.
       notifyIncomingCall({ callId: ev.call_id, title: known || fp.slice(0, 8) })
     }
     if (ev.type === 'call_ended') {
-      // Só reage ao fim da chamada CORRETA: um call_ended de outra chamada
-      // (mesh/grupo/frame atrasado) fechava o overlay com a mídia viva.
+      // Só reage ao fim da chamada CORRETA (call_ended de outra chamada não fecha).
       const mine = activeCall?.callId === ev.call_id || incomingCall?.call_id === ev.call_id
       if (mine) { setActiveCall(null); setIncomingCall(null); sfxRingStop(); sfxCallEnd() }
-      // Chamada terminou: some o aviso do sistema; se ninguém atendeu, vira
-      // "chamada perdida" (uma vez só).
+      // Chamada terminou: some o aviso; sem atendimento vira "chamada perdida".
       endCallNotice(ev.call_id)
     }
     if (ev.type === 'voice_joined' || ev.type === 'voice_left' || ev.type === 'voice_state_changed') {
@@ -1325,22 +1226,16 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   // Conversa aberta = aviso daquela conversa cancelado (e sem badge parado).
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
-  // Mapa conversa → peer, para a notificação saber de QUEM é a foto.
-  // O módulo de notificação não tem acesso ao banco; o shell tem.
+  // Mapa conversa → peer: a notificação não tem acesso ao banco; o shell tem.
   useEffect(() => {
     for (const c of conversations) {
       if (c.peer_fp) registerConversationPeer(c.id, c.peer_fp)
     }
   }, [conversations])
-  // Clique na notificação → abre a conversa certa (id vem do Rust, que
-  // guardou o mapa notificação→conversa).
+  // Clique na notificação → abre a conversa certa (id mapeado no Rust).
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
 
-  // ANDROID: "Atender"/"Recusar" tocados na notificação de chamada.
-  //
-  // Sem isto o botão só abria o app e a chamada continuava tocando — a ação
-  // morria no nativo. Quem atende/recusa é o `callManager` (a sinalização vive
-  // na página), então aqui só traduzimos a escolha.
+  // ANDROID: botões da notificação de chamada viram chamadas do callManager.
   useEffect(() => onCallNotificationAction((callId, action) => {
     if (action === 'accept') {
       const inc = incomingCall
@@ -1370,9 +1265,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const peerTitle = selConvObj?.title || selPeer?.nickname || selPeer?.fp || ''
   const ehGrupo = selConvObj?.kind === 'group'
 
-  // Roster do grupo: pergunta ao MOTOR (SQLite) sempre que a conversa muda e
-  // quando chega `group_synced`. O contador antigo lia uma chave de
-  // `localStorage` que só existe no modo navegador — no app nativo dava sempre 0.
+  // Roster do grupo: lê do MOTOR (SQLite) ao mudar conversa e em `group_synced`.
   useEffect(() => {
     if (!selConv || !ehGrupo) { setGroupMemberCount(0); return }
     let vivo = true
@@ -1388,9 +1281,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     })
     return () => { vivo = false; off() }
   }, [selConv, ehGrupo])
-  // PRESENÇA HONESTA: "online" é SÓ sessão estabelecida (verde). CONECTANDO/
-  // RECONECTANDO são bolinha amarela e NÃO aparecem em "AMIGOS ONLINE" —
-  // era o bug de "aparecia online sem estar" (amarelo listado como online).
+  // PRESENÇA HONESTA: "online" é só sessão estabelecida (verde).
   const onlinePeers = peers.filter(p => p.state === 'CONNECTED')
   const activeComm = view === 'servidores' && selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null
   const mergedChannelsForLabel = (() => {
@@ -1407,17 +1298,9 @@ export default function ThemeShell({ designId }: {designId:string}){
   const shownFriends = friendsTab === 'online'
     ? friendsAccepted.filter(f => onlineFps.has(f.fp) && socialPresence[f.fp] !== 'invisible')
     : friendsAccepted
-  // Suporte a chamadas: 'full' = WebRTC direto, 'none' = sem WebRTC neste
-  // aparelho. Não existe mais o modo áudio-via-relay: sem WebRTC a chamada
-  // falha honesto em vez de degradar para um caminho de latência alta.
-  // Os botões NUNCA são hard-disabled:
-  // este check é um snapshot de render e o WebView pode ganhar WebRTC/permissão
-  // depois (ou perder por um instante). Botão morto sem feedback deixava o
-  // usuário sem clique E sem diagnóstico — o clique mostra o motivo real.
-  // `detectNativeVoice()` é ASSÍNCRONO (consulta o core Rust) e popula o cache
-  // que `getCallsSupport()` lê. Sem esta re-renderização, o primeiro render
-  // acontecia antes da resposta e o app se anunciava "indisponível" mesmo com a
-  // voz nativa ativa — o botão ficava morto e o clique dava o erro errado.
+  // Chamadas: 'full' = WebRTC direto, 'none' = falha honesta (sem relay).
+  // Botões nunca são hard-disabled: o clique explica o que falta no aparelho.
+  // `detectNativeVoice()` é assíncrono — força re-render após a resposta.
   const [, forceCallsRefresh] = useState(0)
   useEffect(() => {
     let alive = true
@@ -1445,13 +1328,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
-  // T1: sem bloqueio global sending — permite digitar/enviar a proxima durante o envio.
-  // So barra duplo-submit da MESMA tecla Enter em <300ms.
-  //
-  // A chave é a CONVERSA, não o relógio global. Antes era um único instante:
-  // mandar para A e, em menos de 300ms, mandar para B DESCARTava o envio de B
-  // sem aviso (o `return` acontece antes de limpar o input), e o Enter parecia
-  // morto ao trocar de conversa. Duplo-submit é por conversa — é ela que repete.
+  // T1: envio é por CONVERSA (não relógio global) + barra duplo-Enter <300ms.
   const lastSendByConvRef = useRef<{ conv: string; at: number }>({ conv: '', at: 0 })
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
@@ -1477,17 +1354,14 @@ export default function ThemeShell({ designId }: {designId:string}){
     })
   }, [selConv])
 
-  // Fecha popovers do composer ao trocar de conversa — senão o emoji fica
-  // aberto por cima de outro canal.
+  // Fecha popovers do composer ao trocar de conversa.
   useEffect(() => { setComposerMenu(false); setShowEmojiPicker(false); setActiveAutocomplete(null) }, [selConv])
 
   async function send() {
     const body = input.trim()
     if (!body || !selConv) return
 
-    // Comando de barra: NÃO vai para a rede. Executa local e mostra a resposta
-    // como mensagem real do autor — é o comportamento do Discord e evita gastar
-    // largura de banda com texto que é resultado de um cálculo local.
+    // Comando de barra: executa local, nunca vai para a rede (comportamento Discord).
     if (body.startsWith('/') && /^\/[A-Za-zÀ-ÿ][\w-]*(\s|$)/.test(body)) {
       setInput('')
       setActiveAutocomplete(null)
@@ -1514,15 +1388,10 @@ export default function ThemeShell({ designId }: {designId:string}){
 
     const now = Date.now()
     const convId = selConv
-    // Antiduplo-SUBMIT por conversa (ver `lastSendByConvRef`): mandar para outra
-    // pessoa no mesmo segundo não pode ser engolido.
+    // Antiduplo-submit por conversa (ver `lastSendByConvRef`).
     if (lastSendByConvRef.current.conv === convId && now - lastSendByConvRef.current.at < 300) return
     lastSendByConvRef.current = { conv: convId, at: now }
-    // `selCommunity` sobrevive à abertura de DM (só a aba "amigos" o limpa),
-    // então ele não é prova de que a conversa selecionada é um canal. O
-    // membership real é a única fonte: mandar num id de DM com community setado
-    // produzia "canal inexistente" para toda mensagem escrita numa conversa
-    // privada depois de visitar um servidor.
+    // `selCommunity` não prova que é canal; membership real é a única fonte.
     const isChannelConv = !!selCommunity && communities.some(c =>
       c.id === selCommunity && c.channels.some(([cid]) => cid === selConv),
     )
@@ -1540,7 +1409,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       const m = communityId
         ? await services.sendChannelMessage(communityId, convId, body)
         : await services.messageSend(convId, body)
-      // Substitui o otimista pelo definitivo (match por tempId; fallback body+ts proximo no hook).
+      // Substitui o otimista pelo definitivo (match por tempId, com fallback).
       replaceOptimistic(tempId, m)
       if (replyTo) {
         // resposta: liga a mensagem nova à citada (meta persistida + difusão P2P)
@@ -1561,9 +1430,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!m.conv_id) return
     patchStatus(m.id, 'sending')
     setError(null)
-    // resolve a comunidade pela PRÓPRIA mensagem, não pelo estado da UI: a
-    // falha original pode ter vindo de outro canal, e o reenvio não pode
-    // herdar o mesmo `selCommunity` que a recusou.
+    // resolve a comunidade pela PRÓPRIA mensagem (reenvio não herda selCommunity)
     const cid = communities.find(c => c.channels.some(([id]) => id === m.conv_id))?.id ?? null
     try {
       const fresh = cid
@@ -1597,9 +1464,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   // ---------- composer: formatação, autocompletar, emoji ----------
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
-  // o MessageList expõe reloadPolls() para o shell forçar a releitura das
-  // enquetes do canal logo após criar uma (o efeito interno só reage a
-  // mensagens novas e a eventos de enquete, que o browser não emite).
+  // msgListRef expõe reloadPolls(): o browser não emite evento de enquete.
   const msgListRef = useRef<MessageListHandle | null>(null)
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [composerMenu, setComposerMenu] = useState(false)
@@ -1613,8 +1478,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     return (activeComm.members ?? []).map(([fp, nick]) => ({ fp, nickname: nick || nameOfFp(fp) }))
   }, [activeComm, socialProfiles, peers])
 
-  // Comandos de barra REAIS: cada um roda localmente e devolve texto.
-  // Nenhum depende de servidor — é o que um app P2P honesto pode oferecer.
+  // Comandos de barra REAIS: rodam localmente, sem depender de servidor.
   const slashCommands = useMemo(() => [
     { name: 'ajuda', summary: 'lista os comandos', run: async () => 'Comandos: ' + SLASH_BASE.map(c => '/' + c.name).join(', ') },
     { name: 'ping', summary: 'mede o tempo de resposta', run: async () => `🏓 pong — ${Math.max(1, Date.now() - slashPingAt.current)} ms` },
@@ -1723,10 +1587,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
   }
 
-  // O auto-resize vivia só no onChange, então limpar o campo depois de enviar
-  // (setInput(''), que não passa pelo onChange) deixava a caixa com a altura
-  // que a mensagem multi-linha tinha criado — o composer ficava gigante para
-  // sempre. Sincroniza em qualquer mudança de `input`, inclusive automática.
+  // O auto-resize precisa reagir também à limpeza do campo (não passa no onChange).
   useEffect(() => {
     const ta = composerRef.current
     if (!ta) return
@@ -1793,8 +1654,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     } else if (selPeerFp) fps = [selPeerFp]
     else if (conv?.peer_fp) fps = [conv.peer_fp]
     if (fps.length === 0) { setError('selecione um amigo ou crie um grupo'); return }
-    // Rota única: WebRTC direto (host/STUN/TURN) ou erro honesto dizendo o
-    // que falta neste aparelho.
+    // Rota única: WebRTC direto ou erro honesto dizendo o que falta.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     if (activeCall) { setError('já existe uma chamada em andamento'); return }
     setCallActionBusy(true)
@@ -1805,11 +1665,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!incomingCall || callActionBusy) return
     // Sem WebRTC: mostra o que falta em vez de aceitar uma chamada muda.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
-    // O ring SÓ para quando o aceite de fato sucedeu — antes o catch deixava
-    // o overlay parado no limbo, sem ring e sem chamada.
-    // Valida ANTES de avisar o peer: se o frame CallAccept sair e o
-    // `acceptInbound` recusar, o chamador conecta sozinho e quem atendeu fica
-    // sem chamada nenhuma (estado dos dois divergentes).
+    // O ring só para quando o aceite sucede; valida ANTES de avisar o peer.
     const bloqueio = callManager.canAccept(incomingCall.call_id)
     if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
     setCallActionBusy(true)
@@ -1849,11 +1705,10 @@ export default function ThemeShell({ designId }: {designId:string}){
     try {
       const sf = await fileSwarm.shareFile(f)
       setFileList([...fileSwarm.files.values()])
-      // envia mensagem com attachment info (hash) para swarm — todos que têm o arquivo semeiam
+      // envia mensagem com hash do attachment para o swarm (todos semeiam)
       if (selConv) {
         const body = encodeFileBody(sf)
-        // mesmo critério do envio de texto: só communityId se selConv for um
-        // canal DELE. Ver comentário em `send()`.
+        // mesmo critério do envio de texto: só communityId se selConv for canal dele.
         const chCid = selCommunity && communities.some(c =>
           c.id === selCommunity && c.channels.some(([cid]) => cid === selConv),
         ) ? selCommunity : null
@@ -1904,23 +1759,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     })
   }
 
-  /**
-   * Token de convite ABERTO do servidor selecionado.
-   *
-   * Antes esta função passava `identity.fingerprint` como `member_fp` e, no
-   * `catch`, devolvia o ID do servidor como se fosse token. Os dois erros
-   * juntos explicam o sintoma "o token nunca funciona": o convite ficava
-   * preso ao fingerprint de quem gerou (o convidado recebia "convite é para
-   * outro fingerprint") e, quando a geração falhava, a UI copiava um id que
-   * nem base64 é.
-   *
-   * Agora: sem `memberFp` = convite aberto, e erro é erro (sem fallback
-   * mentiroso). Quem não é dono recebe a mensagem do core.
-   */
-  // O `InvitePanel` (dentro do modal) gera, mostra e copia o convite — ele é a
-  // fonte única. Aqui só abrimos o modal: gerar um token antes criava um
-  // segundo convite que ninguém lia, e era isso que deixava o botão "Convidar"
-  // assinando um token diferente do que o painel mostrava.
+  /** Token de convite ABERTO do servidor selecionado (erro é erro, sem fallback). */
+  // `InvitePanel` é a fonte única do convite; aqui só abrimos o modal.
   function openInviteModal() {
     if (!selCommunity) return
     setServerMenuOpen(false)
@@ -1937,8 +1777,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       const ok = await copyText(tok)
       if (ok) setNotice('Token copiado — envie por qualquer mensageiro')
       else {
-        // Sem permissão de clipboard: abre o painel, que tem o token e um botão
-        // de copiar próprio. Não inventamos "copiado".
+        // Sem permissão de clipboard: abre o painel com o token para copiar lá.
         setShowInvite(true)
         setError('não foi possível copiar automaticamente — copie o token do painel')
       }
@@ -1947,8 +1786,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   // v6: o modelo é escolhido DENTRO do assistente; aqui só abrimos o passo 'create'.
 
-  // v6: criação legada removida — o CreateServerWizard (raiz) cria com
-  // canais/cargos/meta/regras via services.createCommunity(name, nomes, opts).
+  // v6: criação legada removida — o CreateServerWizard cria via createCommunity.
 
   function closeServerModal() {
     setShowCreateServer(false)
@@ -1979,10 +1817,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     })
   }, [selCommunity])
 
-  // Apelidos por servidor: `fp → apelido naquele servidor`. O motor é a
-  // fonte da verdade; a UI só espelha. Sem isto o `nicknameSet` grava no
-  // banco e NUNCA aparece — o nome vinha do objeto da comunidade.
-  // `members` é `[fp, nickname, role]`, então o espelho é direto.
+  // Apelidos por servidor (fp → apelido): o motor é a fonte da verdade.
   const serverNicks = useMemo<Record<string, string>>(() => {
     const next: Record<string, string> = {}
     for (const m of (activeComm?.members ?? []) as [string, string, string][]) {
@@ -2030,8 +1865,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     list.push({ id: 'search', label: 'Buscar mensagens', hint: 'Ctrl+F', group: 'navegar', run: () => setShowSearch(true) })
     list.push({ id: 'pins', label: 'Mensagens fixadas', hint: 'Ctrl+Shift+P', group: 'navegar', run: () => setShowPins(true) })
     list.push({ id: 'shortcuts', label: 'Ver atalhos de teclado', group: 'ajuda', run: () => setShowShortcuts(true) })
-    // Presença pelo estado central: com a janela fechada, "online" cai para
-    // "ausente" sozinho (conexão ≠ presença).
+    // Presença pelo estado central: janela fechada cai para "ausente" sozinha.
     list.push({ id: 'on', label: 'Ficar online', group: 'presença', run: () => setDesiredPresence('online') })
     list.push({ id: 'idle', label: 'Ficar ausente', group: 'presença', run: () => setDesiredPresence('idle') })
     list.push({ id: 'dnd', label: 'Não perturbe', group: 'presença', run: () => setDesiredPresence('dnd') })
@@ -2080,15 +1914,12 @@ export default function ThemeShell({ designId }: {designId:string}){
       await services.pollCreate(selCommunity, selConv, newPollQ.trim(), opts, false, Date.now() + 86400000)
       setNewPollQ(''); setNewPollOpts(''); setShowPollForm(false)
       setNotice('enquete criada')
-      // O MessageList so recarrega as enquetes quando chega mensagem ou chega
-      // evento de enquete; o backend de browser não emite esse evento, então
-      // damos um toque para a lista aparecer na hora.
+      // MessageList não emite evento de enquete no browser: força reload.
       msgListRef.current?.reloadPolls()
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
-  // ATUALIZAÇÃO ANTES DE ENTRAR — o gate roda em paralelo com o boot e só
-  // aparece quando há versão nova de verdade (ver `components/UpdateGate.tsx`).
+  // UpdateGate roda em paralelo com o boot; só aparece com versão nova real.
   const updateGate = useUpdateGate(true)
 
   if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen />} /><UpdateOverlay api={updateGate} /></>)
@@ -2100,9 +1931,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '12px 0', gap: 8, flexShrink: 0,
   }
 
-  // Pill de rede HONESTA: motor ativo = ONLINE (mesmo sem peers — você está
-  // motor acessível = ONLINE mesmo sem peers; null = INICIANDO (não OFFLINE falso)
-  // Paridade Discord: pill só aparece com ?debug — status vai pro tooltip do avatar.
+  // Pill de rede HONESTA: motor acessível = ONLINE; null = INICIANDO.
+  // Paridade Discord: pill só com ?debug — status vai ao tooltip do avatar.
   const showNet = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug')
   const netPill = (st: typeof status) => {
     if (!showNet) return null
@@ -2125,18 +1955,13 @@ export default function ThemeShell({ designId }: {designId:string}){
         </span>
       )
     }
-    // Honesta: verde só com ≥1 peer Online real. Nó ouvindo sem peers é
-    // "nó no ar", não ONLINE — separa acessibilidade de alcance real.
+    // Honesta: verde só com ≥1 peer Online real (ouvindo sem peers = "no ar").
     const hasPeers = count > 0
     const online = hasPeers && (state === 'CONNECTED' || state === 'DISCONNECTED')
     const color = online ? t.green : state === 'DISCONNECTED' ? '#80848e' : t.yellow
     const label = online ? 'ONLINE' : stateLabel[state as NetworkState]
-    // CONTAGEM DE PESSOAS ONLINE NA REDE.
-    //
-    // É o total de peers com sessão viva (amigos E membros de servidor), não
-    // "amigos online": o pedido é "quantas pessoas estão online na rede". O
-    // tooltip separa as duas coisas para ninguém achar que o número é a lista
-    // de amigos. Com 0 o número aparece: "0" é informação honesta, não sumiço.
+    // Contagem = peers com sessão viva (amigos + membros), não "amigos online".
+    // "0" aparece: é informação honesta.
     const tip = !hasPeers && listening
         ? `Nó no ar em :${st?.listen_port} — 0 pessoas online na rede; adicione amigo pelo fingerprint`
         : `${count} ${count === 1 ? 'pessoa online' : 'pessoas online'} na rede`
@@ -2347,7 +2172,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                       if (!grouped[cat]) grouped[cat] = []
                       grouped[cat].push(ch)
                     })
-                    // ordem: manter GERAL / CANAIS DE TEXTO primeiro, depois alfabético igual screenshot
+                    // ordem: GERAL / CANAIS DE TEXTO primeiro, depois alfabético
                     const order = ['ATENDIMENTO E SUPORTE', 'GERAL', 'CANAIS DE TEXTO', 'PROJETOS', 'DESIGN', 'TESTES']
                     const cats = Object.keys(grouped).sort((a, b) => {
                       const ia = order.indexOf(a), ib = order.indexOf(b)
@@ -2381,32 +2206,22 @@ export default function ThemeShell({ designId }: {designId:string}){
                                   onClick={async () => {
                                     if (ch.kind === 'voice') {
                                       if (callActionBusy) return
-                                      // Canal de voz: 'none' → detalhado; 'relay-only'/'full' → joinVoice (que delega p/ relay quando preciso).
+                                      // Canal de voz: 'none' → detalhado; senão joinVoice.
                                       if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
                                       setCallActionBusy(true)
                                       if (voiceChannel?.channelId === ch.id) {
                                         try {
-                                          // `leaveVoice` já chama `services.voiceLeave`.
-                                          // Repetir aqui mandava DOIS frames VoiceLeave na
-                                          // rede (o outro lado processava a saída duas vezes).
+                                          // `leaveVoice` já chama voiceLeave: não repetir (2 frames na rede).
                                           await callManager.leaveVoice(selCommunity!, ch.id)
                                         } catch (e: any) { setError(String(e?.message ?? e)) }
                                         setVoiceChannel(null); setVoiceStates([])
                                       } else {
                                         setSelConv(ch.id)
                                         try {
-                                          // `joinVoice` JÁ anuncia ao core
-                                          // (`services.voiceJoin`) internamente.
-                                          // Chamar de novo criava uma segunda
-                                          // sessão nativa para o mesmo canal
-                                          // (offers/sessões duplicadas).
+                                          // `joinVoice` já anuncia ao core: chamar de novo duplicava a sessão.
                                           await callManager.joinVoice(selCommunity!, ch.id)
                                         } catch (e: any) { setError(String(e?.message ?? e)); setVoiceChannel(null); setCallActionBusy(false); return }
-                                        // Só marca a barra DEPOIS do join: se
-                                        // havia outro canal de voz, o
-                                        // `joinVoice` sai dele e emite
-                                        // `onUpdate(null)` no meio — marcar antes
-                                        // deixava a barra sumir (o bind limpa).
+                                        // Marca a barra só DEPOIS do join (bind pode limpar no meio).
                                         setVoiceChannel({ communityId: selCommunity!, channelId: ch.id })
                                         services.voiceStates(selCommunity!, ch.id).then(setVoiceStates).catch(()=>{})
                                       }
@@ -2422,12 +2237,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{ch.name}</span>
                                   {ch.topic && <span style={{ fontSize: 10, color: muted, maxWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.topic}</span>}
                                 </button>
-                                {/* QUEM ESTÁ NO CANAL DE VOZ — sempre visível.
-                                    Como no Discord: dá para ver os nomes de quem
-                                    está na chamada e entrar nela tocando no canal,
-                                    sem precisar perguntar. Antes só quem já tinha
-                                    entrado via a barra de voz; quem chegava depois
-                                    não sabia que havia gente ali. */}
+                                {/* Quem está no canal de voz — sempre visível, como no Discord. */}
                                 {ch.kind === 'voice' && (
                                   <ChannelVoicePeers
                                     communityId={selCommunity!}
@@ -2445,9 +2255,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                                     title="Gerenciar canal"
                                   ><Icon d={Icons.settings} size={11} /></button>
                                 )}
-                                {/* Threads aninhadas sob o canal-pai (como no Discord).
-                                    Só monta para o canal ABERTO — abrir uma.ThreadList por
-                                    canal faz N consultas de rede na lista toda. */}
+                                {/* Threads aninhadas sob o canal-pai; só no canal ABERTO (evita N consultas). */}
                                 {ch.kind !== 'voice' && selConv === ch.id && (
                                   <ThreadList
                                     communityId={selCommunity!}
@@ -2563,11 +2371,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </div>
               </button>
             )}
-            {/* BUG VISUAL do "ícone de configuração": os dois botões tinham
-                `flex: 1` dentro de um flex row, então viravam barras de 118px
-                de largura com 24px de altura e um glifo de 14px no meio — uma
-                mancha ilegível, não um botão. Agora são quadrados de 34px com
-                ícone de 17px, rótulo no aria e foco visível. */}
+            {/* Botões de rodapé: quadrados 34px com aria/foco (eram barras ilegíveis). */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <button
                 onClick={() => setShowSettings(true)}
@@ -2613,11 +2417,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <Icon d={Icons.download} size={17} />
                   {dlCount > 0 && <span style={{ position: 'absolute', top: -6, right: -8, background: t.accent, color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: 99, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount}</span>}
                 </button>
-                {/* Estes três eram <Icon> PURO, sem onClick: pareciam botões e
-                    não faziam NADA — era o "ícone de configuração bugado" (o
-                    grid). Agora são botões de verdade: grid abre Configurações,
-                    users vai para Amigos, e o sino some (não existe sistema de
-                    notificação — ícone morto é pior que ícone ausente). */}
+                {/* Botões funcionais de verdade (antes eram <Icon> morto sem onClick). */}
                 <button
                   onClick={() => setShowSettings(true)}
                   title="Configurações"
@@ -2641,11 +2441,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           ) : selConv ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, fontWeight: 800, fontSize: 18 }}>{conversations.find(c=>c.id===selConv)?.kind==='group' ? <Icon d={Icons.users} size={18}/> : '@'}</span>
-              {/* CONTADOR DE MEMBROS: antes lia
-                  `localStorage['distorrent:extras:group_members:<id>']` na mao -
-                  chave que so existe no MODO NAVEGADOR. No app nativo lia null e
-                  mostrava "0 membros" para sempre. Agora vem do motor, e o nome e'
-                  clicavel para abrir o painel do grupo. */}
+              {/* Contador de membros vem do motor (localStorage dava 0 no nativo). */}
               {ehGrupo ? (
                 <button
                   onClick={() => setShowGroupPanel(true)}
@@ -2661,9 +2457,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               ) : (
                 <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
               )}
-              {/* CALL toolbar idêntico Discord — sem hard-disable: se o WebView
-                  não tiver WebRTC/permissão, o clique explica o que falta em vez de
-                  ser um botão morto (o snapshot de `callsSupport` é de render). */}
+              {/* CALL toolbar — sem hard-disable: o clique explica o que falta. */}
               <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 <button onClick={() => setShowDownloads(true)} title="Downloads" aria-label="Downloads" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex', position: 'relative' }}>
                   <Icon d={Icons.download} size={18} />
@@ -2674,8 +2468,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <button onClick={() => setShowAddToCall(true)} title="Adicionar amigos à chamada" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex' }}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg></button>
                 <button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" style={{ background: inputBg, border: `1px solid ${borderColor}`, color: t.accent, cursor: 'pointer', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800 }}>+ Grupo</button>
                 <span style={{ width: 1, height: 20, background: borderColor, margin: '0 4px' }}/>
-                {/* Antes estes dois eram <Icon> PURO: pareciam botões e não
-                    faziam nada. Agora abrem as caixas de menções e_fixados. */}
+                {/* Antes eram <Icon> puro sem ação; agora abrem menções e fixadas. */}
                 <button
                   onClick={() => { setInboxTab('mentions'); setShowInbox(true) }}
                   title="Menções"
@@ -2717,8 +2510,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               <button onClick={() => setFriendsTab('adicionar')} className={'tab-btn add' + (friendsTab === 'adicionar' ? ' active' : '')} style={{ flexShrink: 0 }}>Adicionar amigo</button>
               <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
                 {netPill(status)}
-                {/* Downloads acessível SEM conversa aberta — o swarm é global,
-                    o painel não pode depender de um canal selecionado. */}
+                {/* Downloads acessível sem conversa aberta (swarm é global). */}
                 <button onClick={() => setShowDownloads(true)} title="Downloads" aria-label="Downloads" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex', position: 'relative' }}>
                   <Icon d={Icons.download} size={18} />
                   {dlCount > 0 && <span style={{ position: 'absolute', top: 2, right: 2, minWidth: 15, height: 15, borderRadius: 99, background: t.red, color: '#fff', fontSize: 9, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount > 9 ? '9+' : dlCount}</span>}
@@ -2844,8 +2636,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
           {selConv && (
               <>
-              {/* Histórico: o core pagina por timestamp, mas a UI nunca expôs o
-                  `loadOlder` — conversas longas ficavam truncadas em 100. */}
+              {/* Histórico: expõe o `loadOlder` do core (conversas truncavam em 100). */}
               {hasOlder && (
                 <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0 2px' }}>
                   <button
@@ -2883,15 +2674,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                 renderFile={(m, _grouped) => {
                   const fmeta = parseFileBody(m.body)
                   if (!fmeta) return null
-                  // O card lê o fileSwarm (bitfield = o que já temos) E a fila do
-                  // `downloadManager` (progresso, VELOCIDADE, pausa/erro reais).
-                  // Antes o desktop mostrava só `have/chunks` — um número que
-                  // congelava ao pausar e não dizia por que tinha parado.
+                  // Card lê fileSwarm (bitfield) + downloadManager (velocidade/pausa/erro).
                   const sf = fileSwarm.files.get(fmeta.file_id) ?? null
                   const announced = !!sf
                   const complete = !!sf && sf.chunks > 0 && sf.have.size >= sf.chunks
-                  // O item da fila tem prioridade (é o estado que a UI comanda);
-                  // sem item, o bitfield do swarm dá o progresso "só leitura".
+                  // Item da fila tem prioridade; sem ele, bitfield dá progresso só-leitura.
                   const queued = dlByFile[fmeta.file_id]
                   const progress = queued ?? (announced
                     ? {
@@ -2900,16 +2687,8 @@ export default function ThemeShell({ designId }: {designId:string}){
                         status: complete ? 'completed' : 'idle',
                       }
                     : { pct: 0, speed: 0, status: 'idle' })
-                  // UMA ação para os dois shells (`services/downloadAction`):
-                  // o PC salvava direto quando o arquivo já estava completo,
-                  // pulando a verificação blake3 e o aviso de conclusão que o
-                  // celular fazia. Agora ambos passam pela fila.
-                  //
-                  // NÃO abre o painel de downloads: o próprio cartão já mostra
-                  // barra, % e velocidade, e a central abrindo por cima de
-                  // QUALQUER download é intrusiva (pedido explícito do usuário).
-                  // Quem quiser a lista toca no ícone de downloads ou no botão
-                  // "Painel de downloads" do cartão.
+                  // Ação única para os dois shells (`services/downloadAction`), com
+                  // validação blake3; não abre o painel (o cartão já mostra tudo).
                   const baixar = async () => {
                     setError(null)
                     try {
@@ -3034,10 +2813,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </div>
               )}
               </div>
-              {/* position:relative — os popovers ("+", autocomplete) são positionados
-                  em relação a ESTE box com bottom:calc(100% + 6px). Sem isso o
-                  ancestral de posicionamento era o viewport e o menu aparecia
-                  acima da tela (y negativo), inalcançável. */}
+              {/* position:relative — ancora os popovers ("+", autocomplete). */}
               <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 8, background: t.composer, borderRadius: 8, padding: '8px 10px' }}>
                 <input type="file" ref={(el:any)=> fileInputRef.current = el} onChange={onPickFile} style={{ display: 'none' }} />
                 <button onClick={() => setShowEmojiPicker(v => !v)} className="composer-icon" title="Mais: arquivo, enquete, emoji" aria-label="Mais" aria-expanded={showEmojiPicker} style={{ background: showEmojiPicker ? t.accent : t.accent, color: '#fff', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></button>
@@ -3167,10 +2943,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         )}
       </div>
 
-      {/* PAINEL DE SERVIDORES — um único fluxo para criar/entrar/convidar.
-          Substitui três modais (convite inline, choose/create legado e o
-          "serverFlow" espalhado) que montavam o link cada um do seu jeito.
-          O hub usa `ui.Modal` e o token/link reais do core. */}
+      {/* PAINEL DE SERVIDORES — um único fluxo (hub) para criar/entrar/convidar. */}
       <ServerHubModal
         open={showCreateServer && serverFlow !== 'create'}
         onClose={closeServerModal}
@@ -3218,8 +2991,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         ) : null}
       </Modal>
 
-      {/* v6 — assistente de criação (4 passos + convite). O próprio wizard
-          cria via services.createCommunity(name, canais, opts do wizard). */}
+      {/* v6 — assistente de criação (4 passos + convite), via createCommunity. */}
       <CreateServerWizard
         open={showCreateServer && serverFlow === 'create'}
         onClose={closeServerModal}
@@ -3245,9 +3017,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           <BotConfigPanel
             communityId={selCommunity}
             bot={cb}
-            // FONTE ÚNICA: `mergeChannels` deduplica por id E por nome. Antes esta
-            // linha concatenava as duas listas sem filtro, e o mesmo canal
-            // aparecia duas vezes na lista de escopos do bot.
+            // FONTE ÚNICA: mergeChannels deduplica por id E nome (era duplicado).
             channels={mergeChannels(activeComm?.channels, extraChannels)}
             onSaved={() => { refreshExtras(selCommunity); setConfigBotId(null) }}
             onClose={() => setConfigBotId(null)}
@@ -3273,8 +3043,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* Configurações do servidor — componente próprio (server/ServerSettings).
-          Substitui o modal de 5 abas que vivia inline aqui. */}
+      {/* Configurações do servidor — componente próprio (server/ServerSettings). */}
       {showServerSettings && selCommunity && activeComm && (
         <ServerSettings
           serverId={activeComm.id}
@@ -3412,8 +3181,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 {/* v6: fase da chamada (chamando/conectando/reconectando…) com elapsed */}
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
                   <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} />
-                  {/* Cronômetro já conectado. Antes ficava grudado no título e
-                      sumia quando o badge virava "Conectado • MM:SS". */}
+                {/* Cronômetro separado do título (grudado, sumia no badge). */}
                   <span style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{fmtDuration(callDuration)}</span>
                 </span>
               </span>
@@ -3423,12 +3191,9 @@ export default function ThemeShell({ designId }: {designId:string}){
               </span>
             </span>
             <span style={{ width: 1, height: 26, background: borderColor, flexShrink: 0 }} />
-            {/* PLURAL: '1 participantes' estava errado. E a rota (LAN/STUN/TURN)
-                virou selo próprio — ela é a resposta de "por que não conecta?". */}
+            {/* Plural de participante + rota (LAN/STUN/TURN) como selo próprio. */}
             <span style={{ fontSize: 12, color: muted, whiteSpace: 'nowrap' }}>{activeCall.participants.length} {activeCall.participants.length === 1 ? 'participante' : 'participantes'}</span>
-            {/* HONESTIDADE (proxy/full): a mídia WebRTC NÃO passa pelo
-                SOCKS5/Tor do app — não presenting o modo como protetor da
-                chamada. O aviso fica visível o tempo todo no modo anônimo. */}
+            {/* HONESTIDADE (proxy/full): mídia WebRTC não passa pelo SOCKS5/Tor. */}
             {(privacyMode === 'proxy' || privacyMode === 'full') && (
               <span
                 title="A mídia (áudio/vídeo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes da chamada veem seu IP real. Mensagens e arquivos seguem protegidos pelo modo."
@@ -3465,18 +3230,8 @@ export default function ThemeShell({ designId }: {designId:string}){
               {qualityError ?? (activeCall.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}
             </div>
           )}
-          {/* `alignContent: 'stretch'` + tile com altura mínima real: antes o
-              grid deixava uma faixa vazia embaixo dos vídeos, porque as linhas
-              não ocupavam a altura disponível. */}
-          {/* Quadrados da chamada: PESSOA e TELA. A contagem de colunas vem do
-              número de TILES (não de participantes) — com 2 pessoas + 1 tela o
-              grid antigo abria 2 colunas para 3 itens e a tela caía sozinha
-              numa linha. Fixar/expandir é por `id` de TRANSMISSÃO (`p:<fp>` /
-              `s:<fp>`), então a tela tem vida própria.
-
-              TELA CHEIA NÃO acontece aqui: ela é um overlay (`ScreenStage`)
-              por cima de TUDO. Antes o "expandir" só aumentava o quadrado
-              dentro do painel (`min(56vw, 720px)`), o que não é tela cheia. */}
+          {/* Quadrados da chamada: PESSOA e TELA; colunas contam TILES, e a
+              tela cheia é um overlay (`ScreenStage`) acima de tudo. */}
           <div
             style={{
               flex: 1,
@@ -3509,9 +3264,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               />
             ))}
           </div>
-          {/* A linha do aviso de mesh ficou FORA do grid de propósito: dentro
-              dele virava mais uma linha (`gridColumn: 1 / -1`) e disputava a
-              altura com os vídeos via `1fr` — metade da tela ficava vazia. */}
+          {/* Aviso de mesh FORA do grid: dentro disputava altura com os vídeos. */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '8px 16px', fontSize: 11, color: muted, borderTop: `1px solid ${borderColor}`, background: '#1a1a1a', flexShrink: 0 }}>
             <Icon d={Icons.users} size={13} />
             <span>{activeCall.participants.length === 1 ? 'convide mais alguém para a mídia ir mais estável' : `mesh P2P • ${activeCall.participants.length} pessoas trocam áudio e tela entre si`}</span>
@@ -3522,10 +3275,7 @@ export default function ThemeShell({ designId }: {designId:string}){
             <button onClick={()=>{ setIsMuted(m=>!m); callManager.toggleMute() }} title={isMuted ? 'Ativar microfone' : 'Silenciar'} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: isMuted ? t.red : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={18} /> : <Icon d={Icons.mic} size={18} />}</button>
             <button onClick={()=>{ setIsDeafened(d=>!d); callManager.toggleDeafen() }} title={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: isDeafened ? t.red : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={18} /> : <Icon d={Icons.headphones} size={18} />}</button>
             <button onClick={()=> callManager.toggleCamera()} title="Câmera" aria-label="Câmera" style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: activeCall.cameraOn ? t.green : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.video} size={18} /></button>
-            {/* TELA — antes: um botão só, sem estado no rótulo, sem escolha de
-                fonte e sem forma de PARAR a não ser pelo botão nativo do SO.
-                Agora: rótulo que muda ("Compartilhar"/"Parar"), escolha de
-                tela-inteira vs janela, e o alvo some quando para. */}
+            {/* TELA: rótulo muda (compartilhar/parar) e menu escolhe tela vs janela. */}
             <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
               {activeCall.sharing ? (
                 <button
@@ -3618,8 +3368,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* Painel do GRUPO: membros reais, renomear e remover.
-          Abre ao clicar no nome do grupo no cabeçalho. */}
+      {/* Painel do GRUPO: membros reais, renomear e remover (abre no cabeçalho). */}
       {showGroupPanel && ehGrupo && selConv && (
         <Modal
           open
@@ -3648,10 +3397,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         </Modal>
       )}
 
-      {/* TELA CHEIA da transmissão escolhida (tela ou câmera).
-          Fica ACIMA do painel e o painel CONTINUA MONTADO atrás — é o que
-          mantém os `<audio>` remotos tocando. Fechar com Esc, com o botão
-          "Recolher" ou quando o stream termina (o `stageTile` vira null). */}
+      {/* TELA CHEIA da transmissão: painel fica montado atrás (áudio segue tocando). */}
       {stageTile && (
         <ScreenStage
           tile={stageTile}
@@ -3758,9 +3504,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   }} style={{ flex: 1, background: inputBg, color: text, border: `1px solid ${borderColor}`, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Importar identidade</button>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  {/* IGUAL DISCORD: o popup do próprio perfil leva ao editor
-                      COMPLETO (avatar/banner/about/status) — antes o editor só
-                      era alcançável clicando no avatar de uma mensagem sua. */}
+                  {/* O popup do perfil leva ao editor COMPLETO, igual Discord. */}
                   <button onClick={() => { setShowProfile(false); setProfileFp(identity?.fingerprint ?? '') }} style={{ flex: 1, background: t.accent, color: '#fff', border: 'none', padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Editar perfil</button>
                   <button onClick={() => { setShowProfile(false); setShowSettings(true) }} style={{ flex: 1, background: inputBg, color: text, border: `1px solid ${borderColor}`, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>Configurações</button>
                   <button onClick={() => { setPhase('lock'); setIdentity(null as any); setSelConv(null); setSelPeerFp(null); setShowProfile(false) }} style={{ flex: 1, background: '#f23f4322', color: '#f23f43', border: `1px solid #f23f4355`, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 13 }}>
@@ -4014,12 +3758,7 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* Estilos da área de servidores/mensagens.
-          A maior parte do que vivia aqui DUPLICAVA global.css (rail, server-head,
-          dd-menu, chan-row, nav-row, member-row, tpl-card, cat-head...) e, por
-          vir depois no documento, vencia as regras da folha — o mobile e o
-          desktop divergiam na mesma classe. Ficaram só as regras que NÃO têm
-          equivalente na folha e que são específicas deste shell. */}
+      {/* Estilos locais: só o que NÃO duplica global.css (evitava divergência). */}
       <style>{`
         .msg-row:hover .msg-tools{display:flex !important}
         mark{background:#f0b232;color:#1e1f22;border-radius:2px}
@@ -4033,10 +3772,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           myFp={identity?.fingerprint ?? ''}
           onClose={() => setProfileFp(null)}
           onMessage={fp => { setProfileFp(null); void openDm({ fp }) }}
-          // Atualização IMEDIATA de todos os consumidores (avatar da barra
-          // inferior, cabeçalho, mensagens já renderizadas). O evento
-          // `profile_changed` do core também chega — aplicar os dois é
-          // idempotente porque o objeto é o persistido, não um patch.
+          // Atualização IMEDIATA de todos os consumidores (idempotente).
           onSaved={p => setSocialProfiles(prev => ({ ...prev, [p.fp]: p }))}
         />
       )}

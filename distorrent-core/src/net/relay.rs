@@ -1,16 +1,5 @@
-//! Relay P2P via brokers MQTT públicos — "todo mundo na mesma rede".
-//!
-//! Quando a conexão TCP direta falha (NAT de operadora, CGNAT, sem UPnP, sem
-//! porta aberta), os peers trocam frames pela infra pública de rendezvous,
-//! sem nenhuma configuração. O tópico de cada identidade É o endereço:
-//! `distorrent_r_<fingerprint>`.
-//!
-//! Segurança: o relay transporta bytes opacos. O handshake autenticado
-//! (ed25519 + transcript) e a sessão ChaCha20Poly1305 rodam POR CIMA do
-//! relay, idênticos ao TCP — o relay vê só ciphertext (+ Hello/HelloAck em
-//! claro, mesma exposição do announce já existente). Nenhuma cripto nova.
-//!
-//! Frames grandes são fatiados (limite por mensagem dos brokers) e remontados.
+//! Relay P2P via brokers MQTT públicos: transporta frames cifrados E2E
+//! quando o TCP direto falha (NAT/CGNAT), fatiando frames grandes.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -30,8 +19,7 @@ use crate::protocol::SecureFrame;
 use crate::{DistorrentError, Result};
 
 pub const RELAY_TOPIC_PREFIX: &str = "distorrent_r_";
-/// Tamanho máximo do `data` (base64) por mensagem de relay — envelope JSON +
-/// folga para brokers MQTT e compat. com versões antigas do protocolo.
+/// Tamanho máx do `data` (base64) por mensagem (limite dos brokers + folga).
 pub const RELAY_CHUNK_B64: usize = 3000;
 /// Máximo de bytes de UM frame pelo relay (igual ao TCP).
 pub const RELAY_MAX_FRAME: usize = (1 << 20) + 4;
@@ -40,19 +28,13 @@ pub fn relay_topic(fp: &str) -> String {
     format!("{RELAY_TOPIC_PREFIX}{fp}")
 }
 
-/// Tópico de ANÚNCIO de endpoint (direto P2P): `{fp, addr, lan, nickname}`.
-/// Separado do relay (chunks): o manager ignora (sem `to`), e o lookup
-/// permite dial DIRETA de baixa latência quando o NAT deixa (UPnP ok).
+/// Tópico de anúncio de endpoint P2P (permite dial direta quando o NAT deixa).
 pub fn announce_topic(fp: &str) -> String {
     format!("distorrent_a_{fp}")
 }
 
-/// Contadores do plano de dados do relay (`distorrent_r_*`).
-/// `posts` = nº de `post()` no tópico de relay; `poll_hits` = nº de `poll()`
-/// no tópico de relay que retornaram dados (poll vazio do manager idle NÃO
-/// conta). Tópicos de ANÚNCIO (`distorrent_a_*`, descoberta de endpoint para
-/// dial direta) NÃO contam — senão o announce periódico de endpoint (a cada
-/// 5s quando há IP público) poluía a prova "direta não usa relay".
+/// Contadores do plano de dados do relay (anúncios NÃO contam, senão o
+/// announce periódico poluía a prova "direta não usa relay").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RelayStats {
     pub posts: u64,
@@ -77,10 +59,7 @@ struct RelayEnvelope {
     data: String,
 }
 
-/// Envelope OPACO do peer-relay (F3): o intermediário só vê um `rid`
-/// aleatório, índices e o `data` (ciphertext E2E A↔B). SEM `from`/`to`/
-/// `msg_id` em claro — a identidade é derivada no receptor (Hello em claro
-/// ou decifra do AEAD).
+/// Envelope OPACO do peer-relay (F3): intermediário não vê identidade alguma.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpaqueRelayEnvelope {
     v: u8,
@@ -90,11 +69,8 @@ struct OpaqueRelayEnvelope {
     data: String,
 }
 
-/// Backend de transporte do relay. O padrão é o `MultiRelay` com pernas MQTT
-/// públicas (push, baixa latência, zero config); `MemRelay` é o backend de
-/// testes (in-memory, sem rede). `NtfyRelay` só existe para os modos de
-/// privacidade com proxy SOCKS5 ativados manualmente pelo usuário.
-/// Métodos retornam futures boxeados para o trait ser `dyn` (sem async-trait).
+/// Backend de transporte do relay (MQTT público, memória p/ testes, proxy).
+/// Futures boxeadas para o trait ser `dyn` (sem async-trait).
 pub trait RelayBackend: Send + Sync {
     fn post<'a>(
         &'a self,
@@ -125,32 +101,22 @@ pub trait RelayBackend: Send + Sync {
         false
     }
 
-    /// (F3) O transporte deste backend usa o envelope OPACO ao intermediário
-    /// (sem identidade)? Só o peer-relay devolve `true`.
+    /// (F3) Transporte usa envelope opaco ao intermediário? Só peer-relay.
     fn opaque_envelope(&self) -> bool {
         false
     }
 }
 
-/// Túnel TCP local → SOCKS5: escuta em 127.0.0.1:porta-efêmera e encaminha
-/// CADA conexão aceita pelo proxy SOCKS5 (ex.: Tor em 127.0.0.1:9050) até o
-/// alvo `host:porta` — com o HOSTNAME entregue ao proxy (semântica socks5h:
-/// DNS resolvido DENTRO do proxy/rede Tor; nada de DNS local vazando o alvo).
-///
-/// Por quê: rumqttc só fala TCP/TLS direto (sem SOCKS). Com este túnel, as
-/// pernas MQTT públicas continuam sendo usadas até em proxy/Tor — o tráfego
-/// do broker nunca sai direto, passa SEMPRE pelo proxy. Nada de ntfy.sh.
+/// Túnel TCP local → SOCKS5: deixa o rumqttc (só fala TCP) usar proxy/Tor
+/// com o hostname resolvido DENTRO do proxy (nada de DNS local vazar).
 pub struct SocksTunnel {
     /// Endereço local do listener (127.0.0.1:porta) para apontar o rumqttc.
     pub local_addr: std::net::SocketAddr,
 }
 
 impl SocksTunnel {
-    /// Sobe o túnel para `target_host:target_port` via `proxy` ("host:porta").
-    /// 100% std (listener + threads): precisa funcionar EM QUALQUER contexto,
-    /// inclusive comandos Tauri síncronos sem runtime tokio rodando (é o caso
-    /// do `privacy_set` ativando o modo proxy). Falha de proxy só loga em
-    /// debug — o MQTT reconecta sozinho e o accept loop nunca morre.
+    /// Sobe o túnel via `proxy`. 100% std: funciona até em comando Tauri
+    /// síncrono sem runtime tokio (caso do `privacy_set`).
     pub fn spawn(proxy: String, target_host: String, target_port: u16) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback túnel");
         let local_addr = listener.local_addr().expect("local_addr túnel");
@@ -213,9 +179,7 @@ fn forward_via_socks(
     Ok(())
 }
 
-/// Backend real nº 2: MQTT público (porta 1883) — passa onde HTTPS filtrado
-/// por host cai. Sem conta, sem cadastro: publica no tópico do peer, assina o próprio.
-/// Push (não poll): o pump entrega no inbox; `poll()` assina (1ª vez) e drena.
+/// Backend MQTT público: publica no tópico do peer e assina o próprio.
 pub struct MqttRelay {
     host: String,
     port: u16,
@@ -254,15 +218,13 @@ fn sanitize_client_part(s: &str) -> String {
 
 impl MqttRelay {
     pub fn new(host: &str, port: u16) -> Self {
-        // client_id estável por host (sem rand): com clean_session=false o
-        // broker retoma a sessão entre restarts e entrega o que chegou offline.
+        // client_id estável: com clean_session=false o broker entrega offline.
         let stable = sanitize_client_part(host);
         let short = stable.chars().take(24).collect::<String>();
         Self::new_with_client_id(host, port, &format!("distorrent-{short}"))
     }
 
-    /// client_id explícito (produção: `distorrent-{fp12}-{host}` estável por
-    /// identidade — ver `MultiRelay::default_routes_with_fp`).
+    /// client_id explícito (produção: estável por identidade).
     pub fn new_with_client_id(host: &str, port: u16, client_id: &str) -> Self {
         Self {
             host: host.to_string(),
@@ -283,7 +245,7 @@ impl MqttRelay {
         }
     }
 
-    /// Perna MQTT com identidade estável: `distorrent-{fp[:12]}-{host}`.
+    /// Perna MQTT com client_id estável por identidade (`distorrent-{fp12}-{host}`).
     pub fn new_with_fp(host: &str, port: u16, fp: &str) -> Self {
         let fp12: String = fp.chars().take(12).collect();
         let short = sanitize_client_part(host)
@@ -299,13 +261,9 @@ impl MqttRelay {
         if st.client.is_none() {
             let mut opts =
                 rumqttc::MqttOptions::new(self.client_id.clone(), self.host.clone(), self.port);
-            // keepalive 10s (4G/NAT fecha idle rápido; 15s morria em rádio
-            // dormindo sem detectar — 10s mantém o NAT binding e detecta
-            // queda em ~15s para o pump reconectar).
+            // keepalive 10s: mantém NAT binding e detecta queda rápido (4G).
             opts.set_keep_alive(Duration::from_secs(10));
-            // Sessão persistente: o broker guarda assinatura + offline
-            // (QoS1) para este client_id estável — frame publicado com o
-            // celular dormindo é entregue ao voltar.
+            // Sessão persistente: broker retém QoS1 offline (4G dormindo).
             opts.set_clean_session(false);
             let (client, eventloop) = rumqttc::AsyncClient::new(opts, 64);
             st.client = Some(client);
@@ -326,19 +284,9 @@ impl MqttRelay {
     }
 }
 
-/// Pump: mantém a conexão e entrega publishes no inbox POR TÓPICO.
-/// Reconexão: rumqttc 0.25 já reconecta sozinho dentro de `eventloop.poll()`
-/// (aqui só logamos e seguimos no loop). QoS1 (AtLeastOnce): o broker retém
-/// para sessão persistente e reentrega ao voltar do 4G dormindo; a camada
-/// engine já dedupa (retransmissão Hello + outbox/ACK de DM). Inbox por tópico
-/// com cap 512/tópico: best-effort.
-/// Tópico `distorrent_r_<fp>` e envelope JSON inalterados (compat 4.3.1/4.3.2).
-///
-/// BACKOFF: sem dormir aqui, um broker que reseta (RST/ban/throttle) virava
-/// storm de ~3 connects/s POR PERNA — o próprio storm rende ban de IP e
-/// enterra o relay inteiro. Erros consecutivos dormem 500ms×2^n (teto 30s);
-/// qualquer evento Ok zera. Recusa explícita (NotAuthorized etc.) começa
-/// direto em 5s (não adianta insistir rápido).
+/// Pump: mantém a conexão, entrega publishes no inbox por tópico (cap 512,
+/// best-effort) e aplica BACKOFF exponencial (500ms×2^n, teto 30s) — sem
+/// dormir aqui, broker que reseta virava storm de connects e rendia ban.
 async fn mqtt_pump(
     mut eventloop: rumqttc::EventLoop,
     shared: Arc<StdMutex<MqttState>>,
@@ -347,8 +295,7 @@ async fn mqtt_pump(
     loop {
         match eventloop.poll().await {
             Ok(rumqttc::Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
-                // Reassina no próximo poll (idempotente; com sessão persistente
-                // o broker em geral já reteve, mas reassinar cobre expiração).
+                // Reassina no próximo poll (cobre expiração da sessão).
                 let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
                 st.subscribed.clear();
                 st.consec_errs = 0;
@@ -358,11 +305,8 @@ async fn mqtt_pump(
                 if let Ok(text) = String::from_utf8(p.payload.to_vec()) {
                     let wake = {
                         let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
-                        // CAP 512/tópico (~1.5MB) + 256 tópicos: evita OOM se o
-                        // peer esma ou o celular dorme com pump acumulando.
-                        // Além do cap, descarta (best-effort): o dial retransmite
-                        // Hello a cada 5s e o HelloOk vai 3x, então o handshake se
-                        // recupera; DMs usam outbox/ACK na camada engine.
+                        // CAP 512/tópico: evita OOM com peer esmaído/celular
+                        // dormindo (best-effort; camadas superiores retransmitem).
                         let topic = p.topic.clone();
                         let entry = st.inbox.entry(topic).or_default();
                         if entry.len() < 512 {
@@ -389,8 +333,7 @@ async fn mqtt_pump(
             Err(e) => {
                 let msg = e.to_string();
                 tracing::debug!("relay mqtt ({host}) evento/reconexão: {msg}");
-                // Recusa explícita do broker (auth/ban/sobrecarga): insistir
-                // rápido só piora — começa o backoff já em 5s.
+                // Recusa explícita (auth/ban): backoff já começa em 5s.
                 let base_ms: u64 = if msg.contains("NotAuthorized")
                     || msg.contains("ServiceUnavailable")
                     || msg.contains("BadUserNamePassword")
@@ -425,11 +368,8 @@ impl RelayBackend for MqttRelay {
             let Some(client) = self.ensure() else {
                 return Err(DistorrentError::Protocol("relay mqtt sem client".into()));
             };
-            // QoS1: o broker confirma (PUBACK) e retém para sessão persistente —
-            // frame com o celular offline é entregue ao voltar (4G dormindo).
-            // Erro HONESTO: timeout sozinho ("relay fechado" no dial) escondia
-            // recusa do broker (NotAuthorized/ban/RST em loop). Anexa o último
-            // erro do pump para o diagnóstico mostrar a causa real.
+            // QoS1: broker retém offline. Erro HONESTO anexa o último erro do
+            // pump (timeout sozinho escondia recusa do broker).
             let leg_err = || {
                 self.shared
                     .lock()
@@ -478,13 +418,8 @@ impl RelayBackend for MqttRelay {
                     .contains(topic)
             };
             if need_sub {
-                // `try_subscribe` NÃO espera o SUBACK: enfileira e segue. Antes,
-                // um broker inalcançável (ex.: porta 1883 bloqueada no 4G) fazia
-                // o subscribe esperar 10s e TRAVAVA o poll inteiro — daí o delay.
-                // A assinatura sai sozinha quando/se a conexão subir; o ConnAck
-                // limpa `subscribed` para reassinar após reconexão.
-                // Várias assinaturas coexistem (relay + announce); o inbox é
-                // por tópico, então polls concorrentes não se roubam.
+                // `try_subscribe` NÃO espera o SUBACK (broker inalcançável
+                // chegou a travar o poll 10s). Várias assinaturas coexistem.
                 if client
                     .try_subscribe(topic, rumqttc::QoS::AtLeastOnce)
                     .is_ok()
@@ -522,23 +457,14 @@ impl RelayBackend for MqttRelay {
     }
 }
 
-/// Multi-estrada: posta em TODAS as pernas, lê de TODAS e junta.
-/// Vale QUALQUER UMA mutuamente alcançável (dedupe por conteúdo já existe
-/// no manager). Pernas padrão: 4 brokers MQTT públicos (ntfy removido).
-/// `post` é CONCORRENTE e retorna no PRIMEIRO Ok (latência = min das pernas,
-/// não max nem soma); as demais pernas seguem em background (detached) como
-/// cópias redundantes — redundância sem pagar max-latency. Só retorna Err se
-/// TODAS falharem (espera todas nesse caso; `relay_post_loop` usa Err para
-/// derrubar a sessão e o maintain rediscar). `poll` aguarda todas (completude:
-/// junta o que cada perna tem; perna com erro é ignorada).
+/// Multi-estrada: posta em TODAS as pernas (1º Ok retorna; demais seguem em
+/// background como redundância), lê de todas e junta. Só Err se todas falharem.
 pub struct MultiRelay {
     legs: Vec<Arc<dyn RelayBackend>>,
 }
 
 impl MultiRelay {
-    /// Rotas padrão: SOMENTE brokers MQTT públicos com push (baixa latência).
-    /// ntfy.sh foi removido do caminho principal (lento/poll/dependência
-    /// externa instável); o relay RESTANTE é MQTT multi-estrada com primeiro-Ok.
+    /// Rotas padrão: 4 brokers MQTT públicos com push (ntfy removido).
     pub fn default_routes() -> Self {
         Self {
             legs: vec![
@@ -550,9 +476,7 @@ impl MultiRelay {
         }
     }
 
-    /// Rotas padrão com client_id estável por identidade
-    /// (`distorrent-{fp12}-{host}`): com clean_session=false o broker retém
-    /// assinatura + QoS1 offline entre restarts.
+    /// Rotas padrão com client_id estável por identidade (sessão persistente).
     pub fn default_routes_with_fp(fp: &str) -> Self {
         Self {
             legs: vec![
@@ -564,12 +488,9 @@ impl MultiRelay {
         }
     }
 
-    /// Rotas a partir de `DISTORRENT_MQTT_BROKERS` (`host:porta,host:porta…`) ou as
-    /// públicas quando ausente/inválida. Broker próprio (Mosquitto/EMQX num
-    /// VPS) nunca te bane: atrás de CGNAT/4G hostil, é o caminho durável —
-    /// os públicos aplicam throttle/ban de IP e o relay morre para todo
-    /// mundo naquele IP. Entradas inválidas são ignoradas (nunca derrubam o
-    /// relay); porta omitida = 1883.
+    /// Rotas de `DISTORRENT_MQTT_BROKERS` ou as públicas. Broker próprio é o
+    /// caminho durável atrás de CGNAT (públicos aplicam ban de IP); entradas
+    /// inválidas são ignoradas; porta omitida = 1883.
     pub fn routes_from_env_or_default(fp: &str) -> Self {
         let custom = std::env::var("DISTORRENT_MQTT_BROKERS")
             .ok()
@@ -631,14 +552,9 @@ impl MultiRelay {
         self.legs.len()
     }
 
-    /// Rota de relay para modos anônimos (proxy/Tor ativados manualmente):
-    /// AS MESMAS 4 pernas MQTT públicas, cada uma pelo PRÓPRIO túnel SOCKS5
-    /// (`SocksTunnel` — hostname resolvido PELO proxy, sem DNS local). O
-    /// tráfego nunca sai direto: broker só vê o IP do proxy/Tor. ntfy.sh foi
-    /// REMOVIDO por completo — nada de dependência externa HTTP.
+    /// Rota para modos proxy/Tor: as 4 pernas MQTT via túnel SOCKS5 cada.
     pub fn proxied_routes(proxy: &str) -> Result<Self> {
-        // Fail-fast honesto: proxy com formato inválido dá Err claro (o
-        // engine fail-closed desliga o relay nesses modos, nunca vaza IP).
+        // Fail-fast honesto: proxy inválido dá Err (engine desliga o relay).
         let (_, _) = crate::net::socks5::split_host_port(proxy)?;
         let mk = |host: &'static str, port: u16| {
             let tun = SocksTunnel::spawn(proxy.to_string(), host.to_string(), port);
@@ -654,23 +570,11 @@ impl MultiRelay {
         })
     }
 
-    /// `proxied_routes` com client_id estável por identidade. O id deriva do
-    /// host ALVO (não do 127.0.0.1:porta efêmera do túnel, que muda por boot).
+    /// `proxied_routes` com client_id estável por identidade.
     ///
-    /// BUG que isto corrige: o id era IDÊNTICO ao do modo direto
-    /// (`distorrent-{fp12}-{broker}`). Ligar o proxy cria um backend NOVO sem
-    /// derrubar o ANTIGO — as sessões antigas continuam vivas dentro do
-    /// `relay_post_loop`. Com o mesmo `client_id` e `clean_session(false)`, o
-    /// broker despeja uma sessão quando a outra entra, e o `mqtt_pump`
-    /// reconecta: ping-pong INFINITO de connect/kick. O proxy ficava mudo
-    /// (nenhuma entrega → nenhum Ack → o outbox do remetente reenvia a cada
-    /// 15s → o destinatário vê a mesma mensagem em loop), e a legada ainda
-    /// assinava o tópico, enchendo o inbox sem nunca ser drenada.
-    ///
-    /// O sufixo `-px` dá à perna via proxy uma sessão PERSISTENTE própria: o
-    /// broker não expulsa mais a outra, o offline queue continua funcionando,
-    /// e voltar ao modo direto (que usa o id sem sufixo) reabastece a sessão
-    /// antiga em vez de brigar com a proxied.
+    /// BUG corrigido: id idêntico ao modo direto + clean_session=false fazia
+    /// brokers despejarem a sessão da outra perna (ping-pong de connect/kick,
+    /// mensagens em loop). O sufixo `-px` dá sessão própria à perna proxied.
     pub fn proxied_routes_with_fp(proxy: &str, fp: &str) -> Result<Self> {
         let (_, _) = crate::net::socks5::split_host_port(proxy)?;
         let mk = |host: &'static str, port: u16| {
@@ -704,16 +608,9 @@ impl RelayBackend for MultiRelay {
         body: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            // PRIMEIRO-Ok com background: latência = min das pernas (não max).
-            // Cada perna roda em task detached (tokio::spawn): o 1º Ok retorna
-            // já ao `relay_post_loop` (que segue p/ o próximo chunk/frame sem
-            // esperar a perna lenta);
-            // as demais tasks NÃO são abortadas (drop do rx não cancela spawn)
-            // e completam o post em background como cópias redundantes
-            // (lossy: 20%/leg → 0.2^n com n pernas; ChaCha sem retry segue
-            // protegida pela redundância). Só retorna Err se TODAS falharem
-            // (espera as n respostas; `relay_post_loop` usa Err p/ derrubar
-            // a sessão e o maintain rediscar — 1 Ok já prova perna viva).
+            // PRIMEIRO-Ok: latência = min das pernas. Task detached (drop do rx
+            // não cancela): demais pernas completam em background (redundância
+            // lossy). Só Err se TODAS falharem (1 Ok já prova perna viva).
             // Fast-path 1 perna: sem spawn/channel.
             if self.legs.is_empty() {
                 return Err(DistorrentError::Protocol("relay sem pernas".into()));
@@ -757,12 +654,8 @@ impl RelayBackend for MultiRelay {
         topic: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
         Box::pin(async move {
-            // CONCORRENTE, cada perna com TETO de 3s, e COLETA TODAS.
-            // IMPORTANTE: NÃO retornar cedo — `MqttRelay::poll` faz
-            // `mem::take` do inbox (o broker NÃO re-serve), então cancelar a
-            // tarefa no meio perderia mensagens de vez; por isso esperamos
-            // todas. O teto de 3s por perna evita que uma perna travada
-            // (broker bloqueado no 4G) segure o poll para sempre.
+            // COLETA TODAS as pernas (teto 3s cada): NÃO retornar cedo — o
+            // poll faz `mem::take` do inbox e cancelar no meio perde mensagens.
             let topic = topic.to_string();
             let mut handles = Vec::with_capacity(self.legs.len());
             for leg in &self.legs {
@@ -816,12 +709,9 @@ impl RelayBackend for MultiRelay {
     }
 }
 
-/// Backend peer-relay: roteia o transporte por UM peer intermediário ONLINE
-/// (cifrado E2E de ponta a ponta) em vez do broker público. `post` vira
-/// `PeerRelayPut` e `poll` vira `PeerRelayGet` + espera `PeerRelayData`
-/// (correlacionado por `req_id` via oneshot). O intermediário só vê ciphertext.
-///
-/// `engine` é `Weak` para não criar ciclo (o engine guarda este backend).
+/// Backend peer-relay: roteia via UM peer intermediário (E2E cifrado),
+/// `post`→`PeerRelayPut`, `poll`→`PeerRelayGet`+oneshot por `req_id`.
+/// `engine` é `Weak` para não criar ciclo.
 pub const PEER_RELAY_POLL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Cap de pedidos pendentes (anti-DoS local; acima disso limpa o mapa).
 pub const PEER_RELAY_MAX_PENDING: usize = 512;
@@ -851,8 +741,7 @@ impl PeerRelayBackend {
         &self.relay_fp
     }
 
-    /// Resolve o oneshot pendente do `req_id`. `false` se não havia pedido
-    /// (resposta órfã/atrasada) — o engine só loga em debug.
+    /// Resolve o oneshot do `req_id`; `false` se resposta órfã/atrasada.
     pub fn deliver(&self, req_id: u32, bodies: Vec<String>) -> bool {
         let tx = self
             .pending
@@ -988,9 +877,7 @@ impl RelayBackend for PeerRelayBackend {
     }
 }
 
-/// Estado de UMA perna do relay para diagnóstico (tela "Diagnóstico de conexão").
-/// `ok` = alcançável agora; `last_error` = motivo curto da falha (para 4G/NAT);
-/// `latency_ms` = ida-volta do probe (quando ok).
+/// Estado de UMA perna do relay para a tela "Diagnóstico de conexão".
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RelayLegStatus {
     pub name: String,
@@ -999,32 +886,21 @@ pub struct RelayLegStatus {
     pub last_error: Option<String>,
 }
 
-/// Probes curtos (timeout ~3s direto / ~10s via proxy) nos MESMOS endpoints do
-/// `MultiRelay::default_routes`.
-/// - MQTT (1883): TCP connect — detecta porta bloqueada no 4G/NAT/CGNAT.
-///   Em modo proxy/Tor o connect vai por SOCKS5 (mesmo túnel do relay).
-/// Não posta nada (sem spam na infra pública), só mede alcançabilidade.
-/// `proxy = None` → direto. Use [`check_relay_legs_via`] nos modos proxy/Tor.
+/// Probes de alcançabilidade nos mesmos endpoints do relay (MQTT: handshake
+/// CONNECT→CONNACK, sem postar nada). `proxy = None` → direto.
 pub async fn check_relay_legs() -> Vec<RelayLegStatus> {
     check_relay_legs_via(None).await
 }
 
-/// Igual a [`check_relay_legs`], mas roteia TODAS as pernas por SOCKS5 quando
-/// `proxy` é informado (`host:porta`, ex.: `127.0.0.1:9050` do Tor).
-///
-/// Por que existe: em privacidade "proxy"/"Tor" o probe direto revelaria o IP
-/// real aos hosts públicos. Aqui o TCP do MQTT passa por `socks5_connect` —
-/// nada sai direto.
+/// Igual a [`check_relay_legs`], mas via SOCKS5 quando `proxy` é informado
+/// (em modos anônimos o probe direto revelaria o IP real).
 pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
     use std::time::{Duration, Instant};
 
     let via = proxy.map(|p| format!(" via {p}")).unwrap_or_default();
     let is_proxied = proxy.is_some();
-    // connect timeout: Tor abre circuito (pode passar de 5s); direto falha rápido.
-    //
-    // 3s era pouco: o probe agora espera o CONNACK (não só o TCP) e brokers
-    // públicos respondem com 1-4s de folga variável (o hivemq levou ~3,8s no
-    // teste local). Estourar aqui reportava "falha" para uma perna que funciona.
+    // connect timeout: Tor abre circuito (pode passar de 5s); direto 8s
+    // (espera o CONNACK, não só o TCP — brokers públicos demoram 1-4s).
     let connect_timeout = if is_proxied {
         Duration::from_secs(12)
     } else {
@@ -1047,16 +923,8 @@ pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
     let mut out = Vec::new();
     for (name, host, port) in mqtt_hosts {
         let t0 = Instant::now();
-        // UM TCP CONNECT NÃO PROVA QUE O BROKER FUNCIONA.
-        //
-        // O probe antigo parava no connect. Um broker que aceita a conexão TCP e
-        // recusa/ignora MQTT (auth, sobrecarga, cliente banido) aparecia como
-        // "alcançável" e o relay depois falhava de verdade — e o contrário também
-        // acontecia: broker lento no CONNACK (o hivemq levou ~3,8s no teste local)
-        // estourava o timeout de 3s e era reportado como "falha" mesmo
-        // respondendo. Agora o probe faz o handshake MQTT (CONNECT → CONNACK) e
-        // só dá a perna como boa com `rc=0`. Nada é publicado: o socket fecha
-        // logo após o CONNACK, sem spam na infra pública.
+        // TCP connect não prova que o broker funciona: o probe faz handshake
+        // MQTT (CONNECT→CONNACK) e só aprova com `rc=0`; sem publicar nada.
         let res = tokio::time::timeout(connect_timeout, async {
             let stream = match proxy {
                 Some(p) => crate::net::socks5::socks5_connect(
@@ -1089,10 +957,7 @@ pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
                 name: format!("{name}{via}"),
                 ok: false,
                 latency_ms: None,
-                // O timeout agora cobre TCP + CONNACK. Dizer só "porta 1883
-                // bloqueada" era mentira quando o TCP abre e o broker apenas
-                // demora/ignora o CONNACK (acontece com broker público
-                // sobrecarregado). A mensagem cita as duas possibilidades.
+                // Timeout cobre TCP + CONNACK; mensagem cita ambas as causas.
                 last_error: Some(format!(
                     "sem resposta em {}s{}",
                     connect_timeout.as_secs(),
@@ -1105,8 +970,7 @@ pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
             }),
         }
     }
-    // (sem probe ntfy: ntfy.sh foi removido por completo — nos modos proxy/Tor
-    // as pernas são os MESMOS brokers MQTT, e o túnel SOCKS5 acima já os cobre)
+    // (sem probe ntfy: ntfy.sh removido; túnel SOCKS5 já cobre os brokers)
     out
 }
 
@@ -1118,23 +982,15 @@ fn short_err(s: &str) -> String {
     t
 }
 
-/// Handshake MQTT 3.1.1 mínimo: envia CONNECT e exige um CONNACK com `rc=0`.
-///
-/// Usado pelo diagnóstico para distinguir "porta TCP aberta" de "broker MQTT
-/// funcionando". Aceita qualquer `AsyncRead + AsyncWrite` para servir tanto ao
-/// caminho direto (`TcpStream`) quanto ao túnel SOCKS5 (`SocksStream`).
-///
-/// Não publica, não assina, não retém: fecha o socket logo após o CONNACK.
+/// Handshake MQTT 3.1.1 mínimo: CONNECT e exige CONNACK `rc=0`; serve para
+/// distinguir "porta TCP aberta" de "broker funcionando" no diagnóstico.
 async fn mqtt_connack<S>(mut stream: S, client_id_host: &str) -> std::result::Result<(), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // CONNECT v3.1.1, clean session, keepalive 30s, client id único e curto.
-    // O host entra no id para o broker não confundir com outra perna (o mesmo
-    // fingerprint abrindo 4 brokers com ids iguais é aceito, mas separar evita
-    // "session takeover" entre pernas durante o probe).
+    // CONNECT v3.1.1; host no client_id evita session takeover entre pernas.
     let client_id = format!(
         "distorrent-probe-{}-{}",
         crate::identity::now_ms(),
@@ -1197,12 +1053,8 @@ where
     Ok(())
 }
 
-/// TESTE ONLINE do proxy SOCKS5 (botão "Testar conexão" da UI): abre um
-/// circuito REAL pelo proxy até os brokers MQTT públicos (mesmas pernas do
-/// relay) e devolve a latência do primeiro que responder. Sem ntfy, sem
-/// HTTP externo — é exatamente o caminho que o relay vai usar.
-/// Err traz o motivo técnico (proxy inacessível / não é SOCKS5 / exige auth /
-/// timeout) para a UI mostrar honestamente.
+/// TESTE ONLINE do proxy SOCKS5 (UI): abre circuito real até os brokers MQTT
+/// e devolve a latência do 1º que responder; Err traz o motivo técnico.
 pub async fn proxy_online_test(proxy: &str) -> std::result::Result<u64, String> {
     use std::time::Instant;
     let t0 = Instant::now();
@@ -1237,10 +1089,8 @@ pub async fn proxy_online_test(proxy: &str) -> std::result::Result<u64, String> 
     Err(short_err(&first_err))
 }
 
-/// Backend de testes (in-memory, sem rede) COM push: `post()` acorda os
-/// managers via `wakes()` (igual ao push MQTT), então o handshake em teste
-/// fecha em ~RTT em vez de esperar o tick de poll. Sem risco p/ produção
-/// (só testes usam; `notify_waiters` acorda TODOS — hub compartilhado).
+/// Backend de testes (in-memory) com push via `wakes()` (handshake fecha em
+/// ~RTT em vez de esperar o tick de poll). Hub compartilhado entre managers.
 #[derive(Clone, Default)]
 pub struct MemRelay {
     hub: Arc<StdMutex<HashMap<String, Vec<String>>>>,
@@ -1272,9 +1122,8 @@ impl RelayBackend for MemRelay {
                     .push(body.to_string());
                 self.wake.clone()
             };
-            // waiters (não one): o hub é COMPARTILHADO entre os managers dos
-            // dois peers em teste — `notify_one` poderia acordar só o
-            // remetente (inbox vazio) e deixar o destinatário dormindo.
+            // waiters (não one): hub COMPARTILHADO entre os managers em teste —
+            // `notify_one` poderia acordar só o remetente.
             wake.notify_waiters();
             Ok(())
         })
@@ -1310,10 +1159,8 @@ impl RelayBackend for MemRelay {
     }
 }
 
-/// Fatia um frame completo (bytes length-prefixed) em envelopes prontos p/ post.
-/// Fast-path single-chunk (handshake, chat, ACK, sinalização: 1 chunk): 1
-/// base64 + 1 JSON direto, sem Vec intermediário/split/filter — overhead ~0
-/// vs direta (só o envelope). Multi-chunk (arquivo/grande) segue fatiado.
+/// Fatia um frame length-prefixed em envelopes; fast-path single-chunk
+/// (1 base64 + 1 JSON, overhead ~0) cobre handshake/chat/ACK.
 pub fn chunk_frame(from: &str, to: &str, msg_id: &str, frame: &[u8]) -> Vec<String> {
     if frame.is_empty() {
         return Vec::new();
@@ -1364,9 +1211,8 @@ pub fn chunk_frame(from: &str, to: &str, msg_id: &str, frame: &[u8]) -> Vec<Stri
         .collect()
 }
 
-/// (F3) Fatiador OPACO do peer-relay: sem `from`/`to`/`msg_id`. O `rid`
-/// aleatório (128 bits) só serve p/ remontar no receptor; o intermediário
-/// não vê identidade alguma (só tamanho/índices e o ciphertext E2E).
+/// (F3) Fatiador OPACO do peer-relay: `rid` aleatório só p/ remontar;
+/// intermediário não vê identidade.
 pub fn chunk_frame_opaque(frame: &[u8]) -> Vec<String> {
     if frame.is_empty() {
         return Vec::new();
@@ -1426,18 +1272,15 @@ impl Reassembler {
         }
     }
 
-    /// Alimenta com UMA mensagem do tópico. `my_fp` filtra o destinatário.
-    /// Retorna `(remetente, frame_bytes)` quando uma mensagem completa.
-    /// Fast-path single-chunk (`total==1`, handshake/chat/ACK): decodifica
-    /// direto sem tocar no `pending` (sem HashMap/Vec/collect) — overhead ~0.
+    /// Alimenta com UMA mensagem; fast-path single-chunk decodifica sem
+    /// tocar no `pending` (overhead ~0).
     pub fn feed(&mut self, my_fp: &str, raw: &str) -> Option<(String, Vec<u8>)> {
         // 1) envelope clássico do relay público (identidade + filtro por `to`).
         if let Ok(env) = serde_json::from_str::<RelayEnvelope>(raw) {
             return self.feed_classic(my_fp, env);
         }
-        // 2) envelope OPACO do peer-relay (F3): sem identidade. Devolve `""`
-        //    como remetente — o engine deriva do Hello em claro ou difunde aos
-        //    streams de relay (o AEAD só autentica no peer certo).
+        // 2) envelope OPACO do peer-relay: sem identidade — o engine deriva
+        //    do Hello em claro ou difunde (AEAD autentica no peer certo).
         let env: OpaqueRelayEnvelope = serde_json::from_str(raw).ok()?;
         self.feed_opaque(env)
     }
@@ -1537,9 +1380,8 @@ impl Default for Reassembler {
     }
 }
 
-/// Stream virtual sobre o relay: implementa AsyncRead/AsyncWrite com frames
-/// length-prefixed idênticos ao fio TCP. `inbound` recebe frames completos
-/// (do poller); `outbound` emite frames completos (o loop de post fatia e envia).
+/// Stream virtual sobre o relay: AsyncRead/AsyncWrite com frames
+/// length-prefixed idênticos ao fio TCP.
 pub struct RelayStream {
     inbound: mpsc::UnboundedReceiver<Vec<u8>>,
     outbound: mpsc::UnboundedSender<Vec<u8>>,
@@ -1637,11 +1479,8 @@ impl AsyncWrite for RelayStream {
     }
 }
 
-/// Loop de post: drena frames completos, fatia e publica no tópico do peer.
-/// Fast-path single-chunk (1 post, sem loop): handshake/chat/ACK pagam 1
-/// `post` (que já é 1º-Ok/min-latency no MultiRelay) sem overhead extra.
-/// Só retorna (derruba sessão p/ o maintain rediscar) se TODAS as pernas
-/// falharem — `MultiRelay::post` só dá Err nesse caso.
+/// Loop de post: drena frames, fatia e publica; fast-path 1 chunk (1 post).
+/// Só retorna (derruba sessão p/ maintain rediscar) se TODAS as pernas falharem.
 pub async fn relay_post_loop(
     backend: Arc<dyn RelayBackend>,
     my_fp: String,
@@ -1652,8 +1491,7 @@ pub async fn relay_post_loop(
     let mut counter: u64 = 0;
     while let Some(frame) = rx.recv().await {
         counter += 1;
-        // (F3) No peer-relay o envelope é OPACO ao intermediário (sem
-        // from/to/msg_id); no relay público mantém o envelope clássico.
+        // (F3) peer-relay usa envelope OPACO; relay público, o clássico.
         let chunks = if backend.opaque_envelope() {
             chunk_frame_opaque(&frame)
         } else {

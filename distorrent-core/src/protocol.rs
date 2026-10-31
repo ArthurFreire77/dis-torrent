@@ -1,12 +1,6 @@
-//! Protocolo de rede DisTorrent v1.
-//!
-//! Transporte: TCP com frames length-prefixed (u32 big-endian + JSON).
-//! Handshake autenticado: challenge-response ed25519 + troca X25519 efêmera
-//! → chave de sessão ChaCha20Poly1305 (HKDF-SHA256). Anti-replay via nonces
-//! frescos por conexão; anti-MITM porque as assinaturas cobrem o transcript
-//! completo (fps + nonces + chaves efêmeras).
-//!
-//! Mensagens: envelope assinado (ed25519 sobre bytes canônicos).
+//! Protocolo de rede DisTorrent v1: TCP com frames length-prefixed + JSON,
+//! handshake autenticado (ed25519 + X25519 → ChaCha20Poly1305, anti-replay
+//! e anti-MITM via transcript assinado), mensagens em envelope assinado.
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
@@ -217,15 +211,9 @@ pub enum SecureFrame {
         community_id: String,
         token: String,
     },
-    /// Membro → Host/outro membro: "me manda o estado atual do servidor".
-    ///
-    /// Existe porque o `CommunityState` só era enviado no momento do join. Um
-    /// membro que reiniciava o app (ou reconectava depois de uma queda) ficava
-    /// com o estado congelado até alguém mudar algo no servidor — canais,
-    /// cargos e novos membros não apareciam. O pedido é autenticado pela
-    /// própria sessão: o receptor só responde se o solicitante constar no
-    /// roster local (ou for o dono). Não carrega token, então re-sincronizar
-    /// depois do convite expirar continua funcionando.
+    /// Membro → Host/outro membro: "me manda o estado atual do servidor" —
+    /// membro que reiniciava o app ficava com estado congelado. Autenticado
+    /// pela sessão (sem token), responde só para quem está no roster.
     CommunitySyncRequest {
         community_id: String,
     },
@@ -358,16 +346,9 @@ pub enum SecureFrame {
         indices: Vec<u32>,
     },
     // ---------- sincronização de perfil ----------
-    //
-    // `ProfileSet` carrega o perfil inteiro (avatar/banner em base64): é
-    // caro e só deve ir quando o autor REALMENTE mudou algo. Por isso existe
-    // a via barata de revisão abaixo — cabeçalho de 3 campos que responde
-    // "você está na versão N?". A reconciliação periódica usa só ela; o
-    // `ProfileSet` só trafega quando o `rev` remoto é maior.
-    //
-    // `ProfileQuery` é o pedido explícito: o receptor devolve `ProfileSet` se
-    // tiver uma revisão maior que a informada. É o que recupera a alteração de
-    // um autor que ficou offline enquanto o outro estava desconectado.
+    // `ProfileSet` (caro, perfil inteiro) só trafega quando `rev` remoto é
+    // maior; `ProfileQuery` é a via barata de reconciliação e recupera
+    // alterações de autor que ficou offline.
     ProfileQuery {
         /// Revisão que o solicitante já conhece (0 = não conhece nada).
         known_rev: i64,
@@ -464,11 +445,7 @@ pub enum SecureFrame {
         custom: String,
         custom_emoji: String,
     },
-    /// Perfil público: display name, bio, avatar, banner, cor de destaque.
-    ///
-    /// `rev`/`content_hash` são a identidade da versão (ver `social::ProfileView`).
-    /// `chunk_hashes` NÃO fica aqui de propósito: quem recebe `ProfileSet` já
-    /// tem os bytes nos campos `*_b64`, então não há arquivo a buscar.
+    /// Perfil público. `rev`/`content_hash` são a identidade da versão.
     ProfileSet {
         display_name: String,
         about: String,
@@ -547,10 +524,8 @@ pub enum SecureFrame {
     },
     /// Pergunta "você está online?" → resposta automática com presença.
     PresencePing,
-    /// "Estou digitando" — efêmero por natureza: NÃO é persistido, NÃO entra em
-    /// ack nem em retransmissão. O motor só o repassa para quem compartilha a
-    /// conversa e a UI o expira sozinho. `until_ms` é o prazo que o próprio
-    /// remetente trava: o receptor nunca mostra "digitando" além dele.
+    /// "Estou digitando" — efêmero: NÃO persistido, sem ack/retransmissão;
+    /// `until_ms` é o prazo que o próprio remetente trava.
     Typing {
         conv_id: String,
         until_ms: i64,
@@ -602,21 +577,8 @@ pub fn session_key(
 }
 
 /// Token de convite: base64url(host_fp|community_id|member_fp|exp_ms|sig_hex)
-/// sig = ed25519 do dono sobre "distorrent/v1|invite|community_id|member_fp|exp".
-/// Vínculo ao fingerprint do convidado + expiração — sem segredo permanente em URL.
-///
-/// **base64url** (alfabeto `A-Za-z0-9-_`, sem padding), e NÃO base64 padrão:
-/// um token viaja dentro de uma URL. Base64 padrão produz `+`, `/` e `=`, e
-/// qualquer um dos três quebra o token em pelo menos um contexto:
-///   - `+` numa query string vira ESPAÇO na decodificação de formulário/URL,
-///     então `?invite=AAA+BBB` chega ao servidor como `AAA BBB` → inválido;
-///   - `/` num path segment (`/invite/AAA/BBB`) divide o caminho e a rota
-///     deixa de casar;
-///   - `=` é padding, cortado por alguns normalizadores de URL.
-///
-/// base64url não tem nenhum desses caracteres, então o token sobrevive a URL,
-/// query string e clipboard sem escaping. `parse_invite_token` ainda aceita
-/// base64 padrão para ler tokens emitidos por versões antigas.
+/// — base64url (não padrão) porque `+`/`/`/`=` quebram em URL/query/clipboard;
+/// parse ainda aceita base64 padrão p/ tokens antigos.
 pub fn make_invite_token(
     host: &Keypair,
     community_id: &str,
@@ -639,13 +601,8 @@ pub fn make_invite_token(
     b64url_encode(raw.as_bytes())
 }
 
-/// Extrai o token de uma entrada de usuário que pode ser:
-/// o token cru, uma URL completa (`http://host/invite/TOKEN`), uma URL com
-/// query (`?invite=TOKEN`), ou qualquer um dos dois já percent-encoded.
-///
-/// Sem isto, colar o link copiado da tela — que é o gesto natural — produz
-/// "token inválido", porque a URL inteira não é base64. É a causa do erro de
-/// protocolo que o usuário relatava ao colar o token direto.
+/// Extrai o token de token cru, URL completa, query ou percent-encoded
+/// (colar o link inteiro é o gesto natural e antes dava "token inválido").
 pub fn extract_invite_token(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -673,8 +630,7 @@ pub fn extract_invite_token(input: &str) -> String {
     percent_decode(trimmed)
 }
 
-/// Decodifica %XX de uma string. Deixa o resto intacto (token base64url não
-/// tem `%`, então isso só acontece se o usuário colar algo codificado).
+/// Decodifica %XX de uma string (resto intacto).
 fn percent_decode(s: &str) -> String {
     if !s.contains('%') {
         return s.to_string();
@@ -697,12 +653,8 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Valida e decompõe um token de convite.
-///
-/// Aceita, nesta ordem: base64url (formato atual), base64 padrão (tokens antigos).
-/// Erros são **específicos** — "token inválido" genérico é o que fazia o
-/// usuário acreditar que o token estava corrompido quando o problema era o
-/// formato colado.
+/// Valida e decompõe um token de convite (base64url atual ou base64 antigo);
+/// erros são específicos — "token inválido" genérico enganava o usuário.
 pub fn parse_invite_token(
     token: &str,
 ) -> Result<(String, String, String, i64, String), crate::DistorrentError> {
@@ -808,13 +760,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// ---------------------------------------------------------------------------
-// base64url — o formato que o token de convite realmente usa.
-//
-// Mesmo alfabeto do base64 padrão, trocando `+`→`-` e `/`→`_`, e SEM padding
-// (`=`). O resultado é seguro dentro de URL, query string e clipboard, que é
-// onde o token de convite vive.
-// ---------------------------------------------------------------------------
+// base64url — formato URL-safe do token de convite (sem `+`, `/` ou `=`).
 
 fn b64url_encode(data: &[u8]) -> String {
     b64_encode(data)
@@ -823,9 +769,8 @@ fn b64url_encode(data: &[u8]) -> String {
         .replace('/', "_")
 }
 
-/// Decodifica base64url. Também tolera o alfabeto padrão e o padding, porque o
-/// texto pode ter pasado por um normalizador de URL que reintroduziu `+`/`/`
-/// ou que o colador decodificou `%2B` de volta para `+`.
+/// Decodifica base64url, tolerando alfabeto padrão/padding e espaços/quebras
+/// colados de editores de texto (descartar é mais útil que errar).
 fn b64url_decode(s: &str) -> Option<Vec<u8>> {
     let mut norm = String::with_capacity(s.len() + 3);
     for c in s.chars() {
@@ -833,14 +778,11 @@ fn b64url_decode(s: &str) -> Option<Vec<u8>> {
             '-' => norm.push('+'),
             '_' => norm.push('/'),
             '=' => {}
-            // Espaços e quebras de linha quebram o token quando o usuário
-            // cola de um editor de texto. Descartar é mais útil do que errar.
             ' ' | '\n' | '\r' | '\t' => {}
             other => norm.push(other),
         }
     }
-    // Recalcula o padding: base64 sem '=' precisa de preenchimento para os
-    // chunks de 3 bytes saírem certos.
+    // Recalcula o padding '=' para os chunks de 3 bytes saírem certos.
     while norm.len() % 4 != 0 {
         norm.push('=');
     }
