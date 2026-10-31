@@ -69,6 +69,14 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// situação, curto o bastante para um engano não custar o dia do usuário.
 pub const MUTE_DEFAULT_MS: i64 = 10 * 60 * 1000;
 pub const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(15);
+
+/// Carência do túnel virtual: recém-estabelecido, ele pode carregar tráfego
+/// mesmo sem prova, porque é justamente quando costuma funcionar.
+pub const TUNNEL_PROVE_GRACE_MS: i64 = 8_000;
+/// Validade da prova: se o peer mandou algo PELO túnel nos últimos 45s, a rota
+/// está viva nos dois sentidos. Passou disso sem nada, ela morreu de um lado —
+/// voltar ao caminho normal é melhor que sumir com a mensagem.
+pub const TUNNEL_PROVE_TTL_MS: i64 = 45_000;
 /// Keepalive do mapeamento NAT (UPnP/NAT-PMP): renova antes do lease de 1h
 /// expirar. 15min dá margem folgada p/ roteador lento e mantém o pinhole vivo.
 pub const NAT_RENEW_INTERVAL: Duration = Duration::from_secs(15 * 60);
@@ -2068,7 +2076,98 @@ impl NetworkEngine {
         if !self.tunnel_enabled() || !self.tunnel_established(peer_fp) {
             return false;
         }
-        self.peer_state(peer_fp) == NetworkState::Connected && self.is_peer_via_relay(peer_fp)
+        if self.peer_state(peer_fp) != NetworkState::Connected || !self.is_peer_via_relay(peer_fp) {
+            return false;
+        }
+        // PROVA DE VIDA antes de carregar tráfego (ver `TunnelSession::is_proven`).
+        //
+        // BUG REAL ("manda uma mensagem, funciona, depois para e só religando
+        // resolve"): a sessão do túnel era dada como pronta ao derivar a chave,
+        // sem saber se o OUTRO lado tinha a mesma. Se a resposta do handshake se
+        // perdia, um lado carregava tudo por um túnel que o destino descartava
+        // em silêncio (sem sessão, `handle_tunnel_data` retorna mudo): mensagem,
+        // ACK e Ack sumiam. O link seguia `Online` (o Ping não usa o túnel), e
+        // como o mapa é em memória, só reiniciar limpava — exatamente o relato.
+        //
+        // Agora, sem prova e fora da carência, o frame vai pelo caminho normal
+        // (relay/direto). Errar para o lado lento é aceitável; sumir, nunca.
+        let agora = crate::identity::now_ms();
+        let provado = {
+            let map = self
+                .tunnel_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match map.get(peer_fp) {
+                Some(s) => s.is_proven(agora, TUNNEL_PROVE_GRACE_MS, TUNNEL_PROVE_TTL_MS),
+                None => false,
+            }
+        };
+        if !provado {
+            // Túnel sem prova: derruba e pede outro. O tráfego deste frame já
+            // segue pelo caminho normal; o pedido só prepara a próxima vez.
+            self.tunnel_drop(peer_fp, "sem prova de vida");
+            self.tunnel_request(peer_fp);
+            return false;
+        }
+        true
+    }
+
+    /// Remove a sessão de túnel de um peer (e o contexto de dispatch associado).
+    ///
+    /// Usado quando o túnel morre por dentro (sem prova) e quando o LINK cai.
+    /// Sem isto, uma sessão antiga sobrevivia ao redial e continuava engolindo
+    /// o tráfego da sessão nova com uma chave que ninguém mais tem.
+    fn tunnel_drop(&self, peer_fp: &str, motivo: &str) {
+        let tinha = {
+            let mut map = self
+                .tunnel_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.remove(peer_fp).is_some()
+        };
+        if !tinha {
+            return;
+        }
+        {
+            let mut meta = self.tunnel_meta.lock().unwrap_or_else(|e| e.into_inner());
+            meta.remove(peer_fp);
+        }
+        {
+            let mut pend = self
+                .tunnel_pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            pend.remove(peer_fp);
+        }
+        // Oferecer outro handshake é o que devolve o túnel; o `tunnel_request`
+        // respeita proto_v e a própria janela de oferta pendente.
+        self.diag_update(peer_fp, |d| {
+            d.tunnel_up = false;
+        });
+        debug!(peer_fp, motivo, "tunel: sessão descartada");
+    }
+
+    /// Varre sessões de túnel que pararam de dar prova e as derruba.
+    ///
+    /// Roda no tique do motor. É o que impede o estado preso de durar para
+    /// sempre: sem esta varredura, um túnel quebrado só saía da memória no
+    /// próximo reinício do app.
+    pub fn tunnel_reap_stale(&self) {
+        let agora = crate::identity::now_ms();
+        let mortos: Vec<String> = {
+            let map = self
+                .tunnel_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            map.iter()
+                .filter(|(_, s)| !s.is_proven(agora, TUNNEL_PROVE_GRACE_MS, TUNNEL_PROVE_TTL_MS))
+                .map(|(fp, _)| fp.clone())
+                .collect()
+        };
+        for fp in mortos {
+            self.tunnel_drop(&fp, "sem prova de vida (varredura)");
+            self.tunnel_request(&fp);
+        }
     }
 
     /// Serializa → fragmenta → cifra → emite como TunnelData (via sessão
@@ -7915,6 +8014,10 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
             }
             _ = flush_tick.tick() => {
+                // Túnel que parou de dar prova é derrubado aqui. Sem esta
+                // varredura, um túnel meio-quebrado ficava "estabelecido" para
+                // sempre na memória e engolia o tráfego até reiniciar o app.
+                engine.tunnel_reap_stale();
                 // Reaper de DMs sem ACK: sessão relay agora sobrevive a perda
                 // (não morre mais por 1 frame perdido), então uma DM que se
                 // perdeu ficaria "sent" para sempre. A cada tick, mensagens
@@ -9528,6 +9631,18 @@ async fn register_and_run(
         // Higiene do rate limiter: os buckets por peer morrem com a sessão
         // (churn de peers não acumula mapa morto — o prune é só rede de seg.).
         engine.netlimiter.forget_peer(peer_fp);
+        // TÚNEL MORRE COM O LINK.
+        //
+        // BUG REAL ("uma mensagem funciona, depois para e só religando
+        // resolve"): `tunnel_sessions` é mapa em MEMÓRIA e nunca era limpo aqui.
+        // A sessão de túnel sobrevivia à queda do link e, na sessão nova, ainda
+        // era considerada pronta — com uma chave que o outro lado já tinha
+        // descartado. Como `tunnel_should_carry` então passava a mandar tudo por
+        // ela, mensagens/ACK/Ack eram cifrados para uma chave morta e
+        // descartados em silêncio no destino; o link seguia `Online` porque o
+        // Ping viaja fora do túnel. Resultado: emudece até reiniciar o app.
+        // Derrubar aqui garante que a próxima sessão renegocie do zero.
+        engine.tunnel_drop(peer_fp, "link caiu");
         // não confirmadas → PENDING again (outbox)
         if let Ok(ids) = engine.store.revert_unacked_to_pending(peer_fp) {
             for id in ids {

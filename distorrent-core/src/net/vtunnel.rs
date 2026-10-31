@@ -12,7 +12,7 @@
 //! janela anti-replay de 64, AAD amarra direção (remetente→destinatário).
 
 use std::net::Ipv6Addr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
@@ -145,6 +145,20 @@ pub struct TunnelSession {
     pub created_ms: i64,
     /// Bytes cifrados enviados — base do rekey por volume (Fase 4).
     pub tx_bytes: AtomicU64,
+    /// Último datagrama que ESTE lado abriu com sucesso (epoch ms).
+    ///
+    /// POR QUE EXISTE ("manda uma mensagem, funciona, depois para e só
+    /// religando resolve"): o túnel era marcado como pronto assim que a chave
+    /// era derivada — sem nenhuma prova de que o OUTRO lado consegue abrir.
+    /// Quando a resposta do handshake se perdia (relay/4G/half-open), um lado
+    /// ficava com sessão e o outro não; o lado com sessão passava a mandar
+    /// mensagem/ACK/Ack por um túnel que o destino descartava em silêncio, e
+    /// **nada** voltava. O link continuava `Online` (Ping vai fora do túnel) e
+    /// o estado só se limpava reiniciando o app, porque o mapa de sessões é
+    /// em memória. Com esta marca, o túnel só transporta tráfego depois de
+    /// PROVAR que abre o que o peer manda; sem prova, quem carrega é o caminho
+    /// normal (relay/direto), que sempre funcionou.
+    last_rx_ms: AtomicI64,
     key: [u8; 32],
     send_ctr: AtomicU64,
     recv: std::sync::Mutex<RecvWindow>,
@@ -156,6 +170,8 @@ impl TunnelSession {
             peer_fp,
             created_ms: crate::identity::now_ms(),
             tx_bytes: AtomicU64::new(0),
+            // 0 = nunca abrimos nada por aqui (sessão ainda NÃO provada).
+            last_rx_ms: AtomicI64::new(0),
             key,
             send_ctr: AtomicU64::new(1),
             recv: std::sync::Mutex::new(RecvWindow {
@@ -163,6 +179,30 @@ impl TunnelSession {
                 mask: 0,
             }),
         }
+    }
+
+    /// O túnel pode transportar tráfego agora?
+    ///
+    /// Duas janelas, e as duas importam:
+    ///  - `grace`: logo após o handshake o túnel ainda não teve chance de
+    ///    provar nada, mas é justamente quando ele costuma funcionar — então
+    ///    carregar é permitido por um tempo curto.
+    ///  - `ttl`: uma vez provado, continua valendo enquanto o peer mandar
+    ///    algo por ele. Depois disso, a rota está morta de um lado.
+    ///
+    /// Sem prova e fora da carência ⇒ `false`: o chamador usa o caminho
+    /// normal em vez de sumir com a mensagem.
+    pub fn is_proven(&self, now_ms: i64, grace_ms: i64, ttl_ms: i64) -> bool {
+        let rx = self.last_rx_ms.load(Ordering::SeqCst);
+        if rx > 0 {
+            return now_ms.saturating_sub(rx) <= ttl_ms;
+        }
+        now_ms.saturating_sub(self.created_ms) <= grace_ms
+    }
+
+    /// Marca que este lado ABRIU um datagrama do peer (prova real de vida).
+    fn mark_rx(&self, now_ms: i64) {
+        self.last_rx_ms.store(now_ms, Ordering::SeqCst);
     }
 
     /// Cifra um datagrama; devolve (nonce, ciphertext). Nonce 12B = 4 zeros +
@@ -214,7 +254,7 @@ impl TunnelSession {
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[4..].copy_from_slice(&nonce.to_be_bytes());
         let cipher = ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key));
-        cipher
+        let pt = cipher
             .decrypt(
                 Nonce::from_slice(&nonce_bytes),
                 Payload {
@@ -222,7 +262,11 @@ impl TunnelSession {
                     aad: &tun_aad(sender_fp, receiver_fp),
                 },
             )
-            .map_err(|_| DistorrentError::Crypto("tunel: autenticação falhou".into()))
+            .map_err(|_| DistorrentError::Crypto("tunel: autenticação falhou".into()))?;
+        // Abriu de verdade = prova de que ESTA chave serve nos dois sentidos.
+        // Só aqui a sessão pode passar a carregar tráfego (ver `is_proven`).
+        self.mark_rx(crate::identity::now_ms());
+        Ok(pt)
     }
 }
 
@@ -443,6 +487,28 @@ mod tests {
         for (n, ct) in cts.iter().rev() {
             assert!(s.open("eu", "peer", *n, ct).is_ok());
         }
+    }
+
+    #[test]
+    fn tunel_so_carrega_depois_de_provar() {
+        let key = [3u8; 32];
+        let s = TunnelSession::new("peer".into(), key);
+        let t0 = s.created_ms;
+        // Recém-criado: dentro da carência, pode carregar (é quando costuma dar certo).
+        assert!(s.is_proven(t0, 8_000, 45_000), "carência precisa valer");
+        assert!(s.is_proven(t0 + 7_000, 8_000, 45_000));
+        // Passou a carência sem NENHUMA prova: não carrega mais (era o
+        // "uma mensagem funciona, depois emudece até reiniciar").
+        assert!(
+            !s.is_proven(t0 + 9_000, 8_000, 45_000),
+            "túnel sem prova não pode transportar tráfego"
+        );
+        // Abriu um datagrama do peer = prova real: volta a valer.
+        s.mark_rx(t0 + 9_000);
+        assert!(s.is_proven(t0 + 9_000, 8_000, 45_000));
+        assert!(s.is_proven(t0 + 50_000, 8_000, 45_000));
+        // Prova vencida (peer parou de mandar por 45s): cai de novo.
+        assert!(!s.is_proven(t0 + 60_000, 8_000, 45_000));
     }
 
     #[test]
