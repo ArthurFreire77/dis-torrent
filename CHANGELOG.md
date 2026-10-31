@@ -1,5 +1,61 @@
 # CHANGELOG
 
+## [1.1.18-pre-alpha] — 2026-10-31
+
+### "Cliquei Entrar e não foi"
+
+O `room_join` mandava um `CallInvite` para quem já estava na sala. Isso fazia o
+app dele **tocar o telefone** de uma chamada que já estava acontecendo, e o
+aceite era recusado por "já existe chamada em andamento" — quem clicou Entrar
+ficava esperando para sempre.
+
+Agora o aviso é `CallAddParticipant` (roster, não toca) e só o lado de
+fingerprint maior abre a `RTCPeerConnection`, evitando offer+offer simultâneo.
+
+### Botão Entrar não aparecia no celular
+
+O id de uma DM é um **hash** de 24 caracteres (`blake3("...|dm|<menor>|<maior>")`),
+não contém os fingerprints. A validação do anúncio de sala tentava
+`conv_id.contains(peer_fp)`, que nunca casava: o frame era descartado em
+silêncio no receptor. Agora o id canônico é calculado dos dois lados.
+
+O botão também deixou de ser um número solto ao lado de um telefone: agora diz
+**Entrar**.
+
+### O áudio parava ao parar de compartilhar tela
+
+`stopScreenStreamOnly()` chamava `track.stop()` em **todas** as trilhas do
+stream de tela. Quando tela e microfone compartilhavam o mesmo `MediaStream`,
+isso matava o microfone — o áudio da pessoa caía antes de ela parar o share.
+Agora só as trilhas de vídeo e o áudio de sistema são encerradas.
+
+### A chamada acabava quando alguém saía
+
+O critério de "sala coletiva" era `pcs.size > 1`. Numa chamada de três pessoas
+em que só um par tinha PC aberto, `pcs.size` valia 1 e a saída de qualquer um
+encerrava a chamada para todos. A regra agora olha o roster
+(`callRoomRules.ts`, com testes).
+
+### Amizade só no celular e não no PC
+
+Quando o pedido chegava com o outro lado já `accepted` (aceite feito em outro
+aparelho da mesma conta), o lado que estava `pending_in` continuava pendente
+para sempre. Agora é promovido a amigo.
+
+### `AbortError` ao abrir microfone/câmera
+
+O Android cancela a captura quando o app troca de foco. Não havia retry: a
+chamada nascia muda. Agora tenta de novo duas vezes com espera e, por último,
+abre só o microfone.
+
+### Verificação
+
+- **Core Rust**: 220 testes (9 novos: entrega da sala, `room_join`, liveness).
+- **Frontend**: 259 testes unitários, typecheck, lint e build verdes.
+- **Não validado em aparelho**: os itens de áudio, amizade e `AbortError`
+  dependem do WebView do Android e de dois aparelhos reais; foram corrigidos
+  por leitura de código e teste unitário, sem prova em hardware.
+
 ## [1.1.17-pre-alpha] — 2026-10-31
 
 ### Chamada em andamento agora aparece para todo mundo (e dá para entrar)

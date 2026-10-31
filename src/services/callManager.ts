@@ -4,6 +4,7 @@ import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
 import { setCallVideoSending } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
+import { isCollectiveRoom } from './callRoomRules'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
 import type { VoiceMediaStats } from './models'
 import {
@@ -509,6 +510,21 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
           try { localMediaNotice?.(`${why ? `${why.split(' — ')[0]} — ` : ''}seguindo só com voz`) } catch { /* ignore */ }
           return s
         } catch { /* nem áudio: cai no erro honesto abaixo */ }
+      }
+      // AbortError: a captura foi CANCELADA (Android ao trocar de app, outra
+      // chamada pegou o mic, ou o WebView recriou a página). Não é "sem
+      // permissão" — vale uma nova tentativa depois de a UI voltar.
+      if ((e as Error)?.name === 'AbortError') {
+        for (const espera of [250, 900]) {
+          await new Promise((r) => setTimeout(r, espera))
+          try {
+            return await md.getUserMedia(merged)
+          } catch { /* tenta de novo */ }
+        }
+        // Última cartada: só voz, que é o que a chamada precisa para existir.
+        try {
+          return await md.getUserMedia({ ...merged, video: false })
+        } catch { /* cai no erro honesto abaixo */ }
       }
       const honest = describeMediaError(e)
       try { localMediaNotice?.(honest ?? `falha ao abrir microfone/câmera (${(e as Error)?.name ?? 'erro'})`) } catch { /* ignore */ }
@@ -1151,7 +1167,7 @@ export class CallManager {
         if (this.state && this.state.callId === ev.call_id) {
           // RECUSA EM GRUPO É INDIVIDUAL: solta só o PC de quem recusou (pcs é por peer).
           const fp = String((ev as { from_fp?: string }).from_fp ?? '')
-          const coletiva = this.pcs.size > 1 || this.state.callId.startsWith('voice-')
+          const coletiva = this.isCollectiveCall(this.state)
           if (coletiva) {
             // Solta SÓ a mídia de quem recusou (mesma limpeza do
             // `onVoiceParticipantLeft`, que já é o caminho de saída de um par).
@@ -1214,9 +1230,13 @@ export class CallManager {
         const st = this.state
         if (st && st.callId === ev.call_id) {
           const wasIncoming = st.phase === 'incoming'
-          // EM GRUPO, "DESLIGAR" É INDIVIDUAL: call_ended derruba só o par que saiu (mesh 3+).
+          // EM GRUPO, "DESLIGAR" É INDIVIDUAL: call_ended derruba só o par que saiu.
+          // O critério era `pcs.size > 1` — ERRADO: chamada de 3 pessoas em que
+          // só um PC fechou ainda é grupo, e a saída de UM encerrava a chamada
+          // de todos ("se tiver um cidadão não deve acabar"). O que decide é
+          // gente no roster: mais de 2 (eu + 2) = sala coletiva.
           const fp = String((ev as { from_fp?: string }).from_fp ?? '')
-          const coletiva = this.pcs.size > 1 || st.callId.startsWith('voice-')
+          const coletiva = this.isCollectiveCall(st)
           const saiuEu = !!fp && fp === this.myFp
           if (coletiva && !saiuEu && !wasIncoming) {
             if (fp && fp !== this.myFp) {
@@ -1574,9 +1594,12 @@ export class CallManager {
         // seguida): aqui ela ganha o quadrado, igual ao `voice_joined`.
         this.dropInvite(fp)
         st.participants.push({ fp, nickname: fp.slice(0, 6) })
-        // cada participante existente oferece conexão ao novo (anti-glare:
-        // o novo peer só responde — todos os offers vêm de um lado só).
-        this.createPC(fp, callId, true).catch(() => {})
+        // QUEM OFERECE: só o lado de fp MAIOR. Os dois lados abrem PC (quem
+        // entrou pela sala e quem já estava nela), e offer+offer simultâneo
+        // travava a negociação — era o "cliquei Entrar e não conectou".
+        if (this.myFp && this.myFp > fp) {
+          this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
+        }
       } else if (p.disconnected) {
         // Já estava na lista mas desconectado (caiu e voltou): onPeerBack reconecta; limpa o visual.
         p.disconnected = false
@@ -3431,7 +3454,22 @@ export class CallManager {
 
   /** Libera o stream de tela (sem tocar no estado da chamada). */
   private stopScreenStreamOnly(): void {
-    try { this.screenStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
+    // Só as trilhas de VÍDEO pertencem à captura de tela. Se o stream de tela
+    // for o MESMO objeto do `localStream` (acontece quando o áudio do sistema
+    // é capturado junto), `t.stop()` em todas as trilhas matava o MICROFONE —
+    // era o "ao parar de compartilhar, o áudio da pessoa parava antes".
+    const tracks = this.screenStream?.getTracks() ?? []
+    for (const t of tracks) {
+      if (t.kind !== 'video') continue
+      try { t.stop() } catch { /* ignore */ }
+    }
+    // Áudio capturado junto com a tela: só o do sistema, nunca o do microfone
+    // que já existia antes do compartilhamento.
+    const micTrack = this.localStream?.getAudioTracks()[0] ?? null
+    for (const t of tracks) {
+      if (t.kind !== 'audio' || t === micTrack) continue
+      try { t.stop() } catch { /* ignore */ }
+    }
     this.screenStream = null
   }
 
@@ -4096,6 +4134,15 @@ export class CallManager {
         void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
       }
     }
+  }
+
+  /** Sala coletiva? (ver callRoomRules) — decide se sair de UM encerra a chamada. */
+  private isCollectiveCall(st: { callId: string; participants?: { fp: string }[]; invited?: { fp: string }[] }): boolean {
+    return isCollectiveRoom({
+      callId: st.callId,
+      participants: (st.participants ?? []).map((p) => p.fp),
+      invited: (st.invited ?? []).map((i) => i.fp),
+    })
   }
 
   /** Marca como participante SÓ quando o peer de fato entra (offer/answer/ICE). */

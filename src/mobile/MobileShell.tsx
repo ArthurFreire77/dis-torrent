@@ -43,6 +43,7 @@ import { BookmarksPanel } from '../components/social/Social'
 import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
+import { QuitDialog } from '../components/QuitDialog'
 import { shouldNotify, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
@@ -148,12 +149,13 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
       {room && onJoinRoom && (
         <button
           type="button"
-          title="Entrar na chamada em andamento"
+          title={`Entrar na chamada — ${room.participants.length || 1} na sala`}
           aria-label={`Entrar na chamada de ${c.title}`}
+          data-testid="mobile-join-room"
           onClick={(e) => { e.stopPropagation(); onJoinRoom(c, room) }}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '4px 9px', fontSize: 11, fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap' }}
         >
-          <Icon d={Icons.phone} size={12} /> {room.participants.length || 1}
+          <Icon d={Icons.phone} size={13} /> Entrar
         </button>
       )}
       <button title={c.kind === 'group' ? 'Sair do grupo' : 'Apagar conversa'} aria-label={c.kind === 'group' ? 'Sair do grupo' : 'Apagar conversa'} onClick={(e) => { e.stopPropagation(); void onDelete(c.id, c.title, selected) }} style={{ background: 'transparent', border: 'none', padding: 6, cursor: 'pointer', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8e929b' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={16} /></button>
@@ -1071,8 +1073,24 @@ export default function MobileShell() {
   const [callRoomsMap, setCallRoomsMap] = useState<Map<string, CallRoomView>>(() => callRooms.snapshot())
   useEffect(() => {
     const off = callRooms.subscribe(setCallRoomsMap)
-    services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
-    return off
+    // SINCRONIZA AO VOLTAR: no Android o WebView congela o JS em segundo
+    // plano, então os eventos `call_room` daquele intervalo se perdem e a sala
+    // só aparecia depois de fechar e abrir o app. O snapshot do motor cobre o
+    // buraco; o intervalo cobre o caso de a página nunca perder o foco.
+    const sync = () => {
+      services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
+    }
+    sync()
+    const t = window.setInterval(sync, 20_000)
+    const onVisible = () => { if (!document.hidden) sync() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      off()
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
   }, [])
   useEffect(() => {
     const un = services.subscribe((ev: any) => { if (ev?.type === 'call_room') callRooms.apply(ev) })
@@ -1087,6 +1105,8 @@ export default function MobileShell() {
   }, [activeCall])
   // Lixeira: em grupo abre o diálogo (sair / dono escolhe apagar); DM apaga.
   const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
+  /** Fechar o app (segundo plano × encerrar) — não é logout. */
+  const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => {
     const conv = conversations.find((c) => c.id === id)
     if (conv?.kind === 'group') {
@@ -2843,9 +2863,14 @@ export default function MobileShell() {
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>COFRE &amp; BACKUP</div>
               <StormVaultPanel />
             </div>
-            <button className="nav-row" style={{ color: t.red }} onClick={() => { setPhase('lock'); setIdentity(null as any); setSelConv(null); setSelPeerFp(null); setSelCommunity(null) }}>
+            <button className="nav-row" style={{ color: t.red }} onClick={() => { setShowQuitConfirm(true) }}>
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-              Sair
+              Fechar o app
+            </button>
+            {/* Sair da CONTA fica separado: fechar o app mantém a sessão. */}
+            <button className="nav-row" style={{ color: t.muted }} onClick={() => { if (confirm('Sair da conta? Será preciso destravar de novo para voltar.')) { setPhase('lock'); setIdentity(null as any); setSelConv(null); setSelPeerFp(null); setSelCommunity(null) } }}>
+              <Icon d={Icons.user} size={16} />
+              Sair da conta
             </button>
           </div>
           <div style={{ textAlign: 'center', marginTop: 18, fontSize: 11, color: t.muted, opacity: 0.8, paddingBottom: 8 }}>DisTorrent P2P • E2E{version ? ` • v${version}` : ''} • sem servidor</div>
@@ -2986,6 +3011,23 @@ export default function MobileShell() {
       )}
 
       {renderIncomingModal()}
+
+      {showQuitConfirm && (
+        <QuitDialog
+          canQuit={services.kind === 'native'}
+          onClose={() => setShowQuitConfirm(false)}
+          onBackground={async () => {
+            try { await callManager.leave() } catch { /* sem chamada */ }
+            // Android: `app_hide_to_tray` não existe como bandeja; o correto é
+            // só minimizar (o serviço de primeiro plano segue recebendo).
+            try { await services.appHideToTray() } catch { /* melhor esforço */ }
+          }}
+          onQuit={async () => {
+            try { await callManager.leave() } catch { /* sem chamada */ }
+            try { await services.appQuit() } catch (e: any) { setError(String(e?.message ?? e)) }
+          }}
+        />
+      )}
 
       {leaveTarget && (
         <GroupLeaveDialog

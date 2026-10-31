@@ -41,6 +41,7 @@ import { Modal, Notice, Button } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
+import { QuitDialog } from '../components/QuitDialog'
 import { copyText } from '../shared/clipboard'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -770,6 +771,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showGroupPanel, setShowGroupPanel] = useState(false)
   /** Grupo a sair/apagar (diálogo do dono: todos ou só para mim). */
   const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
+  /** Fechar o app: em segundo plano (recebe chamadas) ou encerrar de vez. */
+  const [showQuitMenu, setShowQuitMenu] = useState(false)
   /** Roster de cada grupo (fp → apelido) para o "ONLINE" incluir não-amigos. */
   const [groupRosters, setGroupRosters] = useState<Record<string, [string, string][]>>({})
   useEffect(() => {
@@ -1871,9 +1874,23 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showRoomMembers, setShowRoomMembers] = useState(false)
   useEffect(() => {
     const off = callRooms.subscribe(setCallRoomsMap)
-    // Boot: a UI perdeu eventos enquanto estava fechada (janela/tela apagada).
-    services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
-    return off
+    // Boot + re-sincronização: com a janela na bandeja o JS pode ficar
+    // suspenso e os eventos `call_room` daquele intervalo se perdem (era o
+    // "só aparece depois de reabrir"). O snapshot do motor cobre o buraco.
+    const sync = () => {
+      services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
+    }
+    sync()
+    const t = window.setInterval(sync, 20_000)
+    const onVisible = () => { if (!document.hidden) sync() }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      off()
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
   }, [])
   useEffect(() => {
     const un = services.subscribe((ev: any) => {
@@ -2508,10 +2525,10 @@ export default function ThemeShell({ designId }: {designId:string}){
               ><Icon d={Icons.settings} size={17} /></button>
               <span style={{ flex: 1, fontSize: 11, fontWeight: 700, color: muted }}>Definições</span>
               <button
-                onClick={() => { setPhase('lock'); setIdentity(null as any); setSelConv(null); setSelPeerFp(null) }}
-                title="Sair"
-                aria-label="Sair"
-                data-testid="app-logout"
+                onClick={() => setShowQuitMenu(true)}
+                title="Fechar o DisTorrent"
+                aria-label="Fechar o DisTorrent"
+                data-testid="app-quit"
                 style={{ width: 34, height: 34, border: `1px solid ${borderColor}`, background: inputBg, cursor: 'pointer', color: t.red, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
               >
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -3601,6 +3618,24 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
           </div>
         </Modal>
+      )}
+
+      {/* Fechar o app: segundo plano (recebe chamadas) ou encerrar. */}
+      {showQuitMenu && (
+        <QuitDialog
+          canQuit={services.kind === 'native'}
+          onClose={() => setShowQuitMenu(false)}
+          onBackground={async () => {
+            // Encerra a chamada/mic antes de esconder: processo na bandeja não
+            // pode continuar publicando áudio de alguém que saiu da tela.
+            try { await callManager.leave() } catch { /* sem chamada */ }
+            try { await services.appHideToTray() } catch (e: any) { setError(String(e?.message ?? e)) }
+          }}
+          onQuit={async () => {
+            try { await callManager.leave() } catch { /* sem chamada */ }
+            try { await services.appQuit() } catch (e: any) { setError(String(e?.message ?? e)) }
+          }}
+        />
       )}
 
       {/* Grupo: sair (membro) ou dono escolhe apagar para todos/só para mim. */}

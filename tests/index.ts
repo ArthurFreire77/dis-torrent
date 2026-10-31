@@ -9,6 +9,7 @@
 import './botCommands.test.ts'
 import './callPhases.test.ts'
 import './callRooms.test.ts'
+import './callRoomRules.test.ts'
 import './callMedia.test.ts'
 import './callParticipants.test.ts'
 import './callPlayback.test.ts'

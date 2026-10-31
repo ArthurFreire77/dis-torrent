@@ -633,6 +633,10 @@ mod peer_liveness_tests;
 mod room_announce;
 #[cfg(test)]
 mod room_announce_tests;
+#[cfg(test)]
+mod room_delivery_tests;
+#[cfg(test)]
+mod room_join_tests;
 
 pub struct NetworkEngine {
     pub store: Arc<Store>,
@@ -2588,7 +2592,22 @@ impl NetworkEngine {
         if last_rx == 0 {
             return true;
         }
-        let janela_ms = RELAY_PING_TIMEOUT.as_millis() as i64;
+        // A janela depende do TRANSPORTE: no caminho direto o ping é de 10 s com
+        // timeout de 25 s; via relay o intervalo é 20 s e o timeout 120 s. Usar
+        // sempre a janela do relay fazia o par DIRETO (o comum no celular em
+        // Wi-Fi) aparecer "reconectando" na UI por até 2 minutos.
+        let via_relay = self
+            .links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(fp)
+            .map(|l| l.via_relay)
+            .unwrap_or(false);
+        let janela_ms = if via_relay {
+            RELAY_PING_TIMEOUT.as_millis() as i64
+        } else {
+            PING_TIMEOUT.as_millis() as i64
+        };
         crate::identity::now_ms().saturating_sub(last_rx) <= janela_ms
     }
 
@@ -11255,7 +11274,11 @@ async fn handle_frame(
                         .ok();
                 }
                 // Pedido CRUZADO (os dois se adicionaram): aceita na hora.
-                Some("pending_out") => {
+                // `pending_in` também cai aqui quando o OUTRO lado já é
+                // `accepted`: pode ser o mesmo usuário em outra máquina
+                // (aceitou no celular e o PC não viu) ou um retry de aceite
+                // que se perdeu. Recusar deixava a amizade só num aparelho.
+                Some("pending_out") | Some("pending_in") => {
                     engine.store.set_friend(peer_fp, &nick, "accepted")?;
                     engine
                         .cmd_tx
