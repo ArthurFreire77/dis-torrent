@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## [1.1.16-pre-alpha] — 2026-10-31
+
+### "Mando uma mensagem, funciona; depois para e só religando resolve"
+
+A causa era o **túnel virtual**, com dois defeitos encadeados.
+
+1. **Sessão pronta sem prova.** O túnel era dado como estabelecido assim que a
+   chave X25519 era derivada — sem nenhuma evidência de que o OUTRO lado tinha
+   a mesma chave. Quando a resposta do handshake se perdia (relay, 4G, sessão
+   half-open), um lado ficava com sessão e o outro não. O lado com sessão
+   passava a mandar mensagem, ACK e Ack por um túnel que o destino descartava
+   **em silêncio**: nada voltava e nada avisava.
+
+2. **Estado que sobrevivia ao link.** O mapa de sessões é em memória e nunca
+   era limpo quando a conexão do peer caía. Na sessão seguinte o túnel
+   continuava "pronto", agora com uma chave que ninguém mais tinha — o mesmo
+   sumidouro. E como o Ping viaja **fora** do túnel, a UI seguia mostrando
+   "Online". Só reiniciar limpava o mapa, exatamente o sintoma relatado.
+
+Agora o túnel precisa **provar** que funciona antes de transportar qualquer
+coisa: só carrega tráfego depois de abrir um datagrama do peer (prova real dos
+dois sentidos), com carência de 8 s após o handshake e validade de 45 s para a
+prova. Sem prova, o frame vai pelo caminho normal — errar pelo lento é
+aceitável, sumir nunca — e a sessão é derrubada. Uma varredura a cada 5 s
+limpa túnel que parou de responder, então o pior caso é de poucos segundos em
+vez de emudecer até reiniciar.
+
+### Enviar para uma pessoa e logo para outra não funcionava
+
+O antiduplo-submit do composer usava **um instante global**: mandar para A e,
+em menos de 300 ms, mandar para B fazia o envio de B retornar antes de
+qualquer coisa — inclusive antes de limpar o input — então o Enter parecia
+morto ao trocar de conversa. Agora a marca é por **conversa**: duplo-Enter na
+mesma conversa continua barrado, mandar para outra pessoa no mesmo segundo
+passa. Corrigido no desktop e no celular.
+
+### Canal de voz mudo no Linux
+
+`hold_call_offer` sai cedo para `voice-*` de propósito (canal não tem aceite),
+mas o chamador encerrava o fluxo sem olhar se a oferta foi realmente retida.
+Resultado: num canal de voz a oferta não virava sessão nativa **e** também não
+chegava ao JS — quem entrava não recebia mídia de ninguém, sem erro na tela.
+Agora a função devolve se reteve, e para canal a oferta segue para o JS.
+
+### Limite por arquivo: 2 GB → 50 GB
+
+O teto estava repetido em três lugares (frontend, casca e core) e precisava
+subir nos três ao mesmo tempo — mexer em um só fazia o arquivo ser aceito no
+anúncio e recusado ao salvar. O número é anti-DoS (um peer anunciar
+"size: 5000 GB" num frame de 200 bytes), não anti-arquivo-grande: a memória é
+protegida pelo teto de 32 MB por **lote** (o total nunca é alocado de uma vez)
+e o disco pelo espaço livre antes de gravar.
+
 ## [1.1.15-pre-alpha] — 2026-10-30
 
 ### X vermelho em quase toda mensagem (o mais grave)
