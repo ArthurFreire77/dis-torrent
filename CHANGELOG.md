@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## [1.1.24-pre-alpha] - 2026-11-01
+
+Correções que só existiam depois da 1.1.23 publicada — quem já está na 1.1.23
+precisa desta versão para receber as duas.
+
+### A atualização fantasma: quem já tinha atualizado via "nova versão" a cada boot
+
+O Rust **ignora** o sufixo `-pre-alpha` ao comparar versões; o frontend
+**não** ignorava. Como a tag é limpa (`v1.1.23`) e o app reporta
+`1.1.23-pre-alpha`, `isNewer('1.1.23-pre-alpha', '1.1.23')` dava `true`: quem
+atualizava continuava vendo a mesma versão, baixava o instalador de novo e caía
+em `stalled` (a tela que avisa que o instalador não contém a versão anunciada).
+
+As duas pontas agora concordam: `1.1.23-pre-alpha` e `1.1.23` são a **mesma**
+versão. Quem está abaixo continua recebendo a oferta normalmente.
+
+### APK saía com a versão errada dentro do arquivo
+
+`build-android.ps1` roda o Gradle direto (para reaproveitar o Rust já
+compilado), mas `tauri.properties` é autogerado e não versionado. O APK 1.1.23
+foi gerado com `versionName=1.1.8-pre-alpha` / `versionCode=1001008` dentro de
+um arquivo chamado 1.1.23 — e **versionCode menor faz o updater do Android
+recusar a instalação**, então a atualização nunca apareceria para quem tinha a
+1.1.8. O script agora reescreve `versionName`/`versionCode` a partir do
+`package.json` a cada build.
+
+Confirmado com `aapt2 dump badging` no APK publicado da 1.1.23:
+`versionCode='1001023'`, `versionName='1.1.23-pre-alpha'`.
+
+### Atualização automática: agora diz a verdade por plataforma
+
+"Automático em todas as plataformas" não existe, e o app não promete mais isso:
+
+| Plataforma | Comportamento | Por quê |
+|---|---|---|
+| Windows | **automático** | Inno `/SILENT` instala e reabre |
+| Linux (AppImage) | **automático** (novo) | é um arquivo só: substitui e reexecuta |
+| Linux (.deb) | abre o instalador | `dpkg -i` exige root; pkexec pede senha |
+| Android | abre o instalador | o sistema exige o toque de confirmação |
+
+O AppImage passou a se substituir sozinho: o Rust descobre o arquivo em
+execução por `$APPIMAGE`, copia o novo para um temporário no **mesmo
+diretório** e faz `rename` por cima (escrever no arquivo em uso dá `ETXTBSY`),
+depois reabre com `--atualizado`. Fora de um AppImage (`cargo run`, `.deb`) não
+há alvo seguro e o caminho antigo continua valendo.
+
+### Seletor de release deixa de depender de inspeção manual
+
+A escolha da release (qual é a mais nova, qual asset por plataforma) saiu de
+dentro de `update_check` para uma função pura, `select_update`, com testes que
+usam os **nomes reais** dos assets publicados. Esse caminho falha em silêncio
+("sem atualização"), então agora é travado por teste.
+
+### Verificação
+
+- **Frontend**: 283 testes unitários, typecheck, lint e build verdes.
+- **Rust** (WSL/Linux): `cargo test --lib` 235 passed; `cargo fmt --check` e
+  `cargo clippy` sem erro (warnings pré-existentes em `lib.rs`/`background.rs`).
+  `src-tauri`: `cargo check --lib` OK, 10 testes do updater passando.
+- **Seleção contra dados reais**: a lista de releases da API foi capturada e
+  usada em teste — v1.1.23 escolhida como maior, `_x64_setup.exe` /
+  `_arm64.apk` / `_amd64.AppImage` por plataforma, todos com `digest` e sem
+  falso `label_mismatch` (o parser não confunde o `64` de `x64_setup.exe`).
+- **Não validado em máquina real**: a troca do AppImage em execução (exige um
+  Linux com o AppImage instalado) e a instalação do APK num aparelho.
+
 ## [1.1.23-pre-alpha] - 2026-11-01
 
 > A 1.1.22 foi publicada antes desta leva de correções. A numeração pulou para
