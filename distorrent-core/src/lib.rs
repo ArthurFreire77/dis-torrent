@@ -9,6 +9,8 @@
 pub mod antispam;
 pub mod authlimit;
 pub mod cache;
+/// Grupos que EU apaguei (lixeira): impede que mensagem nova os recrie.
+pub mod group_trash;
 pub mod identity;
 pub mod media;
 pub mod metrics;

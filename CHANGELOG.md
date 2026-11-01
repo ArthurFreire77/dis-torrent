@@ -69,6 +69,37 @@ anúncio: os outros continuavam vendo "Entrar" numa chamada que não existia.
 - Script `scripts/find-orphans.mjs`: acha código-fonte sem importador (0 órfãos
   hoje).
 
+## [1.1.20-pre-alpha] — 2026-10-31
+
+### Grupo apagado "só para mim" reaparecia depois de um tempo
+
+Relato: apagava o grupo só para mim, e depois de um tempo ele voltava.
+
+O motivo era o **lazy-join** do motor: quando chegava uma mensagem de um grupo
+desconhecido enviada por um amigo aceito, o core criava a conversa na hora
+(`upsert_group_state`) para não perder a mensagem. Como apagar localmente tinha
+removido a conversa, a próxima mensagem recriava o grupo — e o `GroupCreated`
+trazia o roster de volta.
+
+Agora existe uma lixeira persistente (`group_trash`) com os `conv_id` que você
+mandou apagar:
+
+- o lazy-join **não** recria um grupo apagado;
+- `GroupCreated` de um grupo apagado é ignorado — **exceto** se o criador
+  realmente te readicionou (seu fp aparece na lista nova), que é reentrada
+  legítima e limpa o bloqueio;
+- readicionar alguém pelo painel do grupo também limpa o bloqueio.
+
+A lista fica no SQLite, não em memória: reiniciar o app não ressuscita o grupo.
+Teto de 256 ids para não crescer sem limite.
+
+### Verificação
+
+- **Core Rust**: 228 testes (8 novos: lixeira marca/sobrevive ao reinício,
+  reentrada limpa, id vazio nunca bloqueia, teto mantém os recentes).
+- Não validado em aparelho real: depende de uma segunda conta enviando mensagem
+  no grupo apagado.
+
 ## [1.1.19-pre-alpha] — 2026-10-31
 
 ### A chamada acabava quando a penúltima pessoa saía

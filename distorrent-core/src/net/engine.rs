@@ -5764,6 +5764,9 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
         self.store.add_group_member(conv_id, fp, "")?;
+        // Readicionei alguém a um grupo que eu tinha apagado: reentrada
+        // explícita, então o bloqueio da lixeira cai.
+        let _ = crate::group_trash::restore(&self.store, conv_id);
         let members = self.store.list_group_members(conv_id)?;
         let title = conv.title.clone();
         let me = self.identity.fingerprint.clone();
@@ -5930,6 +5933,9 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
         self.store.leave_group_local(conv_id)?;
+        // LIXEIRA: sem isto, a próxima mensagem de um amigo recriava o grupo
+        // pelo lazy-join ("apago e depois de um tempo ele reaparece").
+        let _ = crate::group_trash::dismiss(&self.store, conv_id);
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
             title: String::new(),
@@ -11178,6 +11184,9 @@ async fn handle_frame(
                     .flatten()
                     .map(|(_, s)| s == "accepted")
                     .unwrap_or(false)
+                // GRUPO APAGADO POR MIM: mensagem nova não pode ressuscitar a
+                // conversa (era o "apago e depois de um tempo ele reaparece").
+                && !crate::group_trash::is_dismissed(&engine.store, &env.conv_id)
             {
                 // lazy-join HONESTO: grupo desconhecido de AMIGO aceito — cria
                 // com o autor como único membro; GroupCreated corrige o roster.
@@ -11622,6 +11631,19 @@ async fn handle_frame(
                 return Err(DistorrentError::Protocol(
                     "GroupCreated com roster acima do limite".into(),
                 ));
+            }
+            // GRUPO APAGADO POR MIM: não recria. Mas se o criador me readicionou
+            // de propósito (eu estava FORA da lista que ele mandou e agora estou
+            // dentro), é reentrada legítima: limpa o bloqueio e volta.
+            let eu = &engine.identity.fingerprint;
+            let me_incluiu = members.iter().any(|(fp, _)| fp == eu);
+            if crate::group_trash::is_dismissed(&engine.store, &conv_id) {
+                if !me_incluiu {
+                    // Convite de grupo que apaguei e que não me inclui: ignora
+                    // em silêncio (o criador pode estar reenviando o roster).
+                    return Ok(());
+                }
+                let _ = crate::group_trash::restore(&engine.store, &conv_id);
             }
             engine
                 .store
