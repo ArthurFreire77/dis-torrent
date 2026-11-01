@@ -4573,10 +4573,10 @@ export class CallManager {
           continue
         } catch { /* cai para recriar abaixo */ }
       }
-      // `connecting` também entra: um par preso em ICE `checking` (offer/answer
-      // trocados, candidato perdido) não casava com nenhum ramo e ficava mudo
-      // para sempre — é o "conecta e não conecta" típico de mesh 3+.
-      if (!pc || cs === 'failed' || cs === 'closed' || cs === 'connecting' || !cs) {
+      // `connecting` NÃO é refeito na hora: um par saudável atravessa essa fase
+      // em 1-3 s e recriar a cada tick derrubava quem já estava negociando. Ele
+      // entra no orçamento de "par travado" abaixo. Só `new`/ausente cai aqui.
+      if (!pc || cs === 'failed' || cs === 'closed' || !cs) {
         void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
         continue
       }

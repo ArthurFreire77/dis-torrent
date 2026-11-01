@@ -176,7 +176,11 @@ fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
             .split('.')
             .map(|p| {
                 // `10a` -> 10 (build do Tauri às vezes anexa letra no patch).
-                let digits: String = p.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+                let digits: String = p
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 digits.parse::<u64>().unwrap_or(0)
             })
             .collect();
@@ -247,8 +251,7 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     // fica no core para a lista ser ordenada do mesmo jeito que o frontend
     // compara — sem depender da ordem da API do GitHub.
     releases.sort_by(|a, b| {
-        compare_version_strings(&b.tag_name, &a.tag_name)
-            .then_with(|| b.tag_name.cmp(&a.tag_name))
+        compare_version_strings(&b.tag_name, &a.tag_name).then_with(|| b.tag_name.cmp(&a.tag_name))
     });
     let release = releases.remove(0);
 
@@ -313,7 +316,6 @@ pub async fn update_download(
     digest: String,
 ) -> Result<String, String> {
     use sha2::{Digest as _, Sha256};
-    use tauri::Manager;
 
     if !url.starts_with(DOWNLOAD_PREFIX) {
         return Err("download fora do repositório oficial recusado".into());
@@ -692,18 +694,30 @@ mod tests {
     fn versao_maior_ganha_da_ordem_da_api() {
         use std::cmp::Ordering;
         assert_eq!(compare_version_strings("v1.1.9", "1.1.10"), Ordering::Less);
-        assert_eq!(compare_version_strings("1.1.10", "v1.1.9"), Ordering::Greater);
-        assert_eq!(compare_version_strings("v1.1.23", "1.1.22"), Ordering::Greater);
+        assert_eq!(
+            compare_version_strings("1.1.10", "v1.1.9"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_version_strings("v1.1.23", "1.1.22"),
+            Ordering::Greater
+        );
         // Sufixo de pré-release não muda a base: o projeto publica sempre
         // `-pre-alpha` e tratá-lo como "menor" travaria toda atualização.
         assert_eq!(
             compare_version_strings("1.1.23-pre-alpha", "1.1.22-pre-alpha"),
             Ordering::Greater
         );
-        assert_eq!(compare_version_strings("1.2.0", "1.2.0-pre-alpha"), Ordering::Equal);
+        assert_eq!(
+            compare_version_strings("1.2.0", "1.2.0-pre-alpha"),
+            Ordering::Equal
+        );
         assert_eq!(compare_version_strings("2.0", "1.9.99"), Ordering::Greater);
         // Patch com letra do Tauri (`10a`) conta como 10.
-        assert_eq!(compare_version_strings("1.1.10a", "1.1.10"), Ordering::Equal);
+        assert_eq!(
+            compare_version_strings("1.1.10a", "1.1.10"),
+            Ordering::Equal
+        );
     }
 
     /// Só o INSTALADOR de verdade é escolhido — não um portable/debug anexado.
@@ -723,17 +737,21 @@ mod tests {
             asset("DisTorrent_1.1.23-pre-alpha_amd64.deb"),
             asset("DisTorrent_1.1.23-pre-alpha_amd64.AppImage"),
         ];
-        assert!(pick_asset(&lista, "linux").unwrap().name.ends_with(".AppImage"));
+        assert!(pick_asset(&lista, "linux")
+            .unwrap()
+            .name
+            .ends_with(".AppImage"));
         let so_deb = vec![asset("DisTorrent_1.1.23-pre-alpha_amd64.deb")];
         assert!(pick_asset(&so_deb, "linux").unwrap().name.ends_with(".deb"));
     }
 
     #[test]
     fn android_escolhe_o_apk_arm64() {
-        let lista = vec![
-            asset("DisTorrent_1.1.23-pre-alpha_arm64.apk"),
-        ];
-        assert!(pick_asset(&lista, "android").unwrap().name.ends_with(".apk"));
+        let lista = vec![asset("DisTorrent_1.1.23-pre-alpha_arm64.apk")];
+        assert!(pick_asset(&lista, "android")
+            .unwrap()
+            .name
+            .ends_with(".apk"));
     }
 
     #[test]
