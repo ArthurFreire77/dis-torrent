@@ -219,6 +219,126 @@
           "markdownDescription": "Denies the is_enabled command without any pre-configured scope."
         },
         {
+          "description": "Enables the start command without any pre-configured scope.",
+          "type": "string",
+          "const": "bgservice:allow-start",
+          "markdownDescription": "Enables the start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the state command without any pre-configured scope.",
+          "type": "string",
+          "const": "bgservice:allow-state",
+          "markdownDescription": "Enables the state command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "bgservice:allow-stop",
+          "markdownDescription": "Enables the stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start command without any pre-configured scope.",
+          "type": "string",
+          "const": "bgservice:deny-start",
+          "markdownDescription": "Denies the start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the state command without any pre-configured scope.",
+          "type": "string",
+          "const": "bgservice:deny-state",
+          "markdownDescription": "Denies the state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "bgservice:deny-stop",
+          "markdownDescription": "Denies the stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the ringStart command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:allow-ringStart",
+          "markdownDescription": "Enables the ringStart command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the ringStop command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:allow-ringStop",
+          "markdownDescription": "Enables the ringStop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:allow-start",
+          "markdownDescription": "Enables the start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:allow-stop",
+          "markdownDescription": "Enables the stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ringStart command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:deny-ringStart",
+          "markdownDescription": "Denies the ringStart command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ringStop command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:deny-ringStop",
+          "markdownDescription": "Denies the ringStop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:deny-start",
+          "markdownDescription": "Denies the start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "callfg:deny-stop",
+          "markdownDescription": "Denies the stop command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "callnotif:allow-cancel",
+          "markdownDescription": "Enables the cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pendingAction command without any pre-configured scope.",
+          "type": "string",
+          "const": "callnotif:allow-pendingAction",
+          "markdownDescription": "Enables the pendingAction command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the show command without any pre-configured scope.",
+          "type": "string",
+          "const": "callnotif:allow-show",
+          "markdownDescription": "Enables the show command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "callnotif:deny-cancel",
+          "markdownDescription": "Denies the cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pendingAction command without any pre-configured scope.",
+          "type": "string",
+          "const": "callnotif:deny-pendingAction",
+          "markdownDescription": "Denies the pendingAction command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the show command without any pre-configured scope.",
+          "type": "string",
+          "const": "callnotif:deny-show",
+          "markdownDescription": "Denies the show command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",
@@ -2313,6 +2433,30 @@
           "markdownDescription": "Denies the unregister command without any pre-configured scope."
         },
         {
+          "description": "Enables the cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "msgnotif:allow-cancel",
+          "markdownDescription": "Enables the cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the show command without any pre-configured scope.",
+          "type": "string",
+          "const": "msgnotif:allow-show",
+          "markdownDescription": "Enables the show command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "msgnotif:deny-cancel",
+          "markdownDescription": "Denies the cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the show command without any pre-configured scope.",
+          "type": "string",
+          "const": "msgnotif:deny-show",
+          "markdownDescription": "Denies the show command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures which\nnotification features are by default exposed.\n\n#### Granted Permissions\n\nIt allows all notification related features.\n\n\n#### This default permission set includes:\n\n- `allow-is-permission-granted`\n- `allow-request-permission`\n- `allow-notify`\n- `allow-register-action-types`\n- `allow-register-listener`\n- `allow-remove-listener`\n- `allow-cancel`\n- `allow-get-pending`\n- `allow-remove-active`\n- `allow-get-active`\n- `allow-check-permissions`\n- `allow-show`\n- `allow-batch`\n- `allow-list-channels`\n- `allow-delete-channel`\n- `allow-create-channel`\n- `allow-permission-state`",
           "type": "string",
           "const": "notification:default",
@@ -2521,6 +2665,30 @@
           "type": "string",
           "const": "notification:deny-show",
           "markdownDescription": "Denies the show command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the canInstall command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-canInstall",
+          "markdownDescription": "Enables the canInstall command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the installApk command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:allow-installApk",
+          "markdownDescription": "Enables the installApk command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the canInstall command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-canInstall",
+          "markdownDescription": "Denies the canInstall command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the installApk command without any pre-configured scope.",
+          "type": "string",
+          "const": "updater:deny-installApk",
+          "markdownDescription": "Denies the installApk command without any pre-configured scope."
         }
       ]
     },
