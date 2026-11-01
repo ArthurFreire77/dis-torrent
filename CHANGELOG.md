@@ -172,14 +172,16 @@ entre aberturas.
 
 ### Verificação
 
-- **Frontend**: 279 testes unitários (novos: 13 da regra de saída + 5 de
-  versionamento), typecheck, lint e build verdes.
-- **Core Rust**: 205 testes de lib + integração (grupo/comunidade, salas, rede,
-  storage, voz) + **5 do updater** (escolha de versão e de asset por
-  plataforma).
+- **Frontend**: 282 testes unitários (novos: regra de saída, versionamento e
+  trava de 15 min do encerramento), typecheck, lint e build verdes.
+- **Core Rust** (WSL/Linux, que é onde o código de voz compila): `cargo test
+  --lib` 235 passed / 0 failed; `cargo fmt --check` e `cargo clippy
+  --all-targets` sem erro (3 warnings pré-existentes em `media_voice.rs`).
+  `src-tauri`: `cargo check --lib` OK.
 - **e2e (Playwright)**: `call-rejoin` (chamar → sair → chamar de novo, duas
-  direções), `calls`, `call-phases` — **6/6 verdes**. Antes da correção da regra
-  de coletividade, `call-rejoin` falhava nas duas direções.
+  direções), `calls`, `call-phases` — **6/6 verdes**, rodados nesta máquina.
+  Antes da correção da regra de coletividade, `call-rejoin` falhava nas duas
+  direções.
 - `tests/latency_bench.rs::relay_mqtt_real_rtt` não roda offline (usa brokers
   MQTT públicos reais) — não é teste funcional.
 - **Não validado em aparelho real**: mesh de grupo com 3+ aparelhos físicos e o
