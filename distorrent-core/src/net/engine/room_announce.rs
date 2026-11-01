@@ -303,6 +303,26 @@ impl NetworkEngine {
             .store
             .ensure_dm_conversation(&self.identity.fingerprint, peer_fp, "");
         if state == "closed" {
+            // SÓ O HOST encerra a sala. Qualquer participante que saía mandava
+            // `closed` e a sala sumia para todos — mesmo com a chamada viva
+            // entre os que ficaram (ninguém mais conseguia entrar).
+            // Sala desconhecida aceita o fechamento, senão ficaria órfã na UI.
+            let existe = {
+                let rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
+                rooms.get(conv_id).is_some()
+            };
+            if existe {
+                let eh_host = {
+                    let rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
+                    rooms
+                        .get(conv_id)
+                        .map(|r| r.host_fp == peer_fp)
+                        .unwrap_or(false)
+                };
+                if !eh_host {
+                    return;
+                }
+            }
             let fechada = {
                 let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
                 rooms.close(conv_id)

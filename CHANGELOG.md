@@ -69,6 +69,79 @@ anúncio: os outros continuavam vendo "Entrar" numa chamada que não existia.
 - Script `scripts/find-orphans.mjs`: acha código-fonte sem importador (0 órfãos
   hoje).
 
+## [1.1.22-pre-alpha] — 2026-11-01
+
+### CAUSA RAIZ do áudio mudo no Android: os plugins nunca eram autorizados
+
+`src-tauri/build.rs` só chamava `tauri_build::build()`, então os cinco plugins
+Kotlin (`callfg`, `bgservice`, `callnotif`, `msgnotif`, `updater`) **não tinham
+manifesto ACL**. O Tauri 2 rejeita todo `plugin:*` sem manifesto antes de chegar
+ao Kotlin, e o JS engolia o erro.
+
+Consequência em cadeia — exatamente os relatos:
+
+- `plugin:callfg|start` negado → **nunca existia foreground service** → o
+  Android 14+ corta microfone/câmera em segundo plano → **áudio mudo**;
+- `plugin:bgservice|start` negado → o WebView era pausado → **a sinalização de
+  chamada congelava em segundo plano**;
+- `plugin:callnotif|show` negado → **nenhuma notificação de chamada**;
+- `plugin:bgservice|stop` negado → os serviços **sobreviviam ao "Sair"**.
+
+Agora os plugins são declarados no build (checando `CARGO_CFG_TARGET_OS` em
+**runtime** — `#[cfg(target_os)]` dentro de um build script é avaliado para o
+host, não para o alvo) e existe uma capability própria `android.json` com
+`platforms: ["android"]`. O manifesto é gerado e os comandos chegam ao Kotlin.
+
+### Outros bugs encontrados na auditoria (10 agentes em paralelo)
+
+**Áudio**
+- Dois `<audio>` tocando a mesma trilha: no tile de tela (que usa o stream da
+  câmera como fallback) e num bloco duplicado no mobile → voz dobrada. O áudio
+  agora é só do tile de pessoa.
+- A recuperação de mic **nunca renegociava**: a detecção contava *senders*, e
+  `addTrack` reusa o sender vazio criado por `ensureMlines`. Agora detecta a
+  track que passou a existir.
+- Mic capturado durante o share era enviado pelo sender da tela e morria ao
+  parar de compartilhar. Agora vai pelo caminho de voz.
+- Mic capturado no share ignorava o **mute** — falha de privacidade.
+
+**Chamada em grupo**
+- `enterRoom` não drenava offers retidas: o host oferecia durante o
+  `getLocalMedia` e o par ficava em "Conectando…" para sempre.
+- `start()` de grupo não apresentava os convidados entre si (B e C nunca se
+  conheciam); e o reparo de malha só existia no canal de voz.
+- Par preso em `connecting` nunca era refeito.
+- Qualquer participante que saía **fechava a sala anunciada para todos**; e o
+  TTL era renovado por qualquer um, deixando sala fantasma com host morto.
+
+**Ciclo de vida**
+- `collectiveRoom` não era zerada no aceite por ring → DM aceita depois de um
+  grupo nunca encerrava.
+- `endedCalls` gravava callId de canal de voz (`voice-<c>-<ch>` é estável), e
+  reentrar no mesmo canal descartava offers e candidatos ICE em silêncio.
+- `onPeerGone` derrubava chamada **nativa** viva em qualquer hiccup de
+  transporte (o RTP do core é independente da sessão de transporte).
+
+**Tela**
+- `recaptureScreen` não recoletava o áudio: trocar fonte/áudio matava o som.
+- `onended` da captura antiga derrubava o share **novo** (corrida na troca).
+- `restrictOwnAudio` era string (`'include'`), não booleano — a proteção contra
+  eco nunca aplicava.
+
+**Android**
+- `MODE_IN_COMMUNICATION` sem restauração e com viva-voz forçado (som ia para o
+  alto-falante mesmo com fone/Bluetooth).
+
+### Verificação
+
+- **Frontend**: 267 testes unitários, typecheck, lint e build verdes.
+- **Core Rust**: 228 testes.
+- **Android**: `cargo check --target aarch64-linux-android` compila e o
+  `acl-manifests.json` passa a listar os cinco plugins.
+- **Não validado em aparelho**: a confirmação final é `adb logcat | grep ACL`
+  durante uma chamada — se os comandos chegarem ao Kotlin, o áudio e o
+  background devem se comportar.
+
 ## [1.1.21-pre-alpha] — 2026-10-31
 
 ### "Conecta mas não sai áudio"

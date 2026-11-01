@@ -46,9 +46,12 @@ test('regressão: "tela inteira" NÃO esconde os monitores no seletor do sistema
 
 test('regressão: áudio do sistema pede restrictOwnAudio (evita eco de retorno)', () => {
   const withSystem = buildDisplayMediaConstraints(opts({ audio: 'system' }), ENV)
-  assert.equal(withSystem.restrictOwnAudio, 'include')
+  // `restrictOwnAudio` é BOOLEANO na spec do getDisplayMedia. Passar string
+  // fazia o engine ignorar a proteção — o loopback devolvia a voz dos
+  // participantes e virava eco.
+  assert.equal(withSystem.restrictOwnAudio, true)
   const none = buildDisplayMediaConstraints(opts({ audio: 'none' }), ENV)
-  assert.equal(none.restrictOwnAudio, 'exclude')
+  assert.equal(none.restrictOwnAudio, false)
 })
 
 test('regressão: sem escala dupla — 720p sai 720p, não 640×360', () => {

@@ -101,27 +101,31 @@ class CallForegroundService : Service() {
   }
 
   /**
-   * Roteia o áudio para CHAMADA (viva-voz) enquanto o serviço está vivo.
+   * Roteia o áudio para CHAMADA enquanto o serviço está vivo.
    *
-   * POR QUE ISTO EXISTE: o `<audio>` do WebView toca no canal de MÍDIA, e o
-   * Android por padrão manda mídia para o alto-falante — mas sem
-   * `MODE_IN_COMMUNICATION` o volume de chamada não é aplicado, o eco do
-   * cancelador não atua e em vários aparelhos o som simplesmente não sai
-   * (o clássico "conectou e ficou mudo"). Este é o ajuste que uma chamada de
-   * verdade faz; o WebView não faz por nós.
+   * POR QUE ISTO EXISTE: sem `MODE_IN_COMMUNICATION` o Android não aplica o
+   * volume de chamada nem o cancelador de eco, e em vários aparelhos o som não
+   * sai (o "conectou e ficou mudo"). O WebView não faz esse ajuste por nós.
+   *
+   * NÃO forçamos viva-voz: com fone com fio ou Bluetooth conectado isso jogava
+   * o som no alto-falante ("não sai no fone"). O Android escolhe a rota
+   * sozinho entre os dispositivos disponíveis.
    */
   private fun applyAudioRouting() {
     try {
       val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
       am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-      am.isSpeakerphoneOn = true
+      audioApplied = true
     } catch (_: Throwable) { /* ROM sem AudioManager: o WebView segue no padrão */ }
   }
 
   private fun restoreAudioRouting() {
+    // Só restaura o que alteramos: clobber do modo em ROM que nunca aplicou
+    // deixava o aparelho preso em modo de chamada depois de um crash.
+    if (!audioApplied) return
+    audioApplied = false
     try {
       val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-      am.isSpeakerphoneOn = false
       am.mode = android.media.AudioManager.MODE_NORMAL
     } catch (_: Throwable) { }
   }
@@ -174,5 +178,8 @@ class CallForegroundService : Service() {
     @Volatile
     var isRunning: Boolean = false
       private set
+    /** O modo de áudio foi realmente alterado? (não restaurar o que não mexemos) */
+    @Volatile
+    private var audioApplied: Boolean = false
   }
 }

@@ -1157,20 +1157,25 @@ export class CallManager {
           const me = this.getIdentity()
           if (me) {
             this.myFp = me.fingerprint
-            this.state = {
-              callId: String(ev.call_id),
-              kind: (ev.kind === 'video' ? 'video' : 'voice') as CallKind,
-              convId: '',
-              phase: 'incoming',
-              muted: false,
-              deafened: false,
-              cameraOn: false,
-              sharing: false,
-              participants: [{ fp: me.fingerprint, nickname: me.nickname }],
-              startAt: Date.now(),
-              quality: this.quality,
-              ...(nativeVoiceAvailable === true ? { nativeMedia: true } : {}),
-            } as unknown as CallState
+          this.state = {
+            callId: String(ev.call_id),
+            kind: (ev.kind === 'video' ? 'video' : 'voice') as CallKind,
+            convId: '',
+            phase: 'incoming',
+            muted: false,
+            deafened: false,
+            cameraOn: false,
+            sharing: false,
+            participants: [{ fp: me.fingerprint, nickname: me.nickname }],
+            startAt: Date.now(),
+            quality: this.quality,
+            ...(nativeVoiceAvailable === true ? { nativeMedia: true } : {}),
+          } as unknown as CallState
+          // RING É CHAMADA NOVA: sem este reset, a trava `collectiveRoom` de
+          // um grupo/canal anterior fazia a DM seguinte nunca encerrar quando o
+          // outro desligava (o overlay ficava preso em "Conectado").
+          this.collectiveRoom = false
+          this.stopMicRecovery()
             this.startIncomingWatchdog()
             this.onUpdate({ ...this.state })
           }
@@ -1639,6 +1644,10 @@ export class CallManager {
       if (!st || !fp || fp === this.myFp) return
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) return // não é desta chamada
+      // NATIVO: `peer_offline` é queda de TRANSPORTE (troca de rede, reeleição
+      // de relay) e o RTP do core é independente dela. Sem esta guarda, cada
+      // hiccup marcava 'ice-failed' e o watchdog matava a chamada nativa viva.
+      if ((st as any).nativeMedia) return
       p.disconnected = true
       // TRANSPORTE ≠ MÍDIA: peer_offline (queda de transporte) não derruba chamada viva via ICE.
       const pc = this.pcs.get(fp)
@@ -1876,6 +1885,7 @@ export class CallManager {
       } as unknown as CallState
       this.startNativeVoiceMonitor(callId)
       this.publishRoom()
+      this.startMeshRepair(this.state.callId)
       this.onUpdate({ ...this.state })
       this.startCallForeground()
       return this.state
@@ -1925,8 +1935,19 @@ export class CallManager {
       if (fp === me.fingerprint) continue
       await this.createPC(fp, callId, true)
     }
+    // MALHA DE GRUPO: apresenta os CONVIDADOS uns aos outros. Sem isto eu
+    // chamava B e C, cada um só falava comigo e eles nunca se conheciam —
+    // em 3 pessoas dois ouviam o terceiro e não se ouviam entre si. É só
+    // aviso de roster (`kind` vazio): não toca o telefone de ninguém.
+    for (const alvo of convidados) {
+      for (const outro of convidados) {
+        if (outro === alvo) continue
+        services.callAddParticipant(alvo, callId, outro, '').catch(() => { /* best-effort */ })
+      }
+    }
     // para grupo >10, convida resto via CallAddParticipant (engine relay)
     this.publishRoom()
+    this.startMeshRepair(this.state.callId)
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -2065,6 +2086,7 @@ export class CallManager {
     this.startQualityMonitor()
     // Canal de voz: a barra do canal já mostra quem está; só publica em DM/grupo.
     this.publishRoom()
+    this.startMeshRepair(this.state.callId)
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -2210,6 +2232,9 @@ export class CallManager {
     }
     if (this.state && this.state.callId === callId) {
       if (this.state.phase === 'incoming') this.applyPhase('accept')
+      // Aceite pelo ring é chamada NOVA: a trava de coletividade da chamada
+      // anterior não pode valer aqui (senão a DM nunca encerra).
+      this.collectiveRoom = false
       if (!this.state.convId && convId) this.state.convId = convId
       if (!this.state.participants.find(p => p.fp === fromFp)) {
         this.state.participants.push({ fp: fromFp, nickname: nickname ?? fromFp.slice(0, 6) })
@@ -3074,6 +3099,8 @@ export class CallManager {
       this.stopOutgoingWatchdog()
       this.stopIncomingWatchdog()
       this.clearIceRestartTimers()
+      this.stopMicRecovery()
+      this.stopCallForeground()
       try { this.stopRelayFull() } catch { /* ignore */ }
       this.badWindows = 0
       this.prevLost.clear()
@@ -3270,12 +3297,26 @@ export class CallManager {
     try {
       this.rosterTimer = setInterval(tick, 10_000)
     } catch { this.rosterTimer = null }
-    // REPARO DE PAR HALF-OPEN: tick de 15s refaz offer do lado de fp maior em par não conectado.
+    // O reparo periódico do mesh vive em `startMeshRepair` (usado também por
+    // `start`/`enterRoom`, não só pelo canal de voz).
+    this.startMeshRepair(callId)
+  }
+
+  /**
+   * Reparo periódico do mesh (15 s): reapresenta a sala e refaz pares presos.
+   *
+   * Antes isso só existia em `joinVoice` (canal de voz). Em chamada de grupo
+   * por DM/grupo, uma offer perdida no início — ou um par preso em
+   * `connecting` — nunca era refeita: o "conecta e não conecta".
+   */
+  private startMeshRepair(callId: string) {
+    if (this.repairTimer) return
     try {
       this.repairTimer = setInterval(() => {
         const st = this.state
         if (!st || st.callId !== callId) { this.stopRosterReconcile(); return }
-        // Reapresentação periódica: entrega perdida de CallAddParticipant deixava pares sem malha p/ sempre.
+        // Reapresentação periódica: `CallAddParticipant` perdido deixava pares
+        // sem malha para sempre.
         this.announceSelfToRoom(callId)
         void this.repairHalfOpenPairs().catch(() => { /* reparo é best-effort */ })
       }, 15_000)
@@ -3533,7 +3574,13 @@ export class CallManager {
   /** Reage a fim/mute da track de tela: mute é NORMAL (troca de monitor), ended é fim real. */
   private watchScreenTrack(track: MediaStreamTrack): void {
     try {
-      track.onended = () => { void this.handleScreenEnded() }
+      // SÓ a track ATUAL pode encerrar o share. Sem esta checagem, o `onended`
+      // da captura antiga (janela fechada/portal cancelando durante a troca de
+      // fonte) derrubava o compartilhamento NOVO — a instabilidade relatada.
+      track.onended = () => {
+        if (this.screenStream?.getVideoTracks()[0] !== track) return
+        void this.handleScreenEnded()
+      }
       track.onmute = () => { this.noteScreenEvent('captura pausada pelo sistema (fonte oculta, monitor trocado ou app em segundo plano)') }
       track.onunmute = () => { this.noteScreenEvent('captura retomada') }
     } catch { /* engines sem onmute: só onended */ }
@@ -3647,8 +3694,13 @@ export class CallManager {
         // duplicaria a voz do usuário (eco/comb-filter).
       } else {
         const captured = await this.captureShareMicrophone()
-        if (captured) out.push(captured)
-        else this.noteScreenEvent('microfone indisponível — compartilhando sem a sua voz')
+        if (captured) {
+          // NÃO entra em `out`: o mic capturado vive em `localStream` e é
+          // enviado pelo CAMINHO DE VOZ. Mande-o pelo sender da tela e
+          // `clearScreenAudioSenders` o zerava ao parar o share — era o
+          // "paro de compartilhar e o áudio morre".
+          this.attachMissingLocalTracks()
+        } else this.noteScreenEvent('microfone indisponível — compartilhando sem a sua voz')
       }
     }
     return out
@@ -3662,6 +3714,10 @@ export class CallManager {
     } catch { return null }
     const track = captured?.getAudioTracks()[0] ?? null
     if (!track) return null
+    // RESPEITA O MUTE: sem isto, começar a compartilhar com o usuário MUDO
+    // ativava o mic e o outro lado ouvia — enquanto a UI dizia "mudo".
+    // Falha de privacidade, não só de áudio.
+    try { track.enabled = !this.state?.muted } catch { /* track sem enabled */ }
     try {
       if (this.localStream) this.localStream.addTrack(track)
       else this.localStream = captured
@@ -3784,6 +3840,13 @@ export class CallManager {
         throw new ScreenShareError('no-source', 'nenhuma trilha de vídeo na tela compartilhada', true)
       }
       this.stopScreenStatsTimer()
+      // GERAÇÃO: o usuário pode ter parado o share enquanto o seletor estava
+      // aberto. Sem esta checagem, o `await` acima "ressuscitava" a captura:
+      // stream vivo invisível + timer de 1 s rodando para sempre.
+      if (wasSharing && !this.state?.sharing) {
+        try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
+        return
+      }
       await this.clearScreenAudioSenders()
       this.stopScreenStreamOnly()
       this.screenMonitor.detach()
@@ -3791,7 +3854,11 @@ export class CallManager {
       this.watchScreenTrack(track)
       this.screenMonitor.attach(track)
       await this.tuneScreenTrack(track)
-      await this.seedScreenPeers(stream, track)
+      // ÁUDIO DA TELA: a recaptura precisa recoletar. Antes ela passava só o
+      // vídeo para `seedScreenPeers`, então trocar a fonte/áudio matava o som
+      // do compartilhamento sem avisar.
+      const audioTracks = await this.collectScreenAudioTracks(stream)
+      await this.seedScreenPeers(stream, track, audioTracks)
       this.startScreenStatsTimer()
       if (!wasSharing && this.state) {
         this.state.sharing = true
@@ -4047,14 +4114,24 @@ export class CallManager {
     } catch { /* navegador sem addTransceiver: segue como está */ }
   }
 
-  /** Anexa mídia local a TODOS os PCs e devolve os fps que ganharam tracks novas. */
+  /**
+   * Anexa mídia local a TODOS os PCs e devolve os fps que ganharam track nova.
+   *
+   * BUG QUE ISTO CORRIGE: a detecção era `pc.getSenders().length`. Quando o mic
+   * não abria no início, `ensureMlines` já criava a transceiver de áudio com
+   * sender de `track === null`, e `addTrack` REUSA esse sender (spec) sem
+   * aumentar a contagem. Resultado: a recuperação de mic dizia "conectado",
+   * nunca renegociava e o outro lado continuava sem ouvir.
+   */
   private attachMissingLocalTracks(): string[] {
     const changed: string[] = []
     for (const [fp, pc] of this.pcs) {
       try {
-        const before = pc.getSenders().length
+        const antes = new Set(pc.getSenders().map((s) => s.track).filter(Boolean))
         this.attachLocalStreamToPC(pc)
-        if (pc.getSenders().length > before) changed.push(fp)
+        const ganhou = pc.getSenders().some((s) => s.track && !antes.has(s.track))
+        // Também conta quando o sender existia vazio e passou a ter track.
+        if (ganhou) changed.push(fp)
       } catch { /* peer isolado não derruba os demais */ }
     }
     return changed
@@ -4381,7 +4458,10 @@ export class CallManager {
           continue
         } catch { /* cai para recriar abaixo */ }
       }
-      if (!pc || cs === 'failed' || cs === 'closed') {
+      // `connecting` também entra: um par preso em ICE `checking` (offer/answer
+      // trocados, candidato perdido) não casava com nenhum ramo e ficava mudo
+      // para sempre — é o "conecta e não conecta" típico de mesh 3+.
+      if (!pc || cs === 'failed' || cs === 'closed' || cs === 'connecting' || !cs) {
         void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
       }
     }
@@ -4730,6 +4810,7 @@ export class CallManager {
       } as unknown as CallState
       this.startNativeVoiceMonitor(callId)
       this.publishRoom()
+      this.startMeshRepair(this.state.callId)
       this.onUpdate({ ...this.state })
       this.startCallForeground()
       return this.state
@@ -4765,15 +4846,31 @@ export class CallManager {
     this.startConnectWatchdog()
     this.startQualityMonitor()
     this.ensureRelayTransport()
-    // Abre PC para cada um que já estava na sala. REGRA ANTI-GLARE: só o lado
-    // de fp MAIOR inicia a offer. Aqui era `initiator: true` para todos, e o
-    // outro lado também oferecia (aviso de roster) → offer+offer simultâneo e a
-    // negociação travava em "Conectando…". É o mesmo critério de `voice_joined`.
+    // QUEM OFERECE: só o lado de fp MAIOR. Os dois lados abrem PC (quem
+    // entrou pela sala e quem já estava nela), e offer+offer simultâneo
+    // travava a negociação - era o "cliquei Entrar e não conectou".
     for (const fp of new Set([...alvos, ...fps.filter((f) => f && f !== me.fingerprint)])) {
       const iniciar = !!this.myFp && this.myFp > fp
       await this.createPC(fp, callId, iniciar).catch(() => { /* par best-effort */ })
     }
+    // DRENA as offers retidas: o host reage ao aviso de roster e manda offer
+    // ENQUANTO ainda estamos no `getLocalMedia` (prompt de microfone). Sem
+    // este dreno a offer fica no Map para sempre e o par não sai de
+    // "Conectando…". `joinVoice` e `acceptInbound` já faziam isso; `enterRoom`
+    // não fazia — era o "Entrar" travado.
+    try {
+      for (const fp of [...this.pendingOffers.keys()]) {
+        const pend = this.pendingOffers.get(fp)
+        if (!pend || pend.callId !== callId) continue
+        this.pendingOffers.delete(fp)
+        await this.handleOffer(fp, pend.callId, pend.sdp).catch(() => { /* par best-effort */ })
+      }
+    } catch { /* offer pendente nunca derruba o join */ }
+    // Rede de segurança da malha: quem entrou agora precisa conhecer quem já
+    // estava (um 3º entrante perdia o 2º).
+    this.announceSelfToRoom(callId)
     this.publishRoom()
+    this.startMeshRepair(this.state.callId)
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -4832,10 +4929,16 @@ export class CallManager {
     // Guarda o callId encerrado para `canAccept` barar aceite tardio. Com teto:
     // uma sessão longa não deveria acumular milhares de ids.
     if (this.state) {
-      this.endedCalls.add(this.state.callId)
-      if (this.endedCalls.size > 64) {
-        const maisAntigo = this.endedCalls.values().next().value
-        if (maisAntigo) this.endedCalls.delete(maisAntigo)
+      // CANAL DE VOZ não entra em `endedCalls`: o id é ESTÁVEL (`voice-<c>-<ch>`),
+      // então ao reentrar no mesmo canal as offers e os candidatos ICE eram
+      // descartados em `handleOffer`/`handleIce` — "entrei no canal e não se
+      // ouve", sem erro nenhum.
+      if (!this.state.callId.startsWith('voice-')) {
+        this.endedCalls.add(this.state.callId)
+        if (this.endedCalls.size > 64) {
+          const maisAntigo = this.endedCalls.values().next().value
+          if (maisAntigo) this.endedCalls.delete(maisAntigo)
+        }
       }
     }
     this.state = null

@@ -83,14 +83,14 @@ export function CallTile({
    * DEPOIS (offer → ontrack → re-render). Sem este efeito, o `<audio>` ficava
    * montado com `srcObject` nulo e a chamada ficava muda.
    */
-  const audioSrc = tile.audioStream ?? tile.stream
+  const audioSrc = tile.kind === 'screen' || tile.isLocal ? null : (tile.audioStream ?? tile.stream)
   useEffect(() => {
-    if (tile.isLocal || !audioSrc) return
+    if (!audioSrc) return
     const el = audioRef.current
     if (!el) return
     attachStream(el, audioSrc)
     applyParticipantPlayback(el, tile.fp, callDeafened)
-  }, [tile.isLocal, tile.fp, audioSrc, callDeafened])
+  }, [tile.isLocal, tile.kind, tile.fp, audioSrc, callDeafened])
 
   // Proporção real da fonte: no primeiro frame e a cada mudança de resolução.
   const syncAspect = useCallback(() => {
@@ -349,13 +349,16 @@ export function CallTile({
         <ParticipantAudioControls fp={tile.fp} nickname={tile.nickname} callDeafened={callDeafened} />
       )}
 
-      {/* Áudio remoto SEMPRE presente. Usa `audioStream` (independente de
-          vídeo): numa chamada de voz ou com a câmera do outro desligada o
-          `stream` é vazio, e condicionar o <audio> a ele deixava a chamada
-          muda.
+      {/* Áudio remoto SEMPRE presente, mas SÓ no tile de PESSOA. O tile de
+          tela usa o mesmo stream da câmera como fallback (quando o outro lado
+          não manda transmissão separada) — montar <audio> nos dois tocava a
+          mesma trilha em dobro: voz dobrada (+6 dB e filtro em pente).
+          Usa `audioStream` (independente de vídeo): numa chamada de voz ou com
+          a câmera do outro desligada o `stream` é vazio, e condicionar o
+          <audio> a ele deixava a chamada muda.
           NÃO usar `hidden`: no WebView do Android o elemento com display:none
           às vezes não inicia a reprodução. Fora da tela, mas renderizado. */}
-      {!tile.isLocal && (tile.audioStream ?? tile.stream) && (
+      {!tile.isLocal && !isScreen && (tile.audioStream ?? tile.stream) && (
         <audio
           autoPlay
           playsInline

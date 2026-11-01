@@ -34,10 +34,13 @@ impl Rooms {
     ) -> Room {
         match self.map.get_mut(conv_id) {
             Some(r) if r.call_id == call_id => {
+                // Só o HOST renova o TTL. Antes qualquer publish renovava: com
+                // o host morto, os joiners mantinham a sala viva para sempre e
+                // o "Entrar" aparecia numa chamada que não existe mais.
                 if r.host_fp == publisher_fp {
                     r.participants = participants;
+                    r.updated_ms = now_ms;
                 }
-                r.updated_ms = now_ms;
                 r.clone()
             }
             _ => {

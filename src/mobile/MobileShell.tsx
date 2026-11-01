@@ -15,11 +15,9 @@ import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import { downloadManager } from '../services/downloadManager'
 import { startDownload } from '../services/downloadAction'
-import { applyParticipantPlayback } from '../services/callPlayback'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
-import { attachStream } from '../shared/mediaAttach'
 import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import {
@@ -2101,19 +2099,10 @@ export default function MobileShell() {
         {activeCall && (
           <div data-testid="mobile-call-panel" style={{ margin: '10px 12px 0', background: t.panel, border: `1px solid ${t.green}55`, borderRadius: 12, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, maxHeight: callPanelSize === 'compact' ? 190 : callPanelSize === 'normal' ? '46vh' : '68vh', overflowY: 'auto', transition: 'max-height 180ms ease' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {(activeCall.participants ?? []).filter((p: any) => p.fp !== identity?.fingerprint && p.stream).map((p: any) => (
-                <audio
-                  key={p.fp}
-                  autoPlay
-                  playsInline
-                  data-call-audio-fp={p.fp}
-                  ref={(el: HTMLAudioElement | null) => {
-                    attachStream(el, p.stream)
-                    if (el) applyParticipantPlayback(el, p.fp, !!activeCall.deafened)
-                  }}
-                  style={{ display: 'none' }}
-                />
-              ))}
+              {/* O áudio remoto é do `CallTile` (um <audio> por participante).
+                  Este bloco montava um SEGUNDO <audio> com o mesmo stream:
+                  voz dobrada onde tocava, e volume/mute aplicado em dois
+                  elementos. Removido. */}
               <span style={{ fontSize: 13, fontWeight: 800, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={15} /> : <Icon d={Icons.phone} size={15} />} Em chamada • {fmtCallDuration(callDuration)} • {(activeCall.participants ?? []).length} na sala</span>
               </span>

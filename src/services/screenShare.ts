@@ -275,7 +275,11 @@ export function buildDisplayMediaConstraints(
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
     // Loopback inclui a voz dos próprios participantes (eco); engines antigos ignoram.
-    restrictOwnAudio: wantsSystemAudio ? 'include' : 'exclude',
+    // `restrictOwnAudio` é BOOLEANO no getDisplayMedia: `true` filtra o áudio
+    // produzido pela própria aba (evita o loopback devolver a voz dos
+    // participantes que toca aqui dentro). Passar string fazia o engine
+    // ignorar a proteção — era o risco de eco ao compartilhar o sistema.
+    restrictOwnAudio: wantsSystemAudio,
     selfBrowserSurface: 'exclude',
     surfaceSwitching: env.surfaceSwitching ? 'include' : 'exclude',
     // `exclude` remove monitores do seletor (e o áudio do sistema junto) — só

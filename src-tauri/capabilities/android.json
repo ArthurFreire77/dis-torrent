@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "android-plugins",
+  "description": "Plugins Android próprios (foreground service, notificações, atualizador). Só existem no Android: declarar no desktop quebraria o build.",
+  "windows": ["main"],
+  "platforms": ["android"],
+  "permissions": [
+    "callfg:default",
+    "bgservice:default",
+    "callnotif:default",
+    "msgnotif:default",
+    "updater:default"
+  ]
+}
