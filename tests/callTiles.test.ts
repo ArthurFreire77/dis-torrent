@@ -37,6 +37,47 @@ function fakeStream(opts: { video?: boolean; live?: boolean } = {}): MediaStream
 const ME = 'aaaaaaaaaaaa'
 const PEER = 'bbbbbbbbbbbb'
 
+// O relato "conectou e não sai som": o `<audio>` só era montado com `stream`,
+// e `stream` exige trilha de VÍDEO viva. Numa chamada de voz (ou com a câmera
+// do outro desligada) o áudio existia e nunca tocava.
+test('chamada de VOZ remota tem audioStream mesmo sem video', () => {
+  const stream = fakeStream({ video: false })
+  const tiles = buildCallTiles({
+    myFp: ME,
+    participants: [{ fp: PEER, nickname: 'Fepo', stream, cameraOn: false }],
+  })
+  const peer = tiles.find((t) => t.fp === PEER)
+  assert.ok(peer, 'o quadrado do peer precisa existir')
+  assert.equal(peer.stream, undefined, 'sem vídeo vivo não há <video>')
+  assert.equal(
+    peer.audioStream,
+    stream,
+    'sem audioStream o <audio> não é montado e a chamada fica muda',
+  )
+})
+
+test('camera desligada não tira o audio do peer', () => {
+  const stream = fakeStream({ video: true, live: false })
+  const tiles = buildCallTiles({
+    myFp: ME,
+    participants: [{ fp: PEER, stream, cameraOn: false }],
+  })
+  const peer = tiles.find((t) => t.fp === PEER)!
+  assert.equal(peer.stream, undefined)
+  assert.equal(peer.audioStream, stream)
+})
+
+test('meu próprio quadrado não pede áudio remoto', () => {
+  const mine = fakeStream()
+  const tiles = buildCallTiles({
+    myFp: ME,
+    participants: [{ fp: ME }],
+    local: { stream: mine, cameraOn: true },
+  })
+  const eu = tiles.find((t) => t.isLocal)!
+  assert.equal(eu.audioStream, undefined, 'áudio local não pode ecoar')
+})
+
 test('câmera local aparece no MEU quadrado sem depender do roster', () => {
   // O roster pode não ter o stream local (caminho nativo ou roster criado
   // antes do getUserMedia). A mídia do "eu" vem de `local.stream`.

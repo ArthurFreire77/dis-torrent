@@ -69,6 +69,49 @@ anúncio: os outros continuavam vendo "Entrar" numa chamada que não existia.
 - Script `scripts/find-orphans.mjs`: acha código-fonte sem importador (0 órfãos
   hoje).
 
+## [1.1.21-pre-alpha] — 2026-10-31
+
+### "Conecta mas não sai áudio"
+
+Três causas independentes, todas atacadas:
+
+**1. O `<audio>` só existia quando havia vídeo.** O elemento era montado com
+`tile.stream`, e `stream` só recebe valor quando existe trilha de **vídeo**
+viva (para não mostrar `<video>` preto). Numa chamada de voz — ou com a câmera
+do outro desligada — o áudio chegava, mas não havia elemento nenhum para
+tocar. Agora existe `audioStream`, independente do vídeo, e o `<audio>` usa
+ele.
+
+**2. `hidden` no Android.** O elemento usava o atributo `hidden`, que aplica
+`display:none`; no WebView do Android isso pode impedir o `play()`. Agora fica
+fora da tela, mas renderizado.
+
+**3. O Android nunca era posto em modo de chamada.** Nenhum código configurava
+`AudioManager`. Sem `MODE_IN_COMMUNICATION` e viva-voz, o Android não aplica o
+volume de chamada e em vários aparelhos o som simplesmente não sai. Adicionado
+ao serviço de chamada, com restauração ao encerrar (sem restaurar, a mídia do
+aparelho fica presa no fone do ouvido).
+
+Além disso, o stream remoto chega **depois** da montagem (offer → `ontrack`), e
+o `ref` do React não roda de novo: agora um efeito reaplica `srcObject` e chama
+`play()` sempre que o stream muda.
+
+### Chamada em grupo travada em "Conectando…"
+
+`enterRoom` abria conexão para todos com `initiator: true`, quebrando a regra
+anti-glare (só o lado de fingerprint maior inicia). Os dois lados mandavam
+offer ao mesmo tempo e a negociação travava. Agora segue o mesmo critério de
+`voice_joined`.
+
+### Verificação
+
+- **Frontend**: 267 testes unitários (3 novos de áudio), typecheck, lint e
+  build verdes.
+- **E2E**: `call-audio.spec.ts` passa — monta o tile de uma chamada de voz,
+  confirma que `audioStream` existe sem vídeo e carrega trilha de áudio real.
+- **Não validado em aparelho real**: o roteamento de áudio do Android depende
+  do aparelho; foi implementado conforme o padrão de chamada da plataforma.
+
 ## [1.1.20-pre-alpha] — 2026-10-31
 
 ### Grupo apagado "só para mim" reaparecia depois de um tempo

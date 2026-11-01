@@ -72,8 +72,25 @@ export function CallTile({
   onOpenProfile,
 }: CallTileProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
   const [aspect, setAspect] = useState<string | null>(null)
   const isScreen = tile.kind === 'screen'
+
+  /**
+   * RE-APLICA o áudio quando o stream remoto chega.
+   *
+   * O `ref` só roda quando o elemento monta; o stream remoto quase sempre chega
+   * DEPOIS (offer → ontrack → re-render). Sem este efeito, o `<audio>` ficava
+   * montado com `srcObject` nulo e a chamada ficava muda.
+   */
+  const audioSrc = tile.audioStream ?? tile.stream
+  useEffect(() => {
+    if (tile.isLocal || !audioSrc) return
+    const el = audioRef.current
+    if (!el) return
+    attachStream(el, audioSrc)
+    applyParticipantPlayback(el, tile.fp, callDeafened)
+  }, [tile.isLocal, tile.fp, audioSrc, callDeafened])
 
   // Proporção real da fonte: no primeiro frame e a cada mudança de resolução.
   const syncAspect = useCallback(() => {
@@ -332,16 +349,22 @@ export function CallTile({
         <ParticipantAudioControls fp={tile.fp} nickname={tile.nickname} callDeafened={callDeafened} />
       )}
 
-      {/* Áudio remoto SEMPRE presente (antes vivia no ramo do vídeo e a voz
-          ficava muda). */}
-      {!tile.isLocal && tile.stream && (
+      {/* Áudio remoto SEMPRE presente. Usa `audioStream` (independente de
+          vídeo): numa chamada de voz ou com a câmera do outro desligada o
+          `stream` é vazio, e condicionar o <audio> a ele deixava a chamada
+          muda.
+          NÃO usar `hidden`: no WebView do Android o elemento com display:none
+          às vezes não inicia a reprodução. Fora da tela, mas renderizado. */}
+      {!tile.isLocal && (tile.audioStream ?? tile.stream) && (
         <audio
           autoPlay
           playsInline
-          hidden
           data-call-audio-fp={tile.fp}
+          aria-hidden
+          style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none', left: -9999 }}
           ref={(el: HTMLAudioElement | null) => {
-            attachStream(el, tile.stream)
+            audioRef.current = el
+            attachStream(el, tile.audioStream ?? tile.stream)
             if (el) applyParticipantPlayback(el, tile.fp, callDeafened)
           }}
         />

@@ -62,6 +62,8 @@ class CallForegroundService : Service() {
         startForeground(NOTIFICATION_ID, notification)
       }
       isRunning = true
+      // Só depois de o serviço subir: o roteamento de chamada exige o FGS ativo.
+      applyAudioRouting()
     } catch (e: Throwable) {
       // Sem permissão de mic declarada/concedida o Android recusa o tipo —
       // melhor parar do que ficar num estado que promete algo que não existe.
@@ -78,6 +80,10 @@ class CallForegroundService : Service() {
 
   override fun onDestroy() {
     isRunning = false
+    // Devolve o roteamento de áudio ao normal. Sem isto, o aparelho ficava em
+    // modo de comunicação depois da chamada (som de mídia saindo pelo fone do
+    // ouvido e volume preso).
+    try { restoreAudioRouting() } catch (_: Throwable) { }
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -94,8 +100,33 @@ class CallForegroundService : Service() {
       android.content.pm.PackageManager.PERMISSION_GRANTED
   }
 
-  private fun createChannel() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+  /**
+   * Roteia o áudio para CHAMADA (viva-voz) enquanto o serviço está vivo.
+   *
+   * POR QUE ISTO EXISTE: o `<audio>` do WebView toca no canal de MÍDIA, e o
+   * Android por padrão manda mídia para o alto-falante — mas sem
+   * `MODE_IN_COMMUNICATION` o volume de chamada não é aplicado, o eco do
+   * cancelador não atua e em vários aparelhos o som simplesmente não sai
+   * (o clássico "conectou e ficou mudo"). Este é o ajuste que uma chamada de
+   * verdade faz; o WebView não faz por nós.
+   */
+  private fun applyAudioRouting() {
+    try {
+      val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+      am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
+      am.isSpeakerphoneOn = true
+    } catch (_: Throwable) { /* ROM sem AudioManager: o WebView segue no padrão */ }
+  }
+
+  private fun restoreAudioRouting() {
+    try {
+      val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+      am.isSpeakerphoneOn = false
+      am.mode = android.media.AudioManager.MODE_NORMAL
+    } catch (_: Throwable) { }
+  }
+
+  private fun createChannel() {    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     if (mgr.getNotificationChannel(CHANNEL_ID) != null) return
     val channel = NotificationChannel(

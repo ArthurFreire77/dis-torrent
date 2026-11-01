@@ -57,6 +57,16 @@ export interface CallTile {
   label: string
   /** Stream a desenhar; ausente = avatar (pessoa) ou "aguardando" (tela). */
   stream?: MediaStream
+  /**
+   * Stream que carrega o ÁUDIO remoto.
+   *
+   * POR QUE SEPARADO DE `stream`: `stream` só existe com vídeo (câmera ligada),
+   * porque um `<video>` sem trilha viva mostra preto. Numa chamada de voz — ou
+   * com a câmera do outro desligada — `stream` era `undefined` e o `<audio>`
+   * nem era montado: a chamada "conectava" e ficava MUDA. O áudio é
+   * independente do vídeo e precisa do próprio campo.
+   */
+  audioStream?: MediaStream
   /** Frame JPEG (caminho nativo) quando não há MediaStream. */
   videoUrl?: string
   isLocal: boolean
@@ -201,6 +211,9 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       nickname,
       label: nickname,
       stream: participantStream ?? undefined,
+      // ÁUDIO: usa o stream remoto BRUTO, mesmo sem vídeo. Era o defeito do
+      // "conectado e mudo" quando a câmera do outro estava desligada.
+      audioStream: isLocal ? undefined : (remoteCameraStream ?? cameraStream ?? undefined) ?? undefined,
       videoUrl: participantVideoUrl,
       isLocal,
       sharing,

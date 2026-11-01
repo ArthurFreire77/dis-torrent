@@ -4696,9 +4696,13 @@ export class CallManager {
     this.startConnectWatchdog()
     this.startQualityMonitor()
     this.ensureRelayTransport()
-    // Abre PC para cada um que já estava na sala (eu sou o lado novo).
+    // Abre PC para cada um que já estava na sala. REGRA ANTI-GLARE: só o lado
+    // de fp MAIOR inicia a offer. Aqui era `initiator: true` para todos, e o
+    // outro lado também oferecia (aviso de roster) → offer+offer simultâneo e a
+    // negociação travava em "Conectando…". É o mesmo critério de `voice_joined`.
     for (const fp of new Set([...alvos, ...fps.filter((f) => f && f !== me.fingerprint)])) {
-      await this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
+      const iniciar = !!this.myFp && this.myFp > fp
+      await this.createPC(fp, callId, iniciar).catch(() => { /* par best-effort */ })
     }
     this.publishRoom()
     this.onUpdate({ ...this.state })
