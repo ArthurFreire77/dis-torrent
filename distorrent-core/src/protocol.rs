@@ -159,6 +159,13 @@ pub enum SecureFrame {
     Ack {
         msg_id: String,
     },
+    /// Visto azul: "li as mensagens desta conversa até up_to_ts". Só enviar
+    /// para peers com proto_v>=4 — variante desconhecida derruba a sessão
+    /// legada no deserialize.
+    Read {
+        conv_id: String,
+        up_to_ts: i64,
+    },
     /// Pedido de amizade (remetente já autenticado pela sessão).
     FriendRequest {
         nickname: String,

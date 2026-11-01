@@ -533,7 +533,7 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | ChannelReorder { .. }
         | Bye => 1,
         // 2 — mensagens + acks
-        Msg(_) | ChannelMsg { .. } | ChannelAck { .. } | Ack { .. } => 2,
+        Msg(_) | ChannelMsg { .. } | ChannelAck { .. } | Ack { .. } | Read { .. } => 2,
         // 3 — bulk: arquivos + estado completo de comunidade
         FileAnnounce { .. }
         | FileChunkRequest { .. }
@@ -2754,8 +2754,43 @@ impl NetworkEngine {
     }
 
     /// Envia mensagem real: assina, persiste (SENDING/PENDING), transmite ou enfileira.
-    /// Em grupos: best-effort para todos os membros online (sem outbox por peer —
-    /// o flush de grupo cuida das pendências na reconexão).
+    /// Visto azul (emissor): a UI leu esta conversa até `ts` — avisa os peers
+    /// da conversa. Gate de versão (proto_v>=4) e flood simples por conversa.
+    /// Peers legados continuam sem visto: nada quebra, só não há azul lá.
+    pub fn notify_read(&self, conv_id: &str, up_to_ts: i64) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static LAST_SENT: std::sync::OnceLock<StdMutex<HashMap<String, u64>>> =
+            std::sync::OnceLock::new();
+        let map = LAST_SENT.get_or_init(|| StdMutex::new(HashMap::new()));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        {
+            let mut m = map.lock().unwrap_or_else(|e| e.into_inner()); // 1 s de janela: arrasto de scroll não dispara 100 frames.
+            if m.get(conv_id).copied().unwrap_or(0) + 1000 > now {
+                return;
+            }
+            m.insert(conv_id.to_string(), now);
+        }
+        let peers = self.social_peers_of(conv_id);
+        for fp in peers {
+            if self.peer_proto_v(&fp) < 4 {
+                continue; // legado: frame desconhecido derrubaria a sessão
+            }
+            self.send_to_peer(
+                fp,
+                SecureFrame::Read {
+                    conv_id: conv_id.to_string(),
+                    up_to_ts,
+                },
+            );
+        }
+    }
+
+    /// Envia mensagem real: assina, persiste (SENDING/PENDING), transmite ou
+    /// enfileira. Em grupos: best-effort para os membros online (sem outbox
+    /// por peer — o flush de grupo cuida das pendências na reconexão).
     pub fn send_dm(&self, conv_id: &str, body: &str) -> Result<StoredMessage> {
         let body = body.trim();
         if body.is_empty() {
@@ -11641,6 +11676,39 @@ async fn handle_frame(
                         status: "delivered".into(),
                     });
                 }
+            }
+        }
+        SecureFrame::Read { conv_id, up_to_ts } => {
+            // Visto azul: o outro lado leu as mensagens DELE recebidas até
+            // `up_to_ts`. Mesmo gate do Ack (DM ⇒ peer da conversa; grupo ⇒
+            // membro) — sem isso peer qualquer forjava "visto".
+            let ack_ok = match engine
+                .store
+                .get_conversation(&conv_id)?
+                .map(|c| (c.kind, c.peer_fp))
+            {
+                Some((kind, peer)) if kind == "dm" => peer == peer_fp,
+                Some((kind, _)) if kind == "group" => engine
+                    .store
+                    .list_group_members(&conv_id)?
+                    .iter()
+                    .any(|(fp, _)| fp == peer_fp),
+                _ => false,
+            };
+            if !ack_ok {
+                return Err(DistorrentError::Protocol(
+                    "Read de peer não autorizado".into(),
+                ));
+            }
+            // Marca SÓ as minhas mensagens de saída antigas o bastante — a
+            // dele não tem visto (direção "in"); `read` nunca rebaixa:
+            // maior na hierarquia (pending<sending<sent<delivered<read).
+            let ids = engine.store.mark_read_outgoing(&conv_id, up_to_ts)?;
+            for msg_id in ids {
+                let _ = engine.events.send(EngineEvent::MessageStatus {
+                    msg_id,
+                    status: "read".into(),
+                });
             }
         }
         SecureFrame::Ping { ts } => {

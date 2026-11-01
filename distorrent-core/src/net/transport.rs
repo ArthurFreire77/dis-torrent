@@ -408,8 +408,9 @@ fn build_nonce(dir: u8, counter: u64) -> Nonce {
 }
 
 /// Executa handshake sobre stream novo. `PROTO_V`: v2+ entende o túnel
-/// virtual; variante desconhecida derruba sessão legada (gate no emissor).
-pub const PROTO_V: u32 = 3;
+/// virtual; v4+ entende o visto azul (`SecureFrame::Read`). Variante
+/// desconhecida derruba sessão legada (gate no emissor).
+pub const PROTO_V: u32 = 4;
 
 /// Dial furador de NAT: conecta A PARTIR da porta do listener (reuseport) —
 /// furo coordenado via Punch; Err rápido se o NAT não colaborar (simétrico).

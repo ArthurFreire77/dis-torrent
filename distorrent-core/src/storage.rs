@@ -924,6 +924,26 @@ impl Store {
         Ok(())
     }
 
+    /// Visto azul: marca minhas mensagens de saída (até `up_to_ts`) como
+    /// `read`. Monótona — nunca rebaixa `read` de volta (Ack chega depois
+    /// do Read em retransmissão e não pode reverter o visto).
+    pub fn mark_read_outgoing(&self, conv_id: &str, up_to_ts: i64) -> Result<Vec<String>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT id FROM messages
+             WHERE conv_id=?1 AND direction='out'
+               AND ts<=?2 AND status NOT IN ('read','failed')",
+        )?;
+        let ids = st
+            .query_map(params![conv_id, up_to_ts], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(st);
+        for id in &ids {
+            conn.execute("UPDATE messages SET status='read' WHERE id=?1", params![id])?;
+        }
+        Ok(ids)
+    }
+
     /// Janela de mensagens (paginação por ts) — caminho da UI; `messages_list`
     /// fica para compat.
     pub fn list_messages_window(
@@ -1081,6 +1101,7 @@ impl Store {
             let conn = self.locked();
             // `NOT EXISTS (outbox)`: sem este filtro o varredor regravava
             // `pending` por cima de mensagens já enfileiradas (backoff zerado).
+            // `status IN (...)` já exclui `read`: visto não volta a pending.
             let mut st = conn.prepare(
                 "SELECT id FROM messages
                  WHERE direction='out' AND status IN ('sending','sent') AND ts < ?1
