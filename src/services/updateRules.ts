@@ -49,8 +49,18 @@ export function parseVersion(raw: string): ParsedVersion {
 }
 
 /**
- * Compara duas versões (`> 0` = `a` mais nova). Pré-release da base nova é
- * MAIS NOVA que a final anterior — senão o app nunca atualizaria.
+ * Compara duas versões (`> 0` = `a` mais nova).
+ *
+ * IGNORA o sufixo de pré-release — igual ao `compare_version_strings` do Rust.
+ * As duas pontas PRECISAM concordar: o Rust escolhe QUAL release é a mais nova e
+ * este código decide se ela é mais nova que a atual.
+ *
+ * BUG REAL (achado em 01/11/2026): aqui o sufixo era considerado e no Rust não.
+ * A tag é limpa (`v1.1.23`) e o app reporta `1.1.23-pre-alpha`, então quem
+ * atualizava via `isNewer('1.1.23-pre-alpha', '1.1.23') === true` TODA vez:
+ * o app baixava o instalador de novo e caía em `stalled` depois de reiniciar.
+ *
+ * Regra: `1.1.23-pre-alpha` e `1.1.23` são a MESMA versão.
  */
 export function compareVersions(a: string, b: string): number {
   const pa = parseVersion(a)
@@ -61,11 +71,7 @@ export function compareVersions(a: string, b: string): number {
     const nb = pb.nums[i] ?? 0
     if (na !== nb) return na > nb ? 1 : -1
   }
-  if (pa.pre === pb.pre) return 0
-  // mesma base numérica: final (sem sufixo) > pré-release
-  if (!pa.pre) return 1
-  if (!pb.pre) return -1
-  return pa.pre > pb.pre ? 1 : -1
+  return 0
 }
 
 /** Existe versão mais nova publicada? */

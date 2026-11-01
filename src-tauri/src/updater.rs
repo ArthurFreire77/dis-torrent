@@ -213,31 +213,17 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("cliente HTTP: {e}"))
 }
 
-/// Consulta a release mais recente (`current` sai da versão do APP, não do crate).
-#[tauri::command]
-pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
-    let current = app
-        .config()
-        .version
-        .clone()
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-
-    let client = http_client()?;
-    let res = client
-        .get(RELEASES_API)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("sem conexão com o GitHub: {e}"))?;
-    if !res.status().is_success() {
-        return Err(format!(
-            "GitHub respondeu {} ao procurar a release mais nova",
-            res.status().as_u16()
-        ));
-    }
-    let bytes = res.bytes().await.map_err(|e| format!("resposta: {e}"))?;
-    let mut releases: Vec<GhRelease> = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("resposta do GitHub em formato inesperado: {e}"))?;
+/// Escolhe, na lista de releases da API, a que deve ser oferecida.
+///
+/// PURO (sem rede/rede: recebe o JSON já parseado) para poder ser testado com os
+/// nomes de asset REAIS. Antes isso vivia dentro de `update_check`, então só um
+/// teste com internet provava o caminho — e a seleção é justamente o que erra em
+/// silêncio (asset errado, `label_mismatch` indevido, "sem atualização").
+fn select_update(
+    current: String,
+    mut releases: Vec<GhRelease>,
+    platform: &str,
+) -> Result<UpdateInfo, String> {
     releases.truncate(RELEASES_PAGE_CAP);
 
     // Rascunho não é publicado: nunca oferecer.
@@ -255,7 +241,7 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
     });
     let release = releases.remove(0);
 
-    let platform = platform_tag().to_string();
+    let platform = platform.to_string();
     let asset = pick_asset(&release.assets, &platform).ok_or_else(|| {
         format!(
             "a release {} não publicou um instalador para {platform}",
@@ -305,6 +291,34 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
         label_mismatch,
         asset_version,
     })
+}
+
+/// Consulta a release mais recente (`current` sai da versão do APP, não do crate).
+#[tauri::command]
+pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+    let current = app
+        .config()
+        .version
+        .clone()
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+
+    let client = http_client()?;
+    let res = client
+        .get(RELEASES_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("sem conexão com o GitHub: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!(
+            "GitHub respondeu {} ao procurar a release mais nova",
+            res.status().as_u16()
+        ));
+    }
+    let bytes = res.bytes().await.map_err(|e| format!("resposta: {e}"))?;
+    let releases: Vec<GhRelease> = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("resposta do GitHub em formato inesperado: {e}"))?;
+    select_update(current, releases, platform_tag())
 }
 
 /// Baixa e confere o instalador (SHA-256) em `data_dir/updates/`; devolve o caminho.
@@ -758,5 +772,108 @@ mod tests {
     fn plataforma_sem_asset_devolve_none() {
         let lista = vec![asset("DisTorrent_1.1.23-pre-alpha_amd64.deb")];
         assert!(pick_asset(&lista, "windows").is_none());
+    }
+
+    // ── Caminho REAL de seleção, com os assets que a release v1.1.23 publicou ──
+    // Estes nomes foram copiados da API do GitHub depois da publicação. Se um dia
+    // o pipeline renomear arquivo, este teste falha antes de o usuário receber
+    // "sem atualização" (que é o modo de falha silencioso do updater).
+
+    fn release_v123() -> GhRelease {
+        let nomes = [
+            "DisTorrent_1.1.23-pre-alpha_amd64.AppImage",
+            "DisTorrent_1.1.23-pre-alpha_amd64.deb",
+            "DisTorrent_1.1.23-pre-alpha_arm64.apk",
+            "DisTorrent_1.1.23-pre-alpha_x64_setup.exe",
+        ];
+        GhRelease {
+            tag_name: "v1.1.23".into(),
+            name: "DisTorrent 1.1.23-pre-alpha".into(),
+            body: "correcoes".into(),
+            html_url: "https://github.com/x/y/releases/tag/v1.1.23".into(),
+            draft: false,
+            assets: nomes
+                .iter()
+                .map(|n| GhAsset {
+                    name: (*n).into(),
+                    size: 1000,
+                    browser_download_url: format!("{DOWNLOAD_PREFIX}v1.1.23/{n}"),
+                    digest: Some("sha256:abc".into()),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn v123_windows_escolhe_o_setup_e_nao_marca_rotulo_trocado() {
+        let info =
+            select_update("1.1.22-pre-alpha".into(), vec![release_v123()], "windows").unwrap();
+        assert_eq!(info.asset_name, "DisTorrent_1.1.23-pre-alpha_x64_setup.exe");
+        // `version_in_asset_name` NÃO pode ler o "64" de `x64_setup`.
+        assert_eq!(info.asset_version, "1.1.23");
+        assert!(!info.label_mismatch, "asset e tag tem a mesma versao");
+        assert_eq!(info.latest, "1.1.23");
+        assert_eq!(info.digest, "sha256:abc");
+    }
+
+    #[test]
+    fn v123_linux_escolhe_appimage() {
+        let info = select_update("1.1.22-pre-alpha".into(), vec![release_v123()], "linux").unwrap();
+        assert_eq!(
+            info.asset_name,
+            "DisTorrent_1.1.23-pre-alpha_amd64.AppImage"
+        );
+        assert!(!info.label_mismatch);
+    }
+
+    #[test]
+    fn v123_android_escolhe_o_apk_arm64_publicado() {
+        let info =
+            select_update("1.1.22-pre-alpha".into(), vec![release_v123()], "android").unwrap();
+        assert_eq!(info.asset_name, "DisTorrent_1.1.23-pre-alpha_arm64.apk");
+        assert_eq!(info.asset_version, "1.1.23");
+        assert!(!info.label_mismatch);
+    }
+
+    /// A 1.1.22 ainda publicada não pode ganhar da 1.1.23, e um asset velho
+    /// rotulado com outra versão tem de acender o aviso em vez de passar batido.
+    #[test]
+    fn release_antiga_nao_ganha_e_rotulo_velho_avisa() {
+        let mut antiga = release_v123();
+        antiga.tag_name = "v1.1.22".into();
+        let info = select_update(
+            "1.1.21-pre-alpha".into(),
+            vec![antiga, release_v123()],
+            "windows",
+        )
+        .unwrap();
+        assert_eq!(
+            info.latest, "1.1.23",
+            "maior versao ganha da ordem da lista"
+        );
+
+        // Asset reaproveitado da versão anterior dentro da release nova.
+        let mut trocada = release_v123();
+        trocada.assets[3].name = "DisTorrent_1.1.22-pre-alpha_x64_setup.exe".into();
+        let info = select_update("1.1.22-pre-alpha".into(), vec![trocada], "windows").unwrap();
+        assert!(
+            info.label_mismatch,
+            "instalador rotulado errado precisa avisar"
+        );
+        assert_eq!(info.asset_version, "1.1.22");
+    }
+
+    #[test]
+    fn rascunho_nao_e_oferecido() {
+        let mut draft = release_v123();
+        draft.draft = true;
+        draft.tag_name = "v9.9.9".into();
+        let info = select_update(
+            "1.1.22-pre-alpha".into(),
+            vec![draft, release_v123()],
+            "windows",
+        )
+        .unwrap();
+        assert_eq!(info.latest, "1.1.23", "draft 9.9.9 nao pode ser oferecido");
     }
 }

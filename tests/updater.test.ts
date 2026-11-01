@@ -79,13 +79,27 @@ test('1.1.10 é mais nova que 1.1.9 (o bug do compare por string)', () => {
   assert.equal(isNewer('1.1.10-pre-alpha', '1.1.10-pre-alpha'), false)
 })
 
-test('pré-release mais nova que a base anterior, final mais nova que pré-release', () => {
+test('pre-release e a MESMA versao da base (igual ao Rust, sem loop)', () => {
   // O projeto publica sempre como -pre-alpha: se pré-release fosse "menor",
   // o app nunca se atualizaria.
   assert.equal(isNewer('1.1.10', '1.1.11-pre-alpha'), true)
-  // Mas quando existir uma final da MESMA base, ela ganha.
-  assert.equal(isNewer('1.2.0-pre-alpha', '1.2.0'), true)
+  // MAS: a tag é limpa (`v1.1.23`) e o app reporta `1.1.23-pre-alpha`. Se o
+  // sufixo contasse, quem já atualizou baixaria o mesmo instalador de novo
+  // (bug real: `stalled` a cada boot). Rust e TS precisam dar o mesmo resultado.
+  assert.equal(isNewer('1.2.0-pre-alpha', '1.2.0'), false)
   assert.equal(isNewer('1.2.0', '1.2.0-pre-alpha'), false)
+  assert.equal(compareVersions('1.1.23-pre-alpha', '1.1.23'), 0)
+})
+
+// A transição que esta release precisa fazer de verdade: quem está na 1.1.22
+// tem de ver a 1.1.23. `latest` chega do Rust sem o `v` da tag.
+test('quem esta na 1.1.22 enxerga a 1.1.23 publicada', () => {
+  assert.equal(isNewer('1.1.22-pre-alpha', '1.1.23'), true)
+  assert.equal(isNewer('1.1.22-pre-alpha', '1.1.23-pre-alpha'), true)
+  assert.equal(isNewer('1.1.21-pre-alpha', '1.1.23'), true)
+  // E quem ja atualizou nao recebe a mesma versao de novo (sem loop).
+  assert.equal(isNewer('1.1.23-pre-alpha', '1.1.23'), false)
+  assert.equal(isNewer('1.1.23', '1.1.23-pre-alpha'), false)
 })
 
 test('updateModeFor: windows instala sozinho, linux e android abrem instalador, resto link', () => {
