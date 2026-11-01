@@ -982,6 +982,9 @@ export class CallManager {
    * penúltima pessoa saía.
    */
   private collectiveRoom = false
+  /** Recuperação do mic quando ele não abriu na hora (ver scheduleMicRecovery). */
+  private micRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+  private micRecoveryAttempts = 0
   /** Renova o anúncio da sala (participantes mudam durante a chamada). */
   private roomTimer: ReturnType<typeof setInterval> | null = null
   /**
@@ -1883,6 +1886,12 @@ export class CallManager {
     const qOrVideo: MediaTrackConstraints | boolean = kind === 'video' ? { ...CAMERA_CONSTRAINTS } : false
     const constraints: MediaStreamConstraints = kind === 'video' ? { audio: true, video: qOrVideo } : { audio: true, video: false }
     this.localStream = await getLocalMedia(constraints)
+    // MIC ATRASADO (permissão lenta, device ocupado, `AbortError` do Android):
+    // sem track local a chamada seguia MUDA para sempre, e o peer nunca
+    // recebia áudio. Re-tenta em segundo plano e anexa aos PCs já criados.
+    if (!this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
+      this.scheduleMicRecovery(callId)
+    }
 
     this.resetRelayForNewCall()
     this.state = {
@@ -2003,6 +2012,9 @@ export class CallManager {
 
     // Caminho navegador: mic local + MESH com quem já está (sem isso os watchdogs matavam em ~50s).
     this.localStream = await getLocalMedia({ audio: true })
+    if (!this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
+      this.scheduleMicRecovery(callId)
+    }
     this.state = {
       callId,
       kind: 'voice',
@@ -2119,6 +2131,8 @@ export class CallManager {
       // sala de grupo anterior marcava toda DM seguinte como coletiva (e ela
       // nunca encerrava quando o par saía).
       this.collectiveRoom = false
+      // Não herda a recuperação de mic da chamada anterior.
+      this.stopMicRecovery()
     } catch { /* nunca derruba a chamada */ }
   }
 
@@ -2880,6 +2894,60 @@ export class CallManager {
   }
 
   /**
+   * Recupera o MICROFONE quando ele não abriu na hora da chamada.
+   *
+   * "Às vezes não pega áudio": `getUserMedia` pode devolver null (permissão
+   * lenta, device ocupado, AbortError do Android). Antes a chamada seguia sem
+   * trilha local — o peer recebia vídeo e nenhum áudio, sem erro nenhum.
+   * Aqui tentamos de novo com backoff, anexamos aos PCs existentes e
+   * renegociamos (a m-line nasceu recvonly, então replaceTrack não basta).
+   */
+  private scheduleMicRecovery(callId: string) {
+    if (this.micRecoveryTimer || this.micRecoveryAttempts >= 4) return
+    const atraso = [1500, 4000, 8000, 15000][this.micRecoveryAttempts] ?? 15000
+    this.micRecoveryAttempts += 1
+    this.micRecoveryTimer = setTimeout(async () => {
+      this.micRecoveryTimer = null
+      try {
+        const st = this.state
+        if (!st || st.callId !== callId) return
+        if (st.phase === 'ended' || st.phase === 'failed' || st.phase === 'rejected') return
+        if (this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) return
+        const s = await getLocalMedia({ audio: true })
+        const track = s?.getAudioTracks()[0]
+        if (!track || track.readyState !== 'live') {
+          this.scheduleMicRecovery(callId)
+          return
+        }
+        if (this.localStream) {
+          try { this.localStream.addTrack(track) } catch { /* já tem trilha */ }
+        } else {
+          this.localStream = s
+        }
+        this.micRecoveryAttempts = 0
+        const anexados = this.attachMissingLocalTracks()
+        for (const fp of anexados) {
+          const pc = this.pcs.get(fp)
+          if (pc && pc.remoteDescription && pc.signalingState === 'stable') {
+            await this.renegotiate(fp, pc).catch(() => { /* par best-effort */ })
+          }
+        }
+        this.onCallNotice?.('microfone conectado — o áudio começou a sair agora')
+        if (this.state) this.onUpdate({ ...this.state })
+      } catch { /* próxima tentativa cobre */ }
+    }, atraso)
+  }
+
+  /** Cancela a recuperação de mic (fim da chamada). */
+  private stopMicRecovery() {
+    if (this.micRecoveryTimer) {
+      try { clearTimeout(this.micRecoveryTimer) } catch { /* ignore */ }
+      this.micRecoveryTimer = null
+    }
+    this.micRecoveryAttempts = 0
+  }
+
+  /**
    * ENCERRAR À FORÇA: limpa estado local mesmo sem conseguir falar com o core.
    *
    * Existe porque o gate de "já existe uma chamada em andamento" pode ficar
@@ -2912,6 +2980,7 @@ export class CallManager {
       this.stopReconnectWatchdog()
       this.clearIceRestartTimers()
       this.stopNativeVoiceMonitor()
+      this.stopMicRecovery()
       this.stopQualityMonitor()
       this.stopRosterReconcile()
       this.stopRingRetry()
