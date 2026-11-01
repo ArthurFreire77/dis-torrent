@@ -59,6 +59,93 @@ impl NetworkEngine {
         );
     }
 
+    /// SAÍDA de um participante da sala (não necessariamente o fim da chamada).
+    ///
+    /// BUG REAL que isto corrige: `leave()` chamava `unpublish_room`, que apaga a
+    /// sala e anuncia `closed` para TODO MUNDO. Quem só tinha ENTRADO (convidado)
+    /// derrubava o aviso da chamada para os outros — o botão "Entrar" sumia. A
+    /// sala pertence a quem a ABRIU (host): sair é atualizar a lista, não
+    /// encerrar a chamada dos outros.
+    pub fn leave_room(&self, conv_id: &str) {
+        let me = self.identity.fingerprint.clone();
+        let (restantes, room) = {
+            let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(r) = rooms.get(conv_id).cloned() else {
+                return;
+            };
+            // Não sou o host: a sala continua valendo e eu só saio (o host
+            // reanuncia a lista sem mim no tique de 15 s).
+            if r.host_fp != me {
+                return;
+            }
+            // Host: tiro meu fp da lista. Se sobrar gente na chamada, a sala
+            // continua (o host segue dentro ouvindo) — só reanuncio a lista.
+            let novos: Vec<String> = r
+                .participants
+                .iter()
+                .cloned()
+                .filter(|fp| fp != &me)
+                .collect();
+            rooms.set_participants(conv_id, novos);
+            (r.participants.iter().filter(|fp| *fp != &me).count(), r)
+        };
+        if restantes == 0 {
+            // Host sozinho: encerra de verdade.
+            let fechada = {
+                let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
+                rooms.close(conv_id)
+            };
+            let Some(room) = fechada else { return };
+            let _ = self.events.send(EngineEvent::CallRoom {
+                call_id: room.call_id,
+                conv_id: room.conv_id,
+                kind: room.kind,
+                state: "closed".into(),
+                participants: Vec::new(),
+                host_fp: room.host_fp,
+            });
+            self.room_announce(
+                conv_id,
+                SecureFrame::CallRoom {
+                    call_id: String::new(),
+                    conv_id: conv_id.to_string(),
+                    kind: String::new(),
+                    state: "closed".into(),
+                    participants: Vec::new(),
+                    ts: crate::identity::now_ms(),
+                },
+            );
+            return;
+        }
+        // Sala viva sem o host: os que ficaram continuam na chamada entre si.
+        let atual = self
+            .call_rooms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(conv_id)
+            .cloned()
+            .unwrap_or(room);
+        let _ = self.events.send(EngineEvent::CallRoom {
+            call_id: atual.call_id.clone(),
+            conv_id: atual.conv_id.clone(),
+            kind: atual.kind.clone(),
+            state: "open".into(),
+            participants: atual.participants.clone(),
+            host_fp: atual.host_fp.clone(),
+        });
+        self.room_announce(
+            conv_id,
+            SecureFrame::CallRoom {
+                call_id: atual.call_id,
+                conv_id: atual.conv_id,
+                kind: atual.kind,
+                state: "open".into(),
+                participants: atual.participants,
+                ts: crate::identity::now_ms(),
+            },
+        );
+    }
+
     /// Entra numa sala anunciada: avisa quem já está dentro. A mídia segue o
     /// fluxo normal de invite/offer.
     pub fn room_join(self: &Arc<Self>, conv_id: &str, kind: &str) -> Result<(String, Vec<String>)> {

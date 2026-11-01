@@ -1852,6 +1852,14 @@ fn message_send(
 }
 
 #[tauri::command]
+fn message_resend(
+    msg_id: String,
+    state: State<AppState>,
+) -> Result<distorrent_core::storage::StoredMessage, String> {
+    engine(&state)?.resend_message(&msg_id).map_err(err)
+}
+
+#[tauri::command]
 fn delete_conversation(conv_id: String, state: State<AppState>) -> Result<(), String> {
     let st = open_store(&state)?;
     st.delete_conversation(&conv_id).map_err(err)?;
@@ -3016,6 +3024,14 @@ fn group_members(conv_id: String, state: State<AppState>) -> Result<Vec<(String,
     Ok(engine(&state)?.group_members(&conv_id))
 }
 
+/// Pareia AGORA todos os membros do grupo (não-amigos incluídos).
+/// O frontend chama ao abrir a conversa e ao entrar na chamada do grupo.
+#[tauri::command]
+fn group_pair_now(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.group_pair_now(&conv_id);
+    Ok(())
+}
+
 #[tauri::command]
 fn group_add(conv_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_add(&conv_id, &fp).map_err(err)
@@ -3068,6 +3084,13 @@ fn call_room_publish(
 #[tauri::command]
 fn call_room_close(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.unpublish_room(&conv_id);
+    Ok(())
+}
+
+/// Sair da sala SEM encerrá-la para os outros (só o host, sozinho, fecha).
+#[tauri::command]
+fn call_room_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.leave_room(&conv_id);
     Ok(())
 }
 
@@ -4701,6 +4724,7 @@ fn main() {
             messages_list,
             messages_window,
             message_send,
+            message_resend,
             message_verify,
             metrics_snapshot,
             peer_rtt,
@@ -4735,6 +4759,7 @@ fn main() {
             account_remove_imported,
             create_group,
             group_members,
+            group_pair_now,
             group_add,
             group_remove,
             group_rename,
@@ -4743,6 +4768,7 @@ fn main() {
             group_delete_local,
             call_room_publish,
             call_room_close,
+            call_room_leave,
             call_room_join,
             call_rooms_list,
             call_invite,

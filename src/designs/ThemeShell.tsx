@@ -42,6 +42,7 @@ import { WIDTHS } from '../shared/ui'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
 import { QuitDialog } from '../components/QuitDialog'
+import { resolveSessionStart } from '../services/appUptime'
 import { copyText } from '../shared/clipboard'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -790,6 +791,16 @@ export default function ThemeShell({ designId }: {designId:string}){
     const off = services.subscribe((ev) => { if (ev.type === 'group_synced') void ler() })
     return () => { vivo = false; off() }
   }, [conversations])
+
+  // GRUPO ABERTO: pareia os membros AGORA (não-amigos incluídos).
+  // Sem isto o membro só era discado pelo tique de 45 s do motor, ou nunca se
+  // fosse de grupo e não fosse amigo — aparecia offline no grupo.
+  useEffect(() => {
+    if (!selConv) return
+    const conv = conversations.find((c) => c.id === selConv)
+    if (conv?.kind !== 'group') return
+    try { void services.groupPairNow?.(selConv).catch(() => { /* sem motor */ }) } catch { /* ignore */ }
+  }, [selConv, conversations])
   /** Roster REAL do grupo aberto (vem do motor, não de cache da UI). */
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [groupTitle, setGroupTitle] = useState('')
@@ -1482,14 +1493,13 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!m.conv_id) return
     patchStatus(m.id, 'sending')
     setError(null)
-    // resolve a comunidade pela PRÓPRIA mensagem (reenvio não herda selCommunity)
-    const cid = communities.find(c => c.channels.some(([id]) => id === m.conv_id))?.id ?? null
+    // Reenvio pelo MESMO id: chamar o envio de texto criava um `msg_id` novo e,
+    // ao trocar de conversa/reabrir o app, as duas linhas apareciam (texto
+    // duplicado). O core reconstrói o envelope da linha gravada.
     try {
-      const fresh = cid
-        ? await services.sendChannelMessage(cid, m.conv_id, m.body)
-        : await services.messageSend(m.conv_id, m.body)
+      const fresh = await services.messageResend(m.id)
       replaceOptimistic(m.id, fresh)
-      if (!cid) refreshConvos()
+      refreshConvos()
     } catch (e: any) {
       patchStatus(m.id, 'failed')
       setError(String(e?.message ?? e))
@@ -1543,7 +1553,9 @@ export default function ThemeShell({ designId }: {designId:string}){
   ], [identity, communityMembers, extraChannels, selCommunity, socialPresence])
 
   const slashPingAt = useRef(Date.now())
+  // Mesmo instante usado pela trava de saída (é por PROCESSO, não por render).
   const bootAt = useRef(Date.now())
+  const appStartedAt = useRef(resolveSessionStart(bootAt.current, typeof sessionStorage !== 'undefined' ? sessionStorage : null))
 
   // Executa um comando de barra e devolve o texto da resposta.
   const runSlash = useCallback(async (line: string): Promise<string> => {
@@ -3641,6 +3653,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       {showQuitMenu && (
         <QuitDialog
           canQuit={services.kind === 'native'}
+          startedAtMs={appStartedAt.current}
           onClose={() => setShowQuitMenu(false)}
           onMinimize={async () => {
             try { await callManager.leave() } catch { /* sem chamada */ }

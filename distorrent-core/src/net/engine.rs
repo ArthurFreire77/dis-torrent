@@ -2788,12 +2788,38 @@ impl NetworkEngine {
                     .unwrap_or(false);
                 let online = self.link_tx(&conv.peer_fp).is_some();
                 if online && is_friend {
-                    self.cmd_tx
+                    // ORDEM IMPORTA: enfileira no outbox ANTES de tentar enviar.
+                    //
+                    // BUG corrigido ("mensagem aparece como falha e depois chega
+                    // sozinha, duplicada"): o `enqueue_outbox` vinha DEPOIS do
+                    // `cmd_tx.send`. Se o envio falhasse (fila do engine cheia,
+                    // sessão morrendo), a linha ficava `sending` SEM outbox, a
+                    // UI marcava o balão como falhou — e o varredor de 20s
+                    // (`revert_stale_sent_to_pending`, que inclui `sending` sem
+                    // outbox) reenfileirava e ENTREGAVA a mensagem que o usuário
+                    // viu como falha. Ao reabrir a conversa apareciam os dois.
+                    self.store.enqueue_outbox(&env.id, &conv.peer_fp)?;
+                    if self
+                        .cmd_tx
                         .send(EngineCmd::SendToPeer(
                             conv.peer_fp.clone(),
                             SecureFrame::Msg(env.clone()),
                         ))
-                        .map_err(|_| DistorrentError::PeerNotConnected(conv.peer_fp.clone()))?;
+                        .is_err()
+                    {
+                        // Já está na fila: sai sozinha quando o link voltar.
+                        self.store.set_message_status(&env.id, "pending")?;
+                        let _ = self.events.send(EngineEvent::MessageStatus {
+                            msg_id: env.id.clone(),
+                            status: "pending".into(),
+                        });
+                        self.cmd_tx
+                            .send(EngineCmd::ConnectRelay(conv.peer_fp.clone()))
+                            .ok();
+                        return self.store.message_by_id(&env.id)?.ok_or_else(|| {
+                            DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows)
+                        });
+                    }
                     // HONESTO: "sent" é só a SAÍDA daqui — não prova entrega.
                     // A mensagem SAI do outbox apenas quando o `Ack` do
                     // destinatário chega (`delivered`). Antes ela saía agora e,
@@ -2802,7 +2828,6 @@ impl NetworkEngine {
                     //
                     // Manter no outbox NÃO duplica: o receptor dedupa por id
                     // (INSERT OR IGNORE) e responde Ack à retransmissão.
-                    self.store.enqueue_outbox(&env.id, &conv.peer_fp)?;
                     self.store.set_message_status(&env.id, "sent")?;
                     let _ = self.events.send(EngineEvent::MessageStatus {
                         msg_id: env.id.clone(),
@@ -2835,9 +2860,18 @@ impl NetworkEngine {
                     }
                     if self.link_tx(&fp).is_some() {
                         self.cmd_tx
-                            .send(EngineCmd::SendToPeer(fp, SecureFrame::Msg(env.clone())))
+                            .send(EngineCmd::SendToPeer(
+                                fp.clone(),
+                                SecureFrame::Msg(env.clone()),
+                            ))
                             .ok();
                         sent_any = true;
+                    } else {
+                        // NÃO-AMIGO OFFLINE NO GRUPO: sem este dial a mensagem
+                        // ficava `pending` e NUNCA saía — o membro só recebia se
+                        // ELE te discasse primeiro. O tick de `maintain_groups`
+                        // cobre depois, mas discar aqui entrega na hora.
+                        self.cmd_tx.send(EngineCmd::ConnectRelay(fp)).ok();
                     }
                 }
                 let status = if sent_any { "sent" } else { "pending" };
@@ -2855,6 +2889,150 @@ impl NetworkEngine {
         }
         self.store
             .message_by_id(&env.id)?
+            .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Reenvia uma mensagem JÁ EXISTENTE, preservando o `id` original.
+    ///
+    /// POR QUE NÃO USAR `send_dm`: o botão "Reenviar" da UI chamava o envio de
+    /// texto comum, que fabrica um `MessageEnvelope::new` com id NOVO. A linha
+    /// antiga (`failed`/`pending`) continuava no banco e a nova entrava ao lado
+    /// — na memória a UI trocava uma pela outra, mas ao trocar de conversa ou
+    /// reabrir o app as DUAS voltavam, com o texto duplicado. No receptor pior:
+    /// o dedupe é por id, então ele mostrava duas mensagens.
+    ///
+    /// Aqui o envelope é reconstruído da linha gravada (mesmo id, mesma
+    /// assinatura, mesmo `ts`) e reenfileirado com o orçamento de tentativas
+    /// zerado — o que o `FlushOutbox` faz, mas sob demanda.
+    pub fn resend_message(self: &Arc<Self>, msg_id: &str) -> Result<StoredMessage> {
+        let m = self
+            .store
+            .message_by_id(msg_id)?
+            .ok_or_else(|| DistorrentError::Protocol("mensagem inexistente".into()))?;
+        if m.direction != "out" {
+            return Err(DistorrentError::Protocol(
+                "só dá para reenviar mensagem enviada por você".into(),
+            ));
+        }
+        let conv = self
+            .store
+            .get_conversation(&m.conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("conversa inexistente".into()))?;
+        let env = MessageEnvelope {
+            id: m.id.clone(),
+            conv_id: m.conv_id.clone(),
+            author_fp: m.author_fp.clone(),
+            body: m.body.clone(),
+            ts: m.ts,
+            sig: m.sig.clone(),
+        };
+        match conv.kind.as_str() {
+            "dm" => {
+                // ZERA o backoff: uma mensagem que estourou o orçamento
+                // continuaria inelegível com `enqueue_outbox` (INSERT OR IGNORE).
+                self.store.requeue_outbox(&m.id, &conv.peer_fp)?;
+                self.store.set_message_status(&m.id, "pending")?;
+                if self.link_tx(&conv.peer_fp).is_some() {
+                    self.cmd_tx
+                        .send(EngineCmd::SendToPeer(
+                            conv.peer_fp.clone(),
+                            SecureFrame::Msg(env),
+                        ))
+                        .ok();
+                    self.store.set_message_status(&m.id, "sent").ok();
+                }
+                self.cmd_tx
+                    .send(EngineCmd::ConnectRelay(conv.peer_fp.clone()))
+                    .ok();
+                let status = self
+                    .store
+                    .message_by_id(&m.id)?
+                    .map(|x| x.status)
+                    .unwrap_or_else(|| "pending".into());
+                let _ = self.events.send(EngineEvent::MessageStatus {
+                    msg_id: m.id.clone(),
+                    status,
+                });
+            }
+            "group" => {
+                self.store.set_message_status(&m.id, "pending")?;
+                let me = self.identity.fingerprint.clone();
+                let mut sent_any = false;
+                for (fp, _) in self.store.list_group_members(&m.conv_id)? {
+                    if fp == me {
+                        continue;
+                    }
+                    if self.link_tx(&fp).is_some() {
+                        self.cmd_tx
+                            .send(EngineCmd::SendToPeer(fp, SecureFrame::Msg(env.clone())))
+                            .ok();
+                        sent_any = true;
+                    }
+                }
+                let status = if sent_any { "sent" } else { "pending" };
+                self.store.set_message_status(&m.id, status)?;
+                let _ = self.events.send(EngineEvent::MessageStatus {
+                    msg_id: m.id.clone(),
+                    status: status.into(),
+                });
+            }
+            other => {
+                // CANAL de servidor: o `conv_id` da mensagem é o `channel_id`.
+                // Procura a comunidade dona do canal e reenvia o MESMO envelope
+                // (sem moderação de novo: ela já foi aplicada no envio original,
+                // e reenviar não é falar de novo).
+                let mut achou = false;
+                for (cid, _, owner) in self.store.list_communities().unwrap_or_default() {
+                    if !self
+                        .store
+                        .list_channels(&cid)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|(ch, _)| ch == &m.conv_id)
+                    {
+                        continue;
+                    }
+                    achou = true;
+                    if owner == self.identity.fingerprint {
+                        self.host_relay(&cid, &m.conv_id, &env, "")?;
+                        self.store.set_message_status(&m.id, "sent")?;
+                    } else if self.link_tx(&owner).is_some() {
+                        self.cmd_tx
+                            .send(EngineCmd::SendToPeer(
+                                owner.clone(),
+                                SecureFrame::ChannelMsg {
+                                    community_id: cid.clone(),
+                                    channel_id: m.conv_id.clone(),
+                                    env: env.clone(),
+                                    bot_id: String::new(),
+                                },
+                            ))
+                            .ok();
+                        self.store.set_message_status(&m.id, "sent")?;
+                    } else {
+                        self.store.requeue_outbox(&m.id, &owner)?;
+                        self.store.set_message_status(&m.id, "pending")?;
+                    }
+                    break;
+                }
+                if !achou {
+                    return Err(DistorrentError::Protocol(format!(
+                        "reenvio não suportado para conversa do tipo {other}"
+                    )));
+                }
+                let status = self
+                    .store
+                    .message_by_id(&m.id)?
+                    .map(|x| x.status)
+                    .unwrap_or_else(|| "sent".into());
+                let _ = self.events.send(EngineEvent::MessageStatus {
+                    msg_id: m.id.clone(),
+                    status,
+                });
+            }
+        }
+        self.store
+            .message_by_id(&m.id)?
             .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
     }
 
@@ -4279,6 +4457,99 @@ impl NetworkEngine {
         }
     }
 
+    /// Este peer tem vínculo que JUSTIFICA continuar discando?
+    ///
+    /// Usado quando a sessão cai: sem isto, `peer_state` devolvia `Disconnected`
+    /// durante toda a reconexão e a pessoa "desaparecia" da UI mesmo sendo
+    /// amiga ou estando no mesmo servidor/grupo.
+    ///
+    /// Amizade (`accepted`/`pending_*`), membro de qualquer servidor meu, ou
+    /// membro de qualquer grupo meu. NÃO inclui "peer já visto no peerbook" —
+    /// senão toda descoberta de LAN ficaria eternamente "reconectando".
+    pub fn should_keep_dialing(&self, fp: &str) -> bool {
+        if fp.is_empty() || fp == self.identity.fingerprint {
+            return false;
+        }
+        if self
+            .store
+            .get_friend(fp)
+            .ok()
+            .flatten()
+            .map(|(_, s)| s == "accepted" || s == "pending_out" || s == "pending_in")
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        for (cid, _, _) in self.store.list_communities().unwrap_or_default() {
+            if self
+                .store
+                .list_members(&cid)
+                .unwrap_or_default()
+                .iter()
+                .any(|(m, _, _)| m == fp)
+            {
+                return true;
+            }
+        }
+        for conv in self.store.list_conversations().unwrap_or_default() {
+            if conv.kind != "group" {
+                continue;
+            }
+            if self
+                .store
+                .list_group_members(&conv.id)
+                .unwrap_or_default()
+                .iter()
+                .any(|(m, _)| m == fp)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Pareamento SOB DEMANDA de um grupo: o frontend chama ao abrir a conversa
+    /// (e ao entrar na chamada), para não esperar até 45 s pelo tique.
+    ///
+    /// Pedido do dono: quem está no grupo mas **não é amigo** precisa aparecer
+    /// online e conectar como se fosse. Inbound nunca exigiu amizade; o que
+    /// faltava era o lado que DISCA (ver `maintain_groups`).
+    pub fn group_pair_now(&self, conv_id: &str) {
+        let me = self.identity.fingerprint.clone();
+        let membros = self.store.list_group_members(conv_id).unwrap_or_default();
+        // Só faz sentido se eu realmente estou no grupo.
+        if membros.iter().all(|(fp, _)| fp != &me) {
+            return;
+        }
+        for (fp, _nick) in membros {
+            if fp == me || self.link_tx(&fp).is_some() {
+                continue;
+            }
+            self.connect_to_community_peer(&fp);
+        }
+    }
+
+    /// Pareamento de TODAS as conversas de grupo (chamado no boot/login).
+    /// Fecha o buraco de "abri o app e o grupo inteiro está offline".
+    pub fn pair_all_groups_now(&self) {
+        let me = self.identity.fingerprint.clone();
+        for conv in self.store.list_conversations().unwrap_or_default() {
+            if conv.kind != "group" {
+                continue;
+            }
+            let membros = self.store.list_group_members(&conv.id).unwrap_or_default();
+            if membros.iter().all(|(fp, _)| fp != &me) {
+                continue;
+            }
+            for (fp, _nick) in membros {
+                if fp == me || self.link_tx(&fp).is_some() {
+                    continue;
+                }
+                self.connect_to_community_peer(&fp);
+            }
+        }
+    }
+
     /// Dial imediato (relay + announce) para um peer que participa de servidor.
     fn connect_to_community_peer(&self, fp: &str) {
         if fp == self.identity.fingerprint {
@@ -4431,6 +4702,49 @@ impl NetworkEngine {
             seen.insert(fp.to_string(), now);
         }
         self.connect_to_community_peer(fp);
+    }
+
+    /// Pareamento contínuo entre membros de GRUPO (DM de grupo).
+    ///
+    /// BUG ESTRUTURAL corrigido (pedido do dono: "quem está num grupo mas não é
+    /// amigo deve aparecer online e conectar como se fosse amigo"): **não
+    /// existia nenhum laço de discagem para grupo**. `maintain_communities` só
+    /// cobria SERVIDOR e o tick de amigos só cobria `accepted`. Resultado: um
+    /// membro de grupo que não fosse seu amigo nunca era discado — ele só
+    /// aparecia online se ELE te discasse primeiro, se estivesse na mesma LAN
+    /// (discovery) ou se já tivesse `addr` no peerbook. Era o "está no grupo mas
+    /// aparece offline e não conecta".
+    ///
+    /// Mesma estratégia da comunidade: relay + announce + DHT, com throttle de
+    /// 45 s por fingerprint para o custo de descoberta ficar baixo. Inbound já
+    /// era aceito sem amizade, então o pareamento fecha assim que um dos lados
+    /// disca.
+    pub fn maintain_groups(&self) {
+        let now = crate::identity::now_ms();
+        let me = self.identity.fingerprint.clone();
+        let convs = self.store.list_conversations().unwrap_or_default();
+        for conv in convs {
+            if conv.kind != "group" {
+                continue;
+            }
+            // Sou membro deste grupo? (o roster é a fonte de verdade local)
+            let membros = self.store.list_group_members(&conv.id).unwrap_or_default();
+            if membros.iter().all(|(fp, _)| fp != &me) {
+                continue;
+            }
+            for (fp, _nick) in membros {
+                if fp == me {
+                    continue;
+                }
+                if self.link_tx(&fp).is_some() {
+                    continue;
+                }
+                // 45 s: o mesmo intervalo dos membros de servidor. Cobre
+                // "criou o grupo no PC e abriu no celular" sem martelar
+                // announce/DHT a cada tique.
+                self.connect_to_community_peer_throttled(&fp, now, 45_000);
+            }
+        }
     }
 
     /// Mensagem de canal: dono relay para membros; membro envia ao dono (host).
@@ -5697,7 +6011,7 @@ impl NetworkEngine {
     pub fn create_group(&self, title: &str, members: Vec<String>) -> Result<Conversation> {
         if members.is_empty() {
             return Err(DistorrentError::Protocol(
-                "selecione ao menos 1 amigo".into(),
+                "selecione ao menos 1 pessoa".into(),
             ));
         }
         if members.len() > 9 {
@@ -5705,12 +6019,16 @@ impl NetworkEngine {
                 "máximo 9 membros + você (10 total)".into(),
             ));
         }
+        // NÃO EXIGE AMIZADE. O gate antigo ("{fp} não é amigo") impedia criar
+        // grupo com alguém que você conhece de um servidor — e o pedido do dono
+        // é justamente que quem está no grupo, amigo ou não, apareça online e
+        // conecte. Só rejeita identidade inválida (vazia ou eu mesmo).
         for fp in &members {
-            if self.store.get_friend(fp)?.is_none() && self.store.get_peer(fp)?.is_none() {
-                let has = self.store.list_friends(None)?.iter().any(|p| &p.fp == fp);
-                if !has {
-                    return Err(DistorrentError::Protocol(format!("{fp} não é amigo")));
-                }
+            let f = fp.trim();
+            if f.is_empty() || f == self.identity.fingerprint {
+                return Err(DistorrentError::Protocol(
+                    "fingerprint inválido para o grupo".into(),
+                ));
             }
         }
         let conv = self
@@ -7559,6 +7877,9 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     .ok();
             }
         }
+        // GRUPOS: membros de grupo que NÃO são amigos não estavam em nenhuma
+        // lista de dial do boot — abriam o app com o grupo inteiro "offline".
+        engine.pair_all_groups_now();
         // Convites de servidor que ficaram pendentes no SQLite: o usuário
         // colou o token, o dono estava offline e o app fechou. Sem esta
         // restauração o pedido morria junto com o processo e o servidor nunca
@@ -8309,6 +8630,10 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 //     roster depois de reiniciar;
                 //  3) reenvia o `JoinCommunity` que não foi confirmado.
                 engine.maintain_communities();
+                // 3b) PAREAmento de GRUPO: mesmo tratamento para membros de
+                //     conversa de grupo que não são amigos — sem isto eles nunca
+                //     eram discados e ficavam offline (ver `maintain_groups`).
+                engine.maintain_groups();
                 // 4) RE-ANUNCIA a presença de voz. `VoiceJoin` era enviado uma
                 //    vez só, para peers já `Online`; quem entrava no canal antes
                 //    do link fechar nunca era visto e não havia retry. Um frame
@@ -9931,6 +10256,17 @@ async fn register_and_run(
         // Higiene do rate limiter: os buckets por peer morrem com a sessão
         // (churn de peers não acumula mapa morto — o prune é só rede de seg.).
         engine.netlimiter.forget_peer(peer_fp);
+        // RECONEXÃO VISÍVEL: remover o link fazia `peer_state` devolver
+        // `Disconnected` (o `unwrap_or`) até a PRÓXIMA sessão registrar. Ou seja,
+        // durante toda a tentativa de reconexão — que pode durar minutos com
+        // backoff — a pessoa aparecia OFFLINE na UI e voltava "do nada" quando o
+        // dial acertava. Era o "fica offline e não conecta" / "só volta sozinho
+        // depois de um tempo". Se é alguém que devemos continuar tentando
+        // (amigo, membro de servidor ou de grupo), o estado honesto é
+        // `Reconnecting`.
+        if engine.should_keep_dialing(peer_fp) {
+            set_link_state(&engine, peer_fp, PeerLinkState::Reconnecting);
+        }
         // TÚNEL MORRE COM O LINK.
         //
         // BUG REAL ("uma mensagem funciona, depois para e só religando
@@ -11761,6 +12097,14 @@ async fn handle_frame(
                 // ban/timeout/slowmode aplicados AO AUTOR — o portão do cliente
                 // não protege o host.
                 engine.gate_speech_for(&community_id, &channel_id, &env.author_fp)?;
+                // IDEMPOTENTE: retransmissão do MESMO frame (relay poll, túnel +
+                // sessão, `host_relay` de novo) não pode reemitir `MessageNew`.
+                // A linha já é única (`INSERT OR IGNORE`), mas o evento repetido
+                // duplicava a notificação nativa, que não dedupa por id.
+                if engine.store.message_by_id(&env.id)?.is_some() {
+                    engine.host_relay(&community_id, &channel_id, &env, &bot_id)?;
+                    return Ok(());
+                }
                 if bot_id.is_empty() {
                     engine.store.insert_message(&env, "in", "ok")?;
                 } else {
@@ -11826,6 +12170,12 @@ async fn handle_frame(
                 };
                 if !sig_ok {
                     return Err(DistorrentError::Protocol("assinatura inválida".into()));
+                }
+                // IDEMPOTENTE (membro): o host pode relayar o mesmo frame duas
+                // vezes (retransmissão/dupla sessão). Sem o guarda, `MessageNew`
+                // saía de novo e a notificação nativa duplicava.
+                if engine.store.message_by_id(&env.id)?.is_some() {
+                    return Ok(());
                 }
                 if bot_id.is_empty() {
                     engine.store.insert_message(&env, "in", "ok")?;
@@ -12573,6 +12923,13 @@ async fn handle_frame(
                 return Err(DistorrentError::Protocol("encaminhamento inválido".into()));
             }
             let label = cap_str(&from_label, 120);
+            // IDEMPOTENTE: o encaminhamento pode chegar duas vezes (retransmissão
+            // de canal, relay + sessão direta). Sem este guarda o `INSERT OR
+            // IGNORE` não duplica a LINHA, mas o `MessageNew` era reemitido e a
+            // notificação nativa (que não dedupa por id) aparecia repetida.
+            if engine.store.message_by_id(&env.id)?.is_some() {
+                return Ok(());
+            }
             let _ = engine.store.msg_set_forward(&env.id, &conv_id, &label);
             let _ = engine.store.insert_message(&env, "in", "ok");
             let stored = engine.store.message_by_id(&env.id).ok().flatten();
@@ -12804,6 +13161,11 @@ async fn handle_frame(
             }
             if engine.store.member_role(&community_id, peer_fp).is_none() {
                 return Err(DistorrentError::Protocol("thread só para membro".into()));
+            }
+            // IDEMPOTENTE: retransmissão do mesmo frame reemitia `MessageNew`
+            // (notificação nativa repetida). A linha já é única por id.
+            if engine.store.message_by_id(&env.id)?.is_some() {
+                return Ok(());
             }
             let _ = engine
                 .store

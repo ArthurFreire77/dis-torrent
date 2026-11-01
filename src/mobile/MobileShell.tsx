@@ -42,6 +42,7 @@ import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
 import { QuitDialog } from '../components/QuitDialog'
+import { resolveSessionStart } from '../services/appUptime'
 import { shouldNotify, usePrefs } from '../shared/prefs'
 import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
@@ -528,6 +529,8 @@ export default function MobileShell() {
   const lastTypingSent = useRef(0)
   /** Momento de abertura do app — usado pelo /uptime (paridade com desktop). */
   const bootAtMobile = useRef(Date.now())
+  /** Início do PROCESSO para a trava de saída (15 min), independente de re-render. */
+  const appStartedAt = useRef(resolveSessionStart(bootAtMobile.current, typeof sessionStorage !== 'undefined' ? sessionStorage : null))
 
   /** Avisa a conversa que estou digitando. Throttled: no máximo 1x/2s. */
   function notifyTyping(v: string) {
@@ -1033,6 +1036,17 @@ export default function MobileShell() {
     return () => { vivo = false; off() }
   }, [conversations])
 
+  // GRUPO ABERTO: pareia os membros AGORA (pedido do dono: quem está no grupo
+  // mas não é amigo precisa aparecer online e conectar). Sem isto eles só eram
+  // discados pelo tique de 45 s do motor — e, em grupo, antes não eram discados
+  // nunca.
+  useEffect(() => {
+    if (!selConv) return
+    const conv = conversations.find((c) => c.id === selConv)
+    if (conv?.kind !== 'group') return
+    try { void services.groupPairNow?.(selConv).catch(() => { /* sem motor */ }) } catch { /* ignore */ }
+  }, [selConv, conversations])
+
   const shownFriends = friendsTab === 'online' ? onlineFriends : friendsAccepted
   /**
    * TUDO que tem vínculo comigo e está online agora: amigos + membros dos
@@ -1315,15 +1329,17 @@ export default function MobileShell() {
     if (!m.conv_id) return
     patchStatus(m.id, 'sending')
     setError(null)
+    // Reenvio pelo MESMO id (ver ThemeShell): reenviar texto criava outro
+    // `msg_id` e duplicava a mensagem ao reabrir a conversa.
     try {
-      const fresh = selCommunity ? await services.sendChannelMessage(selCommunity, m.conv_id, m.body) : await services.messageSend(m.conv_id, m.body)
+      const fresh = await services.messageResend(m.id)
       replaceOptimistic(m.id, fresh)
-      if (!selCommunity) refreshConvos()
+      refreshConvos()
     } catch (e: any) {
       patchStatus(m.id, 'failed')
       setError(String(e?.message ?? e))
     }
-  }, [selCommunity, patchStatus, replaceOptimistic, refreshConvos])
+  }, [patchStatus, replaceOptimistic, refreshConvos])
   async function addFriend() {
     const fp = friendFpInput.trim().toLowerCase()
     if (!fp) return
@@ -3035,6 +3051,7 @@ export default function MobileShell() {
       {showQuitConfirm && (
         <QuitDialog
           canQuit={services.kind === 'native'}
+          startedAtMs={appStartedAt.current}
           onClose={() => setShowQuitConfirm(false)}
           onMinimize={async () => {
             try { await callManager.leave() } catch { /* sem chamada */ }

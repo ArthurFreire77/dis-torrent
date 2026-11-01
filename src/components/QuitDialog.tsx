@@ -4,7 +4,15 @@
 // sessão por engano. O dono pediu que ele SAIA do app de verdade — inclusive
 // quando o app está em segundo plano (bandeja/serviço), que continuaria vivo
 // sem isso. "Sair da conta" fica no perfil, onde é o lugar certo.
+//
+// TRAVA DE 15 MINUTOS (pedido do dono): encerrar o processo logo depois de
+// abrir derruba a conexão P2P antes de ela estabilizar e o usuário "desaparece"
+// sem aviso. Enquanto o app tem menos de 15 minutos de vida, "Sair do app" fica
+// desabilitado com o tempo restante visível. "Minimizar (continuar recebendo)"
+// continua liberado — ali o app segue vivo e recebendo.
+import { useEffect, useState } from 'react'
 import { Button } from '../shared/ui'
+import { QUIT_LOCK_MS, canQuitNow, formatQuitLock, quitLockRemaining } from '../services/appUptime'
 
 export interface QuitDialogProps {
   /** Encerra o processo (bandeja, foreground service, motor). */
@@ -14,9 +22,23 @@ export interface QuitDialogProps {
   onClose: () => void
   /** No navegador não há processo para encerrar. */
   canQuit: boolean
+  /** Instante em que este processo abriu (ver `resolveSessionStart`). */
+  startedAtMs?: number
 }
 
-export function QuitDialog({ onQuit, onMinimize, onClose, canQuit }: QuitDialogProps) {
+export function QuitDialog({ onQuit, onMinimize, onClose, canQuit, startedAtMs }: QuitDialogProps) {
+  const inicio = startedAtMs ?? Date.now()
+  const [now, setNow] = useState(() => Date.now())
+  // Só conta o tempo enquanto o bloqueio está de pé; depois do prazo o timer morre.
+  useEffect(() => {
+    if (canQuitNow(Date.now(), inicio)) return
+    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [inicio])
+
+  const restante = quitLockRemaining(now, inicio)
+  const bloqueado = restante > 0
+
   return (
     <div
       onClick={onClose}
@@ -34,10 +56,20 @@ export function QuitDialog({ onQuit, onMinimize, onClose, canQuit }: QuitDialogP
           plano: você para de receber chamadas e mensagens até abrir de novo.
           Sua conta continua salva.
         </div>
+        {bloqueado && (
+          <div
+            role="status"
+            style={{ fontSize: 12, color: '#f0b232', background: '#2b2416', border: '1px solid #f0b23255', borderRadius: 8, padding: '8px 10px', lineHeight: 1.5 }}
+          >
+            Encerrar fica liberado depois dos primeiros {Math.round(QUIT_LOCK_MS / 60000)} minutos —
+            faltam <b>{formatQuitLock(restante)}</b>. Use <b>Minimizar</b> para continuar
+            recebendo chamadas e mensagens.
+          </div>
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
           {canQuit ? (
-            <Button variant="danger" onClick={() => { void onQuit() }}>
-              Sair do app
+            <Button variant="danger" disabled={bloqueado} onClick={() => { if (!bloqueado) void onQuit() }}>
+              {bloqueado ? `Sair do app (em ${formatQuitLock(restante)})` : 'Sair do app'}
             </Button>
           ) : (
             <div style={{ fontSize: 12, color: '#f0b232' }}>

@@ -76,6 +76,70 @@ fn publish_room_gera_frame_para_os_membros_do_grupo() {
 }
 
 #[test]
+fn convidado_sair_nao_encerra_a_chamada_do_grupo() {
+    let (host, _dh) = mk_engine("sala-sai-host");
+    let (guest, _dg) = mk_engine("sala-sai-guest");
+    let conv = grupo_com(&host, &guest);
+    espelhar_grupo(&host, &guest, &conv);
+    let fp_host = host.identity.fingerprint.clone();
+    let fp_guest = guest.identity.fingerprint.clone();
+
+    // Host abre com os dois dentro.
+    host.publish_room(
+        "call-g",
+        &conv,
+        "voice",
+        vec![fp_host.clone(), fp_guest.clone()],
+    );
+    // O convidado recebe o anúncio e entra.
+    guest.room_receive(
+        &fp_host,
+        "call-g",
+        &conv,
+        "voice",
+        "open",
+        vec![fp_host.clone(), fp_guest.clone()],
+    );
+
+    // CONVIDADO sai: a sala TEM de continuar viva para quem ficou.
+    guest.leave_room(&conv);
+    let do_guest = guest.rooms_snapshot();
+    // O convidado não pode anunciar "closed" (isso apagava o botão Entrar dos outros).
+    assert!(
+        !do_guest.iter().any(|ev| matches!(
+            ev,
+            EngineEvent::CallRoom { state, .. } if state == "closed"
+        )),
+        "quem só entrou não encerra a chamada dos outros"
+    );
+
+    // E a sala do host segue aberta com ele dentro.
+    let sala_host = host
+        .rooms_snapshot()
+        .into_iter()
+        .find_map(|ev| match ev {
+            EngineEvent::CallRoom { conv_id, state, .. } if conv_id == conv => Some(state),
+            _ => None,
+        })
+        .expect("a sala do host continua anunciada");
+    assert_eq!(sala_host, "open");
+}
+
+#[test]
+fn host_sozinho_encerra_a_sala_de_verdade() {
+    let (host, _dh) = mk_engine("sala-fecha-host");
+    let fp = host.identity.fingerprint.clone();
+    host.publish_room("call-solo", "conv-solo", "voice", vec![fp]);
+    host.leave_room("conv-solo");
+    // `rooms_snapshot` lista só salas ABERTAS: ficar vazio prova o fechamento
+    // (o evento `closed` sai pelo canal de eventos, não pelo snapshot).
+    assert!(
+        host.rooms_snapshot().is_empty(),
+        "host sozinho fecha a sala"
+    );
+}
+
+#[test]
 fn receber_sala_do_outro_lado_aparece_na_ui() {
     let (a, _da) = mk_engine("sala-rx-a");
     let (b, _db) = mk_engine("sala-rx-b");

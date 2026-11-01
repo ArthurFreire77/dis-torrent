@@ -16,7 +16,18 @@ export interface CollectiveRoomInput {
   invited?: string[]
 }
 
-/** `true` quando a sala tem mais de uma pessoa (ou é canal de voz). */
+/**
+ * `true` quando a sala tem MAIS DE DUAS pessoas (eu + 2), ou é canal de voz.
+ *
+ * BUG CORRIGIDO (a chamada "fantasma" e o "já existe uma chamada em
+ * andamento"): o critério era `size > 1`, que conta **eu + uma pessoa** — ou
+ * seja, toda chamada 1:1 era classificada como coletiva. Em `leaveOutcome`,
+ * coletiva devolve `keep` sempre, então quando o outro desligava numa chamada
+ * de dois o lado que ficava **não encerrava nada**: o overlay sumia pelo evento
+ * do shell, mas o `CallManager` mantinha `state` vivo. A próxima chamada batia
+ * em "já existe uma chamada em andamento" e o botão Entrar ficava travado.
+ * Coletiva é 3+ pessoas; dois é 1:1.
+ */
 export function isCollectiveRoom(input: CollectiveRoomInput | null | undefined): boolean {
   if (!input) return false
   if (typeof input.callId === 'string' && input.callId.startsWith('voice-')) return true
@@ -26,13 +37,14 @@ export function isCollectiveRoom(input: CollectiveRoomInput | null | undefined):
     ),
   )
   // Roster ainda não semeado: os convidados são a única pista de "sala de grupo".
+  // DOIS convidados (ou mais) = grupo; UM convidado é chamada 1:1.
   if (noRoster.size <= 1) {
     const convidados = (Array.isArray(input.invited) ? input.invited : []).filter(
       (i): i is string => typeof i === 'string' && i.length > 0,
     )
-    return convidados.length > 0
+    return convidados.length > 1
   }
-  return noRoster.size > 1
+  return noRoster.size > 2
 }
 
 /**

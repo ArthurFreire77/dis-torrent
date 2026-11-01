@@ -903,6 +903,24 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve(msg)
   },
 
+  // Reenvio no modo navegador/demo: preserva o MESMO id (nada de linha nova).
+  messageResend: (msgId) => {
+    const all = readMsgs()
+    const idx = all.findIndex(x => x.id === msgId)
+    if (idx < 0) return Promise.reject(new Error('mensagem não encontrada'))
+    const msg = { ...all[idx], status: 'pending' as const }
+    all[idx] = msg
+    writeMsgs(all)
+    emit({ type: 'message_status', msg_id: msgId, status: 'pending' } as any)
+    setTimeout(() => {
+      const cur = readMsgs()
+      const i = cur.findIndex(x => x.id === msgId)
+      if (i >= 0) { cur[i] = { ...cur[i], status: 'sent' as const }; writeMsgs(cur) }
+      emit({ type: 'message_status', msg_id: msgId, status: 'sent' } as any)
+    }, 300)
+    return Promise.resolve(msg)
+  },
+
   sendTyping: (convId) => {
     const me = store.load()
     if (!me || !convId) return Promise.resolve()
@@ -1113,6 +1131,8 @@ export const browserServices: DisTorrentServices = {
     try { const v = localStorage.getItem(`distorrent:extras:group_members:${cid}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
     return Promise.resolve([])
   },
+  // Navegador/demo: não há discagem (sem motor de rede). No-op explícito.
+  groupPairNow: () => Promise.resolve(),
   groupAdd: (cid, fp) => {
     try { const k = `distorrent:extras:group_members:${cid}`; const cur = JSON.parse(localStorage.getItem(k) ?? '[]'); if (!cur.find((x: any) => x[0] === fp)) { cur.push([fp, '']); localStorage.setItem(k, JSON.stringify(cur)) } } catch { /* silent */ }
     window.dispatchEvent(new CustomEvent('distorrent:groups_changed'))
@@ -1168,6 +1188,12 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
   callRoomClose: (convId) => {
+    roomsInBrowser.delete(convId)
+    emit({ type: 'call_room', conv_id: convId, state: 'closed', participants: [] } as any)
+    return Promise.resolve()
+  },
+  // No navegador só existe a própria aba: sair é o mesmo que fechar a sala.
+  callRoomLeave: (convId) => {
     roomsInBrowser.delete(convId)
     emit({ type: 'call_room', conv_id: convId, state: 'closed', participants: [] } as any)
     return Promise.resolve()

@@ -1,5 +1,251 @@
 # CHANGELOG
 
+## [1.1.23-pre-alpha] - 2026-11-01
+
+> A 1.1.22 foi publicada antes desta leva de correções. A numeração pulou para
+> 1.1.23 para o atualizador não confundir binários — ver a nota de versionamento
+> no fim desta seção.
+
+### Chamada 1:1 "fantasma": "já existe uma chamada em andamento"
+
+**Este era o bug central do "clico em Entrar e fica tudo bugado".** A regra de
+"sala coletiva" usava `participants > 1`, que conta **eu + uma pessoa** — ou
+seja, **toda chamada 1:1 era classificada como coletiva**. Como coletiva devolve
+`keep` sempre, quando o outro lado desligava o lado que ficava **não encerrava
+nada**: o overlay sumia (evento do shell), mas o `CallManager` mantinha o estado
+vivo. A chamada seguinte batia em "já existe uma chamada em andamento" e o botão
+Entrar ficava travado. Coletiva agora é **3+ pessoas**.
+
+Confirmado por teste automatizado: `e2e/call-rejoin.spec.ts` (chamar → sair →
+chamar de novo, nas duas direções) falhava **também no código anterior** e
+passa agora.
+
+### Não-amigo no grupo/servidor: aparecer online e conectar
+
+Pedido do dono: quem está num grupo ou servidor, **mesmo sem amizade**, deve
+aparecer online e conectar como se fosse amigo.
+
+**Grupo não tinha discagem nenhuma.** `maintain_communities` cobria só SERVIDOR
+e o tique de amigos só cobria `accepted`. Não existia laço equivalente para
+grupo: um membro não-amigo só conectava se **ele** te discasse primeiro, se
+estivesse na mesma LAN, ou se já tivesse endereço no peerbook. Era o "está no
+grupo mas aparece offline e não conecta". Agora existe `maintain_groups` (tique
+de 15 s, throttle de 45 s por pessoa) + `pair_all_groups_now` no boot, e
+`send_dm` de grupo disca quem está offline em vez de só deixar `pending`.
+
+**Nem era possível criar grupo com não-amigo.** `create_group` rejeitava com
+`"{fp} não é amigo"`. O gate caiu: grupo é vínculo próprio, não derivado de
+amizade. Só rejeita fingerprint vazio ou o próprio.
+
+**Pareamento imediato ao abrir a conversa** (`group_pair_now`, chamado pelos
+dois shells e pelo `enterRoom`) — sem esperar o tique.
+
+### Rede caindo: peer aparecia "offline" em vez de "reconectando"
+
+Quando a sessão morria, o link era **removido** do mapa, e `peer_state` devolvia
+`Disconnected` durante toda a reconexão (que pode durar minutos com backoff). A
+pessoa "desaparecia" da UI e voltava do nada quando o dial acertava. Agora, se
+há vínculo que justifica continuar tentando (amigo, membro de servidor ou de
+grupo — `should_keep_dialing`), o estado honesto é `Reconnecting`.
+
+Confirmado por `tests/e2e_two_users.rs` (queda de rede → reconexão → entrega),
+que falhava **também no código anterior**.
+
+### Chamadas de grupo instáveis (3+ pessoas)
+
+**A malha não tinha manutenção.** `startRosterReconcile` — que arma o tique de
+15 s com `announceSelfToRoom` + `repairHalfOpenPairs` — só era chamado por
+`joinVoice`. Uma chamada de **grupo** (`start`, `enterRoom`, `acceptInbound`)
+nunca tinha reparo: bastava um `CallAddParticipant` se perder para dois
+participantes ficarem sem mídia entre si **para sempre**. Era o padrão típico:
+no 1:1 tudo bem, no grupo "uns se ouvem, outros não". Agora a manutenção vale
+para qualquer sala, inclusive nas três entradas de grupo.
+
+**Quem entrava só era apresentado aos `alvos` do anúncio.** `enterRoom` abria PC
+apenas para quem veio no `callRoomJoin`; num grupo de 3+ os demais ficavam fora
+da malha do recém-chegado. Agora `announceSelfToRoom` roda também na entrada
+(inclusive no caminho nativo).
+
+**Aviso de roster derrubava a conexão.** `onParticipantAdded` chamava `createPC`
+sempre que via o participante; o aviso é reenviado a cada 15 s por
+`announceSelfToRoom`. Resultado: a conexão de quem já estava na chamada era
+refeita a cada 15 s. Agora só abre PC se ainda não existir um.
+
+### Instabilidade geral das chamadas (segunda rodada)
+
+**O "banheiro" de PCs.** `createPC` só poupava conexão em `connected`. Qualquer
+par em `connecting`/`new` era **fechado e recriado** — e essa função é chamada
+em `enterRoom`, `onParticipantAdded`, `announceSelfToRoom` e no reparo de 15 s.
+Quem levava mais que um ciclo para fechar o ICE tinha a negociação reiniciada do
+zero a cada chamada, indefinidamente. Era a sensação de "tudo instável" e o
+"Conectando…" que nunca terminava. Agora `connected`/`connecting`/`new` não são
+tocados.
+
+**Aviso de roster derrubava a conexão.** `onParticipantAdded` chamava `createPC`
+sempre que via o participante; o aviso é reenviado a cada 15 s por
+`announceSelfToRoom`. Resultado: a conexão de quem já estava na chamada era
+refeita a cada 15 s. Agora só abre PC se ainda não existir um.
+
+**ICE restart em quem estava funcionando.** O watchdog de conexão chamava
+`restartIceAll`, que reiniciava **todos** os pares — inclusive os já conectados.
+Num mesh de 3+ isso derrubava áudio/vídeo de quem estava ouvindo bem. Agora só
+reinicia quem não tem rota.
+
+**Sair ≠ encerrar a chamada dos outros.** `leave()` chamava `unpublish_room`,
+que apagava a sala e anunciava `closed` para **todo mundo**. Um convidado que
+saía fazia o botão "Entrar" sumir da conversa dos demais. Agora existe
+`call_room_leave`: quem entrou apenas sai (o host reanuncia a lista no tique de
+15 s); o host que sai com gente dentro mantém a sala viva; só fecha de verdade
+quando não sobra ninguém.
+
+**Par travado em `connecting` nunca era refeito.** O reparo só agia em `failed`
+e `closed`. Um par em `connecting` ficava mudo para sempre, com o quadrado da
+pessoa na chamada — o "entrou e não se ouve". Agora, depois de ~25 s sem sair de
+`new`/`connecting`, a negociação é refeita.
+
+**Peer caindo antes de conectar.** `onPeerGone` só reagia em `connected`; em
+`connecting` a chamada ficava esperando o watchdog de 20 s sem ninguém tentar de
+novo. Agora entra em reconexão também nessa fase.
+
+### "Cliquei Entrar e ficou em Conectando…" (Windows e Android)
+
+Sair da sala e **entrar de novo na mesma chamada** usa o mesmo `call_id`. O
+`leave()` gravava esse id em `endedCalls` para barrar aceite tardio — e
+`handleOffer`/`handleIce` descartavam **todo** offer e candidato ICE desse id em
+silêncio. A chamada nascia muda e só era derrubada pelos watchdogs de 20 s/45 s.
+Agora `enterRoom` libera o id ao reentrar.
+
+O `enterRoom` também **nunca drenava as offers retidas**: o aviso
+`CallAddParticipant` faz o host abrir a `RTCPeerConnection` e mandar a offer na
+mesma hora, ela chegava com `this.state` ainda nulo, ficava em `pendingOffers` e
+jamais era aplicada. `joinVoice` e `acceptInbound` já faziam esse dreno; agora a
+entrada pela sala faz igual. E um estado residual (saída que falhou no meio)
+deixa de travar o botão Entrar para sempre — a entrada destrava sozinha.
+
+### Negociação ocupada ao compartilhar tela
+
+`seedScreenPeers` abortava o compartilhamento inteiro quando o sinalizador
+estava em `have-local-offer` (ICE restart logo após entrar na chamada): nenhum
+par recebia a tela e aparecia "não foi possível negociar a tela". Agora espera a
+sinalização voltar a `stable` (até ~3 s) em vez de desistir. `renegotiate`
+também espera, em vez de sair na primeira tentativa.
+
+### Captura de tela instável / qualidade caindo sozinha
+
+- A degradação automática descia um degrau com **uma** amostra ruim e nunca
+  voltava a subir. Agora exige 2 amostras ruins seguidas e recupera o degrau
+  depois de 15 amostras boas.
+- Track pausada pelo sistema (`mute`) zerava bitrate/FPS e era lida como "rede
+  ruim" — a qualidade caía sem motivo. Pausa não é mais avaliada e o baseline
+  de métricas é reiniciado ao retomar (o primeiro segundo pós-pausa lia números
+  falsos).
+
+### Mensagem duplicada
+
+Eram duas causas, ambas reais:
+
+1. **"Reenviar" criava outro `msg_id`.** A UI chamava `messageSend`, que gera um
+   envelope novo. A linha antiga continuava no banco: na memória parecia uma só,
+   mas ao trocar de conversa ou reabrir o app as duas voltavam, e o receptor
+   (que dedupa por id) mostrava duas mensagens. Agora existe
+   `message_resend`, que reconstrói o envelope da linha gravada (mesmo id, mesma
+   assinatura, mesmo `ts`) e reenfileira com o orçamento de tentativas zerado.
+2. **Linha `sending` sem outbox.** Em `send_dm` o `enqueue_outbox` vinha DEPOIS
+   do envio: se o envio falhasse, a UI marcava "falhou" e 20 s depois o varredor
+   reenfileirava e entregava a mensagem mesmo assim. A fila agora é gravada antes
+   da tentativa de envio.
+
+Além disso, `ChannelMsg`, `Forward` e `ThreadMsg` passaram a ser idempotentes por
+`id` como o `Msg` de DM já era: reentrega do mesmo frame não reemite
+`MessageNew` (a linha já era única, mas a notificação nativa duplicava).
+
+### Botão de sair: encerrar bloqueado nos primeiros 15 minutos
+
+O botão do canto continua abrindo **Sair do app** / **Minimizar (continuar
+recebendo)**, mas encerrar o processo de verdade fica desabilitado enquanto o app
+tem menos de 15 minutos de vida, com o tempo restante visível. Encerrar logo
+depois de abrir derrubava a conexão P2P antes de ela estabilizar. **Minimizar
+continua liberado** — o app segue vivo recebendo. A mesma trava vale para o
+"Sair do DisTorrent" das configurações, que antes encerrava sem confirmação
+nenhuma. A marca de início é por execução (`sessionStorage`), não persistida
+entre aberturas.
+
+### Verificação
+
+- **Frontend**: 279 testes unitários (novos: 13 da regra de saída + 5 de
+  versionamento), typecheck, lint e build verdes.
+- **Core Rust**: 205 testes de lib + integração (grupo/comunidade, salas, rede,
+  storage, voz) + **5 do updater** (escolha de versão e de asset por
+  plataforma).
+- **e2e (Playwright)**: `call-rejoin` (chamar → sair → chamar de novo, duas
+  direções), `calls`, `call-phases` — **6/6 verdes**. Antes da correção da regra
+  de coletividade, `call-rejoin` falhava nas duas direções.
+- `tests/latency_bench.rs::relay_mqtt_real_rtt` não roda offline (usa brokers
+  MQTT públicos reais) — não é teste funcional.
+- **Não validado em aparelho real**: mesh de grupo com 3+ aparelhos físicos e o
+  pareamento entre dois aparelhos de não-amigos. O comportamento está coberto
+  por teste de motor e de regra pura.
+
+### Atualizador: o que estava errado e o que mudou
+
+Revisão completa do caminho `update_check` (Rust) → `runUpdateFlow` (frontend),
+porque publicar uma versão que o app não enxerga é o mesmo que não publicar.
+
+**`/releases/latest` ignora pré-release.** O Rust consultava o endpoint
+`/releases/latest`, que **descarta releases marcadas como `prerelease`**. Hoje o
+workflow publica com `prerelease: false`, então funciona — mas bastava alguém
+marcar uma release como pré-release no GitHub para o app responder "sem
+atualização" para sempre, sem nenhum erro visível. Agora a consulta é a LISTA de
+releases (`?per_page=20`) e a escolha é pela **maior versão**, não pela ordem da
+API nem pela data.
+
+**Comparação de versão duplicada.** O Rust precisava ordenar as releases e não
+tinha comparador. Criei `compare_version_strings`, que **espelha** o
+`compareVersions` do `updateRules.ts`. As duas pontas precisam concordar: uma
+escolhe *qual* release é a mais nova, a outra decide se ela é mais nova que a
+atual. Divergir fazia o app baixar um instalador e depois dizer "sem
+atualização".
+
+**Asset errado.** `pick_asset` aceitava "termina em `.exe`" — um `portable.exe`
+ou `debug.exe` anexado à release faria o app baixar o arquivo errado. Agora
+prefere explicitamente o padrão do instalador (`*_setup.exe`, `*_arm64.apk`) e
+cai no primeiro da extensão só se esse padrão não existir.
+
+**Erro de versionamento que gerou esta versão.** Os quatro pontos precisam ser
+idênticos antes de publicar:
+
+| Arquivo | Por que importa |
+|---|---|
+| `package.json` | o workflow lê daqui o **nome** da release |
+| `src-tauri/tauri.conf.json` | é a versão que o **app reporta** ao comparar |
+| `src-tauri/Cargo.toml` | fallback de `current` no Rust |
+| nome do instalador | o updater recusa se não bater com a tag (`label_mismatch`) |
+
+Criei `tests/versioning.test.ts` (5 testes) que falha **antes do build** se
+divergirem, e `publish-release.ps1` agora confere os três arquivos, a tag e o
+nome do instalador antes de criar a release.
+
+**Build local x CI.** O CI publica com **Inno Setup** (`*_x64_setup.exe`) e não
+com o NSIS do Tauri (`*_x64-setup.exe`): o stub do NSIS cai no falso positivo
+`Program:Win32/Contebrew.A!ml`, que faz o navegador bloquear o download. Um
+build local com `--bundles nsis` gera um arquivo com nome e motor **diferentes**
+do que os usuários recebem. `scripts/build-installer.ps1` é o caminho correto.
+
+### Versionamento (por que 1.1.23)
+
+O `update_check` do Rust recusa o asset quando a versão **no nome do arquivo**
+não bate com a **tag da release** (`label_mismatch`) — é a proteção contra
+instalador rotulado errado entrar em loop. Por isso os quatro pontos precisam
+estar sempre idênticos antes de publicar:
+
+- `package.json`
+- `src-tauri/tauri.conf.json` (é daqui que sai a versão que o app reporta)
+- `src-tauri/Cargo.toml`
+- o nome do instalador, gerado pelo próprio Tauri a partir desses campos
+
+Como a 1.1.22 já existia, esta leva saiu como **1.1.23** para o updater não
+achar que o binário é o mesmo da versão anterior.
+
 ## [1.1.20-pre-alpha] - 2026-10-31
 
 ### Ligar e o outro lado não tocar

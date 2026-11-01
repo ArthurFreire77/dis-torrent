@@ -609,6 +609,8 @@ export interface DisTorrentServices {
   conversationDelete(convId: string): Promise<void>
   messagesList(convId: string): Promise<StoredMessage[]>
   messageSend(convId: string, body: string): Promise<StoredMessage>
+  /** Reenvia uma mensagem EXISTENTE preservando o id (sem criar bolha nova). */
+  messageResend(msgId: string): Promise<StoredMessage>
   sendTyping?(convId: string): Promise<void>
   subscribe(cb: (ev: EngineEvent) => void): () => void
 
@@ -661,6 +663,11 @@ export interface DisTorrentServices {
   // Grupos DM (estilo Discord)
   createGroup(title: string, members: string[]): Promise<Conversation>
   groupMembers(convId: string): Promise<[string,string][]>
+  /**
+   * Pede o pareamento IMEDIATO de todos os membros do grupo (não-amigos
+   * incluídos). Sem isto eles só eram discados pelo tique de 45 s do motor.
+   */
+  groupPairNow?(convId: string): Promise<void>
   groupAdd(convId: string, fp: string): Promise<void>
   /** Remove um integrante; o roster é re-sincronizado com todos do grupo. */
   groupRemove(convId: string, fp: string): Promise<void>
@@ -676,6 +683,8 @@ export interface DisTorrentServices {
   // Salas de chamada anunciadas (grupo/DM): ver, entrar e sair
   callRoomPublish(callId: string, convId: string, kind: string, participants: string[]): Promise<void>
   callRoomClose(convId: string): Promise<void>
+  /** Sai da sala sem encerrá-la para os outros (só o host, sozinho, fecha). */
+  callRoomLeave(convId: string): Promise<void>
   /** Entra numa sala anunciada → `[callId, participantes avisados]`. */
   callRoomJoin(convId: string, kind: string): Promise<[string, string[]]>
   /** Salas vivas no boot (a UI perdeu os eventos enquanto estava fechada). */

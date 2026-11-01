@@ -14,11 +14,47 @@ param(
     [string]$Name = 'DisTorrent 1.1.12-pre-alpha',
     [string]$BodyFile = "$env:TEMP\opencode\release-body.md",
     [string]$Setup,
-    [string[]]$ExtraAssets = @()
+    [string[]]$ExtraAssets = @(),
+    # Pula a conferencia de versao entre package.json/tauri.conf.json/Cargo.toml.
+    # NUNCA use em release de verdade: e' justamente essa conferencia que evita
+    # o app achar que ja esta atualizado (ou baixar o mesmo binario em loop).
+    [switch]$SkipVersionCheck
 )
 
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$root = Split-Path -Parent $PSScriptRoot
+
+# --- 0) Versao consistente ANTES de publicar -------------------------------
+# O `update_check` do Rust recusa o asset quando a versao no NOME do instalador
+# nao bate com a TAG (`label_mismatch`) e o frontend compara com a versao que o
+# app reporta (`tauri.conf.json`). Se esses numeros divergirem, a atualizacao
+# nao aparece, aparece eternamente, ou entra em loop de reinstalar o mesmo
+# binario. Conferimos aqui para falhar ANTES de criar a release.
+if (-not $SkipVersionCheck) {
+    $pkgVersion = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
+    $confVersion = (Get-Content (Join-Path $root 'src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json).version
+    $cargoRaw = Get-Content (Join-Path $root 'src-tauri\Cargo.toml') -Raw
+    $cargoMatch = [regex]::Match($cargoRaw, '(?m)^version\s*=\s*"([^"]+)"')
+    $cargoVersion = if ($cargoMatch.Success) { $cargoMatch.Groups[1].Value } else { '' }
+
+    if ($confVersion -ne $pkgVersion -or $cargoVersion -ne $pkgVersion) {
+        throw "versoes divergentes: package.json=$pkgVersion tauri.conf.json=$confVersion Cargo.toml=$cargoVersion - iguale antes de publicar"
+    }
+    # A tag tem de ser a versao do app (sem o sufixo de pre-release).
+    if ($Tag -ne ("v" + ($pkgVersion -split '-')[0])) {
+        throw "tag '$Tag' nao corresponde a versao '$pkgVersion' (esperado v$((($pkgVersion -split '-')[0])))"
+    }
+    # E o instalador, se informado, precisa citar a MESMA versao no nome.
+    if ($Setup -and (Test-Path $Setup)) {
+        $setupName = Split-Path $Setup -Leaf
+        if ($setupName -notlike "*_$($pkgVersion)_*") {
+            throw "instalador '$setupName' nao cita a versao $pkgVersion - foi buildado de outra arvore?"
+        }
+    }
+    Write-Host "versao confere: $pkgVersion (tag $Tag)"
+}
 
 $cred = "protocol=https`nhost=github.com`n`n" | git credential fill
 $tok = ($cred | Select-String '^password=').Line -replace '^password=', ''

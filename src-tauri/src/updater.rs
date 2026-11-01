@@ -9,10 +9,20 @@ use serde::Serialize;
 /// Repositório oficial — única fonte de verdade; a UI não manda URL arbitrária.
 #[allow(dead_code)]
 const REPO: &str = "ArthurFreire77/dis-torrent";
+/// LISTA de releases, não `/releases/latest`.
+///
+/// BUG LATENTE CORRIGIDO: `/releases/latest` **ignora releases marcadas como
+/// `prerelease`**. O workflow publica com `prerelease: false`, então hoje
+/// funciona — mas basta alguém marcar uma release como pré-release no GitHub
+/// (ou o `action-gh-release` mudar o padrão) para o app dizer "sem atualização"
+/// para sempre, sem erro nenhum. A lista permite escolher a MAIOR versão
+/// publicada, independente da flag, e ainda tolerar rascunhos.
 const RELEASES_API: &str =
-    "https://api.github.com/repos/ArthurFreire77/dis-torrent/releases/latest";
+    "https://api.github.com/repos/ArthurFreire77/dis-torrent/releases?per_page=20";
 /// Prefixo aceito para qualquer download.
 const DOWNLOAD_PREFIX: &str = "https://github.com/ArthurFreire77/dis-torrent/releases/download/";
+/// Quantas releases da lista aceitamos (defesa contra resposta gigante).
+const RELEASES_PAGE_CAP: usize = 20;
 
 /// Metadados para o frontend decidir se mostra a tela de atualização.
 #[derive(Debug, Clone, Serialize)]
@@ -86,17 +96,38 @@ fn accepted_ext(platform: &str) -> &'static [&'static str] {
     }
 }
 
-/// Escolhe o asset da release para esta plataforma (Linux: AppImage antes do .deb).
+/// Escolhe o asset da release para esta plataforma.
+///
+/// Primeiro pela EXTENSÃO aceita (Linux: AppImage antes do .deb). Dentro da
+/// extensão, procura o nome exato do instalador do projeto
+/// (`*_setup.exe` no Windows) — antes bastava "termina em .exe", então um
+/// `portable.exe`, `debug.exe` ou símbolos anexados à release fariam o app
+/// baixar o arquivo errado e falhar na instalação.
 fn pick_asset<'a>(assets: &'a [GhAsset], platform: &str) -> Option<&'a GhAsset> {
     let exts = accepted_ext(platform);
     for want in exts {
-        // `find` já pega o primeiro por ordem da API.
-        if let Some(a) = assets
+        let da_ext: Vec<&GhAsset> = assets
             .iter()
-            .find(|a| a.name.to_ascii_lowercase().ends_with(want))
-        {
-            return Some(a);
+            .filter(|a| a.name.to_ascii_lowercase().ends_with(want))
+            .collect();
+        if da_ext.is_empty() {
+            continue;
         }
+        // Preferência explícita pelo padrão do instalador publicado.
+        let preferido = match *want {
+            ".exe" => "_setup",
+            ".apk" => "_arm64",
+            _ => "",
+        };
+        if !preferido.is_empty() {
+            if let Some(a) = da_ext
+                .iter()
+                .find(|a| a.name.to_ascii_lowercase().contains(preferido))
+            {
+                return Some(a);
+            }
+        }
+        return Some(da_ext[0]);
     }
     None
 }
@@ -124,6 +155,48 @@ struct GhRelease {
     draft: bool,
     #[serde(default)]
     assets: Vec<GhAsset>,
+}
+
+/// Compara duas versões do projeto (`1.1.9`, `v1.1.10-pre-alpha`, `2.0`).
+///
+/// ESPELHA `src/services/updateRules.ts` (que decide se mostra o overlay). As
+/// duas pontas PRECISAM concordar: o Rust escolhe QUAL release é a mais nova e
+/// o frontend decide se ela é mais nova que a atual. Se divergirem, o app baixa
+/// um instalador e depois diz "sem atualização" (ou pior: fica em loop).
+///
+/// Regras: componentes numéricos comparados como NÚMERO (`1.1.10 > 1.1.9`),
+/// sufixo de pré-release é IGNORADO na comparação de base — o projeto publica
+/// sempre `-pre-alpha`, então tratá-lo como "menor" travaria toda atualização.
+fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn parse(raw: &str) -> Vec<u64> {
+        let s = raw.trim().trim_start_matches(['v', 'V']);
+        let core = s.split('-').next().unwrap_or("");
+        let mut out: Vec<u64> = core
+            .split('.')
+            .map(|p| {
+                // `10a` -> 10 (build do Tauri às vezes anexa letra no patch).
+                let digits: String = p.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u64>().unwrap_or(0)
+            })
+            .collect();
+        if out.is_empty() {
+            out.push(0);
+        }
+        out
+    }
+    let pa = parse(a);
+    let pb = parse(b);
+    let len = pa.len().max(pb.len());
+    for i in 0..len {
+        let na = pa.get(i).copied().unwrap_or(0);
+        let nb = pb.get(i).copied().unwrap_or(0);
+        match na.cmp(&nb) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    Ordering::Equal
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
@@ -159,11 +232,25 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
         ));
     }
     let bytes = res.bytes().await.map_err(|e| format!("resposta: {e}"))?;
-    let release: GhRelease = serde_json::from_slice(&bytes)
+    let mut releases: Vec<GhRelease> = serde_json::from_slice(&bytes)
         .map_err(|e| format!("resposta do GitHub em formato inesperado: {e}"))?;
-    if release.draft {
-        return Err("release mais recente está em rascunho".into());
+    releases.truncate(RELEASES_PAGE_CAP);
+
+    // Rascunho não é publicado: nunca oferecer.
+    releases.retain(|r| !r.draft);
+    if releases.is_empty() {
+        return Err("nenhuma release publicada no repositório".into());
     }
+
+    // ESCOLHA POR VERSÃO, não por data: a release mais recente pode não ser a
+    // de maior número (backport, republicação, tag fora de ordem). A comparação
+    // fica no core para a lista ser ordenada do mesmo jeito que o frontend
+    // compara — sem depender da ordem da API do GitHub.
+    releases.sort_by(|a, b| {
+        compare_version_strings(&b.tag_name, &a.tag_name)
+            .then_with(|| b.tag_name.cmp(&a.tag_name))
+    });
+    let release = releases.remove(0);
 
     let platform = platform_tag().to_string();
     let asset = pick_asset(&release.assets, &platform).ok_or_else(|| {
@@ -583,4 +670,75 @@ fn pre_update_snapshot(app: &tauri::AppHandle) -> Result<Option<PathBuf>, String
         }
     }
     Ok(Some(destino))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asset(name: &str) -> GhAsset {
+        GhAsset {
+            name: name.to_string(),
+            size: 1,
+            browser_download_url: format!("{DOWNLOAD_PREFIX}v1.0.0/{name}"),
+            digest: None,
+        }
+    }
+
+    /// A release mais nova é a de MAIOR VERSÃO, não a primeira da API.
+    /// Antes o app usava `/releases/latest`, que IGNORA releases marcadas como
+    /// prerelease — a atualização simplesmente não aparecia, sem erro nenhum.
+    #[test]
+    fn versao_maior_ganha_da_ordem_da_api() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_version_strings("v1.1.9", "1.1.10"), Ordering::Less);
+        assert_eq!(compare_version_strings("1.1.10", "v1.1.9"), Ordering::Greater);
+        assert_eq!(compare_version_strings("v1.1.23", "1.1.22"), Ordering::Greater);
+        // Sufixo de pré-release não muda a base: o projeto publica sempre
+        // `-pre-alpha` e tratá-lo como "menor" travaria toda atualização.
+        assert_eq!(
+            compare_version_strings("1.1.23-pre-alpha", "1.1.22-pre-alpha"),
+            Ordering::Greater
+        );
+        assert_eq!(compare_version_strings("1.2.0", "1.2.0-pre-alpha"), Ordering::Equal);
+        assert_eq!(compare_version_strings("2.0", "1.9.99"), Ordering::Greater);
+        // Patch com letra do Tauri (`10a`) conta como 10.
+        assert_eq!(compare_version_strings("1.1.10a", "1.1.10"), Ordering::Equal);
+    }
+
+    /// Só o INSTALADOR de verdade é escolhido — não um portable/debug anexado.
+    #[test]
+    fn windows_escolhe_o_setup_e_nao_outro_exe() {
+        let lista = vec![
+            asset("DisTorrent_1.1.23-pre-alpha_x64_portable.exe"),
+            asset("DisTorrent_1.1.23-pre-alpha_x64_setup.exe"),
+        ];
+        let escolhido = pick_asset(&lista, "windows").expect("tem .exe");
+        assert_eq!(escolhido.name, "DisTorrent_1.1.23-pre-alpha_x64_setup.exe");
+    }
+
+    #[test]
+    fn linux_prefere_appimage_e_aceita_deb_como_fallback() {
+        let lista = vec![
+            asset("DisTorrent_1.1.23-pre-alpha_amd64.deb"),
+            asset("DisTorrent_1.1.23-pre-alpha_amd64.AppImage"),
+        ];
+        assert!(pick_asset(&lista, "linux").unwrap().name.ends_with(".AppImage"));
+        let so_deb = vec![asset("DisTorrent_1.1.23-pre-alpha_amd64.deb")];
+        assert!(pick_asset(&so_deb, "linux").unwrap().name.ends_with(".deb"));
+    }
+
+    #[test]
+    fn android_escolhe_o_apk_arm64() {
+        let lista = vec![
+            asset("DisTorrent_1.1.23-pre-alpha_arm64.apk"),
+        ];
+        assert!(pick_asset(&lista, "android").unwrap().name.ends_with(".apk"));
+    }
+
+    #[test]
+    fn plataforma_sem_asset_devolve_none() {
+        let lista = vec![asset("DisTorrent_1.1.23-pre-alpha_amd64.deb")];
+        assert!(pick_asset(&lista, "windows").is_none());
+    }
 }

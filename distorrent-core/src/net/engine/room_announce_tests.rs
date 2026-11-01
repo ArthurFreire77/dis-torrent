@@ -18,6 +18,67 @@ fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     (e, dir)
 }
 
+/// Pedido do dono: "quem está num grupo mas não é amigo deve aparecer online
+/// e conectar como se fosse amigo".
+///
+/// O buraco era estrutural: `maintain_communities` só cobria SERVIDOR e o tick
+/// de amigos só cobria `accepted`. Nenhum laço discava membro de GRUPO.
+#[test]
+fn grupo_com_nao_amigo_tenta_parear() {
+    let (host, _dh) = mk_engine("grupo-host");
+    let (guest, _dg) = mk_engine("grupo-guest");
+    // NENHUMA amizade é criada — só o grupo.
+    let conv = host
+        .create_group("SemAmizade", vec![guest.identity.fingerprint.clone()])
+        .unwrap();
+    // O convidado também precisa do roster local (é assim que o roster chega).
+    guest
+        .store
+        .upsert_group_state(
+            &conv.id,
+            "SemAmizade",
+            &[
+                (host.identity.fingerprint.clone(), "host".into()),
+                (guest.identity.fingerprint.clone(), "guest".into()),
+            ],
+        )
+        .unwrap();
+
+    // O pareamento não pode exigir amizade: `group_pair_now` agenda o dial.
+    host.group_pair_now(&conv.id);
+    guest.group_pair_now(&conv.id);
+
+    // O throttle do dial registrou o alvo (prova de que a tentativa aconteceu).
+    let alvo = guest.identity.fingerprint.clone();
+    let registrado = host
+        .member_dial_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&alvo);
+    assert!(
+        registrado,
+        "membro de grupo não-amigo precisa ser DISCADO (era o bug do grupo)"
+    );
+}
+
+/// Não sou membro do grupo: não disco ninguém (não vaza tráfego de grupo alheio).
+#[test]
+fn grupo_que_nao_pertence_nao_disca() {
+    let (eu, _d) = mk_engine("grupo-fora");
+    let (outro, _d2) = mk_engine("grupo-dono");
+    let conv = outro
+        .create_group("SoDele", vec![eu.identity.fingerprint.clone()])
+        .unwrap();
+    // Sem roster local da conversa, não pertenço ao grupo.
+    eu.group_pair_now(&conv.id);
+    let dials = eu
+        .member_dial_at
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len();
+    assert_eq!(dials, 0, "não disca membros de grupo do qual não participo");
+}
+
 #[test]
 fn publicar_sala_emite_open_com_participantes() {
     let (e, _d) = mk_engine("sala-host");

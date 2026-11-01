@@ -62,6 +62,15 @@ impl Rooms {
         self.map.remove(conv_id)
     }
 
+    /// Troca a lista de participantes SEM mexer no host nem no `call_id`.
+    /// Usado quando alguém SAI e a chamada continua (ver `leave_room`).
+    pub fn set_participants(&mut self, conv_id: &str, participants: Vec<String>) {
+        if let Some(r) = self.map.get_mut(conv_id) {
+            r.participants = participants;
+            r.updated_ms = crate::identity::now_ms();
+        }
+    }
+
     pub fn get(&self, conv_id: &str) -> Option<&Room> {
         self.map.get(conv_id)
     }
@@ -104,5 +113,32 @@ mod tests {
         assert!(r.reap(500, 1400).is_empty());
         assert_eq!(r.reap(500, 1600).len(), 1);
         assert!(r.get("conv").is_none());
+    }
+
+    /// Sair de um participante não pode apagar a sala dos outros: só troca a
+    /// lista. Era o bug "um convidado sai e o botão Entrar some para todos".
+    #[test]
+    fn set_participants_nao_troca_host_nem_call_id() {
+        let mut r = Rooms::default();
+        r.open(
+            "call-1",
+            "conv",
+            "voice",
+            "host",
+            vec!["host".into(), "guest".into()],
+            1,
+        );
+        r.set_participants("conv", vec!["host".into()]);
+        let sala = r.get("conv").expect("a sala continua viva");
+        assert_eq!(sala.call_id, "call-1", "o id da chamada não muda");
+        assert_eq!(sala.host_fp, "host", "o host não muda");
+        assert_eq!(sala.participants, vec!["host".to_string()]);
+    }
+
+    #[test]
+    fn set_participants_em_sala_inexistente_nao_faz_nada() {
+        let mut r = Rooms::default();
+        r.set_participants("nao-existe", vec!["x".into()]);
+        assert!(r.get("nao-existe").is_none());
     }
 }

@@ -159,6 +159,14 @@ export const tauriServices: DisTorrentServices = {
     return invoke<StoredMessage>('message_send', { convId: convId.trim(), body })
   },
 
+  // Reenvio do botão "Reenviar": manda o MESMO id (o core reconstrói o
+  // envelope da linha gravada). Usar `messageSend` aqui criava um id novo e,
+  // depois de reabrir a conversa, as duas linhas apareciam com o mesmo texto.
+  messageResend: (msgId) => {
+    if (!msgId || msgId.trim() === '') throw new Error('mensagem inválida')
+    return invoke<StoredMessage>('message_resend', { msgId: msgId.trim() })
+  },
+
   sendTyping: async (convId) => {
     // Core ainda não tem frame Typing — best-effort: tenta invoke, ignora se não existir.
     // Quando o relay suportar, o peer recebe; local nunca ecoa para si.
@@ -262,6 +270,7 @@ export const tauriServices: DisTorrentServices = {
   // Grupos DM + chamadas + voz + arquivos
   createGroup: (title, members) => invoke<Conversation>('create_group', { title, members }),
   groupMembers: (cid) => invoke<[string, string][]>('group_members', { convId: cid }),
+  groupPairNow: (cid) => invoke<void>('group_pair_now', { convId: cid }),
   groupAdd: (cid, fp) => invoke<void>('group_add', { convId: cid, fp }),
   groupRemove: (cid, fp) => invoke<void>('group_remove', { convId: cid, fp }),
   groupRename: (cid, title) => invoke<void>('group_rename', { convId: cid, title }),
@@ -274,6 +283,9 @@ export const tauriServices: DisTorrentServices = {
   callRoomPublish: (callId, convId, kind, participants) =>
     invoke<void>('call_room_publish', { callId, convId, kind, participants }),
   callRoomClose: (convId) => invoke<void>('call_room_close', { convId }),
+  // Sair da sala ≠ encerrar a chamada: o core só fecha para todos quando o
+  // HOST sai e não sobra ninguém. Antes o convidado apagava o aviso de todos.
+  callRoomLeave: (convId) => invoke<void>('call_room_leave', { convId }),
   callRoomJoin: (convId, kind) =>
     invoke<[string, string[]]>('call_room_join', { convId, kind }),
   callRoomsList: () => invoke<any[]>('call_rooms_list').catch(() => []),

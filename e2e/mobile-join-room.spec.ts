@@ -14,7 +14,9 @@ async function criarConta(page: Page, nome: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 })
   await page.getByPlaceholder('Seu nome').fill(nome)
   await page.getByRole('button', { name: 'Criar conta' }).click()
-  await expect(page).toHaveURL(/\/d\/distorrent/, { timeout: 15000 })
+  // Com viewport de celular o app entra no shell móvel (`/m`), não em `/d`.
+  // Exigir só `/d/distorrent` reprovava o teste antes de chegar no botão.
+  await expect(page).toHaveURL(/\/(d\/distorrent|m)$/, { timeout: 15000 })
 }
 
 test('mobile mostra o botão Entrar quando há sala de chamada anunciada', async ({ page }) => {

@@ -9,24 +9,28 @@ test('canal de voz é sempre coletivo', () => {
 
 test('DM 1:1 não é coletiva (sair encerra para os dois)', () => {
   assert.equal(isCollectiveRoom({ callId: 'call-abc', participants: ['eu'] }), false)
+  // EU + UMA pessoa = 1:1. Era `size > 1` e classificava TODA chamada de dois
+  // como coletiva: o lado que ficava nunca encerrava e a próxima chamada batia
+  // em "já existe uma chamada em andamento" (chamada fantasma).
+  assert.equal(isCollectiveRoom({ callId: 'call-abc', participants: ['eu', 'fulano'] }), false)
 })
 
-test('sala com mais de uma pessoa é coletiva — mesmo com um único PC', () => {
+test('sala com MAIS DE DUAS pessoas é coletiva — mesmo com um único PC', () => {
   // Era exatamente aqui que a chamada de grupo morria: pcs.size === 1.
-  assert.equal(
-    isCollectiveRoom({ callId: 'call-abc', participants: ['eu', 'fulano'] }),
-    true,
-  )
   assert.equal(
     isCollectiveRoom({ callId: 'call-abc', participants: ['eu', 'fulano', 'ciclano'] }),
     true,
   )
 })
 
-test('roster vazio mas com convidados conta como coletiva', () => {
+test('roster vazio: dois convidados são grupo, um convidado é 1:1', () => {
   assert.equal(
     isCollectiveRoom({ callId: 'call-abc', participants: ['eu'], invited: ['a', 'b'] }),
     true,
+  )
+  assert.equal(
+    isCollectiveRoom({ callId: 'call-abc', participants: ['eu'], invited: ['a'] }),
+    false,
   )
 })
 

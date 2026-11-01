@@ -6,6 +6,7 @@
 //
 // Cada suite também roda isolado, útil pra depurar uma só:
 //   node --experimental-strip-types --test tests/<arquivo>.test.ts
+import './appUptime.test.ts'
 import './botCommands.test.ts'
 import './callPhases.test.ts'
 import './callRooms.test.ts'
@@ -30,5 +31,6 @@ import './screenShare.test.ts'
 import './screenShareFixes.test.ts'
 import './sharedFoundation.test.ts'
 import './updater.test.ts'
+import './versioning.test.ts'
 import './wizardModel.test.ts'
 import './wizardLayout.test.ts'

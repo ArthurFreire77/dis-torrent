@@ -21,6 +21,7 @@ import {
   normalizeOptions,
   isScreenSampleBad,
   lowerScreenQuality,
+  raiseScreenQuality,
   SCREEN_DEFAULT_OPTIONS,
   type ScreenShareOptions,
   type ScreenShareMetrics,
@@ -970,6 +971,8 @@ export class CallManager {
   private nativeVoiceSince = -1
   /** Chamadas JÁ acabadas: barra aceite tardio, chamada fantasma e duplo-clique em "Aceitar". */
   private endedCalls = new Set<string>()
+  /** Desde quando cada par está em `new`/`connecting` (ver repairHalfOpenPairs). */
+  private pairStuckSince = new Map<string, number>()
   /** callIds com aceite em andamento (duplo clique). */
   private accepting = new Set<string>()
   /** Evita que o eco de `call_ended` execute `leave()` recursivamente. */
@@ -1034,6 +1037,12 @@ export class CallManager {
   private screenError: { code: ScreenShareErrorCode; message: string } | null = null
   /** Contador de tentativas de recuperação automática da captura. */
   private screenRecoveryAttempts = 0
+  /** Amostras ruins seguidas (histerese da degradação automática de qualidade). */
+  private screenBadSamples = 0
+  /** Amostras boas seguidas (para voltar a subir a qualidade). */
+  private screenGoodSamples = 0
+  /** Track de tela pausada pelo sistema (`mute`): métricas congeladas não contam. */
+  private screenTrackMuted = false
   private static readonly SCREEN_MAX_RECOVERY = 5
   /** Timer de recuperação (janela fechada/monitor desconectado/perda). */
   private screenRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -1660,7 +1669,11 @@ export class CallManager {
         this.onUpdate({ ...st })
         return
       }
-      if (st.phase === 'connected') this.applyPhase('ice-failed') // → reconnecting
+      // Também em 'connecting': se o par caiu antes de fechar a mídia, esperar
+      // 'connected' deixava a chamada em "Conectando…" sem que ninguém
+      // tentasse de novo até o watchdog de 20 s. Quem estava conectado e caiu
+      // continua indo para 'reconnecting'.
+      if (st.phase === 'connected' || st.phase === 'connecting') this.applyPhase('ice-failed')
       else this.onUpdate({ ...st })
     } catch { /* ignore */ }
   }
@@ -1706,7 +1719,11 @@ export class CallManager {
         // QUEM OFERECE: só o lado de fp MAIOR. Os dois lados abrem PC (quem
         // entrou pela sala e quem já estava nela), e offer+offer simultâneo
         // travava a negociação — era o "cliquei Entrar e não conectou".
-        if (this.myFp && this.myFp > fp) {
+        //
+        // E só se NÃO houver PC: o aviso de roster é reenviado a cada 15 s
+        // (`announceSelfToRoom`). Chamar `createPC` sem esta guarda fechava e
+        // refazia a conexão de um par que já estava negociando/conectado.
+        if (this.myFp && this.myFp > fp && !this.pcs.has(fp)) {
           this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
         }
       } else if (p.disconnected) {
@@ -1946,6 +1963,9 @@ export class CallManager {
       }
     }
     // para grupo >10, convida resto via CallAddParticipant (engine relay)
+    // Manutenção da malha: sem ela, um aviso perdido deixava pares mudos para
+    // sempre numa chamada de grupo (canal de voz já tinha; grupo/DM não).
+    this.startMeshRepair(callId)
     this.publishRoom()
     this.startMeshRepair(this.state.callId)
     this.onUpdate({ ...this.state })
@@ -2323,6 +2343,9 @@ export class CallManager {
     } catch { /* offer pendente nunca derruba o accept */ }
     // MALHA COMPLETA: pede à sala que apresente quem já está dentro (cobre offer perdida).
     this.announceSelfToRoom(callId)
+    // Manutenção periódica da malha (ver startMeshRepair): grupo/DM não tinha
+    // reparo nenhum — um aviso perdido deixava pares mudos para sempre.
+    this.startMeshRepair(callId)
     this.publishRoom()
     this.startCallForeground()
     return this.state
@@ -3023,6 +3046,7 @@ export class CallManager {
       this.lastRemoteOffer.clear()
       this.iceReports.clear()
       this.iceRestarts.clear()
+      this.pairStuckSince.clear()
       this.accepting.clear()
       this.closeRoom()
       // NÃO marca em `endedCalls`: uma chamada NOVA com outro id precisa passar;
@@ -3115,6 +3139,7 @@ export class CallManager {
       this.lastRemoteOffer.clear()
       this.iceReports.clear()
       this.iceRestarts.clear()
+      this.pairStuckSince.clear()
       this.pcs.forEach(pc => { try { pc.close() } catch { /* ignore */ } })
       this.pcs.clear()
       this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
@@ -3153,6 +3178,8 @@ export class CallManager {
     this.screenMetrics = emptyScreenMetrics()
     this.screenError = null
     this.screenRecoveryAttempts = 0
+    this.screenBadSamples = 0
+    this.screenGoodSamples = 0
     this.screenStats.reset()
   }
 
@@ -3297,24 +3324,29 @@ export class CallManager {
     try {
       this.rosterTimer = setInterval(tick, 10_000)
     } catch { this.rosterTimer = null }
-    // O reparo periódico do mesh vive em `startMeshRepair` (usado também por
-    // `start`/`enterRoom`, não só pelo canal de voz).
+    // O reparo periódico da malha vive em `startMeshRepair`, chamado daqui e
+    // também por `start`/`enterRoom`/`acceptInbound`.
     this.startMeshRepair(callId)
   }
 
   /**
-   * Reparo periódico do mesh (15 s): reapresenta a sala e refaz pares presos.
+   * Reparo periódico da malha (15 s): reapresenta a sala e refaz pares presos.
    *
    * Antes isso só existia em `joinVoice` (canal de voz). Em chamada de grupo
    * por DM/grupo, uma offer perdida no início — ou um par preso em
    * `connecting` — nunca era refeita: o "conecta e não conecta".
+   *
+   * Sempre rearma o timer: chamar de novo com outro `callId` precisa substituir
+   * o tique anterior, senão os dois convivem e o da chamada velha derruba o
+   * reparo da nova (`stopRosterReconcile`).
    */
   private startMeshRepair(callId: string) {
-    if (this.repairTimer) return
+    this.stopMeshRepair()
     try {
       this.repairTimer = setInterval(() => {
         const st = this.state
-        if (!st || st.callId !== callId) { this.stopRosterReconcile(); return }
+        if (!st || st.callId !== callId) { this.stopMeshRepair(); return }
+        if (!isCallPhaseActive(st.phase)) return
         // Reapresentação periódica: `CallAddParticipant` perdido deixava pares
         // sem malha para sempre.
         this.announceSelfToRoom(callId)
@@ -3323,11 +3355,15 @@ export class CallManager {
     } catch { this.repairTimer = null }
   }
 
+  private stopMeshRepair() {
+    try { if (this.repairTimer) clearInterval(this.repairTimer) } catch { /* ignore */ }
+    this.repairTimer = null
+  }
+
   private stopRosterReconcile() {
     try { if (this.rosterTimer) clearInterval(this.rosterTimer) } catch { /* ignore */ }
     this.rosterTimer = null
-    try { if (this.repairTimer) clearInterval(this.repairTimer) } catch { /* ignore */ }
-    this.repairTimer = null
+    this.stopMeshRepair()
   }
 
   /** Acha a m-line de vídeo; se era recvonly, promove a sendrecv + renegocia (replaceTrack não muda direção). */
@@ -3517,6 +3553,8 @@ export class CallManager {
     this.state.sharing = true
     this.screenError = null
     this.screenRecoveryAttempts = 0
+    this.screenBadSamples = 0
+    this.screenGoodSamples = 0
     this.screenStats.reset()
     this.screenMetrics = emptyScreenMetrics()
     this.watchScreenTrack(track)
@@ -3581,8 +3619,19 @@ export class CallManager {
         if (this.screenStream?.getVideoTracks()[0] !== track) return
         void this.handleScreenEnded()
       }
-      track.onmute = () => { this.noteScreenEvent('captura pausada pelo sistema (fonte oculta, monitor trocado ou app em segundo plano)') }
-      track.onunmute = () => { this.noteScreenEvent('captura retomada') }
+      // Pausa do sistema NÃO é rede ruim: marcá-la evita que a primeira amostra
+      // pós-retomada (bitrate/FPS zerados) derrube a qualidade "sozinha".
+      track.onmute = () => {
+        this.screenTrackMuted = true
+        this.noteScreenEvent('captura pausada pelo sistema (fonte oculta, monitor trocado ou app em segundo plano)')
+      }
+      track.onunmute = () => {
+        this.screenTrackMuted = false
+        // O baseline de bytes/frames fica obsoleto durante a pausa.
+        this.screenStats.reset()
+        this.screenBadSamples = 0
+        this.noteScreenEvent('captura retomada')
+      }
     } catch { /* engines sem onmute: só onended */ }
   }
 
@@ -3651,7 +3700,10 @@ export class CallManager {
           } catch { /* áudio é opcional: o vídeo continua */ }
         }
         if (needsOffer) {
-          if (pc.signalingState !== 'stable' || !this.state) {
+          // ESPERA a sinalização liberar em vez de abortar o share inteiro.
+          // Antes, um ICE restart em andamento (comum logo após entrar na
+          // chamada) fazia o `throw` aqui e a tela não saía para ninguém.
+          if (!(await this.waitForStable(pc)) || !this.state) {
             throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
           }
           const offer = await createTunedOffer(pc)
@@ -3967,18 +4019,44 @@ export class CallManager {
   /** Degradação honesta: só desce degrau com perda/jitter/FPS real abaixo do capturado; FPS nunca inventado. */
   private adaptScreenQuality(): void {
     if (this.screenOptions.quality === 'auto') return
+    // Track pausada pelo sistema: bitrate/FPS caem a zero e não dizem nada
+    // sobre a rede. Avaliar aqui derrubava a qualidade sem motivo.
+    if (this.screenTrackMuted) return
     const m = this.screenMetrics
-    if (!isScreenSampleBad(m)) {
-      if (this.screenRecoveryAttempts > 0) this.screenRecoveryAttempts = 0
+    // HISTERESE: uma amostra ruim isolada (um pico de jitter de 1 s) não pode
+    // derrubar a qualidade — antes bastava UMA e a tela caía 1080p → 720p →
+    // 480p sem volta, que é o "a captura vai piorando sozinha". Só desce com
+    // 2 amostras ruins seguidas, e volta a subir com 15 boas seguidas.
+    if (isScreenSampleBad(m)) {
+      this.screenGoodSamples = 0
+      this.screenBadSamples += 1
+      if (this.screenBadSamples < 2) return
+      this.screenBadSamples = 0
+      const next = lowerScreenQuality(this.screenOptions.quality)
+      if (next === this.screenOptions.quality) return
+      this.screenOptions = { ...this.screenOptions, quality: next }
+      const track = this.screenStream?.getVideoTracks()[0] ?? null
+      if (track) void applyScreenConstraints(track, this.screenOptions)
+      void this.applyScreenSenderTuning()
+      this.noteScreenEvent(`qualidade da tela ajustada para ${next} (rede ruim)`)
+      this.emitScreenDebug()
       return
     }
-    const next = lowerScreenQuality(this.screenOptions.quality)
-    if (next === this.screenOptions.quality) return
-    this.screenOptions = { ...this.screenOptions, quality: next }
+    this.screenBadSamples = 0
+    if (this.screenRecoveryAttempts > 0) this.screenRecoveryAttempts = 0
+    // RECUPERAÇÃO: rede voltou boa → sobe de volta um degrau (sem histerese a
+    // qualidade só descia e a tela ficava borrada até parar o share).
+    if (this.screenOptions.quality === '1080p') return
+    this.screenGoodSamples += 1
+    if (this.screenGoodSamples < 15) return
+    this.screenGoodSamples = 0
+    const up = raiseScreenQuality(this.screenOptions.quality)
+    if (up === this.screenOptions.quality) return
+    this.screenOptions = { ...this.screenOptions, quality: up }
     const track = this.screenStream?.getVideoTracks()[0] ?? null
     if (track) void applyScreenConstraints(track, this.screenOptions)
     void this.applyScreenSenderTuning()
-    this.noteScreenEvent(`qualidade da tela ajustada para ${next} (rede ruim)`)
+    this.noteScreenEvent(`qualidade da tela voltou para ${up}`)
     this.emitScreenDebug()
   }
 
@@ -4372,6 +4450,14 @@ export class CallManager {
    *  'connecting', onde o ICE está mudo e nada mais dispara o re-gather). */
   private restartIceAll(callId: string) {
     for (const [fp, pc] of this.pcs) {
+      // Só quem NÃO tem rota. O watchdog de 'connecting' dispara quando o
+      // primeiro par fecha; reiniciar os pares já conectados (comum num mesh
+      // de 3+) derrubava áudio/vídeo de quem estava funcionando — era o
+      // "um some e volta" no meio da chamada.
+      try {
+        const s = pc.iceConnectionState
+        if (s === 'connected' || s === 'completed') continue
+      } catch { /* segue */ }
       try { void this.tryIceRestart(fp, pc, callId, true) } catch { /* melhor esforço */ }
     }
   }
@@ -4389,14 +4475,37 @@ export class CallManager {
     await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
   }
 
-  /** Renegocia um PC já conectado (ex.: track anexada ao aceitar a chamada). */
-  private async renegotiate(fp: string, pc: RTCPeerConnection) {
+  /**
+   * Renegocia um PC já conectado (ex.: track anexada ao aceitar a chamada).
+   *
+   * ESPERA a sinalização voltar a `stable` em vez de desistir na hora. Antes,
+   * quem chamava no meio de um restart de ICE/rollback só via
+   * "negociação ocupada; não foi possível enviar a nova track agora" e a tela
+   * compartilhada não saía até parar e começar de novo (era o "às vezes a tela
+   * fica instável").
+   */
+  private async renegotiate(fp: string, pc: RTCPeerConnection): Promise<boolean> {
     try {
-      if (!this.state || pc.signalingState !== 'stable') return
+      if (!this.state) return false
+      const callId = this.state.callId
+      const pronto = await this.waitForStable(pc)
+      if (!pronto) return false
+      // A chamada pode ter trocado durante a espera.
+      if (!this.state || this.state.callId !== callId || this.pcs.get(fp) !== pc) return false
       const offer = await createTunedOffer(pc)
       await pc.setLocalDescription(offer)
-      await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
-    } catch { /* peer isolado não derruba os demais */ }
+      await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+      return true
+    } catch { return false }
+  }
+
+  /** Aguarda `signalingState === 'stable'` (até ~3s). Devolve se conseguiu. */
+  private async waitForStable(pc: RTCPeerConnection, budgetMs = 3000): Promise<boolean> {
+    const limite = Date.now() + budgetMs
+    while (pc.signalingState !== 'stable' && pc.signalingState !== 'closed' && Date.now() < limite) {
+      await new Promise((r) => setTimeout(r, 120))
+    }
+    return pc.signalingState === 'stable'
   }
 
   /** Cria/renegocia PC de UM par; PC já conectado NÃO é fechado (bug "um escuta, o outro não"). */
@@ -4405,11 +4514,17 @@ export class CallManager {
     // Medidor: registra os iceServers efetivos (o que foi tentado de verdade).
     try { this.iceServersUsed = getIceServers() } catch { this.iceServersUsed = null }
     const anterior = this.pcs.get(fp)
-    // Sessão VIVA e saudável: não recriar. Fechar e refazer aqui derrubava
-    // justamente o par que já estava ouvindo (o "um escuta, o outro não").
     if (anterior) {
-      const st = anterior.connectionState
-      if (st === 'connected') {
+      const cs = anterior.connectionState
+      // VIVA (inclusive AINDA NEGOCIANDO): não recriar.
+      //
+      // BUG REAL: só `connected` era poupado. Um PC em `connecting` era
+      // FECHADO e refeito — e `createPC` é chamado em vários caminhos
+      // (`enterRoom`, `onParticipantAdded`, `announceSelfToRoom`, reparo de
+      // 15 s). Quem levava mais de um ciclo para fechar o ICE tinha a
+      // negociação reiniciada do zero a cada chamada: era a sensação de "tudo
+      // instável" e o "Conectando…" que nunca terminava.
+      if (cs === 'connected' || cs === 'connecting' || cs === 'new') {
         return
       }
       try { anterior.close() } catch { /* já fechado */ }
@@ -4463,6 +4578,34 @@ export class CallManager {
       // para sempre — é o "conecta e não conecta" típico de mesh 3+.
       if (!pc || cs === 'failed' || cs === 'closed' || cs === 'connecting' || !cs) {
         void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
+        continue
+      }
+      // PAR TRAVADO (`new`/`connecting` por muito tempo): o ICE não fecha e
+      // nada mais dispara. Sem isto, o par ficava mudo para sempre com o
+      // quadrado da pessoa na chamada (era o "entrou e não se ouve" que só
+      // voltava saindo e entrando).
+      //
+      // Espera um orçamento antes de agir: um par saudável atravessa
+      // `connecting` em 1-3 s; este tick roda a cada 15 s, então dois ticks
+      // (~30 s) sem mídia já justificam refazer a offer do zero.
+      const esperando = cs === 'new' || cs === 'connecting'
+      if (esperando) {
+        const desde = this.pairStuckSince.get(fp) ?? 0
+        if (desde === 0) {
+          this.pairStuckSince.set(fp, Date.now())
+        } else if (Date.now() - desde > 25_000) {
+          this.pairStuckSince.delete(fp)
+          this.setFailureCause(`par com ${fp.slice(0, 8)} sem rota há 25s — refazendo a negociação`)
+          try { pc.close() } catch { /* ignore */ }
+          this.pcs.delete(fp)
+          this.localIce.delete(fp)
+          this.pendingIce.delete(fp)
+          this.lastRemoteOffer.delete(fp)
+          this.iceRestarts.delete(fp)
+          void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
+        }
+      } else {
+        this.pairStuckSince.delete(fp)
       }
     }
   }
@@ -4738,7 +4881,15 @@ export class CallManager {
     } catch { /* nunca derruba a chamada */ }
   }
 
-  /** Fecha a sala anunciada (fim da chamada ou troca de conversa). */
+  /**
+   * Fecha a sala anunciada (fim da chamada ou troca de conversa).
+   *
+   * Usa `callRoomLeave`, NÃO `callRoomClose`: encerrar a sala é decisão de quem
+   * a abriu. Antes, um CONVIDADO que saía anunciava `closed` para todo mundo e
+   * o botão "Entrar" sumia da conversa dos outros (a chamada não existia mais
+   * para quem ficou). O core decide: se o host sair com gente dentro, a sala
+   * continua e a lista é atualizada; se ficar sozinho, aí sim fecha.
+   */
   private closeRoom() {
     if (this.roomTimer) {
       try { clearInterval(this.roomTimer) } catch { /* ignore */ }
@@ -4748,7 +4899,7 @@ export class CallManager {
     this.roomConvId = null
     if (!convId) return
     try {
-      void services.callRoomClose(convId).catch(() => { /* melhor esforço */ })
+      void services.callRoomLeave(convId).catch(() => { /* melhor esforço */ })
     } catch { /* nunca derruba o encerramento */ }
   }
 
@@ -4770,10 +4921,26 @@ export class CallManager {
     if (this.state && isCallPhaseActive(this.state.phase)) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar')
     }
+    // Estado RESIDUAL (saída falhou no meio, rede caiu) travava o botão Entrar
+    // para sempre com "já existe uma chamada". Destrava antes de seguir.
+    if (this.state) {
+      try { await this.forceReset() } catch { /* segue mesmo assim */ }
+    }
     await detectNativeVoice(true)
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
     const [callId, alvos] = await services.callRoomJoin(convId, kind)
     if (!alvos.length) throw new Error('a chamada encerrou — ninguém mais está na sala')
+    // GRUPO: pareia TODOS os membros agora, não só os `alvos` do anúncio.
+    // Sem isto, quem não é amigo e não estava no anúncio nunca era discado e a
+    // malha da chamada ficava incompleta (pedido do dono: "conectar como se
+    // fosse amigo").
+    try { void services.groupPairNow?.(convId)?.catch(() => { /* sem motor */ }) } catch { /* ignore */ }
+    // SAIR E ENTRAR DE NOVO NA MESMA SALA usa o MESMO `call_id`. O `leave()`
+    // grava esse id em `endedCalls` para barrar aceite tardio — e `handleOffer`
+    // e `handleIce` descartavam TODO offer/candidato desse id em silêncio:
+    // a chamada ficava em "Conectando…" até os watchdogs a matarem ("clico em
+    // Entrar e fica bugado"). Reentrar é intencional: libera o id.
+    this.endedCalls.delete(callId)
     this.myFp = me.fingerprint
     this.quality = getStoredQuality()
     this.qualityNotice = null
@@ -4809,6 +4976,10 @@ export class CallManager {
         nativeMedia: true,
       } as unknown as CallState
       this.startNativeVoiceMonitor(callId)
+      // Malha: quem entrou precisa ser apresentado aos demais (o core só abre
+      // as sessões dos `alvos` do anúncio).
+      this.announceSelfToRoom(callId)
+      this.startMeshRepair(callId)
       this.publishRoom()
       this.startMeshRepair(this.state.callId)
       this.onUpdate({ ...this.state })
@@ -4864,13 +5035,17 @@ export class CallManager {
         if (!pend || pend.callId !== callId) continue
         this.pendingOffers.delete(fp)
         await this.handleOffer(fp, pend.callId, pend.sdp).catch(() => { /* par best-effort */ })
+        if (!this.state?.participants.some((p) => p.fp === fp)) {
+          this.state?.participants.push({ fp, nickname: fp.slice(0, 6) })
+        }
       }
     } catch { /* offer pendente nunca derruba o join */ }
-    // Rede de segurança da malha: quem entrou agora precisa conhecer quem já
-    // estava (um 3º entrante perdia o 2º).
+    // Malha: apresenta todos os que já estavam na sala (o joiner só conhece os
+    // `alvos`) e arma o reparo periódico — sem isto, num grupo de 3+ quem entrou
+    // podia ficar ouvindo só um lado.
     this.announceSelfToRoom(callId)
     this.publishRoom()
-    this.startMeshRepair(this.state.callId)
+    this.startMeshRepair(callId)
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -4917,6 +5092,7 @@ export class CallManager {
     this.lastRemoteOffer.clear()
     this.iceReports.clear()
     this.iceRestarts.clear()
+    this.pairStuckSince.clear()
     this.qualityNotice = null
     this.pcs.forEach(pc => { try { pc.close() } catch { /* ignore */ } })
     this.pcs.clear()

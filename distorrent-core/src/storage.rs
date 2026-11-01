@@ -982,6 +982,20 @@ impl Store {
         Ok(())
     }
 
+    /// (Re)enfileira ZERANDO o backoff — usado pelo botão "Reenviar".
+    ///
+    /// `enqueue_outbox` é `INSERT OR IGNORE`: numa mensagem que estourou o
+    /// orçamento (`attempts >= OUTBOX_MAX_ATTEMPTS`) a linha continuaria
+    /// inelegível e o reenvio nunca sairia. Aqui o orçamento volta ao início.
+    pub fn requeue_outbox(&self, msg_id: &str, peer_fp: &str) -> Result<()> {
+        self.locked().execute(
+            "INSERT INTO outbox(msg_id,peer_fp,attempts,next_try) VALUES(?1,?2,0,0)
+             ON CONFLICT(msg_id) DO UPDATE SET peer_fp=excluded.peer_fp, attempts=0, next_try=0",
+            params![msg_id, peer_fp],
+        )?;
+        Ok(())
+    }
+
     /// Teto de tentativas de reenvio.
     ///
     /// BUG corrigido: retransmissão ILIMITADA (backoff existia só no schema,
@@ -3279,6 +3293,40 @@ mod tests {
         store.insert_message(&env, "in", "ok").unwrap();
         let msgs = store.list_messages(&conv.id, 100).unwrap();
         assert_eq!(msgs.len(), 1, "o id é a chave: reentrega não duplica linha");
+    }
+
+    /// O botão "Reenviar" da UI chamava `messageSend`, que fabrica um id NOVO:
+    /// a mensagem aparecia duplicada ao reabrir a conversa. O reenvio agora
+    /// preserva o id e ZERA o orçamento de tentativas (senão uma mensagem que
+    /// estourou o teto continuaria inelegível e nunca sairia).
+    #[test]
+    fn reenvio_preserva_o_id_e_zera_o_orcamento() {
+        let store = Store::open_in_memory().unwrap();
+        let kp = crate::identity::Keypair::generate();
+        let me = kp.identity("me");
+        let conv = store
+            .ensure_dm_conversation(&me.fingerprint, "peerfp000001", "Peer")
+            .unwrap();
+        let env = MessageEnvelope::new(&kp, &conv.id, "reenviar");
+        store.insert_message(&env, "out", "failed").unwrap();
+
+        // Simula a mensagem que estourou o orçamento.
+        store.enqueue_outbox(&env.id, "peerfp000001").unwrap();
+        for _ in 0..Store::OUTBOX_MAX_ATTEMPTS {
+            store.bump_outbox(&env.id).unwrap();
+        }
+        assert!(
+            store.pending_outbox("peerfp000001").unwrap().is_empty(),
+            "estourada não sai no flush normal"
+        );
+
+        // Reenvio: volta ao orçamento cheio, mesmo id.
+        store.requeue_outbox(&env.id, "peerfp000001").unwrap();
+        let prontas = store.pending_outbox("peerfp000001").unwrap();
+        assert_eq!(prontas, vec![env.id.clone()], "o MESMO id volta a sair");
+
+        let msgs = store.list_messages(&conv.id, 100).unwrap();
+        assert_eq!(msgs.len(), 1, "reenviar não cria outra linha");
     }
 
     #[test]

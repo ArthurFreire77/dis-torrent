@@ -4,6 +4,7 @@ import { setPrefs, usePrefs } from '../../shared/prefs'
 import type { PresencaEmSegundoPlano } from '../../shared/prefs'
 import { services } from '../../services'
 import { notificationPermission, requestNotificationPermission, testNotificationSound } from '../../services/notifications'
+import { canQuitNow, formatQuitLock, quitLockRemaining, resolveSessionStart } from '../../services/appUptime'
 
 /**
  * Notificações DO SISTEMA e segundo plano.
@@ -30,6 +31,15 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
   const [tray, setTray] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  // Trava de saída (15 min): mesma regra do QuitDialog, e a mesma marca de
+  // início do processo — senão a tela mostraria dois prazos diferentes.
+  const [appStartedAt] = useState(() => resolveSessionStart(Date.now(), typeof sessionStorage !== 'undefined' ? sessionStorage : null))
+  const [quitNow, setQuitNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (canQuitNow(Date.now(), appStartedAt)) return
+    const t = window.setInterval(() => setQuitNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [appStartedAt])
 
   const isAndroid = (() => {
     try { return /android/i.test(navigator.userAgent ?? '') } catch { return false }
@@ -224,12 +234,26 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
           </button>
 
           <button
-            onClick={() => { void services.appQuit() }}
-            style={{ ...row, borderColor: T.red, color: '#ff9c9c' }}
+            onClick={() => { if (canQuitNow(Date.now(), appStartedAt)) void services.appQuit() }}
+            disabled={!canQuitNow(quitNow, appStartedAt)}
+            title={canQuitNow(quitNow, appStartedAt)
+              ? 'Encerra o app e a conexão'
+              : `Encerrar liberado aos 15 minutos — faltam ${formatQuitLock(quitLockRemaining(quitNow, appStartedAt))}`}
+            style={{
+              ...row,
+              borderColor: canQuitNow(quitNow, appStartedAt) ? T.red : borderColor,
+              color: canQuitNow(quitNow, appStartedAt) ? '#ff9c9c' : muted,
+              opacity: canQuitNow(quitNow, appStartedAt) ? 1 : 0.6,
+              cursor: canQuitNow(quitNow, appStartedAt) ? 'pointer' : 'not-allowed',
+            }}
           >
             <span style={{ display: 'flex', flexShrink: 0 }}><Icon d={Icons.x} size={15} /></span>
             <span style={{ flex: 1, fontSize: 12, fontWeight: 800 }}>Sair do DisTorrent</span>
-            <span style={{ fontSize: 10, color: muted }}>encerra a conexão</span>
+            <span style={{ fontSize: 10, color: muted }}>
+              {canQuitNow(quitNow, appStartedAt)
+                ? 'encerra a conexão'
+                : `em ${formatQuitLock(quitLockRemaining(quitNow, appStartedAt))}`}
+            </span>
           </button>
         </>
       )}
