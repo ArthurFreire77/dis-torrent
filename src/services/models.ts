@@ -2,7 +2,7 @@
 
 export type NetworkState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING'
 
-export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed' | 'ok'
+export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed' | 'ok' | 'read'
 
 // Modos de privacidade: normal | encrypted | proxy (esconde IP) | full (Tor SOCKS5).
 

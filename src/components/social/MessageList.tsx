@@ -553,8 +553,36 @@ function MenuItem({ label, icon, onClick, danger }: { label: string; icon?: stri
 }
 
 function StatusGlyph({ status }: { status: string }) {
-  const g = status === 'delivered' ? '✓✓' : status === 'sent' ? '✓' : status === 'failed' ? '✕' : '○'
-  return <span title={status} style={{ fontSize: 10, color: status === 'failed' ? '#ff9c9c' : T_MUTED, fontFamily: 'monospace' }}>{g}</span>
+  // Estilo WhatsApp: relógio (aguardando rede) → ✓ (saiu daqui) → ✓✓ cinza
+  // (entregue) → ✓✓ azul (lido); ✕ = falhou (clique reenvia).
+  const g =
+    status === 'read' ? '✓✓'
+    : status === 'delivered' ? '✓✓'
+    : status === 'sent' ? '✓'
+    : status === 'sending' ? '○'
+    : status === 'pending' ? '🕓'
+    : status === 'failed' ? '✕'
+    : ''
+  if (!g) return null
+  const cor =
+    status === 'read' ? '#53bdeb'
+    : status === 'failed' ? '#ff9c9c'
+    : T_MUTED
+  return (
+    <span
+      title={
+        status === 'read' ? 'lida'
+        : status === 'delivered' ? 'entregue'
+        : status === 'sent' ? 'enviada'
+        : status === 'sending' ? 'enviando…'
+        : status === 'pending' ? 'aguardando conexão'
+        : 'falhou — clique para reenviar'
+      }
+      style={{ fontSize: 11, color: cor, fontFamily: 'monospace', fontWeight: 700, letterSpacing: -2 }}
+    >
+      {g}
+    </span>
+  )
 }
 
 function emptyMeta(id: string, convId: string): MsgMetaView {

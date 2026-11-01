@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { Icon, Icons } from '../shared/icons'
+import { Section } from '../shared/Section'
 import { activeToken, applyFormat } from '../shared/markdown'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { EmojiPicker } from '../shared/EmojiPicker'
@@ -2412,7 +2413,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </button>
 
                 <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}><span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, flex: 1 }}>CONVERSAS DIRETAS</span><button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', display: 'flex' }}><Icon d={Icons.plus} size={12}/></button></div>
-                <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <Section variant="desktop" title="" maxVisible={12} collapsible={false}>
                   {conversations.map(c => {
                     const sala = callRoomsMap.get(c.id) ?? null
                     return (
@@ -2437,22 +2438,20 @@ export default function ThemeShell({ designId }: {designId:string}){
                     </div>
                     )
                   })}
-                </div>
+                </Section>
 
                 {(() => {
-                  // ONLINE = qualquer vínculo comigo (amigo, grupo ou servidor),
-                  // não só a lista de amigos. Era o "0 online" com gente no grupo.
+                  // ONLINE = qualquer peer com sessão viva. O filtro antigo
+                  // (só amigo/grupo/servidor carregado) escondia gente conectada
+                  // — "3 online, aparece 2". O motor só conecta a contato
+                  // legítimo (amigo aceito, membro de grupo/servidor), então
+                  // listar tudo é seguro e honesto.
                   const amigos = new Set(friendsAccepted.map(f => f.fp))
-                  const vinculados = onlinePeers.filter(p => p.fp !== identity?.fingerprint && (
-                    amigos.has(p.fp)
-                    || groupMemberFps.has(p.fp)
-                    || (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
-                  ))
+                  const vinculados = onlinePeers.filter(p => p.fp !== identity?.fingerprint)
                   if (vinculados.length === 0) return null
                   return (
                     <>
-                      <div style={{ marginTop: 16, fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, padding: '0 8px' }}>ONLINE — {vinculados.length}</div>
-                      <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <Section variant="desktop" title={`ONLINE — ${vinculados.length}`} maxVisible={8}>
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
                           return (
@@ -2462,11 +2461,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                                 <PeerDot s={p.state} />
                               </span>
                               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{p.nickname || p.fp}</span>
-                              {!ehAmigo && <span style={{ fontSize: 10, color: muted, flexShrink: 0 }}>{groupMemberFps.has(p.fp) ? 'grupo' : 'servidor'}</span>}
+                              {!ehAmigo && <span style={{ fontSize: 10, color: muted, flexShrink: 0 }}>{groupMemberFps.has(p.fp) ? 'grupo' : 'contato'}</span>}
                             </button>
                           )
                         })}
-                      </div>
+                      </Section>
                     </>
                   )
                 })()}
@@ -3128,10 +3127,14 @@ export default function ThemeShell({ designId }: {designId:string}){
               const offlineMembers = nonHoisted.filter(([fp]) => !isOnlineFp(fp))
               return (
                 <div style={{ padding: '6px 8px' }}>
-                  <div className="member-group-head">ONLINE — {onlineMembers.length}</div>
-                  {onlineMembers.map(memberRow)}
-                  {offlineMembers.length > 0 && <div className="member-group-head">OFFLINE — {offlineMembers.length}</div>}
-                  {offlineMembers.map(memberRow)}
+                  <Section variant="desktop" title={`ONLINE — ${onlineMembers.length}`} maxVisible={15}>
+                    {onlineMembers.map(memberRow)}
+                  </Section>
+                  {offlineMembers.length > 0 && (
+                    <Section variant="desktop" title={`OFFLINE — ${offlineMembers.length}`} maxVisible={15} defaultOpen={false}>
+                      {offlineMembers.map(memberRow)}
+                    </Section>
+                  )}
                   {bots.length === 0 && roles.filter(r => r.hoist).length === 0 && onlinePeers.length === 0 && (
                     <div style={{ fontSize: 11, color: muted, padding: '6px 8px', opacity: 0.7 }}>Nenhum membro extra — convide amigos com o token do servidor.</div>
                   )}

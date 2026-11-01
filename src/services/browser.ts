@@ -883,6 +883,8 @@ export const browserServices: DisTorrentServices = {
     if (targetOnline) {
       setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'sent' } as any), 80)
       setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'delivered' } as any), 350)
+      // visto azul simulado: demo não tem remetente real para "ler"
+      setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'read' } as any), 1200)
       // atualiza storage para refletir delivered
       setTimeout(() => {
         const all = readMsgs()

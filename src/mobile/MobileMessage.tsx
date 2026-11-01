@@ -23,6 +23,22 @@ const T = {
 }
 const MONO = 'JetBrains Mono, monospace'
 
+/** Visto estilo WhatsApp no celular: relógio → ○ → ✓ → ✓✓ → ✓✓ azul → ✕. */
+function Tick({ status }: { status: string }) {
+  const dois = status === 'read' || status === 'delivered'
+  const g = dois ? '✓✓' : status === 'sent' ? '✓' : status === 'failed' ? '✕' : status === 'pending' ? '🕓' : status === 'sending' ? '○' : ''
+  if (!g) return null
+  const cor = status === 'read' ? '#53bdeb' : status === 'failed' ? '#ff9c9c' : T.muted
+  return (
+    <span
+      title={status === 'read' ? 'lida' : status === 'delivered' ? 'entregue' : status === 'sent' ? 'enviada' : status === 'sending' ? 'enviando…' : status === 'pending' ? 'aguardando conexão' : 'falhou — toque para reenviar'}
+      style={{ fontSize: 11, color: cor, fontFamily: MONO, fontWeight: 700, letterSpacing: -2, flexShrink: 0 }}
+    >
+      {g}
+    </span>
+  )
+}
+
 export function avatarColor(fp: string): string {
   const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
   let h = 0
@@ -192,6 +208,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
             {isBot && <span style={{ fontSize: 9, background: T.accent, color: '#fff', padding: '1px 4px', borderRadius: 4, fontWeight: 800 }}>BOT</span>}
             <span style={{ fontSize: 10, color: T.muted, fontFamily: MONO }}>{authorFp.slice(0, 8)}</span>
             <span style={{ fontSize: 11, color: T.muted }}>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            {mine && m.status !== 'ok' && <Tick status={m.status} />}
           </div>
         )}
 
@@ -246,9 +263,12 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
         ) : isFile ? (
           renderFile!(m)
         ) : (
-          <div onDoubleClick={() => { if (mine) onReply() }}>
-            <RichText body={body} ctx={ctx} color={T.text} fontSize={fs} />
-            {edited && <span style={{ fontSize: 10, color: T.muted, marginLeft: 4 }} title={new Date(meta!.edited_at).toLocaleString()}>(editado)</span>}
+          <div onDoubleClick={() => { if (mine) onReply() }} style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <RichText body={body} ctx={ctx} color={T.text} fontSize={fs} />
+              {edited && <span style={{ fontSize: 10, color: T.muted, marginLeft: 4 }} title={new Date(meta!.edited_at).toLocaleString()}>(editado)</span>}
+            </div>
+            {mine && m.status !== 'ok' && <Tick status={m.status} />}
           </div>
         )}
 

@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { services } from '../services'
 import { Icon, Icons } from '../shared/icons'
+import { Section } from '../shared/Section'
 import { useConversations, useEngineEvents, useMessages, useNetwork } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
@@ -1055,14 +1056,12 @@ export default function MobileShell() {
    */
   const linkedOnline = useMemo(() => {
     const s = new Set<string>()
-    for (const f of friendsAccepted) if (onlineFps.has(f.fp)) s.add(f.fp)
-    for (const [, fp] of groupMemberFps) if (fp && onlineFps.has(fp)) s.add(fp)
-    for (const m of memberPairing) {
-      if ((m.state === 'connected' || m.state === 'relay') && m.fp) s.add(m.fp)
-    }
+    // TODO peer com sessão viva conta (amigo, grupo, servidor): o filtro por
+    // vínculo carregado fazia o contador ficar menor que o real.
+    for (const p of peers) if (p.state === 'CONNECTED') s.add(p.fp)
     if (identity?.fingerprint) s.delete(identity.fingerprint)
     return s
-  }, [friendsAccepted, groupMemberFps, memberPairing, onlineFps, identity?.fingerprint])
+  }, [peers, identity?.fingerprint])
   const unreadTotal = useMemo(() => conversations.reduce((a, c) => a + (((c as any).unread_count as number) || 0), 0), [conversations])
   const netState: NetworkState | null = status?.state ?? null
   // Honesta: verde só com ≥1 peer Online real; nó ouvindo sem peers ≠ ONLINE.
@@ -2509,51 +2508,52 @@ export default function MobileShell() {
           </div>
 
           {(() => {
-            // ONLINE = qualquer vínculo (amigo, grupo ou servidor aberto).
+            // ONLINE = qualquer peer com sessão viva (o filtro por vínculo
+            // escondia gente conectada — "3 online, aparece 2"). O motor só
+            // conecta a amigo aceito/membro de grupo ou servidor, então é seguro.
             const amigos = new Set(friendsAccepted.map(f => f.fp))
-            const vinculados = peers.filter(p => p.state === 'CONNECTED' && p.fp !== identity?.fingerprint && (
-              amigos.has(p.fp)
-              || groupMemberFps.some(([fp]) => fp === p.fp)
-              || (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
-            ))
+            const vinculados = peers.filter(p => p.state === 'CONNECTED' && p.fp !== identity?.fingerprint)
             return (
               <>
-                <div className="m-sec">ONLINE — {vinculados.length}</div>
-                {vinculados.length === 0
-                  ? <EmptyBlock msg="Ninguém online agora — é silencioso demais aqui." sub={<span>Amigo, grupo ou servidor: quem estiver conectado aparece aqui. <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
-                  : <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      {vinculados.map(p => {
-                        const ehAmigo = amigos.has(p.fp)
-                        const nome = resolveMemberName(p.fp) || p.nickname || p.fp.slice(0, 8)
-                        return (
-                          <div key={p.fp} className="friend-row" onClick={() => { if (ehAmigo) void openDm(p.fp, nome) }} style={{ cursor: ehAmigo ? 'pointer' : 'default' }}>
-                            <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                              <Avatar name={nome} fp={p.fp} size={32} avatarB64={profilesByFp[p.fp]?.avatar_b64} />
-                              <PeerDot on ring={t.sidebar} />
-                            </span>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nome}</div>
-                              <div style={{ fontSize: 11, color: t.muted }}>
-                                {ehAmigo ? 'amigo' : groupMemberFps.some(([fp]) => fp === p.fp) ? 'mesmo grupo' : 'mesmo servidor'}
+                <Section variant="mobile" title={<span>ONLINE — {vinculados.length}</span>} maxVisible={8}>
+                  {vinculados.length === 0
+                    ? <EmptyBlock msg="Ninguém online agora — é silencioso demais aqui." sub={<span>Amigo, grupo ou servidor: quem estiver conectado aparece aqui. <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
+                    : <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        {vinculados.map(p => {
+                          const ehAmigo = amigos.has(p.fp)
+                          const nome = resolveMemberName(p.fp) || p.nickname || p.fp.slice(0, 8)
+                          return (
+                            <div key={p.fp} className="friend-row" onClick={() => { if (ehAmigo) void openDm(p.fp, nome) }} style={{ cursor: ehAmigo ? 'pointer' : 'default' }}>
+                              <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                                <Avatar name={nome} fp={p.fp} size={32} avatarB64={profilesByFp[p.fp]?.avatar_b64} />
+                                <PeerDot on ring={t.sidebar} />
+                              </span>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nome}</div>
+                                <div style={{ fontSize: 11, color: t.muted }}>
+                                  {ehAmigo ? 'amigo' : groupMemberFps.some(([fp]) => fp === p.fp) ? 'mesmo grupo' : 'contato'}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        )
-                      })}
-                    </div>}
+                          )
+                        })}
+                      </div>}
+                </Section>
               </>
             )
           })()}
 
-          <div className="m-sec">CONVERSAS RECENTES</div>
-          {filteredConvs.length === 0
-            ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.slice(0, 5).map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+          <Section variant="mobile" title="CONVERSAS RECENTES" maxVisible={5}>
+            {filteredConvs.length === 0
+              ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
+              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+          </Section>
 
-          <div className="m-sec">SEUS SERVIDORES — {filteredComms.length}</div>
-          {filteredComms.length === 0
-            ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setShowInvite(true) }}>Entrar com convite</button></span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
+          <Section variant="mobile" title={`SEUS SERVIDORES — ${filteredComms.length}`} maxVisible={6}>
+            {filteredComms.length === 0
+              ? <EmptyBlock msg="Nenhum servidor ainda" sub={<span>Tem um convite de amigo? <button className="link-btn" onClick={() => { setInviteInput(''); setShowInvite(true) }}>Entrar com convite</button></span>} />
+              : <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>{filteredComms.map(c => <ServerRow key={c.id} c={c} active={selCommunity === c.id} onSelect={setSelCommunity} />)}</div>}
+          </Section>
         </>}
 
         {tab === 'servers' && (() => {
