@@ -104,10 +104,15 @@ test('quem esta na 1.1.22 enxerga a 1.1.23 publicada', () => {
 
 test('updateModeFor: windows instala sozinho, linux e android abrem instalador, resto link', () => {
   assert.equal(updateModeFor('windows'), 'auto')
+  // Linux SEM nome de asset: não dá para saber o formato, então não promete auto.
   assert.equal(updateModeFor('linux'), 'manual')
+  // AppImage é um arquivo só: o Rust substitui e reexecuta, então é automático.
+  assert.equal(updateModeFor('linux', 'DisTorrent_1.1.23-pre-alpha_amd64.AppImage'), 'auto')
+  // .deb depende de root/prompt do sistema: automático seria mentira.
+  assert.equal(updateModeFor('linux', 'DisTorrent_1.1.23-pre-alpha_amd64.deb'), 'manual')
   // Android baixa o APK e abre o instalador do sistema (exige um toque do
   // usuário, mas é instalação de verdade — não é mais "só o link").
-  assert.equal(updateModeFor('android'), 'manual')
+  assert.equal(updateModeFor('android', 'DisTorrent_1.1.23-pre-alpha_arm64.apk'), 'manual')
   assert.equal(updateModeFor('outro'), 'link')
 })
 

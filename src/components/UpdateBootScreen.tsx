@@ -39,7 +39,7 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
 
   const info = api.info
   const temNova = !!info && isNewer(info.current, info.latest)
-  const mode = info ? updateModeFor(info.platform) : 'link'
+  const mode = info ? updateModeFor(info.platform, info.asset_name) : 'link'
   // Instalador rotulado com outra versão: aplicar não resolve (o app volta na
   // mesma versão). É melhor avisar no boot do que deixar o usuário instalar de
   // novo e achar que o app está quebrado.

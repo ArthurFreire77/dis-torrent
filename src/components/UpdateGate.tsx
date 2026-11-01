@@ -122,7 +122,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
             info: outcome.info,
             current: outcome.info.current,
             message:
-              updateModeFor(outcome.info.platform) === 'auto'
+              updateModeFor(outcome.info.platform, outcome.info.asset_name) === 'auto'
                 ? 'instalador aberto — o app vai reiniciar sozinho'
                 : 'instalador aberto — conclua e abra o app de novo',
             progress: null,
@@ -253,7 +253,7 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
   // `stalled` é cartão informativo: o app está bem; o instalador publicado não.
   const stalled = api.phase === 'stalled'
   const info = api.info
-  const mode = info ? updateModeFor(info.platform) : 'link'
+  const mode = info ? updateModeFor(info.platform, info.asset_name) : 'link'
 
   return (
     <div

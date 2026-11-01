@@ -94,9 +94,24 @@ export function shortNotes(notes: string, maxLines = 6): string {
  */
 export type UpdateMode = 'auto' | 'manual' | 'link'
 
-export function updateModeFor(platform: string): UpdateMode {
+/**
+ * Como o update é aplicado: `auto` (a versão nova entra e o app reabre sozinho),
+ * `manual` (o instalador do sistema abre e o usuário confirma) ou `link`.
+ *
+ * O que dá para automatizar de verdade:
+ * - Windows: Inno ` /SILENT` + reinício — automático de fato.
+ * - Linux: depende do formato. AppImage é um arquivo só, então o Rust copia por
+ *   cima e reexecuta (`auto`). `.deb` exige root (`dpkg -i`) ou um prompt de
+ *   senha (pkexec), que não é automático — segue `manual`.
+ * - Android: o sistema exige o toque de confirmação para instalar APK fora da
+ *   loja. Não há como contornar sem root; prometer `auto` seria mentira.
+ */
+export function updateModeFor(platform: string, assetName = ''): UpdateMode {
   if (platform === 'windows') return 'auto'
-  if (platform === 'linux') return 'manual'
+  // Linux: só o AppImage se substitui sozinho; o .deb abre no instalador.
+  if (platform === 'linux') {
+    return /\.appimage$/i.test(assetName) ? 'auto' : 'manual'
+  }
   // Android: o Rust baixa o APK e o plugin nativo abre o instalador.
   if (platform === 'android') return 'manual'
   return 'link'
@@ -128,6 +143,11 @@ export const FLAG_FAILED = 'update.failed'
  * "atualiza → fecha → abre → atualiza de novo" com instalador rotulado errado.
  */
 export const FLAG_APPLIED = 'update.applied'
+/**
+ * Sinal do Rust de que o AppImage já foi substituído e reaberto: não é erro,
+ * é o gatilho para encerrar esta cópia antiga.
+ */
+export const REINICIAR_SINAL = 'ATUALIZADO_E_REINICIADO'
 
 /**
  * Fluxo completo, sem UI: verifica, decide, baixa, confere e aplica.
@@ -149,7 +169,7 @@ export async function runUpdateFlow(
   if (!isNewer(info.current, info.latest)) return { kind: 'none' }
   if ((await deps.getFlag(FLAG_SKIP)) === info.latest) return { kind: 'none' }
 
-  const mode = updateModeFor(info.platform)
+  const mode = updateModeFor(info.platform, info.asset_name)
   // `link` só quando a plataforma não sabe instalar sozinha (macOS).
   if (mode === 'link') return { kind: 'later', info }
 
@@ -179,10 +199,17 @@ export async function runUpdateFlow(
   try {
     await deps.apply(path)
   } catch (e) {
+    const msg = String((e as Error)?.message ?? e)
+    // AppImage no Linux: o Rust já trocou o arquivo e REABRIU a versão nova.
+    // Aqui só encerramos esta cópia antiga pelo caminho normal do app.
+    if (msg.includes(REINICIAR_SINAL)) {
+      await deps.quit().catch(() => {})
+      return { kind: 'applied', info, path }
+    }
     // Falha do INSTALADOR: desfaz a marca e registra a falha para não reiniciar em loop.
     await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
     await deps.setFlag(FLAG_FAILED, info.latest).catch(() => {})
-    return { kind: 'error', message: String((e as Error)?.message ?? e) }
+    return { kind: 'error', message: msg }
   }
 
   // Windows: o Inno fecha este processo e reabre o app. NÃO existe timer de

@@ -443,8 +443,70 @@ pub fn open_release_page(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Sinal de retorno quando o AppImage já foi trocado e reaberto: o front lê
+/// isto e encerra o app pelo caminho normal (não é erro de verdade).
+pub const REINICIAR_SINAL: &str = "ATUALIZADO_E_REINICIADO";
+
+/// Caminho do AppImage que ESTE processo está executando, se for o caso.
+///
+/// O AppImage expõe `$APPIMAGE` com o caminho do arquivo original. Fora dele
+/// (`cargo run`, `.deb`, testes) não existe alvo seguro para sobrescrever —
+/// devolver `None` mantém o caminho antigo (abrir o instalador).
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn appimage_alvo() -> Option<PathBuf> {
+    let bruto = std::env::var("APPIMAGE").ok()?;
+    let caminho = PathBuf::from(bruto);
+    if !caminho.is_file() {
+        return None;
+    }
+    Some(caminho)
+}
+
+/// Copia o AppImage novo por cima do que está em uso e reexecuta.
+///
+/// Não dá para escrever direto no arquivo rodando (ETXTBSY): copia para um
+/// temporário no MESMO diretório (rename só é atômico dentro do mesmo sistema
+/// de arquivos) e `rename` por cima. O processo atual continua rodando porque o
+/// inode antigo segue aberto; o próximo start pega o arquivo novo.
+///
+/// Devolve `true` quando o novo já está no lugar e reaberto — quem chama deve
+/// encerrar este processo pelo caminho normal do app, não com `process::exit`
+/// (que mataria a thread do IPC no meio).
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn substituir_e_reiniciar(
+    baixado: &std::path::Path,
+    destino: &std::path::Path,
+) -> Result<bool, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = destino.with_file_name(format!(
+        ".{}.novo-{}",
+        destino
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("distorrent"),
+        std::process::id()
+    ));
+    std::fs::copy(baixado, &temp)
+        .map_err(|e| format!("não consegui preparar a atualização: {e}"))?;
+    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("não consegui marcar o AppImage como executável: {e}"))?;
+    std::fs::rename(&temp, destino).map_err(|e| {
+        // Sobra de tentativa anterior não pode virar lixo no diretório.
+        let _ = std::fs::remove_file(&temp);
+        format!("não consegui substituir o AppImage em uso: {e}")
+    })?;
+
+    std::process::Command::new(destino)
+        .arg("--atualizado")
+        .spawn()
+        .map_err(|e| format!("AppImage substituído, mas não consegui reabrir: {e}"))?;
+    Ok(true)
+}
+
 /// Executa o instalador baixado (Windows: Inno /SILENT com reinício; Linux:
-/// `xdg-open` sem root; Android: plugin nativo com confirmação do usuário).
+/// AppImage se substitui sozinho, .deb abre no instalador; Android: plugin
+/// nativo com confirmação do usuário).
 #[tauri::command]
 pub fn update_apply(_app: tauri::AppHandle, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
@@ -496,6 +558,26 @@ pub fn update_apply(_app: tauri::AppHandle, path: String) -> Result<(), String> 
             if lower.ends_with(".appimage") {
                 // AppImage precisa do bit de execução; o download vem 0644.
                 let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        // APPIMAGE: troca o arquivo em uso e reinicia — sem diálogo, igual ao
+        // Windows. O AppImage é um arquivo só, então basta copiar por cima do
+        // caminho atual (via rename atômico) e reexecutar. Só dá para fazer
+        // isso quando o app em execução é ele mesmo um AppImage
+        // (`$APPIMAGE`); num .deb ou em dev a instalação é do sistema e
+        // continua indo para o instalador.
+        //
+        // O .deb NÃO tem caminho automático honesto: `dpkg -i` exige root e
+        // chamar pkexec abriria um prompt de senha do sistema (que é
+        // justamente o que "automático" não é). Ele segue abrindo no
+        // instalador gráfico.
+        if lower.ends_with(".appimage") {
+            if let Some(destino) = appimage_alvo() {
+                // Substituído e reaberto: sinaliza ao front para encerrar este
+                // processo pelo caminho normal (o AppImage novo já está no ar).
+                if substituir_e_reiniciar(&p, &destino)? {
+                    return Err(REINICIAR_SINAL.into());
+                }
             }
         }
         std::process::Command::new("xdg-open")
