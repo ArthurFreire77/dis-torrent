@@ -2549,7 +2549,12 @@ fn social_forward(
 
 #[tauri::command]
 fn read_set(conv_id: String, ts: i64, state: State<AppState>) -> Result<(), String> {
-    open_store(&state)?.read_set(&conv_id, ts).map_err(err)
+    open_store(&state)?.read_set(&conv_id, ts).map_err(err)?;
+    // Visto azul: avisa o remetente (best-effort; sem motor = só cursor local).
+    if let Ok(e) = engine(&state) {
+        e.notify_read(&conv_id, ts);
+    }
+    Ok(())
 }
 
 #[tauri::command]
