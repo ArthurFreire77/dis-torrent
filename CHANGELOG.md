@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## [1.1.25-pre-alpha] - 2026-11-01
+
+### Vistos estilo WhatsApp (PC e celular)
+
+Cada mensagem sua agora mostra o estado real, igual WhatsApp:
+
+- 🕓 aguardando rede (contato offline — sai sozinha quando ele conectar)
+- ○ enviando · ✓ enviada · ✓✓ cinza entregue
+- **✓✓ azul = lida**: ao abrir a conversa, seu app avisa o remetente por um
+  frame cifrado novo (`SecureFrame::Read`); o motor valida que só o
+  destinatário da conversa pode confirmar a leitura (ninguém forja visto)
+- ✕ vermelho = falhou (com reenviar no menu, como antes)
+
+O visto é monótono (retransmissão nunca desfaz o "lida") e o celular, que
+não mostrava status nenhum no balão, agora mostra como o desktop.
+
+Compatibilidade: `PROTO_V` sobe para 4 com gate no emissor — app velho não
+derruba a sessão; só não há azul entre versões diferentes.
+
+### Bug do online: "3 pessoas conectadas, aparece 2"
+
+As listas ONLINE (home do celular, sidebar do PC e contador do topo) só
+contavam quem tinha vínculo carregado na tela (amigo + roster do grupo ou
+servidor aberto). Quem conectou por um grupo não aberto era escondido.
+Agora todo peer com sessão viva aparece — o motor só conecta a amigo aceito
+ou membro de grupo/servidor, então listar tudo é seguro. Não-amigos aparecem
+com o rótulo "mesmo grupo"/"contato".
+
+### Tela menos poluída (PC e celular)
+
+Novo componente de seção: cabeçalho clicável recolhe/expande e "ver mais (N)"
+quando a lista passa do limite. Aplicado em ONLINE, Conversas Diretas e
+membros do servidor (OFFLINE recolhida por padrão) no PC; ONLINE, Conversas
+Recentes (que cortava em 5 sem aviso) e Seus Servidores no celular.
+
 ## [1.1.24-pre-alpha] - 2026-11-01
 
 Correções que só existiam depois da 1.1.23 publicada — quem já está na 1.1.23
