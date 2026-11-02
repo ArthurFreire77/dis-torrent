@@ -3418,15 +3418,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </span>
               </span>
               <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }} aria-label="Tamanho do painel da chamada">
-                <button
-                  type="button"
-                  data-testid="call-settings"
-                  aria-label="Ajustes da chamada (microfone, câmera, resolução, FPS)"
-                  title="Ajustes: microfone, câmera, resolução e FPS"
-                  aria-expanded={showCallSettings}
-                  onClick={() => setShowCallSettings((v) => !v)}
-                  style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${showCallSettings ? t.accent : borderColor}`, background: inputBg, color: showCallSettings ? t.accent : text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-                ><Icon d={Icons.gear} size={15} /></button>
                 <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'compact' ? muted : text, opacity: callPanelSize === 'compact' ? 0.5 : 1, cursor: callPanelSize === 'compact' ? 'default' : 'pointer' }}>↑</button>
                 <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'expanded' ? muted : text, opacity: callPanelSize === 'expanded' ? 0.5 : 1, cursor: callPanelSize === 'expanded' ? 'default' : 'pointer' }}>↓</button>
               </span>
@@ -3608,6 +3599,16 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </>
               )}
             </div>
+            {/* ENGRENAGEM: configurações ao lado do compartilhamento de tela —
+                é onde o usuário procura (mic/câmera/tela ficam aqui embaixo). */}
+            <button
+              onClick={() => setShowCallSettings(v => !v)}
+              data-testid="call-settings"
+              title="Configurações da chamada: câmera, tela, microfone, qualidade e FPS"
+              aria-label="Configurações da chamada"
+              aria-expanded={showCallSettings}
+              style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: showCallSettings ? t.accent : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            ><Icon d={Icons.gear} size={18} /></button>
             <button onClick={() => { void callManager.leave() }} data-testid="call-leave" aria-label="Sair da chamada" title="Sair da chamada" style={{ width: 64, height: 48, borderRadius: 24, border: 'none', background: t.red, color: '#fff', cursor: 'pointer', fontWeight: 800, fontSize: 13 }}>Sair</button>
           </div>
         </div>

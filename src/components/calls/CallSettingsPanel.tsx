@@ -128,11 +128,33 @@ export default function CallSettingsPanel({
         if (!md?.enumerateDevices) { setOuvinteDisponivel(false); return }
         const devs: MediaDeviceInfo[] = await md.enumerateDevices()
         if (!vivo) return
+        // `default` é um alias do sistema apontando para o mesmo aparelho que
+        // aparece com deviceId real: mostrar os dois confunde ("dois microfones"
+        // sendo um só). Fica só o real; "padrão do sistema" é a opção vazia.
         const pick = (kind: string): DeviceOption[] => devs
-          .filter((d) => d.kind === kind)
+          .filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default')
           .map((d, i) => ({ deviceId: d.deviceId, label: (d.label || '').trim() || `aparelho ${i + 1}` }))
-        setAudioDevices(pick('audioinput'))
-        setVideoDevices(pick('videoinput'))
+        const audio = pick('audioinput')
+        const video = pick('videoinput')
+        setAudioDevices(audio)
+        setVideoDevices(video)
+        // Nenhum rótulo preenchido = permissão ainda não concedida (a lista vem
+        // com deviceId mas sem nome). Pedir agora é o que faz o usuário ver
+        // "Microfone USB" em vez de "aparelho 1".
+        const semRotulo = [...audio, ...video].some((d) => /^aparelho \d+$/.test(d.label))
+        if (semRotulo && md.getUserMedia) {
+          try {
+            const s: MediaStream = await md.getUserMedia({ audio: true })
+            try { s.getTracks().forEach((t) => t.stop()) } catch { /* ignore */ }
+            if (!vivo) return
+            const devs2: MediaDeviceInfo[] = await md.enumerateDevices()
+            const rotulo = (kind: string): DeviceOption[] => devs2
+              .filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default')
+              .map((d, i) => ({ deviceId: d.deviceId, label: (d.label || '').trim() || `aparelho ${i + 1}` }))
+            setAudioDevices(rotulo('audioinput'))
+            setVideoDevices(rotulo('videoinput'))
+          } catch { /* permissão negada: segue com "aparelho N" (honesto) */ }
+        }
       } catch { if (vivo) setOuvinteDisponivel(false) }
     }
     void ler()
@@ -170,7 +192,10 @@ export default function CallSettingsPanel({
       role="dialog"
       aria-label="Ajustes da chamada"
       style={{
-        position: 'absolute', top: 56, right: 12, zIndex: 30, width: 320,
+        // Ancorado ACIMA da barra de controles (onde fica a engrenagem), não no
+        // topo: o painel tem que nascer perto do botão que o abriu.
+        position: 'absolute', bottom: 86, right: 12, zIndex: 30, width: 320,
+        maxHeight: 'calc(100% - 110px)', overflowY: 'auto',
         background: '#232428', border: `1px solid ${T_BORDER}`, borderRadius: 12,
         padding: 12, display: 'flex', flexDirection: 'column', gap: 10,
         boxShadow: '0 12px 34px rgba(0,0,0,.55)',
@@ -195,7 +220,7 @@ export default function CallSettingsPanel({
             onChange={() => { void onToggleCamera() }}
           />
         )}
-        <Row label="APARELHO">
+        <Row label="APARELHO" hint={videoDevices.length === 0 ? 'nenhuma câmera detectada (ou permissão ainda não concedida)' : `${videoDevices.length} câmera(s) encontrada(s)`}>
           <select
             style={selectStyle}
             value={local.videoInputId}
@@ -280,7 +305,7 @@ export default function CallSettingsPanel({
             {muted ? 'Seu microfone está silenciado (botão da barra).' : 'Microfone ativo.'}
           </span>
         )}
-        <Row label="APARELHO">
+        <Row label="APARELHO" hint={audioDevices.length === 0 ? 'nenhum microfone detectado (ou permissão ainda não concedida)' : `${audioDevices.length} microfone(s) encontrado(s)`}>
           <select
             style={selectStyle}
             value={local.audioInputId}
