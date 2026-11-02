@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## [1.1.32-pre-alpha] - 2026-11-02
+
+### O botão de ajustes agora parece um botão de ajustes
+
+O painel de configuração da chamada existia desde a 1.1.29, mas usava
+`Icons.settings` — que é desenhado como um **sol** (círculo com raios). Ninguém
+reconhecia aquilo como "configurar", então o botão passou despercebido no
+cabeçalho do painel.
+
+Agora há um ícone de **engrenagem** de verdade (`Icons.gear`: corpo com dentes e
+furo central), usado no PC e no celular.
+
+O painel abre no botão ao lado dos controles de tamanho, no cabeçalho do painel
+da chamada, e traz microfone, câmera, resolução (480p–4K), FPS (auto/15/24/30/60)
+e processamento de voz — tudo aplicável durante a chamada.
+
 ## [1.1.31-pre-alpha] - 2026-11-02
 
 ### Áudio da transmissão de tela chegando sozinho
