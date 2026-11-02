@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## [1.1.37-pre-alpha] - 2026-11-02
+
+### Entrar na chamada e não conectar (offer que ninguém mandava)
+
+Sintoma: as duas pessoas aparecem na sala, o cronômetro corre e o status fica
+em **Conectando…** até a tela dar erro. Sair e entrar de novo às vezes
+resolvia — sinal de que a offer (o SDP que abre a mídia) se perdeu no caminho.
+
+Causas:
+- **Só o lado de fingerprint maior oferecia.** O menor esperava para sempre uma
+  offer que nunca chegava. Agora ele espera um orçamento (8 s) e assume a offer
+  também; o glare continua resolvido pelo polite/impolite.
+- **Par recriado perdia a tela.** O reparo chamava `createPC`, que anexa só o
+  `localStream` (mic + câmera) — a tela vive em `screenStream`. Agora o par é
+  refeito e a captura de tela é re-semeada.
+- **Status preso em "Conectando…" com mídia no ar.** Se o evento de ICE se
+  perder, o par nomeado do `getStats` promove a fase: a estatística é prova.
+- **Linux nativo:** entrar numa sala em andamento não registrava o par, então
+  a offer do host era retida como se fosse um pré-aceite que nunca vem. O
+  `room_join` e o anúncio de roster (`CallAddParticipant` sem `kind`) agora
+  registram o par — quem oferece é o fp maior, o outro espera.
+
+### Câmera no lugar da tela ao compartilhar
+
+Sintoma: com a tela no ar, ligar a câmera fazia o outro lado ver a **câmera no
+quadrado da tela**.
+
+Causa: câmera e tela dividem a mesma m-line de vídeo. `toggleCamera` fazia
+`replaceTrack` na m-line da tela enquanto `sharing` continuava `true` — o
+receptor recebia a câmera dentro do quadrado da tela.
+
+Agora é explícito: com a tela no ar, o botão da câmera fica desabilitado com o
+motivo ("pare a tela para ligar a câmera") — no desktop, no celular, nos ajustes
+da chamada e na tela cheia. Nada de troca de fonte silenciosa.
+
+Também no receptor: quando o vídeo é trocado na mesma m-line, a track nova
+**substitui** a antiga (`callRemoteTracks.ts`). Antes ela era apenas adicionada
+ao mesmo `MediaStream` e o `<video>` continuava tocando a primeira — daí o
+quadrado da tela mostrar a câmera antiga mesmo depois de parar a câmera.
+
+### Um só lugar para compartilhar tela
+
+O botão de tela abria um menu (Tela inteira / Janela-Aba / Configurações
+avançadas) que levava a uma **segunda** interface com as mesmas opções. Agora o
+botão abre o seletor único (fonte, áudio, qualidade e FPS).
+
 ## [1.1.36-pre-alpha] - 2026-11-02
 
 ### Entrar na chamada travava o app (offer bloqueante na task de leitura)
