@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## [1.1.31-pre-alpha] - 2026-11-02
+
+### Áudio da transmissão de tela chegando sozinho
+
+Sintoma: ao assistir a uma transmissão de tela, o som só aparecia depois de
+mexer em algum controle — **abaixar e subir o volume**. O áudio estava lá, mas
+nenhum elemento o tocava.
+
+Causa: o `<audio>` do receptor só era montado no quadrado da **pessoa**. Quando
+o peer manda um único stream com o sinal de tela ligado, o vídeo (e o áudio do
+sistema) vão para o quadrado da **tela** — que não montava elemento de áudio. A
+tela aparecia e o som ficava mudo até algum toque forçar o `play()`.
+
+O áudio agora acompanha o quadrado que realmente tem a mídia, e só um deles —
+nunca os dois (tocar em dobro daria eco). Com streams separados (câmera + tela
+dedicada), a voz continua no quadrado da pessoa.
+
+Testes: 2 novos em `callTiles` (áudio na tela quando o stream é único; áudio na
+pessoa quando os streams são separados). 305 testes, 0 falhas.
+
 ## [1.1.30-pre-alpha] - 2026-11-02
 
 ### Correção: o APK não compilava
