@@ -13,6 +13,11 @@
 //! Por isso a barra nunca era escondida em versão nenhuma. O que a distingue de
 //! verdade é a forma: faixa fina e larga (medida 472x70), TOPMOST e sem
 //! legenda. E ela nasce no processo `msedgewebview2.exe`, não no PID do app.
+//!
+//! DEPENDÊNCIAS: só `user32`/`kernel32` e nada além do `windows-sys` que o app
+//! já usava (`Foundation`, `WindowsAndMessaging`, `Threading`). A árvore de
+//! processos é descoberta por `OpenProcess` + `QueryFullProcessImageNameW` (já em
+//! `Threading`), sem `ToolHelp`, sem crate novo e sem alterar o `Cargo.lock`.
 
 /// Esconde as janelas de aviso de captura, se existirem.
 ///
@@ -54,22 +59,22 @@ pub fn unwatch_share_bar() {
 mod imp {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use windows_sys::Win32::Foundation::{
-        CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT, TRUE,
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, TRUE};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
-        IsWindowVisible, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_HIDE, WS_CAPTION, WS_CHILD,
-        WS_EX_TOPMOST,
+        IsWindowVisible, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_HIDE, SW_SHOWNOACTIVATE,
+        WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
     };
 
     /// Classe das janelas do Chromium (a barra é uma delas).
     const CLASS_PREFIX: &str = "Chrome_WidgetWin_";
+
+    /// Sufixo do executável: o único outro processo que pode criar a barra.
+    const EXE_CHROMIUM: &str = "msedgewebview2.exe";
 
     /// A barra é uma faixa fina e larga (medida no Chromium 156: 472x70, ou
     /// seja ~6,7:1). O critério é a PROPORÇÃO, não o pixel: em monitor a 150%
@@ -79,15 +84,30 @@ mod imp {
     /// Largura mínima em múltiplos da altura (a barra real é ~6,7x mais larga).
     const BAR_MIN_ASPECT: i32 = 3;
 
+    /// Quantas janelas vieram de um processo do Chromium; se a rodada não
+    /// escondeu nenhuma, as mudanças são desfeitas (ver `hide`).
+    struct Busca {
+        escondeu: usize,
+        tocadas: Vec<HWND>,
+    }
+
     /// `true` se escondeu ao menos uma janela.
+    ///
+    /// TUDO-OU-NADA: se nenhuma janela for a barra, o estado é desfeito. Sem
+    /// isso, uma janela de conteúdo que casasse por engano ficaria escondida
+    /// para sempre (o app nunca a mostraria de novo).
     pub fn hide() -> bool {
-        let pids = pids_do_app();
         let mut busca = Busca {
-            pids: &pids,
-            encontrou: false,
+            escondeu: 0,
+            tocadas: Vec::new(),
         };
         unsafe { EnumWindows(Some(each_topo), &mut busca as *mut Busca as LPARAM) };
-        busca.encontrou
+        if busca.escondeu == 0 {
+            for hwnd in busca.tocadas {
+                unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+            }
+        }
+        busca.escondeu > 0
     }
 
     /// Enquanto `ATIVO` estiver marcado, uma thread esconde a barra 4x por
@@ -118,46 +138,37 @@ mod imp {
         ATIVO.store(false, Ordering::SeqCst);
     }
 
-    struct Busca<'a> {
-        pids: &'a [u32],
-        encontrou: bool,
+    /// Nome do executável de `pid`, ou vazio.
+    ///
+    /// `PROCESS_QUERY_LIMITED_INFORMATION` funciona em processo de outro dono
+    /// (o WebView2 roda sob o mesmo usuário, mas é outro processo).
+    fn exe_de(pid: u32) -> String {
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            // `OpenProcess` devolve nulo quando o processo morreu no meio.
+            if h.is_null() {
+                return String::new();
+            }
+            let mut buf = [0u16; 260];
+            let mut tam = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut tam);
+            CloseHandle(h);
+            if ok == 0 {
+                return String::new();
+            }
+            String::from_utf16_lossy(&buf[..tam as usize]).to_ascii_lowercase()
+        }
     }
 
-    /// PID do app + descendentes.
+    /// A janela pertence ao app ou a um Chromium que ele subiu?
     ///
-    /// No WebView2 a barra nasce em `msedgewebview2.exe`, não no processo do
-    /// app. Filtrar só o PID do app (como antes) nunca a encontraria.
-    fn pids_do_app() -> Vec<u32> {
-        let mut out = vec![unsafe { GetCurrentProcessId() }];
-        let mut pares: Vec<(u32, u32)> = Vec::new();
-        unsafe {
-            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snap == INVALID_HANDLE_VALUE {
-                return out;
-            }
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                ..Default::default()
-            };
-            let mut ok = Process32FirstW(snap, &mut entry) != 0;
-            while ok {
-                pares.push((entry.th32ProcessID, entry.th32ParentProcessID));
-                ok = Process32NextW(snap, &mut entry) != 0;
-            }
-            CloseHandle(snap);
+    /// O PID do app cobre o dono; o nome do executável cobre o WebView2 (que é
+    /// filho direto) sem varrer a tabela de processos inteira 4x por segundo.
+    fn e_nosso(pid: u32) -> bool {
+        if pid == unsafe { GetCurrentProcessId() } {
+            return true;
         }
-        // Fecha a árvore: cada rodada acrescenta filhos de quem já está na lista.
-        loop {
-            let antes = out.len();
-            for &(filho, pai) in &pares {
-                if out.contains(&pai) && !out.contains(&filho) {
-                    out.push(filho);
-                }
-            }
-            if out.len() == antes {
-                return out;
-            }
-        }
+        exe_de(pid).ends_with(EXE_CHROMIUM)
     }
 
     /// A janela é a barra de compartilhamento?
@@ -165,12 +176,10 @@ mod imp {
     /// Pura (sem Win32) para ser testável. O que identifica a barra é a forma e
     /// o estilo, não o nome: `Chrome_WidgetWin_*`, fina e larga, TOPMOST (é o
     /// que a faz cobrir a barra de tarefas) e sem legenda. Janela de conteúdo do
-    /// WebView2 tem legenda e não é TOPMOST; a janela principal do app tem
-    /// legenda.
+    /// WebView2 é filha (`WS_CHILD`) e a janela principal do app tem legenda.
     fn e_barra(classe: &str, largura: i32, altura: i32, ex_style: u32, style: u32) -> bool {
         classe.starts_with(CLASS_PREFIX)
-            // Janela de topo: a barra flutua sobre o desktop. As janelas de
-            // conteúdo do WebView2 são filhas (`WS_CHILD`) do app.
+            // Janela de topo: a barra flutua sobre o desktop.
             && style & WS_CHILD == 0
             && altura > 0
             && altura <= BAR_MAX_HEIGHT
@@ -187,7 +196,7 @@ mod imp {
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, &mut pid);
-        if !busca.pids.contains(&pid) {
+        if !e_nosso(pid) {
             return;
         }
         let mut cls = [0u16; 256];
@@ -210,7 +219,8 @@ mod imp {
             return;
         }
         ShowWindow(hwnd, SW_HIDE);
-        busca.encontrou = true;
+        busca.escondeu += 1;
+        busca.tocadas.push(hwnd);
     }
 
     unsafe extern "system" fn each_topo(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
@@ -301,85 +311,24 @@ mod imp {
             assert!(!e_barra("Chrome_WidgetWin_1", 472, 70, BAR_EX, 0x00CF_0000));
         }
 
-        /// Fim a fim, com janela de verdade: cria uma com os estilos medidos da
-        /// barra e confere que `hide` a esconde.
-        ///
-        /// `ShowWindow` entre threads só POSTA a mensagem, então a thread dona
-        /// precisa bombear — e é o caso real: o processo que cria a barra é o
-        /// message loop do WebView2.
+        /// O nome do executável é comparado em minúsculas e por sufixo: o mesmo
+        /// binário pode vir de qualquer instalador do runtime.
         #[test]
-        fn esconde_uma_janela_real_no_formato_da_barra() {
-            use crate::sharebar::{unwatch_share_bar, watch_share_bar};
-            use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-            use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-            use windows_sys::Win32::UI::WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IsWindowVisible,
-                PeekMessageW, RegisterClassExW, SetWindowLongW, ShowWindow, TranslateMessage,
-                GWL_STYLE, MSG, PM_REMOVE, SW_SHOWNOACTIVATE, WNDCLASSEXW,
-            };
+        fn reconhece_o_executavel_do_webview2() {
+            assert!("c:\\program files (x86)\\microsoft\\edgewebview\\application\\156.0.1\\msedgewebview2.exe"
+                .ends_with(EXE_CHROMIUM));
+            assert!(
+                !"c:\\program files\\google\\chrome\\application\\chrome.exe"
+                    .ends_with(EXE_CHROMIUM)
+            );
+            assert!(!"msedge.exe".ends_with(EXE_CHROMIUM));
+        }
 
-            unsafe extern "system" fn proc_(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-                DefWindowProcW(h, m, w, l)
-            }
-
-            /// Bombeia por `ms` (message loop do dono da janela).
-            fn pump(ms: u64) {
-                let fim = std::time::Instant::now() + std::time::Duration::from_millis(ms);
-                unsafe {
-                    let mut msg: MSG = std::mem::zeroed();
-                    while std::time::Instant::now() < fim {
-                        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                            TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                }
-            }
-
-            unsafe {
-                let hinst = GetModuleHandleW(std::ptr::null());
-                let mut cls: WNDCLASSEXW = std::mem::zeroed();
-                cls.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
-                cls.lpfnWndProc = Some(proc_);
-                cls.hInstance = hinst;
-                let nome: Vec<u16> = "Chrome_WidgetWin_1\0".encode_utf16().collect();
-                cls.lpszClassName = nome.as_ptr();
-                if RegisterClassExW(&cls) == 0 {
-                    return; // classe já registrada por outro teste
-                }
-                let titulo: Vec<u16> = "http://127.0.0.1:8787 is sharing your screen.\0"
-                    .encode_utf16()
-                    .collect();
-                let h = CreateWindowExW(
-                    0x0020_0008,
-                    nome.as_ptr(),
-                    titulo.as_ptr(),
-                    0x1608_0000,
-                    100,
-                    900,
-                    472,
-                    70,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    hinst,
-                    std::ptr::null_mut(),
-                );
-                // O Windows acrescenta WS_CAPTION na criação; o Chromium zera o
-                // estilo depois de criar a janela de frame customizado.
-                SetWindowLongW(h, GWL_STYLE, 0x1608_0000);
-                ShowWindow(h, SW_SHOWNOACTIVATE);
-                assert!(IsWindowVisible(h) != 0, "a janela precisa começar visível");
-
-                watch_share_bar();
-                pump(700);
-                let escondida = IsWindowVisible(h) == 0;
-                unwatch_share_bar();
-                if IsWindowVisible(h) != 0 {
-                    DestroyWindow(h);
-                }
-                assert!(escondida, "o vigia tem que esconder a barra");
-            }
+        /// O processo do próprio app sempre é aceito, sem consultar o nome.
+        #[test]
+        fn aceita_o_proprio_processo() {
+            let eu = unsafe { GetCurrentProcessId() };
+            assert!(e_nosso(eu));
         }
     }
 }

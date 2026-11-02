@@ -28,12 +28,30 @@ test('identifica a janela por forma/estilo, não pelo nome do widget', () => {
   assert.doesNotMatch(sharebar, /!= BAR_CLASS/)
 })
 
-test('varre a árvore de processos (a barra nasce no msedgewebview2)', () => {
-  assert.match(sharebar, /CreateToolhelp32Snapshot/, 'monta a árvore de PIDs')
-  assert.match(sharebar, /pids\.contains\(&pid\)/, 'aceita processo descendente')
-  // A barra é janela de TOPO (`e_barra` exige WS_CHILD == 0), então
-  // `EnumChildWindows` só visitaria janelas que o predicado sempre rejeita.
+test('acha a barra no processo do WebView2 sem dependência extra', () => {
+  // A barra nasce no `msedgewebview2.exe`, não no PID do app. O nome do
+  // executável vem de `QueryFullProcessImageNameW`, que já está em
+  // `Win32_System_Threading` — a feature que o app já usava.
+  assert.match(sharebar, /QueryFullProcessImageNameW/)
+  assert.match(sharebar, /EXE_CHROMIUM/)
+  assert.match(sharebar, /fn e_nosso/)
+  // Nada de varrer a tabela de processos 4x por segundo (`ToolHelp` exigiria
+  // uma feature nova no Cargo.toml).
+  assert.doesNotMatch(sharebar, /CreateToolhelp32Snapshot/, 'sem feature ToolHelp')
   assert.doesNotMatch(sharebar, /EnumChildWindows/, 'varredura de filhas é código morto')
+})
+
+test('o Cargo.toml não ganhou nenhuma dependência nem feature', () => {
+  // A correção só pode usar o que o app já compilava. `ToolHelp`, `Gdi` e
+  // `LibraryLoader` já foram adicionados por engano e saíram.
+  const toml = readFileSync('src-tauri/Cargo.toml', 'utf8')
+  const linha = toml.match(/^windows-sys = .*$/m)?.[0] ?? ''
+  assert.match(linha, /"Win32_Foundation"/)
+  assert.match(linha, /"Win32_UI_WindowsAndMessaging"/)
+  assert.match(linha, /"Win32_System_Threading"/)
+  for (const extra of ['ToolHelp', 'Graphics_Gdi', 'LibraryLoader', 'dev-dependencies']) {
+    assert.ok(!toml.includes(extra), `não pode existir ${extra} no Cargo.toml`)
+  }
 })
 
 test('vigia continuamente enquanto o share durar', () => {
