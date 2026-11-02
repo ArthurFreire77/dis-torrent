@@ -1,5 +1,45 @@
 # CHANGELOG
 
+## [1.1.27-pre-alpha] - 2026-11-02
+
+### Chamada: negociação sem corrida e botão "Entrar" estável
+
+Três sintomas, uma raiz só.
+
+**"Failed to set local offer sdp: Called in wrong state: have-remote-offer".**
+`createOffer()` é assíncrono. Enquanto ele rodava, a oferta do outro lado
+chegava e o PC passava para `have-remote-offer`; o `setLocalDescription(offer)`
+era então aplicado no estado errado e o navegador recusava. A renegociação
+(câmera, tela, qualidade, ICE restart) morria ali e a chamada ficava muda.
+
+**"Tem que abrir e fechar o mic para ir".** Mesmo erro, visto pelo usuário: a
+primeira offer falhava e a segunda — disparada pelo toggle do microfone —
+passava.
+
+**"O botão de entrar é instável".** O watchdog de conexão marcava `ice-failed`
+em 20 s mesmo com o ICE ainda em `checking`/`connecting`, que é justamente a
+fase normal de quem acabou de entrar e espera a offer do outro lado. A tela
+mostrava erro e a pessoa reentrava.
+
+O que mudou:
+
+- `applyOfferInStable()` confere `stable` **antes e depois** do `createOffer` e
+  só então aplica; quando o estado mudou, devolve `null` em vez de estourar.
+- Fila de negociação **por peer**: câmera, tela, qualidade e ICE restart não
+  disputam mais a mesma sessão.
+- `handleOffer` espera essa fila e confere `have-remote-offer` antes de aplicar
+  a answer (a mesma corrida existe do outro lado).
+- Watchdog só acusa falha com par realmente `failed`/`disconnected`, ou depois
+  de três janelas (~60 s). Enquanto houver par negociando, ele reagenda.
+- Removido `startMeshRepair` duplicado no `enterRoom` (dois intervalos de 15 s
+  concorrentes).
+
+### Verificação
+
+- `npm run typecheck` / `lint`: 0 erros
+- `npm run test:unit`: 293 testes (5 novos em `callNegotiation`, incluindo o
+  caso exato da oferta remota chegando durante o `createOffer`)
+
 ## [1.1.26-pre-alpha] - 2026-11-01
 
 ### Correção: "o contato aparece online mas a mensagem fica no relógio"
