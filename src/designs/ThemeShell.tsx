@@ -19,6 +19,7 @@ import {
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
+import CallChannelStage from '../components/calls/CallChannelStage'
 import ScreenStage from '../components/calls/ScreenStage'
 import { ChannelVoicePeers } from '../components/calls/ChannelVoicePeers'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
@@ -1354,15 +1355,38 @@ export default function ThemeShell({ designId }: {designId:string}){
   const onlinePeers = peers.filter(p => p.state === 'CONNECTED')
   const activeComm = view === 'servidores' && selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null
   const mergedChannelsForLabel = (() => {
-    if (!activeComm) return [] as { id: string; name: string }[]
+    if (!activeComm) return [] as { id: string; name: string; kind: ChannelMeta['kind'] }[]
+    // O `kind` acompanha a lista: sem ele a sidebar sabia o NOME do canal mas
+    // não se era texto/voz/vídeo — e a tela escolhia (errado) o compositor.
     const base = activeComm.channels.map(([id, name]) => {
       const ov = extraChannels.find(c => c.id === id)
-      return ov ? { id: ov.id, name: ov.name } : { id, name }
+      return ov ? { id: ov.id, name: ov.name, kind: ov.kind } : { id, name, kind: 'text' as ChannelMeta['kind'] }
     })
-    const extras = extraChannels.filter(ec => !activeComm.channels.some(([id]) => id === ec.id)).map(c => ({ id: c.id, name: c.name }))
+    const extras = extraChannels
+      .filter(ec => !activeComm.channels.some(([id]) => id === ec.id))
+      .map(c => ({ id: c.id, name: c.name, kind: c.kind }))
     return [...base, ...extras]
   })()
   const channelLabel = mergedChannelsForLabel.find(c => c.id === selConv)?.name ?? (activeComm?.channels.find(([cid]) => cid === selConv)?.[1] ?? 'canal')
+  /**
+   * Canal de VOZ/VÍDEO aberto no desktop → tela de chamada.
+   *
+   * Antes ele caía na tela de mensagens: histórico vazio e um COMPOSITOR de
+   * texto num canal onde ninguém digita. `kind` sai da lista completa
+   * (`extraChannels`), porque o resumo da comunidade só traz (id, nome).
+   */
+  const selCallChannel: ChannelMeta | null = (() => {
+    if (!selCommunity || !selConv) return null
+    // Fonte primária: lista COMPLETA (tem `kind`). Se ela ainda não chegou,
+    // cai no resumo da sidebar — e aí NÃO se assume 'text': um canal de voz
+    // recém-criado voltaria a mostrar o compositor de mensagens.
+    const completo = extraChannels.find((c) => c.id === selConv)
+    if (completo) return isCallableChannel(completo.kind) ? completo : null
+    const naSidebar = mergedChannelsForLabel.find((c) => c.id === selConv)
+    if (!naSidebar) return null
+    const meta = { ...naSidebar, topic: '', category: '', position: 0 } as ChannelMeta
+    return isCallableChannel(meta.kind) ? meta : null
+  })()
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
   /** fps que estão em algum grupo meu (para "ONLINE" incluir não-amigos). */
   const groupMemberFps = useMemo<Set<string>>(() => {
@@ -2617,10 +2641,17 @@ export default function ThemeShell({ designId }: {designId:string}){
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: activeCall ? (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
           {view === 'servidores' && selCommunity ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
-              <span style={{ color: muted, display: 'flex' }}><Icon d={Icons.hash} size={20} /></span>
+              <span style={{ color: muted, display: 'flex' }}>
+                <Icon d={selCallChannel ? (selCallChannel.kind === 'video' ? Icons.video : Icons.speaker) : Icons.hash} size={20} />
+              </span>
               <span style={{ fontWeight: 700, color: t.heading }}>{channelLabel}</span>
               <div style={{ width: 1, height: 20, background: borderColor, margin: '0 8px' }} />
-              <span style={{ fontSize: 12, color: muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{extraChannels.find(c => c.id === selConv)?.topic || 'Bem-vindo ao canal'}</span>
+              <span style={{ fontSize: 12, color: muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {extraChannels.find(c => c.id === selConv)?.topic
+                  || (selCallChannel
+                    ? (selCallChannel.kind === 'video' ? 'Canal de vídeo — a câmera é opcional' : 'Canal de voz')
+                    : 'Bem-vindo ao canal')}
+              </span>
               <span style={{ marginLeft: 'auto', display: 'flex', gap: 14, alignItems: 'center', color: muted }}>
                 <button onClick={() => setShowSearch(s => !s)} title="Buscar mensagens (Ctrl+F)" aria-label="Buscar" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}><Icon d={Icons.search} size={17} /></button>
                 <button onClick={() => setShowInbox(s => !s)} title="Inbox: menções e não-lidas (Ctrl+I)" aria-label="Inbox" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center', position: 'relative' }}>
@@ -2898,7 +2929,24 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
           )}
 
-          {selConv && (
+          {/* CANAL DE VOZ/VÍDEO: a tela é a CHAMADA — sem histórico e sem
+              compositor de texto (era o "dá para digitar num canal de voz"). */}
+          {selConv && selCallChannel && (
+            <CallChannelStage
+              communityId={selCommunity!}
+              channel={selCallChannel}
+              myFp={identity?.fingerprint ?? ''}
+              inCall={!!activeCall && activeCall.convId === selCallChannel.id}
+              busy={!!activeCall && activeCall.convId !== selCallChannel.id}
+              unavailable={!callsOk ? callsUnavailableDetail : null}
+              nameOf={nameOfFp}
+              onJoin={() => { if (selCommunity && selCallChannel) void callManager.joinVoice(selCommunity, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
+              onLeave={() => { void callManager.leaveVoice(selCommunity!, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
+              palette={{ panel: bg, input: inputBg, border: borderColor, heading: t.heading, text, muted, green: t.green, red: t.red, accent: t.accent }}
+            />
+          )}
+
+          {selConv && !selCallChannel && (
               <>
               {/* Histórico: expõe o `loadOlder` do core (conversas truncavam em 100). */}
               {hasOlder && (
@@ -3017,7 +3065,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               onJump={(cid, mid) => { setShowInbox(false); void jumpToMessage(cid, mid) }}
             />
           )}
-          {selConv && (
+          {selConv && !selCallChannel && (
             <div style={{ padding: '0 16px 24px', flexShrink: 0 }}>
               {replyTo && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: inputBg, border: `1px solid ${borderColor}`, borderBottom: 'none', borderRadius: '8px 8px 0 0', padding: '6px 10px', fontSize: 11 }}>
