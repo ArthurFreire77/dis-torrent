@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## [1.1.38-pre-alpha] - 2026-11-02
+
+### Semeadura de arquivos sobrevive ao reinício
+
+O anúncio de arquivo saía uma vez, só para os peers online naquele instante, e
+não era registrado. Quem baixava servia até fechar o app; quem estava offline no
+envio nunca sabia que o arquivo existia; e o download morria em "sem peers com
+o arquivo no swarm".
+
+Agora a tabela `files` guarda `seeded_at` (schema v9, com migração), o tique de
+15 s re-anuncia o que este nó tem (no máximo a cada 30 s por arquivo) e
+`flush_files_to` manda tudo para o peer que acabou de ficar online.
+
+### Documentação
+
+- `docs/files-swarm.md` — identidade do arquivo, fluxo de envio e download,
+  persistência e o que **não** existe (não há DHT de arquivos nem troca de
+  blocos entre baixadores).
+- `docs/voice-channels.md` — voz e vídeo pelo mesmo `joinVoice`, regra do fp
+  maior para a offer, mecanismos de semeadura da malha e limites honestos por
+  plataforma.
+
+Testes: 341 unitários + 250 Rust. Typecheck, lint e `cargo fmt --check` limpos.
+
+---
+
 ## [1.1.37-pre-alpha] - 2026-11-02
 
 ### Entrar na chamada e não conectar (offer que ninguém mandava)
