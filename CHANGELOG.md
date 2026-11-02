@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## [1.1.28-pre-alpha] - 2026-11-02
+
+### Engrenagem na chamada: microfone, câmera, resolução e FPS
+
+Novo painel de ajustes (ícone de engrenagem no cabeçalho do painel da chamada)
+que funciona **durante** a chamada, no PC e no celular:
+
+- **Microfone** e **câmera**: lista os aparelhos reais; trocar no meio da
+  chamada substitui a track nos senders e renegocia só a fonte — a conversa não
+  cai. A lista se atualiza quando você pluga/despluga fone ou webcam.
+- **Resolução** da câmera (480p a 4K) e **FPS** (automático, 15, 24, 30, 60).
+  "Automático" não manda teto nenhum — antes um `ideal: 60` virava teto de 60
+  sem ninguém pedir.
+- **Processamento de voz**: cancelamento de eco, supressão de ruído e ganho
+  automático, aplicados na track viva (`applyConstraints`).
+- Se o aparelho recusar (device ocupado, permissão), a preferência **volta ao
+  valor anterior** e a UI avisa — sem ficar mostrando um estado que não vale.
+
+### Qualidade da tela muito melhor
+
+O teto era 1080p/6 Mbps, que borrava texto em monitor grande. Agora há
+**1440p (12 Mbps)** e **4K (20 Mbps)** no seletor de compartilhamento, com
+captura em resolução nativa e `maintain-resolution` preservando o detalhe em
+vez de derrubar para 720p no primeiro aperto de banda.
+
+### Quadrados: a câmera não ocupa mais o lugar da tela
+
+Quando o outro lado mandava **um único vídeo** com o sinal de tela ligado, o
+mesmo stream era desenhado nos dois quadrados: a pessoa aparecia com a imagem
+da tela e a tela ficava vazia. Agora a tela consome o stream e o quadrado da
+pessoa fica no avatar (não há câmera chegando — estado honesto).
+
+### Chamada: negociação sem corrida (da 1.1.27, mantido)
+
+- `applyOfferInStable()` confere `stable` **antes e depois** do `createOffer`.
+- Fila de negociação **por peer** (câmera, tela, qualidade, ICE restart).
+- Watchdog só acusa falha com par `failed`/`disconnected` ou após ~60 s.
+
+### Confirmação de toque (ring honesto)
+
+Novo frame `CallRinging`: o receptor confirma que **recebeu o convite e está
+tocando**. Antes a tela dizia "Chamando…" só porque nós tínhamos enviado o
+frame — com o peer offline, nada tocava do outro lado. Agora o badge mostra
+**"Discando…"** até a confirmação e só então vira **"Chamando…"**.
+
+### Verificação
+
+- `npm run typecheck` / `lint`: 0 erros
+- `npm run test:unit`: **303 testes** (10 novos de preferências de mídia;
+  testes de degrau de tela atualizados para 1440p/4K)
+- `cargo test --lib`: 218 testes (core compila com o frame novo)
+
 ## [1.1.27-pre-alpha] - 2026-11-02
 
 ### Chamada: negociação sem corrida e botão "Entrar" estável
