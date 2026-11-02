@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## [1.1.33-pre-alpha] - 2026-11-02
+
+### A engrenagem está onde você procura: na barra da chamada
+
+O painel de configurações existia, mas o botão estava no **cabeçalho** do painel
+(no canto, ao lado de ↑↓) — longe de onde ficam microfone, câmera e tela. Foi
+movido para a **barra de controles**, ao lado do botão de compartilhar tela e
+antes do "Sair", no PC e no celular. O painel abre **acima da barra**.
+
+### Seleção de microfone e câmera, com os nomes reais
+
+- As listas mostram **cada aparelho** pelo nome ("Microfone USB", "HD Webcam"),
+  não "aparelho 1" — a lista com nomes só existe depois de uma permissão, então
+  o painel pede na hora e relê.
+- O alias `default` do sistema era listado **junto** com o aparelho real: dava a
+  impressão de dois microfones iguais. Agora ele é só a opção "padrão do
+  sistema".
+- Cada seção diz quantos aparelhos foram encontrados (ou avisa que nenhum foi /
+  que falta permissão), em vez de mostrar um select vazio sem explicação.
+
+### Painel reorganizado em seções
+
+**CÂMERA** — interruptor liga/desliga, aparelho, qualidade (480p–4K) e FPS.
+**TRANSMISSÃO DE TELA** — interruptor, qualidade (480p–4K, com 1440p/4K) e FPS
+próprios, sem herdar o degrau da câmera.
+**MICROFONE** — aparelho, aviso de silenciado e processamento de voz.
+
 ## [1.1.32-pre-alpha] - 2026-11-02
 
 ### O botão de ajustes agora parece um botão de ajustes
