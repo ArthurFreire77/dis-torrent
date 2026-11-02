@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## [1.1.26-pre-alpha] - 2026-11-01
+
+### Correção: "o contato aparece online mas a mensagem fica no relógio"
+
+O log de uma sessão real mostrou o mesmo contato virando `peer ONLINE` várias
+vezes em segundos, sem nenhum `peer OFFLINE` entre eles. Isso não era queda de
+rede: era troca de sessão. A cada troca a writer task era abortada e os frames
+que já estavam na fila (a mensagem enviada e o `Ack` voltando) iam junto. O
+outbox reenviava pelo mesmo caminho, o balão voltava para o relógio e a próxima
+troca repetia o ciclo — daí a sensação de "tudo instável".
+
+Causa: a eleição de sessão dava a sessão nova como "preferida" só pelo
+fingerprint, sem comparar a DIREÇÃO. Um dial repetido do mesmo lado (maintain de
+5s + discovery + relay) derrubava uma sessão saudável. Agora só a **direta
+sobre a relay** substitui, e o `dial cruzado` (as duas pontas abrindo sessão)
+escolhe a mesma sessão nos dois lados.
+
+Além disso, um link que responde Ping mas não confirma dados há 2 minutos com
+mensagem presa no outbox agora é derrubado e refeito, em vez de retentar para
+sempre no mesmo canal morto. Esse vigia não age em link ocioso, em sessão nova
+nem durante chamada ativa.
+
+### Status do balão sem mentir
+
+Com o contato ONLINE, o relógio dizia "aguardando conexão" — o que era falso.
+Agora diz "na fila: o contato está online mas ainda não confirmou a entrega".
+Sem contato online, o texto continua "aguardando conexão". Vale no PC e no
+celular (mesma fonte: `src/components/social/messageStatus.ts`).
+
 ## [1.1.25-pre-alpha] - 2026-11-01
 
 ### Vistos estilo WhatsApp (PC e celular)
