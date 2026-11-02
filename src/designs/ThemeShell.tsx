@@ -5,7 +5,7 @@ import { activeToken, applyFormat } from '../shared/markdown'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import MessageList, { type MessageListHandle } from '../components/social/MessageList'
-import { BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel, PinsPanel, ProfileModal, SearchPanel, ThreadList, ThreadViewModal, useShortcuts, type Command, type InboxTab } from '../components/social/Social'
+import { BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel, PinsPanel, ProfileModal, SearchPanel, ThreadViewModal, useShortcuts, type Command, type InboxTab } from '../components/social/Social'
 import { services } from '../services'
 import type { Identity, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage, MemberPairing } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
@@ -18,10 +18,9 @@ import {
 } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
-import CallTileComponent from '../components/calls/CallTile'
 import CallChannelStage from '../components/calls/CallChannelStage'
+import CallTilesGrid from '../components/calls/CallTilesGrid'
 import ScreenStage from '../components/calls/ScreenStage'
-import { ChannelVoicePeers } from '../components/calls/ChannelVoicePeers'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
 import ScreenSharePicker from '../components/ScreenSharePicker'
@@ -1387,6 +1386,8 @@ export default function ThemeShell({ designId }: {designId:string}){
     const meta = { ...naSidebar, topic: '', category: '', position: 0 } as ChannelMeta
     return isCallableChannel(meta.kind) ? meta : null
   })()
+  /** Estou na chamada DESTE canal? (decide tela cheia de mídia × botão entrar) */
+  const inThisCall = !!activeCall && !!selCallChannel && activeCall.convId === selCallChannel.id
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
   /** fps que estão em algum grupo meu (para "ONLINE" incluir não-amigos). */
   const groupMemberFps = useMemo<Set<string>>(() => {
@@ -2451,17 +2452,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{ch.name}</span>
                                   {ch.topic && <span style={{ fontSize: 10, color: muted, maxWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.topic}</span>}
                                 </button>
-                                {/* Quem está no canal de voz/vídeo — sempre visível, como no Discord. */}
-                                {isCallableChannel(ch.kind) && (
-                                  <ChannelVoicePeers
-                                    communityId={selCommunity!}
-                                    channelId={ch.id}
-                                    myFp={identity?.fingerprint ?? ''}
-                                    isCurrent={voiceChannel?.channelId === ch.id}
-                                    nameOf={nameOfFp}
-                                    palette={{ muted, text, heading: t.heading, green: t.green, red: t.red }}
-                                  />
-                                )}
                                 {isOwner && (
                                   <button
                                     className="chan-gear"
@@ -2469,15 +2459,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                                     title="Gerenciar canal"
                                   ><Icon d={Icons.settings} size={11} /></button>
                                 )}
-                                {/* Threads aninhadas sob o canal-pai; só no canal ABERTO (evita N consultas). */}
-                                {!isCallableChannel(ch.kind) && selConv === ch.id && (
-                                  <ThreadList
-                                    communityId={selCommunity!}
-                                    parentChannel={ch.id}
-                                    channels={extraChannels}
-                                    onOpen={(th) => setOpenThread(th)}
-                                  />
-                                )}
+                                {/* Threads saíram da sidebar: a lista "Discussão de…"
+                                    /"+ Nova thread" embaixo de cada canal poluía a
+                                    navegação. A discussão abre pelo modal (menu do
+                                    canal e painel), não como sub-item da lista. */}
                               </div>
                             ))}
                           </div>
@@ -2930,20 +2915,38 @@ export default function ThemeShell({ designId }: {designId:string}){
           )}
 
           {/* CANAL DE VOZ/VÍDEO: a tela é a CHAMADA — sem histórico e sem
-              compositor de texto (era o "dá para digitar num canal de voz"). */}
+              compositor de texto (era o "dá para digitar num canal de voz").
+              DENTRO da chamada, os quadrados ocupam o espaço central (o painel
+              lateral vira só controles: mostrar os dois duplicava a mídia). */}
           {selConv && selCallChannel && (
-            <CallChannelStage
-              communityId={selCommunity!}
-              channel={selCallChannel}
-              myFp={identity?.fingerprint ?? ''}
-              inCall={!!activeCall && activeCall.convId === selCallChannel.id}
-              busy={!!activeCall && activeCall.convId !== selCallChannel.id}
-              unavailable={!callsOk ? callsUnavailableDetail : null}
-              nameOf={nameOfFp}
-              onJoin={() => { if (selCommunity && selCallChannel) void callManager.joinVoice(selCommunity, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
-              onLeave={() => { void callManager.leaveVoice(selCommunity!, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
-              palette={{ panel: bg, input: inputBg, border: borderColor, heading: t.heading, text, muted, green: t.green, red: t.red, accent: t.accent }}
-            />
+            inThisCall ? (
+              <CallTilesGrid
+                tiles={visibleCallTiles}
+                pinnedId={pinnedTileId}
+                onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
+                onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+                deafened={!!activeCall?.deafened}
+                showAudioControls
+                minHeight={180}
+                palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
+                avatarColor={avatarColor}
+                avatarB64={callAvatars}
+                onOpenProfile={(fp) => setProfileFp(fp)}
+              />
+            ) : (
+              <CallChannelStage
+                communityId={selCommunity!}
+                channel={selCallChannel}
+                myFp={identity?.fingerprint ?? ''}
+                inCall={false}
+                busy={!!activeCall}
+                unavailable={!callsOk ? callsUnavailableDetail : null}
+                nameOf={nameOfFp}
+                onJoin={() => { if (selCommunity && selCallChannel) void callManager.joinVoice(selCommunity, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
+                onLeave={() => { void callManager.leaveVoice(selCommunity!, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
+                palette={{ panel: bg, input: inputBg, border: borderColor, heading: t.heading, text, muted, green: t.green, red: t.red, accent: t.accent }}
+              />
+            )
           )}
 
           {selConv && !selCallChannel && (
@@ -3490,7 +3493,9 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* Painel lateral: a navegação e a conversa permanecem acessíveis durante a chamada. */}
+      {/* Painel lateral: a navegação e a conversa permanecem acessíveis durante a chamada.
+          Em canal de voz/vídeo os QUADRADOS ficam no centro (senão a mesma mídia
+          aparece duas vezes e a tela fica sem espaço): aqui só os controles. */}
       {activeCall && (
         <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)', background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
           <div style={{ minHeight: 56, height: 'auto', background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', gap: 8 }}>
@@ -3575,42 +3580,23 @@ export default function ThemeShell({ designId }: {designId:string}){
               onScreenFpsChange={(f) => { void callManager.setScreenShareOptions({ fps: f as any }).catch((e: any) => setError(String(e?.message ?? e))); setScreenOptsTick((v) => v + 1) }}
             />
           )}
-          {/* Quadrados da chamada: PESSOA e TELA; colunas contam TILES, e a
-              tela cheia é um overlay (`ScreenStage`) acima de tudo. */}
-          <div
-            style={{
-              flex: 1,
-              display: 'grid',
-              gridTemplateColumns: `repeat(${Math.min(callTiles.length, callPanelSize === 'compact' ? 1 : 2)}, minmax(0, 1fr))`,
-              gridAutoRows: `minmax(${callPanelSize === 'compact' ? 112 : 150}px, 1fr)`,
-              alignContent: 'stretch',
-              gap: 10,
-              padding: 12,
-              overflowY: 'auto',
-              background: '#1a1a1a',
-              transition: 'grid-template-columns 180ms ease',
-            }}
-          >
-            {visibleCallTiles.map((tile) => (
-              <CallTileComponent
-                key={tile.id}
-                tile={tile}
-                pinned={tile.id === pinnedTileId}
-                onPin={(id) => {
-                  setPinnedTileId((cur) => (cur === id ? null : id))
-                  // Fixar NÃO abre tela cheia: são independentes.
-                }}
-                onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
-                showAudioControls
-                callDeafened={!!activeCall.deafened}
-                palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
-                minHeight={callPanelSize === 'compact' ? 112 : 150}
-                avatarColor={avatarColor}
-                avatarB64={callAvatars}
-                onOpenProfile={(fp) => setProfileFp(fp)}
-              />
-            ))}
-          </div>
+          {/* Quadrados no PAINEL só quando a chamada NÃO é de um canal aberto:
+              num canal de voz/vídeo eles já estão no centro da tela. */}
+          {!inThisCall && (
+            <CallTilesGrid
+              tiles={visibleCallTiles}
+              pinnedId={pinnedTileId}
+              onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
+              onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+              deafened={!!activeCall.deafened}
+              compact={callPanelSize === 'compact'}
+              showAudioControls
+              palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
+              avatarColor={avatarColor}
+              avatarB64={callAvatars}
+              onOpenProfile={(fp) => setProfileFp(fp)}
+            />
+          )}
           {/* Quem foi chamado e AINDA NÃO entrou: chip pequeno, nunca quadrado. */}
           {((activeCall as any)?.invited?.length ?? 0) > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, padding: '6px 12px', borderTop: `1px solid ${borderColor}`, background: '#1a1a1a', fontSize: 11, color: muted, flexShrink: 0 }}>

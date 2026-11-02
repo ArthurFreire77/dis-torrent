@@ -2232,6 +2232,15 @@ export class CallManager {
     } catch { /* lista best-effort: voice_joined still wires latecomers */ }
     // Origem de verdade contínua para o roster (ver startRosterReconcile).
     this.startRosterReconcile(callId, communityId, channelId)
+    // CATCH-UP DO ROSTER — o bug do "só conecta na segunda".
+    //
+    // O `voiceStates` é lido UMA vez, logo depois do `voiceJoin`. No primeiro
+    // join a linha do outro peer pode ainda não ter chegado aqui (ele está
+    // reconectando/o frame ainda não voltou), então a lista vem vazia, ninguém
+    // abre PC e a tela fica em "Conectando…". Ao sair e entrar de novo o dado
+    // já está no SQLite e funciona — exatamente o sintoma relatado.
+    // Aqui relemos o roster pouco depois e abrimos os pares que faltam.
+    this.catchUpVoiceRoster(callId, communityId, channelId)
     // DRENA offers retidas durante o `getLocalMedia`/`voiceJoin`.
     // DRENA offers retidas: par pode oferecer antes de o estado nascer (participante "na lista" e mudo).
     try {
@@ -2253,6 +2262,38 @@ export class CallManager {
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
+  }
+
+  /**
+   * Relê o roster do canal alguns instantes depois do join e abre os pares que
+   * faltam. Resolve o "só conecta na segunda" (na estreia o `voiceStates` não
+   * tinha o outro peer ainda).
+   */
+  private catchUpVoiceRoster(callId: string, communityId: string, channelId: string) {
+    const delays = [1200, 3500, 8000]
+    for (const ms of delays) {
+      try {
+        setTimeout(() => {
+          const st = this.state
+          if (!st || st.callId !== callId) return
+          void services.voiceStates(communityId, channelId).then(async (states) => {
+            const cur = this.state
+            if (!cur || cur.callId !== callId) return
+            for (const [fp] of states) {
+              if (!fp || fp === this.myFp) continue
+              if (!cur.participants.some((p: any) => p.fp === fp)) {
+                cur.participants.push({ fp, nickname: fp.slice(0, 6) })
+                this.onUpdate({ ...cur })
+              }
+              // Sem par = ninguém vai falar. A regra do fp maior inicia.
+              if (!this.pcs.has(fp) && this.myFp && this.myFp > fp) {
+                try { await this.createPC(fp, callId, true) } catch { /* best-effort */ }
+              }
+            }
+          }).catch(() => { /* motor ainda subindo */ })
+        }, ms)
+      } catch { /* timer é best-effort */ }
+    }
   }
 
   // ── joinVoiceRelayOnly REMOVIDO ──────────────────────────────────────────
