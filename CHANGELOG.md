@@ -1,5 +1,43 @@
 # CHANGELOG
 
+## [1.1.29-pre-alpha] - 2026-11-02
+
+### F11 / Alt+Enter: tela cheia da janela
+
+Atalho global (funciona fora da chamada também): **F11** ou **Alt+Enter**
+alterna a tela cheia da janela. O estado vem do SO — se o gerenciador de janelas
+recusar, a UI não finge que entrou. No WebView2 o F11 era capturado pelo
+navegador embutido; agora é interceptado antes.
+
+Comando novo no Tauri: `window_toggle_fullscreen` (devolve o estado real).
+No modo navegador usa a Fullscreen API.
+
+### Engrenagem da chamada (PC e celular)
+
+Painel de ajustes no cabeçalho do painel: microfone, câmera, resolução, FPS e
+processamento de voz, aplicáveis **durante** a chamada. Trocar de aparelho
+substitui a track e renegocia só a fonte — a conversa não cai. Se o aparelho
+recusar, a preferência volta ao valor anterior e a UI avisa.
+
+### Tela nítida: 1440p e 4K
+
+Teto antigo era 1080p/6 Mbps. Agora **1440p (12 Mbps)** e **4K (20 Mbps)**,
+captura em resolução nativa com `maintain-resolution`.
+
+### A câmera não ocupa mais o lugar da tela
+
+Com um único vídeo remoto sinalizado como tela, o mesmo stream ia para os dois
+quadrados. Agora a tela consome o stream e a pessoa fica no avatar.
+
+### "Chamando…" só com confirmação de toque
+
+Frame `CallRinging`: o receptor confirma que recebeu e está tocando. Até lá o
+badge mostra **"Discando…"**.
+
+### Verificação
+
+`typecheck` / `lint` limpos · **303** testes de UI · **218** do core.
+
 ## [1.1.28-pre-alpha] - 2026-11-02
 
 ### Engrenagem na chamada: microfone, câmera, resolução e FPS
