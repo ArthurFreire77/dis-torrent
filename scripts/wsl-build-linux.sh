@@ -12,4 +12,4 @@ echo "=== tauri build (deb, appimage) ==="
 npm run tauri build -- --bundles deb,appimage
 
 echo "=== artefatos ==="
-ls -la src-tauri/target/release/bundle/deb/*1.1.38* src-tauri/target/release/bundle/appimage/*1.1.38* || true
+ls -la src-tauri/target/release/bundle/deb/*1.1.39* src-tauri/target/release/bundle/appimage/*1.1.39* || true

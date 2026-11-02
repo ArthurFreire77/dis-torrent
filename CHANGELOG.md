@@ -1,5 +1,53 @@
 # CHANGELOG
 
+## [1.1.39-pre-alpha] - 2026-11-02
+
+### Canal de voz/vídeo no PC abria o compositor de texto
+
+Selecionar um canal de voz ou de vídeo no desktop caía na tela de mensagens:
+histórico vazio e um campo para **digitar** num canal onde ninguém escreve. O
+cabeçalho ainda mostrava `#` e "Bem-vindo ao canal".
+
+Agora esses canais abrem a tela da chamada: quem está na sala (fonte é o
+motor, não o roster local), botão entrar/sair pelo mesmo `joinVoice` do canal
+de voz, e o motivo honesto quando a chamada não está disponível. Histórico e
+compositor só aparecem em canal de texto; o cabeçalho usa o ícone do tipo
+(alto-falante/câmera) e o texto certo.
+
+Junto: `mergedChannelsForLabel` passou a carregar o `kind`. Sem ele a sidebar
+sabia o nome do canal mas a tela escolhia "texto" para um canal de voz
+recém-criado — o tipo só chegava por `extraChannels`, que pode estar vazio no
+primeiro render.
+
+### Canal de voz/vídeo no celular tocava de verdade?
+
+A tela da chamada no celular substituía a conversa inteira e **não renderizava
+nenhum `CallTile`** — e é dentro dos tiles que vivem o `<audio>` da voz remota e
+o `<video>` da câmera/tela. Resultado: conectava, o cronômetro corria e não
+saía som nem imagem. Os quadrados agora saem de `renderCallTilesMobile` (uma
+função só, usada pelo painel e pela tela do canal) e a tela da chamada recebe
+`media`.
+
+### "Entrar" preso em Conectando…
+
+Quem hospeda já tem o convidado na lista de participantes (a sala é publicada
+com a lista), então `onParticipantAdded` nunca entrava no ramo que cria o
+`RTCPeerConnection`: o convidado ficava com um PC sem offer esperando para
+sempre. O par agora é garantido fora do ramo que adiciona ao roster, mantendo a
+regra do fingerprint maior (anti-glare).
+
+### Discussão (thread) bugada
+
+O modal buscava as mensagens uma vez e refazia a busca a cada mensagem
+(`[thread.id, msgs.length]`), sem assinar nada: mensagem de outra pessoa não
+aparecia até fechar e reabrir, e respostas atrasadas sobrescreviam a lista. O
+erro de envio era engolido, então "Enviar" às vezes não fazia nada visível.
+Agora: carga única + `message_new` ao vivo, scroll para a última mensagem,
+erro visível e texto devolvido ao composer quando o envio falha — no desktop e
+no celular.
+
+**Verificação:** typecheck 0, lint 0, 360 testes unitários.
+
 ## [1.1.38-pre-alpha] - 2026-11-02
 
 ### Links e convites não abrem mais uma aba morta (`tauri.localhost`)
