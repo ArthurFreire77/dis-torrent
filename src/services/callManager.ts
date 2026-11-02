@@ -5,6 +5,8 @@ import { isAndroidRuntime } from './screenShare'
 import { setCallVideoSending, applyOfferInStable as applyOfferToSession } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
+import { shouldInitiatePair } from './callRepair'
+import { mergeRemoteStream, type RemoteStreamLike, type RemoteTrackLike } from './callRemoteTracks'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
 import type { VoiceMediaStats } from './models'
 import {
@@ -401,14 +403,15 @@ function attachRemoteTrack(
       onUpdate({ ...state })
       return
     }
-    // stream novo (ex.: tela chegou num objeto separado): mescla tracks que faltam
+    // stream novo (ex.: tela chegou num objeto separado): mescla tracks que faltam.
+    // Vídeo é UM por peer (câmera OU tela): a track nova SUBSTITUI a antiga —
+    // sem isso o `<video>` continua tocando a primeira e o quadrado da tela
+    // mostrava a câmera antiga ("a câmera foi para o lugar da tela").
     try {
-      for (const tr of stream.getTracks()) {
-        const exists = p.stream.getTracks().some(t => t.id === tr.id)
-        if (!exists) {
-          try { p.stream.addTrack(tr) } catch { /* ignora track duplicada */ }
-        }
-      }
+      mergeRemoteStream(
+        p.stream as unknown as RemoteStreamLike<RemoteTrackLike>,
+        stream as unknown as RemoteStreamLike<RemoteTrackLike>,
+      )
       // garante que o elemento <video> re-renderize mesmo sem trocar de id
       onUpdate({ ...state })
     } catch {
@@ -1053,6 +1056,8 @@ export class CallManager {
   private endedCalls = new Set<string>()
   /** Desde quando cada par está em `new`/`connecting` (ver repairHalfOpenPairs). */
   private pairStuckSince = new Map<string, number>()
+  /** Desde quando o lado MENOR espera uma offer que nunca chegou (ver repairHalfOpenPairs). */
+  private soloWaitSince = new Map<string, number>()
   /** callIds com aceite em andamento (duplo clique). */
   private accepting = new Set<string>()
   /** Evita que o eco de `call_ended` execute `leave()` recursivamente. */
@@ -2958,12 +2963,22 @@ export class CallManager {
     if (!this.state || this.pcs.size === 0) return
     try {
       let bad = false
+      let parSelecionado = false
       for (const [fp, pc] of this.pcs) {
         try {
           if (pc.connectionState === 'closed') continue
           const stats = await pc.getStats()
           // Medidor B1: par selecionado + rtt + bytes (mesma janela, sem timer novo).
-          try { this.iceReports.set(fp, readIceReport(pc, stats)) } catch { /* stats parcial */ }
+          try {
+            const rep = readIceReport(pc, stats)
+            this.iceReports.set(fp, rep)
+            // PAR NOMINADO = rota de mídia REAL. O evento de ICE pode se
+            // perder (WebView que só emite `connectionState`, renegociação
+            // logo após entrar na sala) e a chamada ficava em "Conectando…"
+            // com áudio passando — era o "entra e não conecta" que só o
+            // relógio mostrava. A estatística é prova, não palpite.
+            if (rep.localType || rep.remoteType) parSelecionado = true
+          } catch { /* stats parcial */ }
           // Cache completo para o painel de diagnóstico (ver getCallDiagnostics).
           try { this.lastStats.set(fp, stats) } catch { /* ignore */ }
           stats.forEach((r: any) => {
@@ -2978,6 +2993,11 @@ export class CallManager {
             }
           })
         } catch { /* peer sem stats nesta janela */ }
+      }
+      // Par nomeado nas estatísticas = mídia rota: promove a fase mesmo que o
+      // evento de ICE tenha se perdido (ver comentário acima).
+      if (parSelecionado && this.state && this.state.phase !== 'connected') {
+        this.applyPhase('media-connected')
       }
       if (bad) this.badWindows += 1
       else this.badWindows = 0
@@ -3256,6 +3276,7 @@ export class CallManager {
       this.iceReports.clear()
       this.iceRestarts.clear()
       this.pairStuckSince.clear()
+      this.soloWaitSince.clear()
       this.accepting.clear()
       this.closeRoom()
       // NÃO marca em `endedCalls`: uma chamada NOVA com outro id precisa passar;
@@ -3357,6 +3378,7 @@ export class CallManager {
       this.iceReports.clear()
       this.iceRestarts.clear()
       this.pairStuckSince.clear()
+      this.soloWaitSince.clear()
       this.pcs.forEach(pc => { try { pc.close() } catch { /* ignore */ } })
       this.pcs.clear()
       this.localStream?.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } })
@@ -3618,6 +3640,17 @@ export class CallManager {
     // Dois cliques rápidos abriam dois getUserMedia; a track perdedora ficava
     // viva (LED da câmera preso) e o sender oscilava.
     if (this.cameraBusy) return
+    // UM VÍDEO POR PAR: a tela ocupa a única m-line de vídeo enquanto está no
+    // ar. Ligar a câmera aqui fazia replaceTrack na m-line da TELA — o outro
+    // lado continuava com `sharing: true` e recebia a câmera dentro do quadrado
+    // da tela ("a câmera vai no lugar da tela"). Trocar a fonte é decisão
+    // explícita, nunca efeito colateral de ligar a câmera.
+    if (!this.state.cameraOn && this.state.sharing) {
+      try {
+        this.onCallNotice?.('a tela está no ar — pare o compartilhamento para ligar a câmera')
+      } catch { /* ignore */ }
+      return
+    }
     this.cameraBusy = true
     try {
       if (this.state.cameraOn) {
@@ -4937,7 +4970,16 @@ export class CallManager {
     }
   }
 
-  /** Re-par half-open: lado de fp MAIOR refaz a offer (mesma regra do voice_joined); par conectado intocado. */
+  /**
+   * Re-par half-open: lado de fp MAIOR refaz a offer (mesma regra do voice_joined);
+   * par conectado intocado.
+   *
+   * O lado MENOR normalmente espera a offer — mas se ela nunca chega (frame
+   * perdido no meio de um `Entrar`), esperar era esperar para sempre: era o
+   * "entrou na chamada e não conecta". Depois de um orçamento ele também
+   * assume a iniciativa; o glare (duas offers ao mesmo tempo) já é resolvido
+   * pelo polite/impolite de `handleOffer`.
+   */
   private async repairHalfOpenPairs(): Promise<void> {
     const st = this.state
     if (!st || !isCallPhaseActive(st.phase) || !this.myFp) return
@@ -4948,9 +4990,19 @@ export class CallManager {
       const cs = pc?.connectionState
       // RTCPeerConnection.connectionState n�o tem 'completed' (isso � do
       // iceConnectionState): s� 'connected' significa m�dia fluindo.
-      if (cs === 'connected') continue
-      // Só o lado MAIOR inicia (o menor espera a offer).
-      if (!(this.myFp > fp)) continue
+      if (cs === 'connected') {
+        this.soloWaitSince.delete(fp)
+        continue
+      }
+      // Lado MENOR sem par nem offer: dá alguns segundos para a offer do outro
+      // chegar antes de assumir a iniciativa deste par (regra pura em
+      // `callRepair.ts`; sem ela o menor esperava para sempre e a sala ficava
+      // em "Conectando…").
+      if (!(this.myFp > fp) && !pc) {
+        const desde = this.soloWaitSince.get(fp) ?? 0
+        if (desde === 0) { this.soloWaitSince.set(fp, Date.now()); continue }
+        if (!shouldInitiatePair({ myFp: this.myFp, peerFp: fp, hasPair: false, waitingSinceMs: desde, nowMs: Date.now() })) continue
+      }
       // Um ICE restart é mais barato que um PC novo e resolve o caso half-open.
       if (pc && cs === 'failed') {
         try {
@@ -4967,7 +5019,8 @@ export class CallManager {
       // em 1-3 s e recriar a cada tick derrubava quem já estava negociando. Ele
       // entra no orçamento de "par travado" abaixo. Só `new`/ausente cai aqui.
       if (!pc || cs === 'failed' || cs === 'closed' || !cs) {
-        void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
+        this.soloWaitSince.delete(fp)
+        this.restorePeerMedia(fp, st.callId)
         continue
       }
       // PAR TRAVADO (`new`/`connecting` por muito tempo): o ICE não fecha e
@@ -4992,12 +5045,37 @@ export class CallManager {
           this.pendingIce.delete(fp)
           this.lastRemoteOffer.delete(fp)
           this.iceRestarts.delete(fp)
-          void this.createPC(fp, st.callId, true).catch(() => { /* par best-effort */ })
+          this.restorePeerMedia(fp, st.callId)
         }
       } else {
         this.pairStuckSince.delete(fp)
       }
     }
+  }
+
+  /**
+   * Recria o par e re-semeia o vídeo que está no ar.
+   *
+   * `createPC` anexa o `localStream` (áudio + câmera), mas a TELA vive em
+   * `screenStream`: um par refeito no meio de um compartilhamento ficava sem
+   * ela (ou com a câmera no lugar dela). Só remedia o quadrado, não mexe no
+   * estado da chamada.
+   */
+  private restorePeerMedia(fp: string, callId: string): void {
+    void this.createPC(fp, callId, true)
+      .then(async () => {
+        const stream = this.screenStream
+        const track = stream?.getVideoTracks()[0] ?? null
+        if (!this.state?.sharing || !track || !stream) return
+        const pc = this.pcs.get(fp)
+        if (!pc || pc.signalingState === 'closed') return
+        const tr = this.findVideoTransceiver(pc)
+        if (!tr) return
+        const precisaOffer = setCallVideoSending(tr, true)
+        await tr.sender.replaceTrack(track)
+        if (precisaOffer && this.state) await this.sendOffer(fp, this.state.callId).catch(() => false)
+      })
+      .catch(() => { /* par best-effort: o próximo tick tenta de novo */ })
   }
 
   /** Sala coletiva? (ver callRoomRules) — decide se sair de UM encerra a chamada. */
@@ -5496,6 +5574,7 @@ export class CallManager {
     this.iceReports.clear()
     this.iceRestarts.clear()
     this.pairStuckSince.clear()
+    this.soloWaitSince.clear()
     this.qualityNotice = null
     this.pcs.forEach(pc => { try { pc.close() } catch { /* ignore */ } })
     this.pcs.clear()

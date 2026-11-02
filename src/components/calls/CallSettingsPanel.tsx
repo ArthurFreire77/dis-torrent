@@ -213,12 +213,21 @@ export default function CallSettingsPanel({
       {/* ── CÂMERA: ligar/desligar + aparelho + qualidade + FPS ── */}
       <Secao title="CÂMERA">
         {onToggleCamera && (
-          <Toggle
-            on={!!cameraOn}
-            label={cameraOn ? 'Câmera ligada' : 'Câmera desligada'}
-            disabled={busy}
-            onChange={() => { void onToggleCamera() }}
-          />
+          <>
+            <Toggle
+              on={!!cameraOn}
+              label={cameraOn ? 'Câmera ligada' : 'Câmera desligada'}
+              disabled={busy || (!!sharing && !cameraOn)}
+              onChange={() => { void onToggleCamera() }}
+            />
+            {/* Tela e câmera dividem a mesma m-line de vídeo: ligar a câmera
+                com a tela no ar trocava a TELA pela câmera no outro lado. */}
+            {sharing && !cameraOn && (
+              <span style={{ fontSize: 10.5, color: T_MUTED }}>
+                Pare a transmissão de tela para ligar a câmera — as duas usam o mesmo vídeo.
+              </span>
+            )}
+          </>
         )}
         <Row label="APARELHO" hint={videoDevices.length === 0 ? 'nenhuma câmera detectada (ou permissão ainda não concedida)' : `${videoDevices.length} câmera(s) encontrada(s)`}>
           <select

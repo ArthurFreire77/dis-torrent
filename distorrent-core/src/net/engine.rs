@@ -6767,6 +6767,49 @@ impl NetworkEngine {
         self.voice_register(call_id, peer_fp)
     }
 
+    /// Registra o par nativo de uma sala de chamada e oferece, se eu sou o lado
+    /// que oferece. Usado por `room_join` (entrar numa chamada já no ar).
+    ///
+    /// Quem oferece é o lado de fingerprint MAIOR — a mesma regra da malha dos
+    /// canais —, então os dois lados não se atropelam com offer simultânea. O
+    /// lado menor registra e espera a offer do outro (o registro é o que impede
+    /// essa offer de ser retida como se fosse um pré-aceite).
+    #[cfg(target_os = "linux")]
+    pub(super) fn native_pair_begin(self: &Arc<Self>, call_id: &str, peer_fp: &str) {
+        if !self.voice_register(call_id, peer_fp) {
+            return;
+        }
+        if self.identity.fingerprint.as_str() <= peer_fp {
+            return;
+        }
+        // Sem runtime (comando síncrono de teste/startup): oferece direto, como
+        // os outros caminhos nativos já fazem.
+        if tokio::runtime::Handle::try_current().is_err() {
+            if let Ok(Some(sdp)) = self.voice_begin_offer(call_id, peer_fp) {
+                let _ = self.call_signal(
+                    peer_fp,
+                    SecureFrame::CallOffer {
+                        call_id: call_id.into(),
+                        sdp,
+                    },
+                );
+            }
+            return;
+        }
+        // Fora da task de leitura/da thread do comando: `create_offer` bloqueia.
+        let engine = self.clone();
+        let cid = call_id.to_string();
+        let peer = peer_fp.to_string();
+        tokio::spawn(async move {
+            let e2 = engine.clone();
+            let (c, p) = (cid.clone(), peer.clone());
+            let r = tokio::task::spawn_blocking(move || e2.voice_begin_offer(&c, &p)).await;
+            if let Ok(Ok(Some(sdp))) = r {
+                let _ = engine.call_signal(&peer, SecureFrame::CallOffer { call_id: cid, sdp });
+            }
+        });
+    }
+
     /// Envia o SDP/candidatos que a mídia nativa produziu, pelos MESMOS
     /// `SecureFrame::Call*` que o navegador usa — nenhum frame novo no
     /// protocolo, nenhum branch no peer distante.
@@ -12654,6 +12697,17 @@ async fn handle_frame(
             });
         }
         SecureFrame::CallAddParticipant { call_id, fp, kind } => {
+            // MÍDIA NATIVA: o aviso de roster de quem ENTROU numa chamada já no
+            // ar é o único sinal que o host recebe (não há ring nem aceite).
+            // Sem registrar o par aqui, a offer nativa não nasce e a sala fica
+            // muda naquele nó, com o `CallAddParticipant` "funcionando".
+            #[cfg(target_os = "linux")]
+            {
+                let ja_na_chamada = engine.voice_is_native(&call_id, peer_fp);
+                if !ja_na_chamada {
+                    engine.native_pair_begin(&call_id, peer_fp);
+                }
+            }
             let _ = engine.events.send(EngineEvent::CallParticipantAdded {
                 call_id: call_id.clone(),
                 fp,

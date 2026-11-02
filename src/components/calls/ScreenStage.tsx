@@ -41,6 +41,8 @@ export interface ScreenStageProps {
   muted?: boolean
   onToggleMute?: () => void
   cameraOn?: boolean
+  /** A tela está sendo transmitida agora (câmera bloqueada: mesma m-line). */
+  sharing?: boolean
   onToggleCamera?: () => void
   onLeave?: () => void
   /** Nome da chamada, para contexto no cabeçalho. */
@@ -57,6 +59,7 @@ export function ScreenStage({
   muted = false,
   onToggleMute,
   cameraOn = false,
+  sharing = false,
   onToggleCamera,
   onLeave,
   callTitle,
@@ -234,10 +237,15 @@ export function ScreenStage({
           <button
             type="button"
             onClick={onToggleCamera}
-            title={cameraOn ? 'Desligar câmera' : 'Ligar câmera'}
-            aria-label={cameraOn ? 'Desligar câmera' : 'Ligar câmera'}
+            // Câmera e tela dividem a mesma m-line de vídeo: com a tela no ar,
+            // ligar a câmera trocava a TELA pela câmera no outro lado.
+            disabled={sharing && !cameraOn}
+            title={sharing && !cameraOn ? 'Pare a tela para ligar a câmera' : (cameraOn ? 'Desligar câmera' : 'Ligar câmera')}
+            aria-label={sharing && !cameraOn ? 'Câmera indisponível enquanto compartilha a tela' : (cameraOn ? 'Desligar câmera' : 'Ligar câmera')}
             style={{
-              width: 38, height: 38, borderRadius: '50%', border: 'none', cursor: 'pointer',
+              width: 38, height: 38, borderRadius: '50%', border: 'none',
+              cursor: sharing && !cameraOn ? 'not-allowed' : 'pointer',
+              opacity: sharing && !cameraOn ? 0.45 : 1,
               background: cameraOn ? c.green : 'rgba(255,255,255,.14)', color: '#fff',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}

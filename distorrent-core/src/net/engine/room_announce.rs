@@ -173,11 +173,20 @@ impl NetworkEngine {
                 "ninguém na sala para entrar".into(),
             ));
         }
-        let kind = if kind.is_empty() {
-            room.kind.clone()
-        } else {
-            kind.to_string()
-        };
+        // O `kind` da UI não manda aqui: a sala já carrega o seu, e é ele que
+        // vale para todos os que estão dentro (entrar num anúncio de voz como
+        // vídeo trocaria a mídia só para quem entrou).
+        let _ = kind;
+        // MÍDIA NATIVA: entrar numa sala em andamento precisa criar a sessão
+        // com cada participante — a offer que o host manda NÃO é retida (é um
+        // "hold para o aceite" que aqui nunca vem, porque a sala já está no
+        // ar): sem registrar, `voice_is_native` era falso e a offer ia para o
+        // JS de um WebView sem RTCPeerConnection, morrendo em silêncio. Era o
+        // "clico em Entrar e fica em Conectando" no Linux.
+        #[cfg(target_os = "linux")]
+        for fp in &alvos {
+            self.native_pair_begin(&room.call_id, fp);
+        }
         for fp in &alvos {
             let _ = self.store.join_call(&room.call_id, fp);
             // AVISO DE ROSTER, não ring: o host já está numa chamada. Um

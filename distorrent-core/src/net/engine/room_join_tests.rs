@@ -113,6 +113,46 @@ fn entrar_em_sala_so_comigo_nao_avisa_ninguem() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn entrar_na_sala_registra_o_par_nativo() {
+    // Chamada NATIVA (Linux): entrar numa sala em andamento não passa por
+    // aceite, então o `hold_call_offer` não tem quem o drene. Sem REGISTRAR o
+    // par no `room_join`, a offer do host era retida para sempre e a sala
+    // ficava em "Conectando…" — o relato de campo. O teste trava o registro
+    // (a mídia em si exige device, que não existe aqui).
+    let (host, _d1) = mk_engine("join-native-host");
+    let (guest, _d2) = mk_engine("join-native-guest");
+    let conv = grupo_com(&host, &guest);
+    espelhar(&host, &guest, &conv);
+    host.publish_room(
+        "call-nativa-1",
+        &conv,
+        "voice",
+        vec![host.identity.fingerprint.clone()],
+    );
+    guest.room_receive(
+        &host.identity.fingerprint,
+        "call-nativa-1",
+        &conv,
+        "voice",
+        "open",
+        vec![host.identity.fingerprint.clone()],
+    );
+    // Sem Codec/device a voz nativa não sobe neste ambiente: se subir, o par
+    // tem de estar registrado; se não subir, nada é registrado e o caminho é
+    // o navegador (honesto). O teste só exige a coerência.
+    let (call_id, alvos) = guest.room_join(&conv, "voice").expect("join ok");
+    assert_eq!(call_id, "call-nativa-1");
+    assert_eq!(alvos, vec![host.identity.fingerprint.clone()]);
+    if guest.native_voice_available() {
+        assert!(
+            guest.voice_is_native(&call_id, &host.identity.fingerprint),
+            "sem o registro, a offer do host fica retida e a sala nunca conecta"
+        );
+    }
+}
+
+#[test]
 fn sala_fechada_impede_entrar() {
     let (host, _d1) = mk_engine("join-close-host");
     let (guest, _d2) = mk_engine("join-close-guest");
