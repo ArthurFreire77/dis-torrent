@@ -53,7 +53,16 @@ test('fase presa em connecting é promovida pelo estado REAL do PC', () => {
 test('quadrado tem TETO de altura (não estica a janela toda)', () => {
   assert.match(grid, /maxTileHeight/, 'existe teto configurável')
   assert.match(grid, /height: maxTileHeight/, 'o card recebe a altura do teto')
-  assert.doesNotMatch(grid, /gridAutoRows: `minmax\([^)]*1fr\)`/, 'não usa mais 1fr (esticava)')
+  assert.match(grid, /flexWrap: 'wrap'/, 'fora do palco a grade é wrap com teto')
+})
+
+test('palco do canal de voz PREENCHE a área toda (relato do dono: "completar a tela como nos amigos, num espaço maior")', () => {
+  // O `fill` é EXCLUSIVO do centro do canal: painel lateral e mobile
+  // continuam com quadrados com teto (o esticamento de antes era lá).
+  assert.match(grid, /fill\?: boolean/, 'prop fill existe')
+  assert.equal(grid.split('gridAutoRows').length - 1, 1, 'só o palco usa linhas de grid')
+  const primeiroUso = shell.indexOf('<CallTilesGrid')
+  assert.match(shell.slice(primeiroUso, primeiroUso + 800), /\bfill\b/, 'a grade do canal recebe o modo palco')
 })
 
 test('em chamada de canal o painel lateral fica estreito', () => {

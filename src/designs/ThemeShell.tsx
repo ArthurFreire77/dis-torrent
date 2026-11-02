@@ -2921,12 +2921,14 @@ export default function ThemeShell({ designId }: {designId:string}){
 
           {/* CANAL DE VOZ/VÍDEO: a tela é a CHAMADA — sem histórico e sem
               compositor de texto (era o "dá para digitar num canal de voz").
-              DENTRO da chamada, os quadrados ocupam o espaço central (o painel
-              lateral vira só controles: mostrar os dois duplicava a mídia). */}
+              DENTRO da chamada, os quadrados PREENCHEM o espaço central em
+              modo palco (o painel lateral vira só controles: mostrar os dois
+              duplicava a mídia). */}
           {selConv && selCallChannel && (
             inThisCall ? (
               <CallTilesGrid
                 tiles={visibleCallTiles}
+                fill
                 pinnedId={pinnedTileId}
                 onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
                 onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}

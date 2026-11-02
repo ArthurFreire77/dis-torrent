@@ -26,6 +26,11 @@ export interface CallTilesGridProps {
   padding?: number
   /** Altura máxima de cada quadrado — sem teto o card esticava a tela toda. */
   maxTileHeight?: number
+  /**
+   * Modo palco (canal de voz): a grade PREENCHE a área toda em vez de
+   * soltar quadrados com teto no topo do espaço central.
+   */
+  fill?: boolean
 }
 
 export default function CallTilesGrid({
@@ -45,8 +50,54 @@ export default function CallTilesGrid({
   padding = 12,
   /** Altura máxima de cada quadrado — sem teto o card esticava a tela toda. */
   maxTileHeight = 420,
+  fill = false,
 }: CallTilesGridProps) {
   const altura = minHeight ?? (compact ? 112 : 150)
+  const renderTile = (t: CallTile) => (
+    <CallTileComponent
+      tile={t}
+      pinned={t.id === pinnedId}
+      onPin={onPin}
+      onExpand={onExpand}
+      showAudioControls={showAudioControls}
+      callDeafened={deafened}
+      palette={palette}
+      minHeight={altura}
+      avatarColor={avatarColor}
+      avatarB64={avatarB64}
+      onOpenProfile={onOpenProfile}
+    />
+  )
+
+  if (fill) {
+    // PALCO do canal de voz: preenche a área toda (pedido do dono — "completar
+    // a tela como nos amigos, num espaço maior"). Colunas por raiz quadrada:
+    // 1→1, 2→2, 3-4→2, 5-6→3…
+    const colunas = Math.max(1, Math.ceil(Math.sqrt(tiles.length)))
+    return (
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: 'grid',
+          gap: 10,
+          padding,
+          gridTemplateColumns: `repeat(${colunas}, minmax(0, 1fr))`,
+          // Piso de 200px: com muita gente as linhas rolam em vez de colapsar.
+          gridAutoRows: 'minmax(200px, 1fr)',
+          overflowY: 'auto',
+          background,
+        }}
+      >
+        {tiles.map((t) => (
+          <div key={t.id} style={{ minWidth: 0, minHeight: 0, display: 'flex' }}>
+            {renderTile(t)}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div
       style={{
@@ -77,19 +128,7 @@ export default function CallTilesGrid({
             display: 'flex',
           }}
         >
-          <CallTileComponent
-            tile={tile}
-            pinned={tile.id === pinnedId}
-            onPin={onPin}
-            onExpand={onExpand}
-            showAudioControls={showAudioControls}
-            callDeafened={deafened}
-            palette={palette}
-            minHeight={altura}
-            avatarColor={avatarColor}
-            avatarB64={avatarB64}
-            onOpenProfile={onOpenProfile}
-          />
+          {renderTile(tile)}
         </div>
       ))}
     </div>

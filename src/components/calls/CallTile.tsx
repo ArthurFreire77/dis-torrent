@@ -153,7 +153,10 @@ export function CallTile({
               }
             : thumbnail
               ? null
-              : { aspectRatio: aspect, minHeight: 0, alignSelf: 'start', width: '100%' }
+              // maxHeight: no palco largo a caixa por largura estouraria a
+              // linha da grade — o clamp letterboxa no preto (o vídeo dentro
+              // já usa `contain`).
+              : { aspectRatio: aspect, minHeight: 0, maxHeight: '100%', alignSelf: 'start', width: '100%' }
           : null),
         display: 'flex',
         alignItems: 'center',
