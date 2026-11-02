@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## [1.1.40-pre-alpha] - 2026-11-02
+
+### Canal de voz ocupa a tela (e as threads saíram da sidebar)
+
+A lista de threads ("Discussão de…" / "+ Nova thread") aparecia aninhada
+embaixo de cada canal e poluía a navegação. Saiu da barra lateral; a discussão
+continua abrindo no modal (menu do canal / painel).
+
+Dentro da chamada, os quadrados ocupam o espaço central — é ali que a mídia
+deve viver. O painel lateral fica só com os controles: mostrar os tiles nos
+dois lugares duplicava a mídia e sobrava pouco espaço. Fora da chamada, a tela
+do canal mostra quem está e o botão de entrar.
+
+`CallTilesGrid` extrai a grade de quadrados para um componente só — os tiles
+são onde vivem o `<audio>` e o `<video>` da chamada, e duplicar o JSX já fez
+uma tela ficar muda.
+
+### "Só conecta na segunda"
+
+O `voiceStates` era lido UMA vez, logo após o `voiceJoin`. Na estreia a linha
+do outro peer ainda não tinha chegado, a lista vinha vazia, ninguém abria
+`RTCPeerConnection` e a tela ficava em "Conectando…". Sair e entrar de novo
+funcionava porque o dado já estava no SQLite.
+
+Agora `catchUpVoiceRoster` relê o roster em 1,2 s / 3,5 s / 8 s e abre os pares
+que faltam, respeitando a regra do fingerprint maior (anti-glare).
+
+**Verificação:** typecheck 0, lint 0, 365 testes unitários.
+
 ## [1.1.39-pre-alpha] - 2026-11-02
 
 ### Canal de voz/vídeo no PC abria o compositor de texto
