@@ -28,6 +28,47 @@ Testes: 341 unitários + 250 Rust. Typecheck, lint e `cargo fmt --check` limpos.
 
 ## [1.1.37-pre-alpha] - 2026-11-02
 
+### Tags/canais criados no PC não apareciam no celular
+
+O estado do servidor (canais, cargos/tags, bots) só era enviado quando o dono
+mexia nele e o outro aparelho já estava online. Quem conectava depois esperava
+o sync de até 45 s; com a tela parada, a tag recém-criada não aparecia.
+
+Agora o dono empurra o estado no instante em que o peer fica online
+(`flush_community_state_to`) e a UI pede pareamento + estado imediatos ao abrir
+o servidor (`community_pair_now`/`community_sync_now`). No celular a lista
+também é relida quando o app volta do segundo plano — a WebView congela e os
+eventos do intervalo se perdem. O broadcast do estado deixou de abortar para
+TODOS quando um payload falhava para um membro.
+
+### Canal de vídeo entra na chamada, como o de voz
+
+`video` era só mais um canal de texto: clicar abria o histórico e não havia
+como entrar na chamada pelo celular. Agora voz e vídeo entram pelo mesmo
+`joinVoice`/`leaveVoice`, com o mesmo roster; a câmera continua opcional,
+ligada no botão da chamada.
+
+### Interface de servidor no celular
+
+Painel do servidor no celular: canais agrupados por categoria, ícone por tipo,
+quem está falando e entrar/sair da chamada; o dono pode criar, renomear e
+apagar canal. As TAGS do servidor aparecem numa seção própria. Canal de
+voz/vídeo abre a tela da chamada (participantes, microfone, fone e câmera) —
+antes caía no compositor de texto.
+
+### Bots na criação do servidor + documentação dentro do app
+
+O assistente de criação de servidor ganhou o passo **Bots**: adicionar,
+nomear, escolher modelo e cargo, com modelos prontos ("sem comandos" e
+"clima" via Open-Meteo, sem chave). Os bots são criados logo após o servidor —
+o core exige o servidor e os cargos para validar — e uma falha de bot não
+desfaz o servidor: o resumo final lista o que falhou.
+
+A documentação dos bots virou dado no app (`botDocs.ts`) e um acordeão único,
+usado no assistente **e** no painel de Bots: o que o bot faz, quem executa,
+limite do config (16 KB), placeholders e o que ele NÃO faz. Texto completo em
+`docs/bots.md`.
+
 ### Entrar na chamada e não conectar (offer que ninguém mandava)
 
 Sintoma: as duas pessoas aparecem na sala, o cronômetro corre e o status fica
