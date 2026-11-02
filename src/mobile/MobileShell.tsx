@@ -20,6 +20,7 @@ import { startDownload } from '../services/downloadAction'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
+import { pastedImages } from '../shared/clipboardImage'
 import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import {
@@ -1406,6 +1407,12 @@ export default function MobileShell() {
   // Envio de arquivo no celular: input real + shareFile do swarm + mensagem.
   async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return
+    await sendFileNow(f)
+    e.target.value = ''
+  }
+
+  /** Envia um arquivo pelo swarm e publica o metadado na conversa aberta. */
+  async function sendFileNow(f: File) {
     try {
       const sf = await fileSwarm.shareFile(f)
       setFileList([...fileSwarm.files.values()])
@@ -1414,7 +1421,23 @@ export default function MobileShell() {
         try { const m = selCommunity ? await services.sendChannelMessage(selCommunity, selConv, body) : await services.messageSend(selConv, body); append(m); refreshConvos() } catch { /* silent */ }
       }
     } catch (err: any) { setError(String(err?.message ?? err)) }
-    e.target.value = ''
+  }
+
+  /** Ctrl+V com imagem na área de transferência (o textarea só aceita texto). */
+  async function handleComposerPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const dt = e.clipboardData
+    const imagens = pastedImages(dt, new Date())
+    if (imagens.length === 0) return
+    e.preventDefault()
+    if (!selConv) { setError('abra uma conversa antes de colar uma imagem'); return }
+    for (const img of imagens) {
+      const original = dt.files && dt.files[img.fileIndex] ? dt.files[img.fileIndex] : null
+      if (!original) continue
+      const file = original.name === img.name && original.type === img.type
+        ? original
+        : new File([original], img.name, { type: img.type })
+      await sendFileNow(file)
+    }
   }
 
   // Entrada por convite: fluxo ÚNICO pelo `JoinServerForm` (mesmo do desktop).
@@ -2382,6 +2405,7 @@ export default function MobileShell() {
                 // avisa o outro lado que estou digitando (throttled 2s)
                 notifyTyping(v)
               }}
+              onPaste={handleComposerPaste}
               onKeyDown={e => {
                 // navegação do autocompletar tem prioridade sobre o envio
                 if (autocompleteItems.length > 0) {

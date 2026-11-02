@@ -45,6 +45,7 @@ import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
 import { QuitDialog } from '../components/QuitDialog'
 import { resolveSessionStart } from '../services/appUptime'
 import { copyText } from '../shared/clipboard'
+import { pastedImages } from '../shared/clipboardImage'
 import { mergeChannels } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
@@ -1534,6 +1535,30 @@ export default function ThemeShell({ designId }: {designId:string}){
     }
   }
 
+  /**
+   * Ctrl+V com imagem na área de transferência.
+   *
+   * O `<textarea>` só aceita texto: sem tratar `paste`, uma captura de tela
+   * colada não gerava nada. Aqui o binário vira arquivo do swarm e a mensagem
+   * sai normalmente; texto continua sendo colado pelo caminho nativo.
+   */
+  async function handleComposerPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const dt = e.clipboardData
+    const imagens = pastedImages(dt, new Date())
+    if (imagens.length === 0) return
+    e.preventDefault()
+    if (!selConv) { setError('abra uma conversa antes de colar uma imagem'); return }
+    for (const img of imagens) {
+      const original = dt.files && dt.files[img.fileIndex] ? dt.files[img.fileIndex] : null
+      if (!original) continue
+      // O nome vem do SO ou é gerado; o tipo vem do MIME para o download abrir certo.
+      const file = original.name === img.name && original.type === img.type
+        ? original
+        : new File([original], img.name, { type: img.type })
+      await sendFileNow(file)
+    }
+  }
+
   // ---------- composer: formatação, autocompletar, emoji ----------
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
   // msgListRef expõe reloadPolls(): o browser não emite evento de enquete.
@@ -1799,6 +1824,12 @@ export default function ThemeShell({ designId }: {designId:string}){
   }
   async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return
+    await sendFileNow(f)
+    e.target.value = ''
+  }
+
+  /** Envia um arquivo pelo swarm e publica o metadado na conversa aberta. */
+  async function sendFileNow(f: File) {
     try {
       const sf = await fileSwarm.shareFile(f)
       setFileList([...fileSwarm.files.values()])
@@ -1818,7 +1849,6 @@ export default function ThemeShell({ designId }: {designId:string}){
         } catch (err: any) { setError(String(err?.message ?? err)) }
       }
     } catch (err: any) { setError(String(err?.message ?? err)) }
-    e.target.value = ''
   }
 
   const [friendSuccess, setFriendSuccess] = useState<string | null>(null)
@@ -3058,6 +3088,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   value={input}
                   onChange={e => { onComposerChange(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, 220)}px` }}
                   onKeyDown={handleComposerKeyDown}
+                  onPaste={handleComposerPaste}
                   rows={1}
                   placeholder={view === 'servidores' ? `Conversar em #${channelLabel}` : `Conversar com ${peerTitle || 'amigo'}`}
                   aria-label="Mensagem"
