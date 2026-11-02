@@ -47,10 +47,10 @@ export interface IconCategory {
 export const LIMITE_NOME = 64
 export const LIMITE_REGRAS = 2000
 
-export const PASSO_REGRAS = 3
-export const PASSO_CONCLUIDO = 4
+export const PASSO_REGRAS = 4
+export const PASSO_CONCLUIDO = 5
 
-export const STEP_LABELS = ['Identidade', 'Canais', 'Cargos', 'Regras'] as const
+export const STEP_LABELS = ['Identidade', 'Canais', 'Cargos', 'Bots', 'Regras'] as const
 
 export const KIND_ICON: Record<ChannelKind, IconName> = {
   text: 'hash',
@@ -164,6 +164,14 @@ export function categoryFor(kind: ChannelKind): string {
 
 export function initialChannels(): WizardChannel[] {
   return [{ name: 'geral', kind: 'text', category: categoryFor('text') }]
+}
+
+/**
+ * Bot inicial do assistente — começa desligado (a pessoa escolhe em "Adicionar
+ * bot" se quer um). Mantido fora do componente para o estado ser previsível.
+ */
+export function novoBotWizardModel(): { name: string; roleId: string | null; template: 'vazio' | 'clima' } {
+  return { name: 'Bot', roleId: null, template: 'vazio' }
 }
 
 export function initialRoles(): RolePreset[] {

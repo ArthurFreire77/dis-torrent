@@ -204,7 +204,7 @@ export function StepRules({ value, onChange }: { value: string; onChange: (v: st
   return (
     <>
       <StepHead
-        step={4}
+        step={5}
         title="Regras"
         sub="Opcional. Aparece para quem está pensando em entrar."
       />

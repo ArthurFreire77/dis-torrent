@@ -423,6 +423,87 @@ export const layout = {
 
   empty: { fontSize: 12, color: ui.muted, lineHeight: 1.5 } satisfies CSSProperties,
 
+  /** Caixa vazia explicando o passo (bot opcional, por exemplo). */
+  emptyBox: {
+    fontSize: 12,
+    color: ui.muted,
+    lineHeight: 1.55,
+    background: ui.input,
+    border: `1px dashed ${ui.border}`,
+    borderRadius: ui.radiusSm,
+    padding: '12px 13px',
+  } satisfies CSSProperties,
+
+  /** Cartão de UM bot no passo de criação. */
+  botCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: ui.sm,
+    background: ui.surface,
+    border: `1px solid ${ui.border}`,
+    borderRadius: ui.radius,
+    padding: '12px 13px',
+  } satisfies CSSProperties,
+
+  botAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'rgba(88,101,242,.16)',
+    color: ui.accent,
+  } satisfies CSSProperties,
+
+  botIconBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 7,
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: ui.input,
+    border: `1px solid ${ui.border}`,
+    color: ui.muted,
+    cursor: 'pointer',
+  } satisfies CSSProperties,
+
+  botChip: (selected: boolean): CSSProperties => ({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    fontSize: 11.5,
+    fontWeight: 700,
+    borderRadius: 99,
+    padding: '5px 10px',
+    cursor: 'pointer',
+    background: selected ? 'rgba(88,101,242,.18)' : ui.input,
+    border: `1px solid ${selected ? ui.accent : ui.border}`,
+    color: selected ? '#fff' : ui.text,
+  }),
+
+  /** Bloco de documentação expansível (mesmo padrão do resto do wizard). */
+  docCard: (open: boolean): CSSProperties => ({
+    borderRadius: ui.radiusSm,
+    background: ui.surface,
+    border: `1px solid ${open ? ui.borderStrong : ui.border}`,
+  }),
+
+  docHead: {
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    background: 'transparent',
+    border: 'none',
+    padding: '9px 12px',
+    cursor: 'pointer',
+    color: ui.text,
+  } satisfies CSSProperties,
+
   done: {
     display: 'flex',
     flexDirection: 'column',

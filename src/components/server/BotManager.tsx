@@ -10,6 +10,8 @@
 import { useState } from 'react'
 import type { BotView, RoleView } from '../../services/models'
 import { Tooltip } from '../../shared/Tooltip'
+import { validateBotEntryName } from './botModel'
+import { BotDocsAccordion } from './BotDocsAccordion'
 import {
   Button,
   EmptyState,
@@ -27,17 +29,10 @@ export function validateBotName(
   existentes: BotView[],
   editandoId?: string | null,
 ): string | null {
-  const n = nome.trim()
-  if (!n) return 'Dê um nome ao bot.'
-  if (n.length < 2) return 'O nome precisa ter pelo menos 2 caracteres.'
-  if (n.length > 32) return 'O nome pode ter no máximo 32 caracteres.'
-  if (!/^[\wÀ-ÿ .-]+$/.test(n))
-    return 'Use apenas letras, números, espaço, ponto, hífen ou sublinhado.'
-  const dup = existentes.some(
-    (b) => b.id !== editandoId && b.name.toLowerCase() === n.toLowerCase(),
-  )
-  if (dup) return 'Já existe um bot com esse nome.'
-  return null
+  const outros = existentes
+    .filter((b) => b.id !== editandoId)
+    .map((b) => b.name)
+  return validateBotEntryName(nome, outros)
 }
 
 export function BotManager({
@@ -81,6 +76,10 @@ export function BotManager({
           este bot.
         </Notice>
       </div>
+
+      {/* DOCUMENTAÇÃO aqui, não só no docs/bots.md: quem está configurando
+          precisa saber que o bot só responde com o app do dono aberto. */}
+      <BotDocsAccordion />
 
       {ehDono && (
         <div>

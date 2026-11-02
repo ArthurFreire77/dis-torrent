@@ -17,6 +17,7 @@ const FILES = [
   'src/components/server/wizardChannelSteps.tsx',
   'src/components/server/wizardChrome.tsx',
   'src/components/server/wizardSummary.tsx',
+  'src/components/server/wizardBotStep.tsx',
 ]
 
 test('wizard: nenhum elemento depende só da folha de estilo para ter layout', () => {

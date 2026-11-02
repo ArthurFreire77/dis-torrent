@@ -28,6 +28,8 @@ import {
 } from './server/wizardModel'
 import { StepIdentity } from './server/wizardSteps'
 import { StepChannels, StepRoles, StepRules } from './server/wizardChannelSteps'
+import { StepBots, type WizardBot } from './server/wizardBotStep'
+import { botTemplateConfig } from './server/botDocs'
 import { WizardSummary } from './server/wizardSummary'
 import { WizardFooter, WizardStepper } from './server/wizardChrome'
 import { css, layout } from './server/wizardStyles'
@@ -54,12 +56,15 @@ export default function CreateServerWizard({
   const [iconId, setIconId] = useState<IconName>('server')
   const [channels, setChannels] = useState<WizardChannel[]>(initialChannels)
   const [roles, setRoles] = useState<RolePreset[]>(initialRoles)
+  const [bots, setBots] = useState<WizardBot[]>([])
   const [expandedRole, setExpandedRole] = useState<string | null>(null)
   const [rulesText, setRulesText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [inviteUrl, setInviteUrl] = useState('')
   const [createdId, setCreatedId] = useState('')
+  /** Bots que falharam ao criar (o servidor em si foi criado). */
+  const [botsFalhos, setBotsFalhos] = useState<string[]>([])
 
   const mainRef = useRef<HTMLDivElement | null>(null)
 
@@ -73,12 +78,14 @@ export default function CreateServerWizard({
     setIconId('server')
     setChannels(initialChannels())
     setRoles(initialRoles())
+    setBots([])
     setExpandedRole(null)
     setRulesText('')
     setBusy(false)
     setError(null)
     setInviteUrl('')
     setCreatedId('')
+    setBotsFalhos([])
   }, [open])
 
   // Troca de passo volta o scroll ao topo (passos altos → curtos deixavam no vazio).
@@ -190,6 +197,31 @@ export default function CreateServerWizard({
     )
   }
 
+  // ---------- bots ----------
+
+  function addBot() {
+    setBots((prev) => [
+      ...prev,
+      { name: `Bot ${prev.length + 1}`, roleKey: null, template: 'vazio' },
+    ])
+  }
+
+  function removeBot(i: number) {
+    setBots((prev) => prev.filter((_, idx) => idx !== i))
+  }
+
+  function renameBot(i: number, name: string) {
+    setBots((prev) => prev.map((b, idx) => (idx === i ? { ...b, name } : b)))
+  }
+
+  function templateBot(i: number, template: WizardBot['template']) {
+    setBots((prev) => prev.map((b, idx) => (idx === i ? { ...b, template } : b)))
+  }
+
+  function roleBot(i: number, roleKey: string | null) {
+    setBots((prev) => prev.map((b, idx) => (idx === i ? { ...b, roleKey } : b)))
+  }
+
   // ---------- criação ----------
 
   async function createServer() {
@@ -225,10 +257,34 @@ export default function CreateServerWizard({
           })),
         },
       )
+      // BOTS DO ASSISTENTE: criados DEPOIS do servidor existir, porque o core
+      // exige o servidor e os cargos para validar (cargo fantasma é recusado).
+      // Falha de bot não pode desfazer o servidor: o resultado é reportado.
+      const botsFalhos: string[] = []
+      if (bots.length > 0) {
+        // presets de cargo → ids reais, na mesma ordem em que foram criados
+        let cargosCriados: { id: string; name: string }[] = []
+        try { cargosCriados = await services.rolesList(id) } catch { /* sem lista: bots sem cargo */ }
+        for (const b of bots) {
+          const nome = b.name.trim()
+          if (!nome) continue
+          const cargo = b.roleKey
+            ? cargosCriados.find((r) => r.name === cargosAtivos.find((x) => x.key === b.roleKey)?.name.trim())
+            : null
+          try {
+            const botId = await services.botCreate(id, { name: nome, roleId: cargo?.id ?? null })
+            const cfg = botTemplateConfig(b.template)
+            if (cfg) await services.botUpdate(id, botId, { config: cfg })
+          } catch (e) {
+            botsFalhos.push(`${nome}: ${(e as Error)?.message ?? String(e)}`)
+          }
+        }
+      }
       // Convite público wildcard: vale em qualquer aparelho (formato aceito
       // pelo Rust e pelo modo navegador).
       const token = await services.makeInvite(id, '000000000000')
       setCreatedId(id)
+      setBotsFalhos(botsFalhos)
       setInviteUrl(
         isTauriRuntime()
           ? `distorrent://invite?invite=${encodeURIComponent(token)}`
@@ -286,6 +342,19 @@ export default function CreateServerWizard({
     if (step === PASSO_REGRAS) {
       return <StepRules value={rulesText} onChange={setRulesText} />
     }
+    if (step === 3) {
+      return (
+        <StepBots
+          bots={bots}
+          roles={cargosAtivos.map((r) => ({ key: r.key, name: r.name.trim() || r.key }))}
+          onAdd={addBot}
+          onRemove={removeBot}
+          onRename={renameBot}
+          onTemplate={templateBot}
+          onRole={roleBot}
+        />
+      )
+    }
 
     // Passo concluído
     return (
@@ -312,6 +381,14 @@ export default function CreateServerWizard({
             Wi-Fi. Fora disso, não há como entrar pelo link — o app é de rede local.
           </Notice>
         </div>
+        {botsFalhos.length > 0 && (
+          <div style={{ marginTop: ui.lg }}>
+            <Notice tone="danger" icon="warn">
+              O servidor foi criado, mas {botsFalhos.length === 1 ? 'um bot falhou' : `${botsFalhos.length} bots falharam`}:
+              {' '}{botsFalhos.join(' · ')}. Crie de novo em Configurações → Bots.
+            </Notice>
+          </div>
+        )}
       </>
     )
   })()
@@ -390,7 +467,7 @@ export default function CreateServerWizard({
             className="csw-main"
             style={layout.main}
             role="group"
-            aria-label={concluido ? 'Servidor criado' : `Passo ${step + 1} de 4: Criar servidor`}
+            aria-label={concluido ? 'Servidor criado' : `Passo ${step + 1} de 5: Criar servidor`}
           >
             {conteudo}
           </div>
@@ -406,6 +483,7 @@ export default function CreateServerWizard({
               canaisVoz={canaisVoz}
               cargosAtivos={cargosAtivos}
               rulesText={rulesText}
+              bots={bots}
             />
           )}
         </div>

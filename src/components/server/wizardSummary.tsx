@@ -30,6 +30,7 @@ export function WizardSummary({
   canaisVoz,
   cargosAtivos,
   rulesText,
+  bots,
 }: {
   iconId: IconName
   name: string
@@ -40,6 +41,8 @@ export function WizardSummary({
   canaisVoz: number
   cargosAtivos: RolePreset[]
   rulesText: string
+  /** Bots que serão criados junto com o servidor. */
+  bots?: { name: string }[]
 }) {
   return (
     <aside className="csw-side" style={layout.side} aria-label="Resumo do servidor">
@@ -104,6 +107,23 @@ export function WizardSummary({
           </div>
         ) : (
           <div style={layout.empty}>nenhuma — opcional</div>
+        )}
+      </SideBox>
+
+      <SideBox icon="bot" title="Bots">
+        {!bots || bots.length === 0 ? (
+          <div style={layout.empty}>nenhum — opcional</div>
+        ) : (
+          <div style={layout.list}>
+            {bots.map((b, i) => (
+              <div key={i} style={layout.listItem}>
+                <span style={layout.listIcon}>
+                  <Ic name="bot" size={12} />
+                </span>
+                <span style={layout.ellipsis}>{b.name.trim() || `Bot ${i + 1}`}</span>
+              </div>
+            ))}
+          </div>
         )}
       </SideBox>
     </aside>

@@ -8,9 +8,12 @@
 //   node --experimental-strip-types --test tests/<arquivo>.test.ts
 import './appUptime.test.ts'
 import './botCommands.test.ts'
+import './botWizard.test.ts'
 import './callPhases.test.ts'
 import './callRooms.test.ts'
 import './callRoomRules.test.ts'
+import './callRepair.test.ts'
+import './callRemoteTracks.test.ts'
 import './callMedia.test.ts'
 import './callNegotiation.test.ts'
 import './callMediaPrefs.test.ts'
