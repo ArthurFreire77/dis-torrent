@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## [1.1.30-pre-alpha] - 2026-11-02
+
+### Correção: o APK não compilava
+
+O comando de tela cheia (`window_toggle_fullscreen`) adicionado na 1.1.29 usava
+`WebviewWindow::set_fullscreen`, que **só existe em desktop**. O build Android
+quebrava com `E0599` e o APK daquela versão nunca saiu.
+
+Agora o corpo que chama `set_fullscreen`/`is_fullscreen` está sob
+`#[cfg(desktop)]`; no celular o comando devolve `false` (não entrou) em vez de
+fingir sucesso — não há janela redimensionável para colocar em tela cheia.
+
+Verificado com `cargo check --lib` (desktop) e `cargo check --target
+aarch64-linux-android --lib` (Android).
+
+Todo o conteúdo da 1.1.29 está incluído: F11/Alt+Enter, engrenagem de ajustes
+na chamada (PC e celular), tela 1440p/4K, tiles corrigidos e `CallRinging`.
+
 ## [1.1.29-pre-alpha] - 2026-11-02
 
 ### F11 / Alt+Enter: tela cheia da janela
