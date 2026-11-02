@@ -1,5 +1,43 @@
 # CHANGELOG
 
+## [1.1.36-pre-alpha] - 2026-11-02
+
+### Entrar na chamada travava o app (offer bloqueante na task de leitura)
+
+Sintoma: ao entrar numa chamada já em andamento (ou num canal de voz com
+gente), o app travava, as mensagens paravam e só voltava reiniciando.
+
+Causa: `voice_mesh_maybe_offer` chamava `voice_begin_offer` → `create_offer`,
+que **bloqueia** esperando SDP + ICE. Isso rodava dentro do `handle_frame`, na
+task de leitura da sessão do peer. Bloquear ali segura a leitura inteira
+daquele peer; com vários pares entrando ao mesmo tempo, as workers do runtime
+ficam ocupadas e a UI para de responder.
+
+Agora o offer sai numa task separada, com `spawn_blocking` — a leitura da
+sessão nunca espera a mídia.
+
+### Colar imagem no compositor envia a imagem
+
+O `<textarea>` só entende texto: com um print na área de transferência, Ctrl+V
+não gerava nada (nem mensagem, nem erro). Agora o `paste` lê
+`clipboardData.files` e, quando o WebView não popula `files`, cai em
+`clipboardData.items`. A imagem vira arquivo do swarm e a mensagem sai pelo
+mesmo caminho do botão de anexo.
+
+Nome: o do Sistema Operacional quando existe; senão `imagem-AAAAMMDD-HHMMSS`
+com a extensão do MIME. Arquivo vazio e item que não é imagem são ignorados, e
+colar texto continua igual. Mesmo comportamento no celular.
+
+### Resto da 1.1.35
+
+Tela em 8K, qualidade/FPS automáticos por padrão, bitrate da câmera, correção
+do segundo compartilhamento de tela, barra do WebView2 escondida, hub de
+servidores em uma tela e salas verificadas a cada 10 s.
+
+Testes: 318 unitários + 244 Rust. Typecheck, lint, fmt e clippy limpos.
+
+---
+
 ## [1.1.35-pre-alpha] - 2026-11-02
 
 ### Compartilhar tela em 8K, automático de verdade e sem a barra do WebView2
