@@ -12,6 +12,7 @@ import { callRooms, type CallRoomView } from '../services/callRooms'
 import { FileCard } from '../components/FileCard'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
+import CallSettingsPanel from '../components/calls/CallSettingsPanel'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import { downloadManager } from '../services/downloadManager'
@@ -30,7 +31,7 @@ import {
   type ServerSummary,
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
-import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import MobileMessage from './MobileMessage'
 import { EmojiPicker } from '../shared/EmojiPicker'
@@ -635,6 +636,9 @@ export default function MobileShell() {
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
   const [showCallDiag, setShowCallDiag] = useState(false)
+  /** Engrenagem da chamada (microfone/câmera/resolução/FPS) no celular. */
+  const [showCallSettings, setShowCallSettings] = useState(false)
+  const [callMediaPrefsState, setCallMediaPrefsState] = useState(() => getCallMediaPrefs())
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   const swarmNotifyRef = useRef<() => void>(() => {})
@@ -2161,6 +2165,7 @@ export default function MobileShell() {
               )}
               {/* v6: fase (chamando/conectando/reconectando…) com elapsed */}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} ringing={activeCall.ringing} />
+              <button type="button" data-testid="call-settings" aria-label="Ajustes da chamada (microfone, câmera, resolução, FPS)" title="Ajustes: microfone, câmera, resolução e FPS" aria-expanded={showCallSettings} onClick={() => setShowCallSettings((v) => !v)} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${showCallSettings ? t.accent : t.border}`, background: t.input, color: showCallSettings ? t.accent : t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.settings} size={16} /></button>
               <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'compact' ? t.muted : t.text, opacity: callPanelSize === 'compact' ? 0.5 : 1 }}>↑</button>
               <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'expanded' ? t.muted : t.text, opacity: callPanelSize === 'expanded' ? 0.5 : 1 }}>↓</button>
               <button aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} title={isMuted ? 'Ativar microfone' : 'Silenciar'} className="m-iconbtn" style={isMuted ? { background: t.red, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}>{isMuted ? <Icon d={Icons.micOff} size={16} /> : <Icon d={Icons.mic} size={16} />}</button>
@@ -2170,6 +2175,23 @@ export default function MobileShell() {
             {callPanelSize !== 'compact' && <div style={{ fontSize: 11, color: t.muted }} role="status">rota: {callManager.getRungSummary()}</div>}
             {callPanelSize !== 'compact' && <button onClick={() => setShowCallDiag((v) => !v)} aria-label="Diagnóstico da chamada" style={{ background: showCallDiag ? t.accent : t.input, border: `1px solid ${t.border}`, color: showCallDiag ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}>{showCallDiag ? 'Ocultar diagnóstico' : 'Diagnóstico'}</button>}
             {showCallDiag && <CallDiagnostics compact />}
+            {/* AJUSTES AO VIVO no celular: folha sobre o painel (tela estreita). */}
+            {showCallSettings && (
+              <div style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,.55)', display: 'flex', alignItems: 'flex-end' }} onClick={() => setShowCallSettings(false)}>
+                <div onClick={(e) => e.stopPropagation()} style={{ position: 'relative', width: '100%' }}>
+                  <CallSettingsPanel
+                    prefs={callMediaPrefsState}
+                    onApply={async (patch) => {
+                      const aplicado = await callManager.applyMediaPrefs(patch)
+                      setCallMediaPrefsState(aplicado)
+                      return aplicado
+                    }}
+                    onClose={() => setShowCallSettings(false)}
+                    onError={(m) => setError(m)}
+                  />
+                </div>
+              </div>
+            )}
             {(activeCall as any)?.relayActive && (
               <div title="Áudio via relay pela sinalização — latência alta, WebRTC indisponível" style={{ fontSize: 11, fontWeight: 800, background: '#f0b232', color: '#000', padding: '4px 8px', borderRadius: 8, textAlign: 'center' }}>via relay (latência alta)</div>
             )}

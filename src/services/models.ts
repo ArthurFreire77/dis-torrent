@@ -828,6 +828,8 @@ export interface DisTorrentServices {
   appShowWindow(): Promise<void>
   appHideToTray(): Promise<void>
   appQuit(): Promise<void>
+  /** Alterna tela cheia da janela (F11). Devolve o estado NOVO real. */
+  windowToggleFullscreen(): Promise<boolean>
   backgroundSetConnection(state: string, onlinePeers: number, unread?: number): Promise<void>
   presenceGet(fp: string): Promise<PresenceView>
   profileSet(patch: ProfilePatch): Promise<ProfileView>

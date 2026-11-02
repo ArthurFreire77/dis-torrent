@@ -23,7 +23,7 @@ mod updater;
 
 // Comandos do segundo plano reexportados para o `generate_handler!` abaixo.
 use background::{
-    app_hide_to_tray, app_quit, app_show_window, autostart_ensure, autostart_get,
+    app_hide_to_tray, app_quit, app_show_window, window_toggle_fullscreen, autostart_ensure, autostart_get,
     autostart_mark_decided, autostart_set, background_prefs_get, background_prefs_set,
     background_set_connection, call_ring_start, call_ring_stop, notification_cancel,
     notification_cancel_all, notification_permission_state, notification_request_permission,
@@ -4908,6 +4908,7 @@ fn main() {
             app_show_window,
             app_hide_to_tray,
             app_quit,
+            window_toggle_fullscreen,
             background_set_connection,
             call_ring_start,
             call_ring_stop,

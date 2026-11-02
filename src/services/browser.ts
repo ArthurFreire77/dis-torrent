@@ -1665,6 +1665,15 @@ export const browserServices: DisTorrentServices = {
   callNotifyCancel: async () => {},
   appShowWindow: async () => {},
   appHideToTray: async () => {},
+  // Navegador: a Fullscreen API é a única disponível (sem janela nativa).
+  windowToggleFullscreen: async () => {
+    try {
+      if (typeof document === 'undefined') return false
+      if (document.fullscreenElement) { await document.exitFullscreen?.(); return false }
+      await document.documentElement.requestFullscreen?.()
+      return true
+    } catch { return false }
+  },
   appQuit: async () => {},
   backgroundSetConnection: async () => {},
 

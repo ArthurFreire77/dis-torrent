@@ -462,6 +462,7 @@ export const tauriServices: DisTorrentServices = {
   },
   appShowWindow: () => invoke<void>('app_show_window'),
   appHideToTray: () => invoke<void>('app_hide_to_tray'),
+  windowToggleFullscreen: () => invoke<boolean>('window_toggle_fullscreen'),
   appQuit: async () => {
     // ANDROID: o foreground service mantém o processo vivo mesmo depois de
     // `app.exit` — "sair" viraria uma tela preta com o app recebendo em

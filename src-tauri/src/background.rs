@@ -343,6 +343,24 @@ pub fn app_hide_to_tray(app: AppHandle) {
     emit_hidden(&app);
 }
 
+/// Alterna a tela cheia da janela principal (atalho F11).
+///
+/// Devolve o estado NOVO para a UI mostrar o ícone certo — nunca chuta:
+/// `is_fullscreen` pode divergir do que o atalho pediu (usuário saiu com Esc,
+/// gerenciador de janelas recusou).
+#[tauri::command]
+pub fn window_toggle_fullscreen(app: AppHandle) -> bool {
+    let Some(w) = app.get_webview_window("main") else {
+        return false;
+    };
+    let atual = w.is_fullscreen().unwrap_or(false);
+    let alvo = !atual;
+    if w.set_fullscreen(alvo).is_err() {
+        return atual;
+    }
+    alvo
+}
+
 /// Sair DE VERDADE: derruba a rede, remove a bandeja e encerra o processo.
 #[tauri::command]
 pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {

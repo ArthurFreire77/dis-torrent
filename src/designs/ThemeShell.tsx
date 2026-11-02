@@ -1707,6 +1707,29 @@ export default function ThemeShell({ designId }: {designId:string}){
   }, [input, selConv, activeAutocomplete])
 
   // --- helpers CALL idêntico Discord ---
+  /**
+   * F11 / Alt+Enter: tela cheia da JANELA (não é a tela cheia de um tile).
+   *
+   * Atalho global: funciona fora da chamada também. `preventDefault` porque no
+   * WebView2 o F11 é capturado pelo navegador embutido e abriria o menu dele.
+   * O estado devolvido é o REAL — se o SO recusar, a UI não finge que entrou.
+   */
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      const f11 = e.key === 'F11'
+      const altEnter = e.altKey && e.key === 'Enter'
+      if (!f11 && !altEnter) return
+      e.preventDefault()
+      e.stopPropagation()
+      services.windowToggleFullscreen()
+        .then((telaCheia) => setNotice(telaCheia ? 'tela cheia (F11 para sair)' : 'tela cheia desativada'))
+        .catch(() => { /* navegador sem API: sem aviso falso */ })
+    }
+    window.addEventListener('keydown', h, true)
+    return () => window.removeEventListener('keydown', h, true)
+  }, [])
+
+  // --- helpers CALL idêntico Discord ---
   function fmtDuration(s: number) {
     const m = Math.floor(s / 60).toString().padStart(2, '0')
     const sec = (s % 60).toString().padStart(2, '0')
