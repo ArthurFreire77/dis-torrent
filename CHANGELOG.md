@@ -2,6 +2,29 @@
 
 ## [1.1.38-pre-alpha] - 2026-11-02
 
+### Links e convites não abrem mais uma aba morta (`tauri.localhost`)
+
+Sintoma: clicar num endereço dentro do app abria uma janela por cima, preta, com
+`ECONNREFUSED: Unable to connect` e `tauri.localhost` na barra.
+
+Causa: dentro do WebView não existe navegador embutido — `target="_blank"` cria
+uma janela DO PRÓPRIO WebView. Com `http://tauri.localhost` (o esquema interno do
+Tauri) ou com `distorrent://` não há nada atendendo naquele endereço, então a
+janela nasce morta. O convite no painel do servidor era montado com
+`window.location.origin`, ou seja, apontava exatamente para esse host interno.
+
+Agora:
+- um interceptador global (`shared/installExternalLinks.ts`, em fase de captura)
+  entrega todo link externo ao sistema operacional via comando `open_external`;
+- `open_external` só aceita `http`, `https`, `mailto` e `distorrent` — não vira
+  porta para `file:`/`javascript:`/execução de comando;
+- o convite no app nativo usa o deep link `distorrent://` (o mesmo do wizard),
+  e aparece como endereço copiável com o aviso de que abre o app instalado;
+- `LocalLink` não envolve mais deep link em `<a target="_blank">`.
+
+Nenhuma tela deixou de funcionar: link interno continua no router, e endereço de
+fora abre no navegador de verdade.
+
 ### Semeadura de arquivos sobrevive ao reinício
 
 O anúncio de arquivo saía uma vez, só para os peers online naquele instante, e
