@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## [1.1.41-pre-alpha] - 2026-11-02
+
+### Chamada: par aberto dos dois lados (o "só conecta de segunda")
+
+Quem entrava no canal esperava a offer do outro lado — mas o outro ainda não
+tinha recebido o meu `VoiceJoin` (link subindo), então ninguém oferecia mídia e
+a tela ficava em "Conectando…". Sair e entrar de novo funcionava porque aí o
+aviso já tinha chegado.
+
+Agora o par é aberto dos DOIS lados (`onParticipantAdded` e
+`onVoiceParticipantJoined`), o joiner abre com todos os que já estão no canal, e
+o catch-up tem prazo: se a offer não vem, este lado assume a iniciativa. Duas
+offers simultâneas já são resolvidas pelo polite/impolite.
+
+### Rota honesta
+
+`getRungSummary` caía em `'host'` quando não havia NENHUM candidate-pair
+nominado, e `'host'` era traduzido como "LAN". A tela mostrava "rota LAN" verde
+junto com "Conectando…". Sem par selecionado agora é `n/d`.
+
+### Fase presa em "Conectando…" com mídia no ar
+
+O evento de ICE se perde fácil (WebView que só emite `connectionState`,
+renegociação após entrar, par recriado) e a fase nunca era promovida. O tique de
+reparo (15 s) consulta o estado REAL dos PCs e promove quando existe par
+`connected`.
+
+### Layout dos quadrados
+
+Usavam `gridAutoRows: 1fr` e esticavam por toda a altura da janela — dois
+retângulos gigantes de borda a borda. Agora têm teto de altura (420px) e largura
+flexível. Em chamada de canal o painel lateral fica estreito (300px), porque a
+mídia vive no centro; antes ele reservava até 520px e sobrava um vão vazio.
+
+**Verificação:** typecheck 0, lint 0, 371 testes unitários.
+
 ## [1.1.40-pre-alpha] - 2026-11-02
 
 ### Canal de voz ocupa a tela (e as threads saíram da sidebar)
