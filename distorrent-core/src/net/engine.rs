@@ -651,6 +651,9 @@ impl PeerLink {
     }
 }
 
+/// Pareamento imediato + push do estado do servidor (tags/canais) — ver
+/// `net/engine/community_pair.rs`.
+mod community_pair;
 #[cfg(test)]
 mod peer_liveness_tests;
 /// Anúncio da sala de chamada (grupo/DM) — ver `net/engine/room_announce.rs`.
@@ -3394,8 +3397,10 @@ impl NetworkEngine {
             let frame = match self.community_state_payload(community_id, Some(&fp)) {
                 Ok(f) => f,
                 Err(e) => {
-                    debug!("broadcast do estado falhou para {community_id}: {e}");
-                    return;
+                    // `continue`, não `return`: um payload que falha para UM
+                    // membro não pode calar o broadcast para os outros.
+                    debug!("broadcast do estado falhou para {community_id}/{fp}: {e}");
+                    continue;
                 }
             };
             if self.link_tx(&fp).is_some() {
@@ -10278,6 +10283,11 @@ async fn register_and_run(
         // canal antes do link subir nunca era informado (o `VoiceJoin` original
         // virou no-op silencioso) — o par aparecia conectado e não se ouvia.
         engine.flush_voice_state_to(peer_fp);
+        // SERVIDORES: empurra canais/cargos/tags/bots AGORA para quem acabou de
+        // subir. Antes o estado só ia quando o dono mexia nele e o peer já
+        // estava Online: a tag criada enquanto o celular dormia só aparecia no
+        // sync de até 45 s (ou nunca, se a tela ficasse parada).
+        engine.flush_community_state_to(peer_fp);
         // SALAS: manda para o peer recém-online as salas vivas em que ele
         // participa (grupo ou DM). Sem isto ele só veria a chamada no próximo
         // tique de 15 s — e quem abriu o app durante a chamada não entrava.

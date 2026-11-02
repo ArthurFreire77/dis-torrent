@@ -670,6 +670,17 @@ export interface DisTorrentServices {
    * incluídos). Sem isto eles só eram discados pelo tique de 45 s do motor.
    */
   groupPairNow?(convId: string): Promise<void>
+  /**
+   * Pede o pareamento IMEDIATO de todos os membros do servidor. Sem isto eles
+   * só eram discados pelo tique de 45 s — abrir o servidor parecia "vazio".
+   */
+  communityPairNow?(communityId: string): Promise<void>
+  /**
+   * Pede o estado do servidor agora (canais, cargos/tags, bots, membros).
+   * Chamado quando o app volta ao primeiro plano: no celular a WebView congela
+   * e os eventos do intervalo se perdem.
+   */
+  communitySyncNow?(communityId: string): Promise<void>
   groupAdd(convId: string, fp: string): Promise<void>
   /** Remove um integrante; o roster é re-sincronizado com todos do grupo. */
   groupRemove(convId: string, fp: string): Promise<void>

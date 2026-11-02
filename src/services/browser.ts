@@ -1135,6 +1135,9 @@ export const browserServices: DisTorrentServices = {
   },
   // Navegador/demo: não há discagem (sem motor de rede). No-op explícito.
   groupPairNow: () => Promise.resolve(),
+  // Browser/demo não tem motor P2P: pareamento e sync são no-op honestos.
+  communityPairNow: () => Promise.resolve(),
+  communitySyncNow: () => Promise.resolve(),
   groupAdd: (cid, fp) => {
     try { const k = `distorrent:extras:group_members:${cid}`; const cur = JSON.parse(localStorage.getItem(k) ?? '[]'); if (!cur.find((x: any) => x[0] === fp)) { cur.push([fp, '']); localStorage.setItem(k, JSON.stringify(cur)) } } catch { /* silent */ }
     window.dispatchEvent(new CustomEvent('distorrent:groups_changed'))

@@ -3048,6 +3048,22 @@ fn group_pair_now(conv_id: String, state: State<AppState>) -> Result<(), String>
     Ok(())
 }
 
+/// Pareia AGORA todos os membros do SERVIDOR (abrir o servidor/mensagens).
+/// Sem isto o primeiro contato esperava até 45 s pelo tique de manutenção.
+#[tauri::command]
+fn community_pair_now(community_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.community_pair_now(&community_id);
+    Ok(())
+}
+
+/// Pede o estado do servidor IMEDIATAMENTE (sem o intervalo de 45 s).
+/// Usado quando o app volta ao primeiro plano (WebView do celular congelada).
+#[tauri::command]
+fn community_sync_now(community_id: String, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?.community_sync_now(&community_id);
+    Ok(())
+}
+
 #[tauri::command]
 fn group_add(conv_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_add(&conv_id, &fp).map_err(err)
@@ -4777,6 +4793,8 @@ fn main() {
             create_group,
             group_members,
             group_pair_now,
+            community_pair_now,
+            community_sync_now,
             group_add,
             group_remove,
             group_rename,
