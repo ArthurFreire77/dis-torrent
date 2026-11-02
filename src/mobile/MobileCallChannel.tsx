@@ -7,6 +7,7 @@
 // vídeo usa o mesmo caminho do de voz).
 
 import { Ic } from '../shared/icons'
+import type { ReactNode } from 'react'
 
 const T = {
   rail: '#0f1115', main: '#14161a', panel: '#1e2128', input: '#23262f',
@@ -35,6 +36,7 @@ export default function MobileCallChannel({
   connecting,
   seconds,
   participants,
+  media,
   myFp,
   muted,
   deafened,
@@ -56,6 +58,15 @@ export default function MobileCallChannel({
   connecting: boolean
   seconds: number
   participants: CallChannelParticipant[]
+  /**
+   * Quadrados da chamada (`CallTile`) — OBRIGATÓRIO quando `inCall`.
+   *
+   * Eles não são decoração: o `<audio>` que toca a voz remota e o `<video>` da
+   * câmera/tela vivem DENTRO do `CallTile`. Uma tela de chamada sem eles
+   * conecta, conta o tempo e fica muda e sem imagem — foi exatamente o bug do
+   * canal de voz no celular.
+   */
+  media?: ReactNode
   myFp: string
   muted: boolean
   deafened: boolean
@@ -88,6 +99,13 @@ export default function MobileCallChannel({
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {/* MÍDIA PRIMEIRO: é aqui que o <audio>/<video> de verdade são montados.
+            Sem esta área a chamada "conecta" e não sai som nem imagem. */}
+        {inCall && media && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {media}
+          </div>
+        )}
         <div style={{
           background: T.panel, border: `1px solid ${inCall ? `${T.green}66` : T.border}`,
           borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 10,

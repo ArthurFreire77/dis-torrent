@@ -1860,6 +1860,16 @@ export class CallManager {
         // Já estava na lista mas desconectado (caiu e voltou): onPeerBack reconecta; limpa o visual.
         p.disconnected = false
       }
+      // PAR AUSENTE COM A PESSOA JÁ NO ROSTER — o bug do "Conectando…".
+      //
+      // Quem ENTRA numa sala anunciada já estava na lista de participantes de
+      // quem hospeda (a sala é publicada com a lista). Então `!p` era falso no
+      // host, este bloco não rodava e NINGUÉM abria o RTCPeerConnection: o
+      // convidado ficava com um PC sem offer esperando a vida toda. Aqui o lado
+      // de fp maior garante o par mesmo quando a pessoa já estava listada.
+      if (this.myFp && this.myFp > fp && !this.pcs.has(fp) && isCallPhaseActive(st.phase)) {
+        this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
+      }
       this.onUpdate({ ...st })
     } catch { /* ignore */ }
   }

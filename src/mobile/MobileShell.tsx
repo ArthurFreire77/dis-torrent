@@ -1931,14 +1931,43 @@ export default function MobileShell() {
   async function loadThread(id: string) {
     try { setThreadMsgs(await services.threadMessages(id, 100) ?? []) } catch (e: any) { setError(String(e?.message ?? e)) }
   }
+
+  /**
+   * Discussão (thread) aberta: carga única + AO VIVO.
+   *
+   * Antes esta tela só buscava as mensagens ao abrir e depois de você enviar:
+   * a mensagem de outra pessoa nunca aparecia (tinha que fechar e abrir de
+   * novo) e a lista abria no topo, parecendo vazia.
+   */
+  useEffect(() => {
+    if (!showThread || !threadId) return
+    let vivo = true
+    const carregar = () => {
+      services.threadMessages(threadId, 100)
+        .then((list) => { if (vivo) setThreadMsgs(Array.isArray(list) ? list : []) })
+        .catch(() => { /* mantém o que já está na tela */ })
+    }
+    carregar()
+    const off = services.subscribe((ev) => {
+      if (ev.type !== 'message_new') return
+      const m = ev as unknown as StoredMessage & { conv_id?: string }
+      if (m.conv_id !== threadId) return
+      setThreadMsgs((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]))
+    })
+    return () => { vivo = false; off() }
+  }, [showThread, threadId])
   async function sendThread() {
     if (!threadId || !threadInput.trim() || !selCommunity) return
     const body = threadInput.trim()
     setThreadInput('')
     try {
-      await services.threadSend(selCommunity, threadId, body)
-      await loadThread(threadId)
-    } catch (e: any) { setError(String(e?.message ?? e)) }
+      const m = await services.threadSend(selCommunity, threadId, body)
+      // Entra na hora, sem depender de novo fetch (a resposta pode vir depois).
+      setThreadMsgs((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]))
+    } catch (e: any) {
+      setThreadInput(body) // devolve o texto: perder a mensagem digitada é pior
+      setError(String(e?.message ?? e))
+    }
   }
 
   const sheetWrap = (title: string, body: React.ReactNode, onClose: () => void) => (
@@ -2130,6 +2159,45 @@ export default function MobileShell() {
   if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 
+  /**
+   * Quadrados da chamada (mídia de verdade: `<audio>`/`<video>` por peer).
+   *
+   * Extraído para função porque DOIS lugares precisam dele: o painel de chamada
+   * e a tela do canal de voz/vídeo. Uma tela sem estes elementos conecta e fica
+   * muda — era o bug do canal de voz no celular.
+   */
+  const renderCallTilesMobile = (compact: boolean) => {
+    if (callTilesMobile.length === 0) return null
+    const cols = pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 8 }}>
+        {visibleCallTilesMobile.map((tile) => (
+          <div
+            key={tile.id}
+            style={{
+              // TELA CHEIA é overlay (ScreenStage), não quadrado maior.
+              height: compact ? 92 : tile.kind === 'screen' ? 168 : 124,
+              transition: 'height 180ms ease',
+            }}
+          >
+            <CallTileComponent
+              tile={tile}
+              pinned={tile.id === pinnedTileId}
+              onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
+              onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+              callDeafened={!!activeCall?.deafened}
+              palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
+              minHeight={compact ? 92 : 124}
+              avatarColor={avatarColor}
+              avatarB64={mobileCallAvatars}
+              onOpenProfile={(fp) => setProfilePeer({ fp, name: resolveMemberName(fp) || fp.slice(0, 8) })}
+            />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   // ---- conversa em tela cheia (lista FLAT, igual desktop) ----
   if (selConv) {
     // CANAL DE VOZ/VÍDEO: a tela é a CHAMADA, não o histórico de texto.
@@ -2153,6 +2221,7 @@ export default function MobileShell() {
           connecting={!!ligando}
           seconds={dentro ? callDuration : 0}
           participants={dentro ? participantes : []}
+          media={dentro ? renderCallTilesMobile(false) : null}
           myFp={identity?.fingerprint ?? ''}
           muted={isMuted}
           deafened={isDeafened}
@@ -2378,37 +2447,7 @@ export default function MobileShell() {
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>}
             {/* Quadrados da chamada: mesmo modelo do desktop (`callTiles.ts`). */}
-            {(() => {
-              if (callTilesMobile.length === 0) return null
-              const cols = pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
-              return (
-                <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 8 }}>
-                  {visibleCallTilesMobile.map((tile) => (
-                    <div
-                      key={tile.id}
-                      style={{
-                        // TELA CHEIA é overlay (ScreenStage), não quadrado maior.
-                        height: callPanelSize === 'compact' ? 92 : tile.kind === 'screen' ? 168 : 124,
-                        transition: 'height 180ms ease',
-                      }}
-                    >
-                      <CallTileComponent
-                        tile={tile}
-                        pinned={tile.id === pinnedTileId}
-                        onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
-                        onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
-                        callDeafened={!!activeCall.deafened}
-                        palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
-                        minHeight={callPanelSize === 'compact' ? 92 : 124}
-                        avatarColor={avatarColor}
-                        avatarB64={mobileCallAvatars}
-                        onOpenProfile={(fp) => setProfilePeer({ fp, name: resolveMemberName(fp) || fp.slice(0, 8) })}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )
-            })()}
+            {renderCallTilesMobile(callPanelSize === 'compact')}
           </div>
         )}
 

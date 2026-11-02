@@ -212,14 +212,54 @@ export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
   const [msgs, setMsgs] = useState<StoredMessage[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [erro, setErro] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { services.threadMessages(thread.id, 100).then(setMsgs).catch(() => setMsgs([])) }, [thread.id, msgs.length])
+
+  // Carga única + AO VIVO.
+  //
+  // BUG REAL: a dependência era `[thread.id, msgs.length]`, então cada mensagem
+  // recebida disparava OUTRA busca (e a resposta anterior chegava depois,
+  // sobrescrevendo a lista). E não havia assinatura nenhuma: mensagem de outra
+  // pessoa na discussão só aparecia fechando e abrindo o modal.
+  useEffect(() => {
+    let vivo = true
+    const load = () => {
+      services.threadMessages(thread.id, 100)
+        .then((list) => { if (vivo) setMsgs(Array.isArray(list) ? list : []) })
+        .catch(() => { if (vivo) setMsgs([]) })
+    }
+    load()
+    const off = services.subscribe((ev) => {
+      if (ev.type !== 'message_new') return
+      const m = ev as StoredMessage & { conv_id?: string }
+      if (m.conv_id !== thread.id) return
+      setMsgs((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]))
+    })
+    return () => { vivo = false; off() }
+  }, [thread.id])
+
+  // Rola para a última mensagem (a conversa abria no topo e parecia vazia).
+  useEffect(() => {
+    try { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) } catch { /* ignore */ }
+  }, [msgs.length])
+
   async function send() {
     const body = input.trim()
-    if (!body) return
+    if (!body || busy) return
     setBusy(true)
-    try { const m = await services.threadSend(communityId, thread.id, body); setMsgs(a => [...a, m]); setInput('') } catch { /* erroshown no composer */ } finally { setBusy(false) }
+    setErro(null)
+    try {
+      const m = await services.threadSend(communityId, thread.id, body)
+      setMsgs((a) => (a.some((x) => x.id === m.id) ? a : [...a, m]))
+      setInput('')
+    } catch (e) {
+      // Antes era `catch {}`: o botão "Enviar" não fazia nada e ninguém sabia.
+      setErro((e as Error)?.message ?? String(e))
+    } finally {
+      setBusy(false)
+    }
   }
+
   return (
     <Modal title={`# ${thread.name}`} onClose={onClose} width={620}>
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 12 }}>
@@ -239,10 +279,11 @@ export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
         ))}
         <div ref={endRef} />
       </div>
+      {erro && <div role="alert" style={{ fontSize: 12, color: '#ff9c9c', marginBottom: 8 }}>{erro}</div>}
       <div style={{ display: 'flex', gap: 8 }}>
-        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-          placeholder={`Mensar em ${thread.name}`} style={{ ...inputStyle, flex: 1 }} />
-        <button onClick={send} disabled={busy || !input.trim()} style={{ ...btnPrimary, opacity: busy || !input.trim() ? 0.6 : 1 }}>Enviar</button>
+        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send() } }}
+          placeholder={`Mensagem em ${thread.name}`} style={{ ...inputStyle, flex: 1 }} />
+        <button onClick={() => void send()} disabled={busy || !input.trim()} style={{ ...btnPrimary, opacity: busy || !input.trim() ? 0.6 : 1 }}>Enviar</button>
       </div>
     </Modal>
   )
