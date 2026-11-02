@@ -14,15 +14,20 @@ import {
   classifyScreenShareError,
   applyScreenConstraints,
   applySenderTuning,
+  applyCameraTuning,
   setScreenContentHint,
+  setCameraContentHint,
   ScreenShareError,
   ScreenCaptureMonitor,
   ScreenStatsCollector,
   normalizeOptions,
   isScreenSampleBad,
+  compareQuality,
+  ceilingOf,
   lowerScreenQuality,
   raiseScreenQuality,
   SCREEN_DEFAULT_OPTIONS,
+  type ScreenQualityKey,
   type ScreenShareOptions,
   type ScreenShareMetrics,
   type ScreenShareErrorCode,
@@ -1094,11 +1099,24 @@ export class CallManager {
   private screenStream: MediaStream | null = null
   /** Sender de áudio da TELA por peer, REUSADO entre shares (sem ele o SDP crescia a cada ciclo). */
   private screenAudioSenders = new Map<RTCPeerConnection, RTCRtpSender>()
+  /**
+   * Serializa as operações da tela (iniciar/parar/recapturar).
+   *
+   * BUG REAL: parar e iniciar em seguida (ou o `ended` do sistema chegando
+   * durante o seletor) fazia o `stop` em voo terminar DEPOIS do novo start:
+   * ele zerava `sharing` e trocava a track de volta para a câmera. Era o
+   * "compartilho, paro e a segunda vez não sobe" com a câmera estranha.
+   */
+  private screenOp: Promise<unknown> = Promise.resolve()
+  /** Geração do compartilhamento: só opera quem ainda é o dono. */
+  private screenGen = 0
   /** Atalho legado 'monitor'/'window'; fonte de verdade é screenOptions.source. */
   private screenSource: 'monitor' | 'window' = 'monitor'
   // ── Screen share (módulo screenShare.ts) ──────────────────────────────────
   /** Opções completas de compartilhamento (fonte/áudio/qualidade/FPS). */
   private screenOptions: ScreenShareOptions = { ...SCREEN_DEFAULT_OPTIONS }
+  /** Teto da recuperação automática: o degrau que o usuário escolheu (`auto` = o mais alto). */
+  private screenQualityCeiling: ScreenQualityKey = ceilingOf(SCREEN_DEFAULT_OPTIONS.quality)
   /** Ambiente de captura detectado (plataforma, capacidades, notas). */
   private screenEnv: ScreenEnvironment = detectScreenEnvironment(getScreenShareBackend() === 'native')
   /** FPS capturado de verdade (requestVideoFrameCallback) — nunca inventado. */
@@ -1125,6 +1143,8 @@ export class CallManager {
   private screenLastSize = ''
   /** Callback de UI para o painel "Screen Share Debug". */
   public onScreenDebug: ((m: ScreenShareMetrics & { options: ScreenShareOptions; env: ScreenEnvironment; error: { code: ScreenShareErrorCode; message: string } | null }) => void) | null = null
+  /** Avisa o shell para ressincronizar as salas (saiu/entrou de chamada). */
+  public onRoomsChanged: (() => void) | null = null
   private onUpdate: (s: CallState | null) => void = () => {}
   private state: CallState | null = null
   private myFp = ''
@@ -3297,9 +3317,17 @@ export class CallManager {
       this.stopCallForeground()
       this.cleanup(cid)
       await endSignal
+      // Verifica a sala AGORA: sem isso o botão "Entrar" da sala que acabou
+      // continua na tela até o próximo ciclo (era o "some só depois de um tempo").
+      this.refreshRooms()
     } finally {
       this.leavingCalls.delete(cid)
     }
+  }
+
+  /** Pede ao shell para ressincronizar as salas (o motor é a fonte da verdade). */
+  private refreshRooms() {
+    try { this.onRoomsChanged?.() } catch { /* assinante quebrado não derruba */ }
   }
 
   async leaveVoice(communityId: string, channelId: string) {
@@ -3629,6 +3657,8 @@ export class CallManager {
         } else {
           try { this.localStream.addTrack(track) } catch { /* ignore */ }
         }
+        // Hint + bitrate: sem isso a câmera fica no padrão do engine (~300 kbps).
+        setCameraContentHint(track)
         if (!this.localStream) return
         // Por peer: m-line existente → replaceTrack (+ renegociação se era
         // recvonly); sem m-line → addTrack + offer.
@@ -3653,6 +3683,8 @@ export class CallManager {
               const saiu = await this.sendOffer(fp, this.state.callId)
               if (!saiu) needsOffer = false
             }
+            const videoSender = tr?.sender ?? pc.getSenders().find((s) => s.track === track) ?? null
+            if (videoSender) await applyCameraTuning(videoSender, this.cameraQuality())
             sent++
           } catch (e) {
             lastErr = e
@@ -3681,19 +3713,35 @@ export class CallManager {
   }
 
   /** Transmissão estilo Discord (desktop): getDisplayMedia + renegociação por peer; mobile honesto. */
-  /** Última linha de texto do doc da função (substituído abaixo). */
   async toggleScreen(): Promise<void> {
-    if (this.state?.sharing) {
-      await this.stopScreenShare()
-      return
-    }
-    await this.startScreenShare()
+    // Uma operação só: chamar `startScreenShare`/`stopScreenShare` aqui dentro
+    // enfileiraria outra tarefa ATRÁS desta e travaria para sempre.
+    return this.enqueueScreenOp(async () => {
+      if (this.state?.sharing) await this.stopScreenShareNow()
+      else await this.startScreenShareNow()
+    })
+  }
+
+  /**
+   * Enfileira uma operação da tela (start/stop/recaptura) em série.
+   * Devolve o resultado da operação e propaga o erro dela.
+   */
+  private enqueueScreenOp<T>(op: () => Promise<T>): Promise<T> {
+    const next = this.screenOp.then(op, op)
+    // A fila não pode carregar o erro para a próxima operação.
+    this.screenOp = next.catch(() => {})
+    return next
   }
 
   /** Screen share P2P: captura local → encode nativo → WebRTC direto; tela/janela/monitor + áudio separado. */
   async startScreenShare(opts?: Partial<ScreenShareOptions>): Promise<void> {
+    return this.enqueueScreenOp(() => this.startScreenShareNow(opts))
+  }
+
+  private async startScreenShareNow(opts?: Partial<ScreenShareOptions>): Promise<void> {
     if (!this.state) return
-    // Caminho NATIVO (Linux): xcap + GStreamer no core (antes caía no guard de pcs.size === 0 — mentira).
+    // Geração NOVA: invalida qualquer `ended`/recuperação da captura anterior.
+    const gen = ++this.screenGen    // Caminho NATIVO (Linux): xcap + GStreamer no core (antes caía no guard de pcs.size === 0 — mentira).
     if ((this.state as any)?.nativeMedia) {
       const next = normalizeOptions(opts, this.screenOptions)
       if (next.source === 'window' || next.source === 'monitor') {
@@ -3721,6 +3769,8 @@ export class CallManager {
       this.onCallNotice?.('preparando a tela — ela começa a ser enviada quando a chamada conectar')
     }
     this.screenOptions = normalizeOptions(opts, this.screenOptions)
+    // Captura NOVA: o teto volta a ser o degrau pedido (`auto` = o mais alto).
+    this.screenQualityCeiling = ceilingOf(this.screenOptions.quality)
 
     let stream: MediaStream
     try {
@@ -3737,6 +3787,11 @@ export class CallManager {
       this.setScreenError(err.code, err.message)
       throw err
     }
+    // Outro start entrou enquanto o seletor estava aberto: esta captura é lixo.
+    if (gen !== this.screenGen || !this.state) {
+      try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
+      return
+    }
 
     // Captura substitui a anterior sem derrubar a chamada.
     try { this.stopScreenStreamOnly() } catch { /* ignore */ }
@@ -3748,7 +3803,7 @@ export class CallManager {
     this.screenGoodSamples = 0
     this.screenStats.reset()
     this.screenMetrics = emptyScreenMetrics()
-    this.watchScreenTrack(track)
+    this.watchScreenTrack(track, gen)
     this.screenMonitor.attach(track)
     await this.tuneScreenTrack(track)
     try {
@@ -3759,13 +3814,17 @@ export class CallManager {
     } catch (e) {
       // Não deixa captura local aberta nem UI dizendo "compartilhando" quando
       // nenhum peer aceitou a oferta; restaura a câmera antes de informar falha.
-      this.stopScreenStatsTimer()
-      try { await this.clearScreenAudioSenders() } catch { /* limpeza best-effort */ }
-      this.stopScreenStreamOnly()
-      this.screenMonitor.detach()
-      this.screenLastSize = ''
-      this.state.sharing = false
-      try { await this.restoreCameraAfterScreen() } catch { /* falha original é a mais útil */ }
+      // Só desfaz se ESTA captura ainda é a atual: um stop/start no meio não
+      // pode ser derrubado pela falha da tentativa anterior.
+      if (gen === this.screenGen) {
+        this.stopScreenStatsTimer()
+        try { await this.clearScreenAudioSenders() } catch { /* limpeza best-effort */ }
+        this.stopScreenStreamOnly()
+        this.screenMonitor.detach()
+        this.screenLastSize = ''
+        this.state.sharing = false
+        try { await this.restoreCameraAfterScreen() } catch { /* falha original é a mais útil */ }
+      }
       const cameraOn = !!this.localStream?.getVideoTracks().some(cam => cam.readyState === 'live' && cam.enabled)
       this.broadcastScreenSignal(false, cameraOn)
       this.onUpdate({ ...this.state })
@@ -3775,9 +3834,21 @@ export class CallManager {
       this.setScreenError(err.code, err.message)
       throw err
     }
+    if (gen !== this.screenGen) return
     this.startScreenStatsTimer()
     this.broadcastScreenSignal(true, false)
     this.onUpdate({ ...this.state })
+    // A barra do Chromium ("tauri.localhost está compartilhando") é uma janela
+    // separada que cobre a barra de tarefas. Este app já mostra o estado.
+    void services.hideShareBar?.().catch(() => {})
+  }
+
+  /**
+   * Re-verifica a barra do WebView2: ela é recriada quando a captura é trocada
+   * (monitor → janela) e não existe evento para isso.
+   */
+  async ensureShareBarHidden(): Promise<void> {
+    try { await services.hideShareBar?.() } catch { /* opcional */ }
   }
 
   /** Pede a captura ao engine com as constraints de fonte/áudio corretas. */
@@ -3801,22 +3872,24 @@ export class CallManager {
   }
 
   /** Reage a fim/mute da track de tela: mute é NORMAL (troca de monitor), ended é fim real. */
-  private watchScreenTrack(track: MediaStreamTrack): void {
+  private watchScreenTrack(track: MediaStreamTrack, gen: number): void {
     try {
-      // SÓ a track ATUAL pode encerrar o share. Sem esta checagem, o `onended`
-      // da captura antiga (janela fechada/portal cancelando durante a troca de
-      // fonte) derrubava o compartilhamento NOVO — a instabilidade relatada.
+      // SÓ a captura ATUAL (mesma track E mesma geração) pode encerrar o share.
+      // O `onended` de uma captura antiga derrubava o compartilhamento novo.
+      const aindaAtual = () => gen === this.screenGen && this.screenStream?.getVideoTracks()[0] === track
       track.onended = () => {
-        if (this.screenStream?.getVideoTracks()[0] !== track) return
-        void this.handleScreenEnded()
+        if (!aindaAtual()) return
+        void this.handleScreenEnded(gen)
       }
       // Pausa do sistema NÃO é rede ruim: marcá-la evita que a primeira amostra
       // pós-retomada (bitrate/FPS zerados) derrube a qualidade "sozinha".
       track.onmute = () => {
+        if (!aindaAtual()) return
         this.screenTrackMuted = true
         this.noteScreenEvent('captura pausada pelo sistema (fonte oculta, monitor trocado ou app em segundo plano)')
       }
       track.onunmute = () => {
+        if (!aindaAtual()) return
         this.screenTrackMuted = false
         // O baseline de bytes/frames fica obsoleto durante a pausa.
         this.screenStats.reset()
@@ -3826,13 +3899,13 @@ export class CallManager {
     } catch { /* engines sem onmute: só onended */ }
   }
 
-  private async handleScreenEnded(): Promise<void> {
-    if (!this.state?.sharing) return
-    // Differencia "o sistema encerrou a projeção (Android/Android WebView,
-    // barra do navegador, janela fechada)" de um stop explícito nosso.
+  /** `onended` da track de tela: o sistema encerrou a projeção (não é stop nosso). */
+  private async handleScreenEnded(gen: number): Promise<void> {
+    if (!this.state?.sharing || gen !== this.screenGen) return
     const msg = 'o compartilhamento de tela foi encerrado pelo sistema'
     this.setScreenError('ended', msg)
     try { this.onCallNotice?.(msg) } catch { /* ignore */ }
+    // `stopScreenShare` entra na fila; este callback NÃO está dentro dela.
     await this.stopScreenShare()
   }
 
@@ -3856,6 +3929,60 @@ export class CallManager {
         await applySenderTuning(sender, this.screenOptions)
       } catch { /* sender sem parâmetros: segue com o padrão */ }
     }
+  }
+
+  /** Aplica o tuning da tela/câmera depois de um intervalo (pós-negociação). */
+  private scheduleRetune(): void {
+    try { if (this.retuneTimer) clearTimeout(this.retuneTimer) } catch { /* ignore */ }
+    this.retuneTimer = setTimeout(() => {
+      this.retuneTimer = null
+      for (const pc of this.pcs.values()) void this.retuneSenders(pc).catch(() => {})
+    }, 1500)
+  }
+
+  private retuneTimer: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * Reaplica o tuning num PC que ACABOU de negociar: `getParameters().encodings`
+   * só existe depois do answer, então o ajuste feito no início do share
+   * gravava em objeto vazio e o bitrate ficava no padrão do engine.
+   */
+  private async retuneSenders(pc: RTCPeerConnection): Promise<void> {
+    try {
+      if (pc.signalingState === 'closed') return
+      // TELA e CÂMERA podem dividir o mesmo m-line (replaceTrack): afina só o
+      // que está realmente transmitindo agora.
+      const sender = this.findVideoSender(pc)
+      if (sender?.track) {
+        if (this.state?.sharing) await applySenderTuning(sender, this.screenOptions)
+        else await applyCameraTuning(sender, this.cameraQuality())
+      }
+      const audio = pc.getSenders().find((s) => s.track?.kind === 'audio') ?? null
+      if (audio) await this.applyAudioBitrate(audio)
+    } catch { /* tuning é acessório: nunca derruba a chamada */ }
+  }
+
+  /** Qualidade de câmera ativa (a preferência do usuário; 720p se ainda não leu). */
+  private cameraQuality(): '480p' | '720p' | '1080p' | '4K' {
+    try { return getCallMediaPrefs().quality } catch { return this.quality }
+  }
+
+  /**
+   * Teto de bitrate do Opus na voz: parte dos engines ignora o
+   * `maxaveragebitrate` do SDP e fica em ~24 kbps (voz metálica).
+   */
+  private async applyAudioBitrate(sender: RTCRtpSender): Promise<boolean> {
+    try {
+      const params = sender.getParameters()
+      if (!params.encodings || params.encodings.length === 0) return false
+      const enc = params.encodings[0] as RTCRtpEncodingParameters & { maxBitrate?: number }
+      // Sem restrição, o Opus estéreo de tela/música sobe para 128 kbps e a
+      // voz fica mais nítida sem estourar a banda.
+      enc.maxBitrate = 64000
+      enc.priority = 'high'
+      await sender.setParameters(params)
+      return true
+    } catch { return false }
   }
 
   /** Semeia a track em todo o mesh e negocia envio quando o m-line era recvonly. */
@@ -3915,6 +4042,8 @@ export class CallManager {
       }
     }
     await this.applyScreenSenderTuning()
+    // `getParameters()` só tem `encodings` depois do answer: reaplica depois.
+    this.scheduleRetune()
   }
 
   /** Áudio do share nos 4 modos: sistema e mic são TRILHAS SEPARADAS — falta de um nunca derruba o outro. */
@@ -3979,7 +4108,13 @@ export class CallManager {
 
   /** Para o compartilhamento e devolve a câmera (ou null) aos remotos. */
   async stopScreenShare(): Promise<void> {
+    return this.enqueueScreenOp(() => this.stopScreenShareNow())
+  }
+
+  private async stopScreenShareNow(): Promise<void> {
     if (!this.state) return
+    // Invalida `ended`/recuperação pendentes da captura que está saindo.
+    this.screenGen += 1
     // NATIVO: para o encoder no core (sem isto o xcap/GStreamer continuava
     // capturando e codificando uma tela que ninguém assiste).
     if ((this.state as any)?.nativeMedia) {
@@ -4051,12 +4186,15 @@ export class CallManager {
     const prev = this.screenOptions
     const next = normalizeOptions(patch, this.screenOptions)
     this.screenOptions = next
+    // Escolha explícita de qualidade vira o novo teto (`auto` = o mais alto).
+    if (patch.quality) this.screenQualityCeiling = ceilingOf(patch.quality)
     this.screenEnv = detectScreenEnvironment(getScreenShareBackend() === 'native')
     if (!this.state?.sharing) return
     const sourceChanged = next.source !== prev.source
     const audioChanged = next.audio !== prev.audio
     if (sourceChanged || audioChanged) {
-      await this.recaptureScreen(next)
+      // Pela FILA: a troca de fonte compete com start/stop e com a recuperação.
+      await this.enqueueScreenOp(() => this.recaptureScreen(next))
       return
     }
     const track = this.screenStream?.getVideoTracks()[0] ?? null
@@ -4070,6 +4208,7 @@ export class CallManager {
 
   /** Recaptura mantendo a chamada viva (fonte/áudio mudaram). */
   private async recaptureScreen(opts: ScreenShareOptions): Promise<void> {
+    const gen = ++this.screenGen
     const wasSharing = !!this.state?.sharing
     try {
       // Captura a NOVA fonte ANTES de tocar na atual: cancelar o seletor não derruba o share no ar.
@@ -4079,19 +4218,17 @@ export class CallManager {
         try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
         throw new ScreenShareError('no-source', 'nenhuma trilha de vídeo na tela compartilhada', true)
       }
-      this.stopScreenStatsTimer()
-      // GERAÇÃO: o usuário pode ter parado o share enquanto o seletor estava
-      // aberto. Sem esta checagem, o `await` acima "ressuscitava" a captura:
-      // stream vivo invisível + timer de 1 s rodando para sempre.
-      if (wasSharing && !this.state?.sharing) {
+      // Geração mudou (stop/start no meio): esta captura não é mais a atual.
+      if (gen !== this.screenGen || !this.state) {
         try { stream.getTracks().forEach(t => { try { t.stop() } catch { /* ignore */ } }) } catch { /* ignore */ }
         return
       }
+      this.stopScreenStatsTimer()
       await this.clearScreenAudioSenders()
       this.stopScreenStreamOnly()
       this.screenMonitor.detach()
       this.screenStream = stream
-      this.watchScreenTrack(track)
+      this.watchScreenTrack(track, gen)
       this.screenMonitor.attach(track)
       await this.tuneScreenTrack(track)
       // ÁUDIO DA TELA: a recaptura precisa recoletar. Antes ela passava só o
@@ -4099,6 +4236,7 @@ export class CallManager {
       // do compartilhamento sem avisar.
       const audioTracks = await this.collectScreenAudioTracks(stream)
       await this.seedScreenPeers(stream, track, audioTracks)
+      if (gen !== this.screenGen) return
       this.startScreenStatsTimer()
       if (!wasSharing && this.state) {
         this.state.sharing = true
@@ -4106,11 +4244,13 @@ export class CallManager {
       }
       this.screenError = null
       if (this.state) this.onUpdate({ ...this.state })
+      // Recaptura recria a barra do WebView2 (nova sessão de captura).
+      void services.hideShareBar?.().catch(() => {})
     } catch (e) {
       const err = classifyScreenShareError(e)
       this.setScreenError(err.code, err.message)
       // NÃO marca sharing=false: a captura anterior (se havia) segue no ar.
-      if (this.state && !wasSharing) {
+      if (this.state && !wasSharing && gen === this.screenGen) {
         this.state.sharing = false
         this.broadcastScreenSignal(false)
         this.onUpdate({ ...this.state })
@@ -4138,20 +4278,24 @@ export class CallManager {
 
   private async recoverScreen(reason: string): Promise<void> {
     if (!this.state?.sharing) return
+    // Pela FILA: recuperação não pode atropelar um start/stop do usuário.
     try {
-      const track = this.screenStream?.getVideoTracks()[0] ?? null
-      if (!track || track.readyState !== 'live') {
-        await this.recaptureScreen(this.screenOptions)
-        return
-      }
-      // track viva mas ruim (mute/stall): reaplica constraints e reinicia
-      // a estatística — o receiver volta a receber keyframes normais.
-      await applyScreenConstraints(track, this.screenOptions)
-      await this.applyScreenSenderTuning()
-      this.screenStats.reset()
-      this.noteScreenEvent(`captura recuperada (${reason})`)
+      await this.enqueueScreenOp(async () => {
+        const track = this.screenStream?.getVideoTracks()[0] ?? null
+        if (!track || track.readyState !== 'live') {
+          await this.recaptureScreen(this.screenOptions)
+          return
+        }
+        // track viva mas ruim (mute/stall): reaplica constraints e reinicia
+        // a estatística — o receiver volta a receber keyframes normais.
+        await applyScreenConstraints(track, this.screenOptions)
+        await this.applyScreenSenderTuning()
+        this.screenStats.reset()
+        this.noteScreenEvent(`captura recuperada (${reason})`)
+      })
     } catch {
-      await this.recaptureScreen(this.screenOptions).catch(() => {})
+      // Falhou a reaplicação: tenta recapturar (também na fila).
+      await this.enqueueScreenOp(() => this.recaptureScreen(this.screenOptions)).catch(() => {})
     }
   }
 
@@ -4201,15 +4345,27 @@ export class CallManager {
       this.checkScreenGeometry()
       this.adaptScreenQuality()
       this.emitScreenDebug()
+      // A barra do Chromium reaparece quando a captura é trocada/reconectada.
+      void this.ensureShareBarHidden()
     } catch { /* métrica nunca derruba a captura */ }
   }
 
-  /** Degradação honesta: só desce degrau com perda/jitter/FPS real abaixo do capturado; FPS nunca inventado. */
+  /**
+   * Degradação honesta: só desce degrau com perda/jitter/FPS real abaixo do
+   * capturado. Funciona também em `auto` — automático não pode significar
+   * "nunca adapta": parte do degrau mais alto (a resolução nativa) e só cai
+   * quando a rede realmente não aguenta.
+   */
   private adaptScreenQuality(): void {
-    if (this.screenOptions.quality === 'auto') return
     // Track pausada pelo sistema: bitrate/FPS caem a zero e não dizem nada
     // sobre a rede. Avaliar aqui derrubava a qualidade sem motivo.
     if (this.screenTrackMuted) return
+    // Em `auto` o degrau corrente é o teto: a primeira amostra ruim ancora no
+    // mais alto e a histerese abaixo trabalha em cima dele.
+    if (this.screenOptions.quality === 'auto') {
+      if (!isScreenSampleBad(this.screenMetrics)) return
+      this.screenOptions = { ...this.screenOptions, quality: this.screenQualityCeiling }
+    }
     const m = this.screenMetrics
     // HISTERESE: uma amostra ruim isolada (um pico de jitter de 1 s) não pode
     // derrubar a qualidade — antes bastava UMA e a tela caía 1080p → 720p →
@@ -4232,14 +4388,16 @@ export class CallManager {
     }
     this.screenBadSamples = 0
     if (this.screenRecoveryAttempts > 0) this.screenRecoveryAttempts = 0
-    // RECUPERAÇÃO: rede voltou boa → sobe de volta um degrau (sem histerese a
-    // qualidade só descia e a tela ficava borrada até parar o share).
-    if (this.screenOptions.quality === '1080p') return
+    // RECUPERAÇÃO: rede voltou boa → sobe de volta um degrau, mas NUNCA acima
+    // do que o usuário escolheu (antes travava em 1080p, que era o teto; agora
+    // o teto é o próprio degrau pedido).
+    if (this.screenOptions.quality === this.screenQualityCeiling) return
     this.screenGoodSamples += 1
     if (this.screenGoodSamples < 15) return
     this.screenGoodSamples = 0
     const up = raiseScreenQuality(this.screenOptions.quality)
     if (up === this.screenOptions.quality) return
+    if (compareQuality(up, this.screenQualityCeiling) > 0) return
     this.screenOptions = { ...this.screenOptions, quality: up }
     const track = this.screenStream?.getVideoTracks()[0] ?? null
     if (track) void applyScreenConstraints(track, this.screenOptions)

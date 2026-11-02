@@ -36,11 +36,14 @@ export default function CreateServerWizard({
   open,
   onClose,
   onCreated,
+  onJoinInstead,
 }: {
   open: boolean
   onClose: () => void
   /** Id do servidor criado, como string — é o que o shell consome. */
   onCreated: (communityId: string) => void
+  /** "Já tem um convite?": leva para a entrada por token no hub. */
+  onJoinInstead?: () => void
 }) {
   const [step, setStep] = useState(0)
   /** Maior passo já alcançado. O stepper só volta para <= este. */
@@ -127,6 +130,13 @@ export default function CreateServerWizard({
    * a pessoa escreveu — sobrescrever é o pior que um atalho pode fazer).
    */
   function aplicarModelo(id: string) {
+    if (id === 'custom') {
+      setModeloId(null)
+      setIconId('server')
+      setDescription('')
+      setChannels(initialChannels())
+      return
+    }
     const m = MODELOS.find((x) => x.id === id)
     if (!m) return
     if (modeloId === id) {
@@ -307,7 +317,9 @@ export default function CreateServerWizard({
   })()
 
   // Título estável em todos os passos (o contexto fica no `StepHead` interno).
-  const subtitulo = concluido ? 'Pronto. O convite está abaixo.' : 'Leva menos de um minuto.'
+  const subtitulo = concluido
+    ? 'Pronto. O convite está abaixo.'
+    : 'Seu servidor é onde você e seus amigos se reúnem. Crie o seu e comece a interagir.'
 
   return (
     <>
@@ -315,25 +327,59 @@ export default function CreateServerWizard({
       <Modal
         open={open}
         onClose={busy ? () => {} : onClose}
-        title="Criar servidor"
+        title="Criar seu servidor"
         subtitle={subtitulo}
         width={WIDTHS.wizard}
         labelId="csw-title"
         dialogLabel="Criar servidor"
         footer={
-          <WizardFooter
-            step={step}
-            busy={busy}
-            error={error}
-            pendencias={pendencias}
-            onBack={() => goTo(step - 1)}
-            onNext={() => goTo(step + 1)}
-            onCreate={() => void createServer()}
-            onConclude={() => {
-              onCreated(createdId)
-              onClose()
-            }}
-          />
+          <div style={{ width: '100%' }}>
+            {!concluido && onJoinInstead && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  flexWrap: 'wrap',
+                  paddingBottom: ui.md,
+                  marginBottom: ui.md,
+                  borderBottom: `1px solid ${ui.border}`,
+                }}
+              >
+                <span style={{ fontSize: 13, fontWeight: 800, color: ui.heading }}>Já tem um convite?</span>
+                <button
+                  type="button"
+                  onClick={onJoinInstead}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    padding: 0,
+                    color: ui.link,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                  }}
+                >
+                  Entrar em um servidor
+                </button>
+              </div>
+            )}
+            <WizardFooter
+              step={step}
+              busy={busy}
+              error={error}
+              pendencias={pendencias}
+              onBack={() => goTo(step - 1)}
+              onNext={() => goTo(step + 1)}
+              onCreate={() => void createServer()}
+              onConclude={() => {
+                onCreated(createdId)
+                onClose()
+              }}
+            />
+          </div>
         }
       >
         <WizardStepper step={step} visited={visited} busy={busy} onGo={goTo} />

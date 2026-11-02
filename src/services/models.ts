@@ -827,6 +827,8 @@ export interface DisTorrentServices {
   callNotifyCancel(callId: string): Promise<void>
   appShowWindow(): Promise<void>
   appHideToTray(): Promise<void>
+  /** Windows: esconde a barra de compartilhamento que o WebView2 cria. */
+  hideShareBar(): Promise<void>
   appQuit(): Promise<void>
   /** Alterna tela cheia da janela (F11). Devolve o estado NOVO real. */
   windowToggleFullscreen(): Promise<boolean>

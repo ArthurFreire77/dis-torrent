@@ -94,6 +94,25 @@ export class CallRoomStore {
 
 export const callRooms = new CallRoomStore()
 
+/** Intervalo de re-checagem das salas: 10 s (era 20 s e a sala "morria" na tela). */
+export const ROOM_SYNC_MS = 10_000
+
+/**
+ * Ressincroniza com o motor AGORA (snapshot de `call_rooms_list`).
+ *
+ * Chamar no boot, ao voltar o foco e ao sair/entrar de chamada: sem isso o
+ * botão "Entrar" continua aparecendo depois que a sala acabou, ou some porque
+ * o evento se perdeu com a janela em segundo plano.
+ */
+export async function syncCallRooms(
+  list: () => Promise<unknown[]>,
+): Promise<void> {
+  try {
+    const l = await list()
+    callRooms.reset(Array.isArray(l) ? l : [])
+  } catch { /* sem motor: mantém o último estado real */ }
+}
+
 /** Texto curto do cabeçalho: quem está na chamada, sem inventar nome. */
 export function roomSummary(room: CallRoomView | null, nameOf: (fp: string) => string): string | null {
   if (!room) return null

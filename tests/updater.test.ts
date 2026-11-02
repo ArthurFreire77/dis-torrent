@@ -91,6 +91,30 @@ test('pre-release e a MESMA versao da base (igual ao Rust, sem loop)', () => {
   assert.equal(compareVersions('1.1.23-pre-alpha', '1.1.23'), 0)
 })
 
+test('versionamento futuro: alpha < pre-alpha? não — pre-alpha é o mais inicial', () => {
+  // Ordem dos rótulos: pre-alpha < alpha < beta < rc. Quem está em pre-alpha
+  // recebe o alpha da MESMA base, e alpha recebe beta.
+  assert.equal(isNewer('1.2.1-pre-alpha', '1.2.1-alpha'), true)
+  assert.equal(isNewer('1.2.1-alpha', '1.2.1-beta'), true)
+  assert.equal(isNewer('1.2.1-beta', '1.2.1-rc'), true)
+  // E o inverso nunca "atualiza para trás".
+  assert.equal(isNewer('1.2.1-alpha', '1.2.1-pre-alpha'), false)
+  assert.equal(isNewer('1.2.1-beta', '1.2.1-alpha'), false)
+  // Uma versão final depois do rc é mais nova.
+  assert.equal(compareVersions('1.2.1', '1.2.1-rc'), 0, 'tag limpa = mesma versão')
+  assert.equal(isNewer('1.2.1-rc', '1.2.2'), true)
+})
+
+test('versionamento futuro: base nova sempre ganha do sufixo da base antiga', () => {
+  // 1.2.1-alpha é mais nova que 1.2.0 final.
+  assert.equal(isNewer('1.2.0', '1.2.1-pre-alpha'), true)
+  assert.equal(isNewer('1.1.99-pre-alpha', '1.2.0-pre-alpha'), true)
+  assert.equal(isNewer('1.2.0-pre-alpha', '1.10.0-pre-alpha'), true)
+  // Número de build no sufixo é comparado como número: alpha.2 < alpha.10.
+  assert.equal(isNewer('1.2.1-alpha.2', '1.2.1-alpha.10'), true)
+  assert.equal(isNewer('1.2.1-alpha.10', '1.2.1-alpha.2'), false)
+})
+
 // A transição que esta release precisa fazer de verdade: quem está na 1.1.22
 // tem de ver a 1.1.23. `latest` chega do Rust sem o `v` da tag.
 test('quem esta na 1.1.22 enxerga a 1.1.23 publicada', () => {

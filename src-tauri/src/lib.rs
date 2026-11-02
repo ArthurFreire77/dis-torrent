@@ -18,6 +18,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 // Segundo plano (bandeja/autostart) e update automático pelo GitHub.
 mod background;
+// Barra "está compartilhando sua tela" do WebView2 (Windows): escondida pelo app.
+mod sharebar;
 // Atualização automática pelo GitHub (hash conferido antes de executar).
 mod updater;
 
@@ -256,6 +258,15 @@ fn local_ipv4_addresses() -> Vec<String> {
         }
     }
     out
+}
+
+/// Esconde a barra de "compartilhando a tela" do WebView2 (Windows).
+///
+/// É uma janela do Chromium, não do app; o DisTorrent mostra o estado na
+/// própria UI. Devolve `true` se encontrou e escondeu (diagnóstico).
+#[tauri::command]
+fn hide_share_bar() -> bool {
+    crate::sharebar::hide_share_bar()
 }
 
 #[tauri::command]
@@ -4685,6 +4696,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_version,
+            hide_share_bar,
             updater::update_check,
             updater::update_download,
             updater::update_apply,
@@ -4909,6 +4921,7 @@ fn main() {
             app_hide_to_tray,
             app_quit,
             window_toggle_fullscreen,
+            hide_share_bar,
             background_set_connection,
             call_ring_start,
             call_ring_stop,

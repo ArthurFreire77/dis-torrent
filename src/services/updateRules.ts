@@ -25,12 +25,15 @@ export interface UpdateInfo {
 
 export interface ParsedVersion {
   nums: number[]
-  /** Sufixo de pré-release (`pre-alpha`, `beta.2`); vazio em versão final. */
+  /** Sufixo de pré-release (`pre-alpha`, `alpha.2`); vazio em versão final. */
   pre: string
+  /** Tokens do sufixo (`['pre','alpha']`, `['alpha','2']`). */
+  preTokens: string[]
 }
 
 /**
- * Lê uma versão no formato do projeto (`1.1.10-pre-alpha`, `v1.1.9`, `2.0`).
+ * Lê uma versão no formato do projeto (`1.1.10-pre-alpha`, `v1.1.9`, `2.0`,
+ * `1.2.1-alpha`, `1.2.1-pre-alpha`).
  * Cada componente numérico é comparado como NÚMERO — como string, "10" < "9".
  */
 export function parseVersion(raw: string): ParsedVersion {
@@ -45,22 +48,44 @@ export function parseVersion(raw: string): ParsedVersion {
       return m ? Number(m[0]) : 0
     })
   if (nums.length === 0) nums.push(0)
-  return { nums, pre: rest.join('-').toLowerCase() }
+  const pre = rest.join('-').toLowerCase()
+  return { nums, pre, preTokens: pre ? pre.split(/[-.]/).filter(Boolean) : [] }
+}
+
+/**
+ * Peso do rótulo de pré-release. `pre-alpha` vem ANTES de `alpha`, que vem
+ * antes de `beta`/`rc`; desconhecido fica no meio para não inventar ordem.
+ */
+const PRE_RANK: Record<string, number> = {
+  pre: 0,
+  alpha: 1,
+  a: 1,
+  beta: 2,
+  b: 2,
+  rc: 3,
+  preview: 3,
+}
+
+function rankOf(tokens: string[]): number {
+  for (const t of tokens) {
+    const r = PRE_RANK[t]
+    if (r !== undefined) return r
+  }
+  return 2
 }
 
 /**
  * Compara duas versões (`> 0` = `a` mais nova).
  *
- * IGNORA o sufixo de pré-release — igual ao `compare_version_strings` do Rust.
- * As duas pontas PRECISAM concordar: o Rust escolhe QUAL release é a mais nova e
- * este código decide se ela é mais nova que a atual.
+ * 1) Núcleo numérico sempre; `1.1.10 > 1.1.9`.
+ * 2) Sufixo SÓ quando OS DOIS têm sufixo. Nunca comparar sufixo contra ausência:
+ *    a tag é limpa (`v1.1.23`) e o app reporta `1.1.23-pre-alpha`; tratar
+ *    ausência como "final" fazia o app baixar o mesmo instalador para sempre
+ *    (bug real: `stalled` a cada boot).
+ * 3) Com os dois sufixados, a ordem é `pre-alpha < alpha < beta < rc` e, dentro
+ *    do mesmo rótulo, o número decide (`alpha.2 > alpha.10` como número).
  *
- * BUG REAL (achado em 01/11/2026): aqui o sufixo era considerado e no Rust não.
- * A tag é limpa (`v1.1.23`) e o app reporta `1.1.23-pre-alpha`, então quem
- * atualizava via `isNewer('1.1.23-pre-alpha', '1.1.23') === true` TODA vez:
- * o app baixava o instalador de novo e caía em `stalled` depois de reiniciar.
- *
- * Regra: `1.1.23-pre-alpha` e `1.1.23` são a MESMA versão.
+ * As duas pontas (este arquivo e `updater.rs`) PRECISAM concordar.
  */
 export function compareVersions(a: string, b: string): number {
   const pa = parseVersion(a)
@@ -70,6 +95,21 @@ export function compareVersions(a: string, b: string): number {
     const na = pa.nums[i] ?? 0
     const nb = pb.nums[i] ?? 0
     if (na !== nb) return na > nb ? 1 : -1
+  }
+  // Mesmo núcleo: só compara sufixos quando ambos existem (ver item 2 acima).
+  if (!pa.pre || !pb.pre) return 0
+  if (pa.pre === pb.pre) return 0
+  const ra = rankOf(pa.preTokens)
+  const rb = rankOf(pb.preTokens)
+  if (ra !== rb) return ra > rb ? 1 : -1
+  // Mesmo rótulo: compara os números (alpha.2 vs alpha.10).
+  const na = pa.preTokens.filter((t) => /^\d+$/.test(t)).map(Number)
+  const nb = pb.preTokens.filter((t) => /^\d+$/.test(t)).map(Number)
+  const n = Math.max(na.length, nb.length)
+  for (let i = 0; i < n; i++) {
+    const x = na[i] ?? 0
+    const y = nb[i] ?? 0
+    if (x !== y) return x > y ? 1 : -1
   }
   return 0
 }

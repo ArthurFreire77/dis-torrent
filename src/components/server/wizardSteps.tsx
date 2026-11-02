@@ -71,8 +71,29 @@ export function StepIdentity({
       <StepHead step={1} title="Identidade" sub="Como o servidor aparece na lista e para quem pensa em entrar." />
 
       <div>
-        <StepCap>Comece por um modelo (opcional)</StepCap>
+        <StepCap>Começar de um molde</StepCap>
         <div style={layout.models} className="csw-models">
+          {/* "Criar o meu" primeiro: quem quer o básico não precisa ler molde. */}
+          <button
+            type="button"
+            className="csw-card"
+            style={layout.card(modeloId === null)}
+            aria-pressed={modeloId === null}
+            onClick={() => onModelo('custom')}
+          >
+            <span style={{ ...layout.modelIcon(modeloId === null), color: modeloId === null ? '#fff' : ui.accent }}>
+              <Ic name="plus" size={15} />
+            </span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: 'block', fontSize: 13, fontWeight: 800, color: ui.heading, ...layout.ellipsis }}>
+                Criar o meu
+              </span>
+              <span style={{ display: 'block', fontSize: 11, color: ui.muted, lineHeight: 1.45, minWidth: 0 }}>
+                do zero, só com um canal de texto
+              </span>
+            </span>
+            <ModelChevron selected={modeloId === null} />
+          </button>
           {MODELOS.map((m) => (
             <button
               key={m.id}
@@ -100,10 +121,10 @@ export function StepIdentity({
           ))}
         </div>
       </div>
-      {modeloId && (
+      {modeloId && modeloId !== 'custom' && (
         <Notice tone="info" icon="info">
-          O modelo preencheu a descrição, o ícone e os canais abaixo. Pode trocar
-          qualquer um deles — inclusive escolher outro modelo.
+          O molde preencheu descrição, ícone e canais. Pode trocar qualquer um —
+          inclusive escolher outro.
         </Notice>
       )}
 

@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## [1.1.35-pre-alpha] - 2026-11-02
+
+### Compartilhar tela em 8K, automático de verdade e sem a barra do WebView2
+
+- **Qualidade da tela**: degrau novo de **8K** (7680×4320) e bitrates maiores em
+  todos os degraus; o 4K/1440p voltava em silêncio para 1080p porque
+  `normalizeOptions` tinha a lista de qualidade escrita à mão.
+- **Padrão automático**: qualidade e FPS agora começam em "Automático" — o
+  engine entrega a resolução nativa e o FPS que a máquina sustenta. O adaptador
+  parte do degrau mais alto e só desce em perda/jitter reais.
+- **Bitrate da câmera**: a câmera não recebia `maxBitrate` nenhum (ficava em
+  ~300 kbps, a 1080p saía como bloco de pixels) e o tuning era aplicado antes
+  do answer, quando `getParameters()` ainda vem vazio. Agora é reaplicado
+  depois da negociação.
+- **Segundo compartilhamento**: parar e iniciar em seguida fazia o `stop` em voo
+  terminar depois do `start` novo — ele zerava o estado e devolvia a câmera.
+  As operações da tela agora são serializadas com token de geração.
+- **Barra do WebView2**: escondida no Windows (é uma janela do Chromium, sem API
+  de controle — WebView2Feedback#2442). O app já mostra "compartilhando".
+- **Hub de servidores sem abas**: "Entrar com convite" virou um painel que abre
+  sobre a lista; a lista e os detalhes aparecem juntos, sem trocar de aba.
+- **Criar servidor** com a mesma disposição da referência: "Criar o meu" +
+  moldes (Jogos, Amigos, Grupo de estudos, Clube escolar) e "Já tem um
+  convite?" no rodapé.
+- **Salas de chamada**: verificadas a cada 10 s (era 20 s) e na hora em que a
+  chamada termina.
+- **Versionamento à prova de futuro**: `pre-alpha < alpha < beta < rc` na
+  comparação de versões, com número no sufixo (`alpha.2 < alpha.10`). Permite
+  publicar 1.2.1-alpha, 1.2.1-beta e 1.2.1 depois, sem loop de atualização.
+
+Testes: 311 unitários (0 falhas) + 14 Rust. Typecheck, lint e build limpos.
+
+---
+
 ## [1.1.34-pre-alpha] - 2026-11-02
 
 ### Volume da tela deixou de mexer no volume da voz

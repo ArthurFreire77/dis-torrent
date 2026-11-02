@@ -1,7 +1,6 @@
 // Hub de servidores — o MESMO fluxo no desktop e no celular (`mode`):
 // desktop pode criar e entrar por convite; mobile só entra (decisão de produto).
-// Unifica três caminhos desktop de convite que antes divergiam (um gerava token
-// com o fp do criador — inútil a terceiros; outro usava `tauri.localhost`).
+// Uma tela só: lista, detalhes e convite sem abas (ver `ServerHubModal`).
 // Honestidade: `joinCommunity` devolve "pedido enviado" (não "membro"); estado
 // de membro vem de `communityMembers`; silenciar é preferência local.
 
@@ -85,7 +84,7 @@ export function ServerList({
     )
   }
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       {servers.map(({ community, online, total, pending }) => {
         const active = community.id === selectedId
         const muted = isMutedServer(community.id)
@@ -98,14 +97,14 @@ export function ServerList({
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 10,
+              gap: 12,
               width: '100%',
               minWidth: 0,
               textAlign: 'left',
-              background: active ? ui.surfaceHover : 'transparent',
-              border: `1px solid ${active ? ui.borderStrong : 'transparent'}`,
-              borderRadius: ui.radius,
-              padding: '9px 10px',
+              background: active ? ui.surfaceHover : ui.surface,
+              border: `1px solid ${active ? ui.borderStrong : ui.border}`,
+              borderRadius: ui.radiusLg,
+              padding: '10px 12px',
               color: ui.text,
               cursor: 'pointer',
             }}
@@ -113,17 +112,17 @@ export function ServerList({
             <span
               aria-hidden
               style={{
-                width: 30,
-                height: 30,
-                borderRadius: 10,
+                width: 38,
+                height: 38,
+                borderRadius: 12,
                 flexShrink: 0,
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                background: active ? ui.accent : ui.input,
-                color: active ? '#fff' : ui.muted,
+                background: ui.accent,
+                color: '#fff',
                 fontWeight: 800,
-                fontSize: 13,
+                fontSize: 16,
                 opacity: muted ? 0.55 : 1,
               }}
             >
@@ -134,8 +133,8 @@ export function ServerList({
                 style={{
                   display: 'block',
                   fontSize: 13.5,
-                  fontWeight: 700,
-                  color: active ? ui.heading : ui.text,
+                  fontWeight: 800,
+                  color: ui.heading,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -143,23 +142,27 @@ export function ServerList({
               >
                 {community.name}
                 {muted && (
-                  <span title="Notificações silenciadas" style={{ marginLeft: 6, color: ui.muted }}>
+                  <span title="Notificações silenciadas" style={{ marginLeft: 6, color: ui.muted, verticalAlign: 'middle' }}>
                     <Ic name="eyeOff" size={11} />
                   </span>
                 )}
               </span>
-              <span style={{ display: 'block', fontSize: 11, color: ui.muted, marginTop: 2 }}>
+              <span style={{ display: 'block', fontSize: 11.5, color: ui.muted, marginTop: 2 }}>
                 {pending
                   ? 'aguardando confirmação do dono'
                   : `${online}/${total} ${total === 1 ? 'membro pareado' : 'membros pareados'}`}
               </span>
             </span>
-            {!muted && online > 0 && (
-              <span
-                title={`${online} online`}
-                style={{ width: 8, height: 8, borderRadius: '50%', background: '#23a559', flexShrink: 0 }}
-              />
-            )}
+            <span
+              title={online > 0 ? `${online} online` : 'ninguém pareado agora'}
+              style={{
+                width: 9,
+                height: 9,
+                borderRadius: '50%',
+                flexShrink: 0,
+                background: online > 0 ? '#23a559' : ui.borderStrong,
+              }}
+            />
           </button>
         )
       })}
@@ -665,7 +668,10 @@ export function ServerDetails({
 
 // ---------------------------------------------------------------- modal
 
-/** Modal de servidores (desktop): padrão visual do app (`ui.Modal`). */
+/**
+ * Modal de servidores: uma tela com ações no topo, lista sempre visível,
+ * detalhes do selecionado e o convite aberto por botão (ou por deep link).
+ */
 export function ServerHubModal({
   open,
   onClose,
@@ -678,6 +684,7 @@ export function ServerHubModal({
   onJoined,
   autoToken,
   onError,
+  openJoin,
 }: {
   open: boolean
   onClose: () => void
@@ -691,17 +698,20 @@ export function ServerHubModal({
   onJoined: (id: string) => void
   autoToken?: string | null
   onError: (msg: string) => void
+  /** Abre a seção de convite já expandida (vem do "Já tem um convite?"). */
+  openJoin?: boolean
 }) {
   const selected = servers.find((s) => s.community.id === selectedId)?.community ?? null
-  const [tab, setTab] = useState<'join' | 'details'>(autoToken ? 'join' : 'details')
+  const [joinOpen, setJoinOpen] = useState(!!autoToken || !!openJoin)
 
   useEffect(() => {
-    if (open && autoToken) setTab('join')
+    if (open && (autoToken || openJoin)) setJoinOpen(true)
+  }, [open, autoToken, openJoin])
+
+  // Reabrir o modal não deve manter o convite aberto da vez anterior.
+  useEffect(() => {
+    if (!open) setJoinOpen(!!autoToken)
   }, [open, autoToken])
-
-  useEffect(() => {
-    if (open && selected && !autoToken) setTab('details')
-  }, [open, selected?.id, autoToken])
 
   return (
     <Modal
@@ -718,84 +728,70 @@ export function ServerHubModal({
       dialogLabel="Servidores"
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: ui.lg, minWidth: 0 }}>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button
-            type="button"
-            onClick={() => setTab('join')}
-            style={{
-              background: tab === 'join' ? ui.accent : ui.input,
-              color: tab === 'join' ? '#fff' : ui.text,
-              border: `1px solid ${tab === 'join' ? ui.accent : ui.border}`,
-              borderRadius: 99,
-              padding: '6px 14px',
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-          >
-            Entrar com convite
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab('details')}
-            disabled={!selected}
-            style={{
-              background: tab === 'details' ? ui.accent : ui.input,
-              color: tab === 'details' ? '#fff' : selected ? ui.text : ui.muted,
-              border: `1px solid ${tab === 'details' ? ui.accent : ui.border}`,
-              borderRadius: 99,
-              padding: '6px 14px',
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: selected ? 'pointer' : 'not-allowed',
-            }}
-          >
-            Meus servidores
-          </button>
+        <div style={{ display: 'flex', gap: ui.sm, flexWrap: 'wrap', alignItems: 'center' }}>
           {mode === 'desktop' && (
-            <div style={{ flex: 1 }} />
+            <Button variant="primary" icon="plus" onClick={onCreate}>
+              Criar servidor
+            </Button>
           )}
+          <Button
+            variant="secondary"
+            icon={joinOpen ? 'chevron' : 'link'}
+            onClick={() => setJoinOpen((v) => !v)}
+            ariaLabel={joinOpen ? 'Fechar entrada por convite' : 'Entrar com convite'}
+          >
+            {joinOpen ? 'Fechar convite' : 'Entrar com convite'}
+          </Button>
         </div>
 
-        {tab === 'join' ? (
-          <JoinServerForm
-            autoToken={autoToken}
-            compact={mode === 'mobile'}
-            onJoined={(id) => {
-              onJoined(id)
-              setTab('details')
+        {joinOpen && (
+          <div
+            style={{
+              background: ui.surface,
+              border: `1px solid ${ui.border}`,
+              borderRadius: ui.radiusLg,
+              padding: ui.lg,
             }}
-          />
-        ) : (
-          <>
-            {mode === 'desktop' && (
-              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                <Button variant="primary" icon="plus" onClick={onCreate}>
-                  Criar servidor
-                </Button>
-              </div>
-            )}
-            <ServerList
-              servers={servers}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              emptyHint={
-                mode === 'mobile'
-                  ? 'Nenhum servidor ainda. Toque em “Entrar com convite” e cole o token.'
-                  : 'Nenhum servidor ainda. Crie um ou entre com o token de alguém.'
-              }
+          >
+            <div style={{ fontSize: 12, fontWeight: 800, color: ui.heading, marginBottom: ui.sm }}>
+              Entrar com convite
+            </div>
+            <JoinServerForm
+              autoToken={autoToken}
+              compact={mode === 'mobile'}
+              onJoined={(id) => {
+                onJoined(id)
+                setJoinOpen(false)
+              }}
             />
-            {selected && (
-              <div style={{ borderTop: `1px solid ${ui.border}`, paddingTop: ui.lg }}>
-                <ServerDetails
-                  community={selected}
-                  members={members}
-                  canCreateInvite={selected.is_owner === true}
-                  onError={onError}
-                />
-              </div>
-            )}
-          </>
+          </div>
+        )}
+
+        <div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6, color: ui.muted, marginBottom: 8 }}>
+            MEUS SERVIDORES
+          </div>
+          <ServerList
+            servers={servers}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            emptyHint={
+              mode === 'mobile'
+                ? 'Nenhum servidor ainda. Toque em “Entrar com convite” e cole o token.'
+                : 'Nenhum servidor ainda. Crie um ou entre com o token de alguém.'
+            }
+          />
+        </div>
+
+        {selected && (
+          <div style={{ borderTop: `1px solid ${ui.border}`, paddingTop: ui.lg }}>
+            <ServerDetails
+              community={selected}
+              members={members}
+              canCreateInvite={selected.is_owner === true}
+              onError={onError}
+            />
+          </div>
         )}
       </div>
     </Modal>

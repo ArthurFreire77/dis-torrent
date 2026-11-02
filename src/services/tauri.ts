@@ -462,6 +462,12 @@ export const tauriServices: DisTorrentServices = {
   },
   appShowWindow: () => invoke<void>('app_show_window'),
   appHideToTray: () => invoke<void>('app_hide_to_tray'),
+  /** Windows: esconde a barra "está compartilhando sua tela" do WebView2. */
+  hideShareBar: async () => {
+    if (!isAndroidRuntime()) {
+      try { await invoke<boolean>('hide_share_bar') } catch { /* comando opcional */ }
+    }
+  },
   windowToggleFullscreen: () => invoke<boolean>('window_toggle_fullscreen'),
   appQuit: async () => {
     // ANDROID: o foreground service mantém o processo vivo mesmo depois de

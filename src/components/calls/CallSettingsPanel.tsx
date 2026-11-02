@@ -277,6 +277,7 @@ export default function CallSettingsPanel({
                 <option value="1080p">1080p</option>
                 <option value="1440p">1440p (nítida)</option>
                 <option value="4K">4K (máxima)</option>
+                <option value="8K">8K (tela 8K)</option>
               </select>
             </Row>
           )}

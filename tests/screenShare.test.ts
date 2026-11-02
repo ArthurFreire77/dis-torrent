@@ -7,8 +7,10 @@ import {
   ScreenShareError,
   buildDisplayMediaConstraints,
   buildSenderTuning,
+  buildCameraTuning,
   buildSourceChoices,
   classifyScreenShareError,
+  compareQuality,
   detectScreenEnvironment,
   fpsOf,
   isScreenSampleBad,
@@ -49,7 +51,7 @@ test('qualidade: piso operacional é 480p e os degraus sobem em ordem', () => {
   assert.equal(SCREEN_QUALITY_STEPS[0].key, '480p')
   assert.equal(SCREEN_QUALITY_STEPS[0].height, 480)
   const keys = SCREEN_QUALITY_STEPS.map(s => s.key)
-  assert.deepEqual(keys, ['480p', '720p', '1080p', '1440p', '4K'])
+  assert.deepEqual(keys, ['480p', '720p', '1080p', '1440p', '4K', '8K'])
   for (let i = 1; i < SCREEN_QUALITY_STEPS.length; i++) {
     const prev = SCREEN_QUALITY_STEPS[i - 1]
     const cur = SCREEN_QUALITY_STEPS[i]
@@ -59,17 +61,41 @@ test('qualidade: piso operacional é 480p e os degraus sobem em ordem', () => {
   }
 })
 
+test('8K: existe de verdade e o bitrate acompanha a resolução', () => {
+  const k8 = SCREEN_QUALITY_STEPS.find(s => s.key === '8K')
+  assert.ok(k8, '8K precisa estar no catálogo (quem tem tela 8K consegue escolher)')
+  assert.deepEqual([k8!.width, k8!.height], [7680, 4320])
+  assert.ok(k8!.maxBitrateKbps > SCREEN_QUALITY_STEPS[4].maxBitrateKbps)
+  // Pede resolução, nunca exige: monitor menor entrega a nativa sem erro.
+  const c = screenConstraints({ ...SCREEN_DEFAULT_OPTIONS, quality: '8K' }) as Record<string, any>
+  assert.equal(c.width.ideal, 7680)
+  assert.equal(c.width.max, undefined, '8K sem tela 8K não pode dar OverconstrainedError')
+})
+
+test('bitrate da câmera acompanha a resolução (sem teto ficava em ~300 kbps)', () => {
+  const hd = buildCameraTuning('1080p')
+  const sd = buildCameraTuning('480p')
+  assert.ok(hd.maxBitrate > sd.maxBitrate, '1080p precisa de mais banda que 480p')
+  assert.equal(hd.scaleResolutionDownBy, 1, 'a captura já entrega a resolução; escalar é escala dupla')
+  // Áudio do sistema e tela usam tuning próprio — a câmera não pode zerar isso.
+  assert.ok(hd.minBitrate > 0)
+})
+
 test('degrau de qualidade: sobe e desce sem passar da ponta', () => {
   assert.equal(lowerScreenQuality('1080p'), '720p')
   assert.equal(lowerScreenQuality('720p'), '480p')
   assert.equal(lowerScreenQuality('480p'), '480p')
   assert.equal(lowerScreenQuality('auto'), '720p')
   assert.equal(raiseScreenQuality('480p'), '720p')
-  // Teto subiu para 4K: 1080p ainda pode subir (texto nítido em monitor grande).
+  // Teto subiu para 8K: 1080p ainda pode subir (texto nítido em monitor grande).
   assert.equal(raiseScreenQuality('1080p'), '1440p')
   assert.equal(raiseScreenQuality('1440p'), '4K')
-  assert.equal(raiseScreenQuality('4K'), '4K')
+  assert.equal(raiseScreenQuality('4K'), '8K')
+  assert.equal(raiseScreenQuality('8K'), '8K', '8K é a ponta')
   assert.equal(raiseScreenQuality('auto'), 'auto')
+  assert.equal(compareQuality('1080p', '4K'), -1)
+  assert.equal(compareQuality('4K', '1080p'), 1)
+  assert.equal(compareQuality('720p', '720p'), 0)
 })
 
 test('FPS: "auto" não fixa nada; 120 é pedido e nunca inventado', () => {
@@ -324,11 +350,15 @@ test('constraints: microfone nunca vem do getDisplayMedia (só o áudio do siste
 test('constraints: fonte janela vs monitor muda o displaySurface pedido', () => {
   const env = detectScreenEnvironment()
   const win = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'window' }, env)
-  assert.deepEqual(win.video, { displaySurface: 'window', frameRate: { ideal: 60 } })
+  // Padrão é `auto`: nenhum frameRate imposto na captura.
+  assert.deepEqual(win.video, { displaySurface: 'window' })
   const mon = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor' }, env)
-  assert.deepEqual(mon.video, { displaySurface: 'monitor', frameRate: { ideal: 60 } })
+  assert.deepEqual(mon.video, { displaySurface: 'monitor' })
   assert.equal(mon.monitorTypeSurfaces, 'include')
   assert.equal(win.monitorTypeSurfaces, 'exclude')
+  // Grade explícita continua indo para a captura.
+  const comFps = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor', fps: '60' }, env)
+  assert.deepEqual(comFps.video, { displaySurface: 'monitor', frameRate: { ideal: 60 } })
 })
 
 test('constraints: nunca pede min no getDisplayMedia (WebView2 recusa)', () => {
@@ -338,7 +368,7 @@ test('constraints: nunca pede min no getDisplayMedia (WebView2 recusa)', () => {
   // aparecer em applyConstraints (screenConstraints), nunca aqui.
   const env = detectScreenEnvironment()
   for (const source of ['screen', 'window', 'monitor'] as const) {
-    const c = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source }, env)
+    const c = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source, fps: '60' }, env)
     const video = c.video as Record<string, any>
     assert.equal(video.frameRate.min, undefined, `${source}: min não é suportado`)
     assert.ok(video.frameRate.ideal >= 30, `${source}: ideal >= 30`)
@@ -348,7 +378,8 @@ test('constraints: nunca pede min no getDisplayMedia (WebView2 recusa)', () => {
 test('derivedDisplayConstraints: relaxa frameRate/displaySurface e desiste quando não há o que mudar', async () => {
   const { derivedDisplayConstraints } = await import('../src/services/screenShare.ts')
   const env = detectScreenEnvironment()
-  const original = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor' }, env)
+  const original = buildDisplayMediaConstraints(
+    { ...SCREEN_DEFAULT_OPTIONS, source: 'monitor', fps: '60' }, env)
   const relaxed = derivedDisplayConstraints(original)
   assert.ok(relaxed, 'deve haver versão relaxada')
   const video = relaxed!.video as Record<string, any>

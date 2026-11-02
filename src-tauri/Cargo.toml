@@ -1,6 +1,6 @@
 [package]
 name = "distorent-cli"
-version = "1.1.34-pre-alpha"
+version = "1.1.35-pre-alpha"
 description = "DisTorrent CLI — ferramentas de linha de comando para o ecossistema DisTorrent"
 authors = ["DisTorrent"]
 license = "MIT"
@@ -41,8 +41,12 @@ tauri-plugin-autostart = "2"
 # deep-link, então o convite abre na janela existente.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
-# LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,
-# `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do
+# Esconder a barra "tauri.localhost está compartilhando sua tela" no Windows:
+# é uma janela do Chromium, sem API de controle (WebView2Feedback#2442).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
+
+# LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,# `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do
 # `enable_webrtc` — que no WebKitGTK vem DESLIGADO por padrão. Resultado:
 # `typeof RTCPeerConnection === 'undefined'` dentro do app, e a chamada morre
 # com "falta WebRTC". A versão tem que bater exatamente com a do wry (2.0.2),

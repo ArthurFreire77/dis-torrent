@@ -22,7 +22,7 @@ import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
 import { ChannelVoicePeers } from '../components/calls/ChannelVoicePeers'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
-import { callRooms, roomSummary, type CallRoomView } from '../services/callRooms'
+import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import { FileCard } from '../components/FileCard'
@@ -971,6 +971,8 @@ export default function ThemeShell({ designId }: {designId:string}){
       setIncomingCall((cur) => (cur && cur.call_id === callId ? null : cur))
       try { sfxRingStop() } catch { /* ignore */ }
     }
+    // Sair de uma chamada ressincroniza as salas na hora (sem esperar 10 s).
+    callManager.onRoomsChanged = () => { void syncCallRooms(() => services.callRoomsList()) }
     return () => {
       callManager.unbind()
       try { stopBots?.() } catch { /* ignore */ }
@@ -978,6 +980,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       callManager.onCallNotice = unNotice
       callManager.onIceFailed = unIce
       callManager.onIncomingGone = unIncomingGone
+      callManager.onRoomsChanged = null
     }
   }, [])
   // identidade real no CallManager (sem isso chamadas falham "sem identidade")
@@ -1919,11 +1922,9 @@ export default function ThemeShell({ designId }: {designId:string}){
     // Boot + re-sincronização: com a janela na bandeja o JS pode ficar
     // suspenso e os eventos `call_room` daquele intervalo se perdem (era o
     // "só aparece depois de reabrir"). O snapshot do motor cobre o buraco.
-    const sync = () => {
-      services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
-    }
+    const sync = () => { void syncCallRooms(() => services.callRoomsList()) }
     sync()
-    const t = window.setInterval(sync, 20_000)
+    const t = window.setInterval(sync, ROOM_SYNC_MS)
     const onVisible = () => { if (!document.hidden) sync() }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
@@ -3200,6 +3201,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           closeServerModal()
         }}
         autoToken={inviteFromLink}
+        openJoin={serverFlow === 'join'}
         onError={(msg) => setError(msg)}
       />
 
@@ -3227,6 +3229,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       <CreateServerWizard
         open={showCreateServer && serverFlow === 'create'}
         onClose={closeServerModal}
+        onJoinInstead={() => setServerFlow('join')}
         onCreated={(id) => {
           setUnreadServers(prev => new Set(prev).add(id))
           refreshCommunities()

@@ -4,7 +4,7 @@ export { isAndroidRuntime, isIOSRuntime }
 
 export type ScreenSourceKind = 'screen' | 'window' | 'monitor'
 export type ScreenAudioMode = 'none' | 'system' | 'mic' | 'system+mic'
-export type ScreenQualityKey = 'auto' | '480p' | '720p' | '1080p' | '1440p' | '4K'
+export type ScreenQualityKey = 'auto' | '480p' | '720p' | '1080p' | '1440p' | '4K' | '8K'
 export type ScreenFpsKey = 'auto' | '30' | '60' | '120'
 
 export interface ScreenQualityStep {
@@ -18,21 +18,29 @@ export interface ScreenQualityStep {
 }
 
 export const SCREEN_QUALITY_STEPS: ScreenQualityStep[] = [
-  { key: '480p', width: 854, height: 480, maxBitrateKbps: 1500, minBitrateKbps: 300, scaleDown: 4, label: '480p' },
-  { key: '720p', width: 1280, height: 720, maxBitrateKbps: 3000, minBitrateKbps: 600, scaleDown: 2, label: '720p' },
-  { key: '1080p', width: 1920, height: 1080, maxBitrateKbps: 6000, minBitrateKbps: 1200, scaleDown: 1, label: '1080p' },
-  // 1440p/4K: tela é TEXTO. 1080p num monitor grande vira borrão ilegível — o
-  // teto de 6 Mbps não sustentava nem o 1080p em movimento. Bitrate alto de
-  // propósito: a captura sai em resolução nativa e o `maintain-resolution`
-  // preserva o detalhe em vez de derrubar para 720p no primeiro aperto.
-  { key: '1440p', width: 2560, height: 1440, maxBitrateKbps: 12000, minBitrateKbps: 2000, scaleDown: 1, label: '1440p' },
-  { key: '4K', width: 3840, height: 2160, maxBitrateKbps: 20000, minBitrateKbps: 3000, scaleDown: 1, label: '4K' },
+  { key: '480p', width: 854, height: 480, maxBitrateKbps: 2000, minBitrateKbps: 400, scaleDown: 4, label: '480p' },
+  { key: '720p', width: 1280, height: 720, maxBitrateKbps: 4000, minBitrateKbps: 800, scaleDown: 2, label: '720p' },
+  { key: '1080p', width: 1920, height: 1080, maxBitrateKbps: 8000, minBitrateKbps: 1500, scaleDown: 1, label: '1080p' },
+  // 1440p/4K/8K: tela é TEXTO. 1080p num monitor grande vira borrão ilegível —
+  // o teto antigo de 6 Mbps não sustentava nem o 1080p em movimento. Bitrate
+  // alto de propósito: a captura sai em resolução nativa e o
+  // `maintain-resolution` preserva o detalhe em vez de derrubar para 720p no
+  // primeiro aperto. 8K só entrega se o monitor e o encoder aguentarem — o
+  // pedido sai como `ideal`, nunca como exigência (ver `screenConstraints`).
+  { key: '1440p', width: 2560, height: 1440, maxBitrateKbps: 16000, minBitrateKbps: 2500, scaleDown: 1, label: '1440p' },
+  { key: '4K', width: 3840, height: 2160, maxBitrateKbps: 28000, minBitrateKbps: 4000, scaleDown: 1, label: '4K' },
+  { key: '8K', width: 7680, height: 4320, maxBitrateKbps: 60000, minBitrateKbps: 6000, scaleDown: 1, label: '8K' },
 ]
 
 export const SCREEN_MIN_OPERATIONAL = '480p'
 export const SCREEN_FPS_OPTIONS: ScreenFpsKey[] = ['auto', '30', '60', '120']
-export const SCREEN_DEFAULT_QUALITY: ScreenQualityKey = '720p'
-export const SCREEN_DEFAULT_FPS: ScreenFpsKey = '60'
+/**
+ * Padrão AUTOMÁTICO: o engine entrega a resolução nativa da tela e o FPS que a
+ * máquina sustentar (o `auto` não impõe teto — ver `fpsOf`). Fixar 1080p/60 por
+ * padrão derrubava tela 4K/8K para 1080p sem o usuário ter pedido.
+ */
+export const SCREEN_DEFAULT_QUALITY: ScreenQualityKey = 'auto'
+export const SCREEN_DEFAULT_FPS: ScreenFpsKey = 'auto'
 
 export interface ScreenShareOptions {
   source: ScreenSourceKind
@@ -277,7 +285,7 @@ export function buildDisplayMediaConstraints(
     // SEM `min` aqui: o Chromium (WebView2 incluso) recusa constraint obrigatória
     // com TypeError e a captura não abria. `ideal` é dica; o piso de fps é
     // perseguido depois em `applyScreenConstraints` (que aceita `max`).
-    video: { displaySurface, frameRate: { ideal: 60 } },
+    video: { displaySurface, ...displayConstraintsFor(opts) },
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
     // Loopback inclui a voz dos próprios participantes (eco); engines antigos ignoram.
@@ -340,12 +348,22 @@ export function screenConstraints(opts: ScreenShareOptions): MediaTrackConstrain
   if (step) {
     // `ideal` (não `max`) em width/height preserva a proporção da fonte — `max`
     // esticava 16:10/21:9 para 16:9. `resizeMode: 'none'` impede reescala do engine.
+    //
+    // 8K: pedir 7680 de largura como `ideal` num monitor 1080p não é exigência —
+    // o engine entrega a resolução REAL da fonte. Quem tem tela 8K e GPU capaz
+    // recebe 8K; quem não tem segue na nativa, sem erro de constraint.
     c.width = { ideal: step.width }
     c.height = { ideal: step.height }
     c.resizeMode = 'none'
   }
   if (fps) c.frameRate = { ideal: fps, max: fps }
   return c as MediaTrackConstraints
+}
+
+/** Escape do `getDisplayMedia` com o FPS escolhido; `auto` não pede teto nenhum. */
+export function displayConstraintsFor(opts: ScreenShareOptions): Record<string, unknown> {
+  const fps = fpsOf(resolveStep(opts), opts)
+  return fps ? { frameRate: { ideal: fps } } : {}
 }
 
 export async function applyScreenConstraints(track: MediaStreamTrack, opts: ScreenShareOptions): Promise<boolean> {
@@ -361,6 +379,16 @@ export function setScreenContentHint(track: MediaStreamTrack | null, kind: Scree
   } catch { /* hint é best-effort */ }
 }
 
+/**
+ * `contentHint: 'motion'` na câmera: sem hint o encoder trata rosto em
+ * movimento como texto e gasta bitrate em detalhe estático.
+ */
+export function setCameraContentHint(track: MediaStreamTrack | null): void {
+  try {
+    ;(track as unknown as { contentHint?: string }).contentHint = 'motion'
+  } catch { /* hint é best-effort */ }
+}
+
 export interface ScreenSenderTuning {
   degradationPreference: RTCDegradationPreference
   scaleResolutionDownBy: number
@@ -373,8 +401,10 @@ export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning 
   const step = resolveStep(opts)
   const fps = fpsOf(step, opts)
   const bitrateFactor = fps && fps >= 120 ? 1.6 : (fps && fps <= 30 ? 0.6 : 1)
-  const maxKbps = step ? Math.round(step.maxBitrateKbps * bitrateFactor) : 6000
-  const minKbps = step ? Math.round(step.minBitrateKbps * bitrateFactor) : 800
+  // `auto` (padrão) não tem degrau: teto de 12 Mbps para o engine entregar a
+  // resolução nativa com folga — 6 Mbps achatava 1440p/4K em borrão.
+  const maxKbps = step ? Math.round(step.maxBitrateKbps * bitrateFactor) : 12000
+  const minKbps = step ? Math.round(step.minBitrateKbps * bitrateFactor) : 1500
   return {
     // Tela é texto/detalhe: manter resolução (antes era `window`, invertido).
     degradationPreference: 'maintain-resolution',
@@ -386,21 +416,63 @@ export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning 
   }
 }
 
+/** Degraus da CÂMERA (a tela tem os próprios — ver `SCREEN_QUALITY_STEPS`). */
+export interface CameraTuning {
+  maxBitrate: number
+  minBitrate: number
+  scaleResolutionDownBy: number
+}
+
+/** Bitrate da câmera por resolução: sem teto o engine fica em ~300 kbps. */
+export function buildCameraTuning(quality: '480p' | '720p' | '1080p' | '4K'): CameraTuning {
+  const kbps: Record<string, { max: number; min: number }> = {
+    '480p': { max: 1200, min: 300 },
+    '720p': { max: 2500, min: 600 },
+    '1080p': { max: 4500, min: 1000 },
+    '4K': { max: 12000, min: 2500 },
+  }
+  const v = kbps[quality] ?? kbps['720p']
+  return { maxBitrate: v.max * 1000, minBitrate: v.min * 1000, scaleResolutionDownBy: 1 }
+}
+
+/** Aplica bitrate na câmera; `false` quando o engine não aceita (não inventa). */
+export async function applyCameraTuning(sender: RTCRtpSender, quality: '480p' | '720p' | '1080p' | '4K'): Promise<boolean> {
+  try {
+    const tuning = buildCameraTuning(quality)
+    const params = sender.getParameters()
+    // `getParameters()` volta vazio antes do answer — mexer ali joga a config
+    // fora e o encoder fica no padrão achando que foi afinado.
+    if (!params.encodings || params.encodings.length === 0) return false
+    params.degradationPreference = 'balanced'
+    const enc = params.encodings[0] as RTCRtpEncodingParameters & { minBitrate?: number }
+    enc.scaleResolutionDownBy = tuning.scaleResolutionDownBy
+    enc.maxBitrate = tuning.maxBitrate
+    enc.minBitrate = tuning.minBitrate
+    enc.priority = 'high'
+    enc.networkPriority = 'high'
+    await sender.setParameters(params)
+    return true
+  } catch { return false }
+}
+
 export async function applySenderTuning(sender: RTCRtpSender, opts: ScreenShareOptions): Promise<boolean> {
   try {
     const tuning = buildSenderTuning(opts)
     const params = sender.getParameters()
+    // Sem `encodings` o `setParameters` não tem onde gravar o bitrate: fingir
+    // sucesso deixava a tela no padrão do engine (~1 Mbps) achando que estava
+    // afinada. Quem chama reaplica depois do answer (`getParameters` vazio
+    // antes dele).
+    if (!params.encodings || params.encodings.length === 0) return false
     params.degradationPreference = tuning.degradationPreference
-    const target = params.encodings && params.encodings.length ? params.encodings[0] : undefined
-    if (target) {
-      const enc = target as RTCRtpEncodingParameters & { minBitrate?: number }
-      enc.scaleResolutionDownBy = tuning.scaleResolutionDownBy
-      enc.maxBitrate = tuning.maxBitrate
-      // minBitrate não existe em todo engine; quem não entende, ignora.
-      enc.minBitrate = tuning.minBitrate
-      if (tuning.priority) target.priority = tuning.priority
-      target.networkPriority = 'high'
-    }
+    const target = params.encodings[0]
+    const enc = target as RTCRtpEncodingParameters & { minBitrate?: number }
+    enc.scaleResolutionDownBy = tuning.scaleResolutionDownBy
+    enc.maxBitrate = tuning.maxBitrate
+    // minBitrate não existe em todo engine; quem não entende, ignora.
+    enc.minBitrate = tuning.minBitrate
+    if (tuning.priority) target.priority = tuning.priority
+    target.networkPriority = 'high'
     await sender.setParameters(params)
     return true
   } catch { return false }
@@ -688,6 +760,28 @@ export function isScreenSampleBad(m: ScreenShareMetrics): boolean {
   return false
 }
 
+/**
+ * Teto da recuperação automática para um degrau escolhido.
+ *
+ * `auto` não é degrau (não entra em `compareQuality`): vale o mais alto, porque
+ * é isso que "automático" significa — o engine decide, não o adaptador.
+ */
+export function ceilingOf(q: ScreenQualityKey): ScreenQualityKey {
+  if (q === 'auto') return SCREEN_QUALITY_STEPS[SCREEN_QUALITY_STEPS.length - 1].key
+  return q
+}
+
+/**
+ * Ordem dos degraus: negativo quando `a` é mais leve que `b`. `auto` não entra
+ * na escala — quem compara `auto` deve tratar antes.
+ */
+export function compareQuality(a: ScreenQualityKey, b: ScreenQualityKey): number {
+  const i = SCREEN_QUALITY_STEPS.findIndex(s => s.key === a)
+  const j = SCREEN_QUALITY_STEPS.findIndex(s => s.key === b)
+  if (i < 0 || j < 0) return 0
+  return i === j ? 0 : i > j ? 1 : -1
+}
+
 export function lowerScreenQuality(q: ScreenQualityKey): ScreenQualityKey {
   if (q === 'auto') return '720p'
   const i = SCREEN_QUALITY_STEPS.findIndex(s => s.key === q)
@@ -702,13 +796,19 @@ export function raiseScreenQuality(q: ScreenQualityKey): ScreenQualityKey {
   return SCREEN_QUALITY_STEPS[i + 1].key
 }
 
+/** Aceita só degraus que existem: lista fixa até 1080p fazia 4K/8K voltar em silêncio. */
+const QUALITY_KEYS: ReadonlySet<string> = new Set<string>([
+  'auto',
+  ...SCREEN_QUALITY_STEPS.map((s) => s.key),
+])
+
 export function normalizeOptions(patch: Partial<ScreenShareOptions> | null | undefined, base: ScreenShareOptions): ScreenShareOptions {
   const out: ScreenShareOptions = { ...base }
   if (!patch) return out
   if (patch.source === 'screen' || patch.source === 'window' || patch.source === 'monitor') out.source = patch.source
   if (patch.audio === 'none' || patch.audio === 'system' || patch.audio === 'mic' || patch.audio === 'system+mic') out.audio = patch.audio
-  if (patch.quality === 'auto' || patch.quality === '480p' || patch.quality === '720p' || patch.quality === '1080p') out.quality = patch.quality
-  if (patch.fps === 'auto' || patch.fps === '30' || patch.fps === '60' || patch.fps === '120') out.fps = patch.fps
+  if (typeof patch.quality === 'string' && QUALITY_KEYS.has(patch.quality)) out.quality = patch.quality
+  if (typeof patch.fps === 'string' && (SCREEN_FPS_OPTIONS as string[]).includes(patch.fps)) out.fps = patch.fps
   if (typeof patch.monitorId === 'string' || patch.monitorId === null) out.monitorId = patch.monitorId
   if (typeof patch.monitorLabel === 'string' || patch.monitorLabel === null) out.monitorLabel = patch.monitorLabel
   return out

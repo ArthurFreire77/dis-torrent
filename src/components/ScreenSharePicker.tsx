@@ -41,6 +41,8 @@ const QUALITY_CHOICES: { value: ScreenQualityKey; label: string }[] = [
   // não do encoder (ver SCREEN_QUALITY_STEPS).
   { value: '1440p', label: '1440p (nítido)' },
   { value: '4K', label: '4K (máximo)' },
+  // 8K só vale com tela 8K + GPU; sem isso o engine entrega a resolução nativa.
+  { value: '8K', label: '8K (tela 8K)' },
 ]
 
 const FPS_LABELS: Record<ScreenFpsKey, string> = {
@@ -279,6 +281,7 @@ export default function ScreenSharePicker({
           ? 'Caminho nativo: a tela inteira é enviada (janela/monitor específico e áudio do sistema ainda não existem aqui).'
           : `Piso operacional ${SCREEN_QUALITY_STEPS[0].label}; o degrau muda sozinho se a rede cair.`}
         {opts.fps === '120' && ' 120 FPS só é atingido com monitor, encoder e placa que suportem.'}
+        {opts.quality === '8K' && ' 8K exige monitor 8K e GPU com encoder para 8K; sem isso a captura sai na resolução nativa da tela.'}
       </div>
       {saved && (
         <div style={{ ...helpStyle, marginTop: ui.xs, color: ui.text }} role="status" data-testid="screen-options-saved">

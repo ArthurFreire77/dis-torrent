@@ -8,7 +8,7 @@ import CallDiagnostics from '../components/CallDiagnostics'
 import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
-import { callRooms, type CallRoomView } from '../services/callRooms'
+import { callRooms, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
 import { FileCard } from '../components/FileCard'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -743,7 +743,8 @@ export default function MobileShell() {
       setIncomingCall((cur: any) => (cur && cur.call_id === callId ? null : cur))
       try { sfxRingStop() } catch { /* ignore */ }
     }
-    return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone }
+    callManager.onRoomsChanged = () => { void syncCallRooms(() => services.callRoomsList()) }
+    return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone; callManager.onRoomsChanged = null }
   }, [])
   // Conversa aberta cancela o aviso dela; clique na notificação abre a conversa.
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
@@ -1092,11 +1093,9 @@ export default function MobileShell() {
     // plano, então os eventos `call_room` daquele intervalo se perdem e a sala
     // só aparecia depois de fechar e abrir o app. O snapshot do motor cobre o
     // buraco; o intervalo cobre o caso de a página nunca perder o foco.
-    const sync = () => {
-      services.callRoomsList().then((l) => callRooms.reset(l)).catch(() => { /* sem motor */ })
-    }
+    const sync = () => { void syncCallRooms(() => services.callRoomsList()) }
     sync()
-    const t = window.setInterval(sync, 20_000)
+    const t = window.setInterval(sync, ROOM_SYNC_MS)
     const onVisible = () => { if (!document.hidden) sync() }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)

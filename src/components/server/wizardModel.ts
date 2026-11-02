@@ -102,24 +102,37 @@ export const MODELOS: {
   channels: { name: string; kind: ChannelKind }[]
 }[] = [
   {
-    id: 'comunidade',
-    label: 'Comunidade',
-    desc: 'Bate-papo, eventos e gente nova',
+    id: 'jogos',
+    label: 'Jogos',
+    desc: 'Partidas, torneios e sala de jogo',
+    icon: 'crown',
+    tint: '#f0b232',
+    description: 'Para marcar partida, combinar horário e conversar durante o jogo.',
+    channels: [
+      { name: 'geral', kind: 'text' },
+      { name: 'partidas', kind: 'text' },
+      { name: 'sala-de-jogo', kind: 'voice' },
+    ],
+  },
+  {
+    id: 'amigos',
+    label: 'Amigos',
+    desc: 'Bate-papo e encontros do grupo',
     icon: 'users',
-    tint: '#23a559',
+    tint: '#eb459e',
     description: 'Espaço para conversar, combinar o que fazer e manter todo mundo por perto.',
     channels: [
       { name: 'geral', kind: 'text' },
-      { name: 'apresentacoes', kind: 'text' },
+      { name: 'memes', kind: 'text' },
       { name: 'encontros', kind: 'voice' },
     ],
   },
   {
     id: 'estudo',
-    label: 'Estudo',
+    label: 'Grupo de estudos',
     desc: 'Aulas, avisos e materiais',
     icon: 'code',
-    tint: '#f0b232',
+    tint: '#23a559',
     description: 'Grupo de estudos: avisos de aula, materiais compartilhados e dúvidas.',
     channels: [
       { name: 'geral', kind: 'text' },
@@ -129,17 +142,16 @@ export const MODELOS: {
     ],
   },
   {
-    id: 'trabalho',
-    label: 'Trabalho',
-    desc: 'Projetos, tarefas e reunião',
-    icon: 'terminal',
+    id: 'escola',
+    label: 'Clube escolar',
+    desc: 'Turma, projetos e atividades',
+    icon: 'folder',
     tint: '#5865f2',
-    description: 'Equipe de trabalho: andamento de projetos, tarefas abertas e reunião rápida.',
+    description: 'Clube da escola: avisos da turma, projetos e encontros.',
     channels: [
       { name: 'geral', kind: 'text' },
       { name: 'projetos', kind: 'text' },
-      { name: 'tarefas', kind: 'text' },
-      { name: 'reuniao', kind: 'voice' },
+      { name: 'encontros', kind: 'voice' },
     ],
   },
 ]

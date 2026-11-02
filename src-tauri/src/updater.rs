@@ -157,22 +157,29 @@ struct GhRelease {
     assets: Vec<GhAsset>,
 }
 
-/// Compara duas versões do projeto (`1.1.9`, `v1.1.10-pre-alpha`, `2.0`).
+/// Compara duas versões do projeto (`1.1.9`, `v1.1.10-pre-alpha`, `1.2.1-alpha`).
 ///
 /// ESPELHA `src/services/updateRules.ts` (que decide se mostra o overlay). As
 /// duas pontas PRECISAM concordar: o Rust escolhe QUAL release é a mais nova e
 /// o frontend decide se ela é mais nova que a atual. Se divergirem, o app baixa
 /// um instalador e depois diz "sem atualização" (ou pior: fica em loop).
 ///
-/// Regras: componentes numéricos comparados como NÚMERO (`1.1.10 > 1.1.9`),
-/// sufixo de pré-release é IGNORADO na comparação de base — o projeto publica
-/// sempre `-pre-alpha`, então tratá-lo como "menor" travaria toda atualização.
+/// Regras:
+/// 1. Componentes numéricos comparados como NÚMERO (`1.1.10 > 1.1.9`).
+/// 2. O sufixo só é comparado quando OS DOIS têm sufixo. Comparar sufixo contra
+///    ausência quebrava: a tag é limpa (`v1.1.23`) e o app reporta
+///    `1.1.23-pre-alpha` — quem já atualizou baixava o mesmo instalador sempre.
+/// 3. Com os dois sufixados: `pre-alpha < alpha < beta < rc` e, dentro do mesmo
+///    rótulo, o número decide (`alpha.2 < alpha.10`).
 fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    fn parse(raw: &str) -> Vec<u64> {
+
+    fn parse(raw: &str) -> (Vec<u64>, Vec<String>) {
         let s = raw.trim().trim_start_matches(['v', 'V']);
-        let core = s.split('-').next().unwrap_or("");
-        let mut out: Vec<u64> = core
+        let mut parts = s.splitn(2, '-');
+        let core = parts.next().unwrap_or("");
+        let pre = parts.next().unwrap_or("").to_ascii_lowercase();
+        let mut nums: Vec<u64> = core
             .split('.')
             .map(|p| {
                 // `10a` -> 10 (build do Tauri às vezes anexa letra no patch).
@@ -184,18 +191,65 @@ fn compare_version_strings(a: &str, b: &str) -> std::cmp::Ordering {
                 digits.parse::<u64>().unwrap_or(0)
             })
             .collect();
-        if out.is_empty() {
-            out.push(0);
+        if nums.is_empty() {
+            nums.push(0);
         }
-        out
+        let tokens = pre
+            .split(['-', '.'])
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect();
+        (nums, tokens)
     }
-    let pa = parse(a);
-    let pb = parse(b);
+
+    fn rank(tokens: &[String]) -> u8 {
+        for t in tokens {
+            match t.as_str() {
+                "pre" => return 0,
+                "alpha" | "a" => return 1,
+                "beta" | "b" => return 2,
+                "rc" | "preview" => return 3,
+                _ => {}
+            }
+        }
+        2
+    }
+
+    let (pa, ta) = parse(a);
+    let (pb, tb) = parse(b);
     let len = pa.len().max(pb.len());
     for i in 0..len {
         let na = pa.get(i).copied().unwrap_or(0);
         let nb = pb.get(i).copied().unwrap_or(0);
         match na.cmp(&nb) {
+            Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    // Mesmo núcleo: sem sufixo em um dos lados = mesma versão (ver regra 2).
+    if ta.is_empty() || tb.is_empty() {
+        return Ordering::Equal;
+    }
+    if ta == tb {
+        return Ordering::Equal;
+    }
+    match rank(&ta).cmp(&rank(&tb)) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    let nums = |t: &[String]| -> Vec<u64> {
+        t.iter()
+            .filter(|x| x.chars().all(|c| c.is_ascii_digit()))
+            .filter_map(|x| x.parse::<u64>().ok())
+            .collect()
+    };
+    let na = nums(&ta);
+    let nb = nums(&tb);
+    let n = na.len().max(nb.len());
+    for i in 0..n {
+        let x = na.get(i).copied().unwrap_or(0);
+        let y = nb.get(i).copied().unwrap_or(0);
+        match x.cmp(&y) {
             Ordering::Equal => continue,
             other => return other,
         }
@@ -813,6 +867,44 @@ mod tests {
         assert_eq!(
             compare_version_strings("1.1.10a", "1.1.10"),
             Ordering::Equal
+        );
+    }
+
+    /// Ordem dos sufíxos, espelhando `tests/updater.test.ts`: quem está em
+    /// `pre-alpha` recebe o `alpha` da mesma base, e assim por diante.
+    #[test]
+    fn sufixos_tem_ordem_e_base_nova_sempre_ganha() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_version_strings("1.2.1-alpha", "1.2.1-pre-alpha"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_version_strings("1.2.1-beta", "1.2.1-alpha"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_version_strings("1.2.1-rc", "1.2.1-beta"),
+            Ordering::Greater
+        );
+        // Nunca "atualiza para trás".
+        assert_eq!(
+            compare_version_strings("1.2.1-pre-alpha", "1.2.1-alpha"),
+            Ordering::Less
+        );
+        // Base nova vence o sufixo da base antiga.
+        assert_eq!(
+            compare_version_strings("1.2.1-pre-alpha", "1.2.0"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_version_strings("1.10.0-pre-alpha", "1.2.0-pre-alpha"),
+            Ordering::Greater
+        );
+        // Número no sufixo é comparado como número.
+        assert_eq!(
+            compare_version_strings("1.2.1-alpha.10", "1.2.1-alpha.2"),
+            Ordering::Greater
         );
     }
 
