@@ -46,7 +46,7 @@ import { QuitDialog } from '../components/QuitDialog'
 import { resolveSessionStart } from '../services/appUptime'
 import { copyText } from '../shared/clipboard'
 import { pastedImages } from '../shared/clipboardImage'
-import { mergeChannels } from '../app/channels'
+import { mergeChannels, isCallableChannel } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
 import { startDownload } from '../services/downloadAction'
@@ -924,6 +924,14 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch { /* sem dados */ }
   }
   useEffect(() => { refreshExtras(selCommunity) }, [selCommunity, communities.length])
+  // SERVIDOR ABERTO: pareia agora e pede o estado (canais/cargos/tags).
+  // Sem isto o primeiro contato esperava o tique de 45 s e a tag criada em
+  // outro aparelho só aparecia quando algo disparava um refresh.
+  useEffect(() => {
+    if (!selCommunity) return
+    try { void services.communityPairNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
+    try { void services.communitySyncNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
+  }, [selCommunity])
   useEffect(() => { if (phase === 'app') { refreshFriends(); refreshCommunities() } }, [phase])
 
   // CallManager bind + timers; runtime de bots e avisos de chamada.
@@ -2388,9 +2396,9 @@ export default function ThemeShell({ designId }: {designId:string}){
                               <div key={ch.id} className={'chan-row-wrap' + (selConv === ch.id ? ' active' : '') + (voiceChannel?.channelId===ch.id ? ' voice-active' : '')}>
                                 <button
                                   onClick={async () => {
-                                    if (ch.kind === 'voice') {
+                                    if (isCallableChannel(ch.kind)) {
                                       if (callActionBusy) return
-                                      // Canal de voz: 'none' → detalhado; senão joinVoice.
+                                      // Canal de voz/vídeo: 'none' → detalhado; senão joinVoice.
                                       if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
                                       setCallActionBusy(true)
                                       if (voiceChannel?.channelId === ch.id) {
@@ -2416,13 +2424,13 @@ export default function ThemeShell({ designId }: {designId:string}){
                                   className={'chan-row' + (selConv === ch.id ? ' active' : '')}
                                 >
                                   <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}>
-                                    <Icon d={ch.kind === 'voice' ? Icons.speaker : Icons.hash} size={16} />
+                                    <Icon d={ch.kind === 'voice' ? Icons.speaker : ch.kind === 'video' ? Icons.video : Icons.hash} size={16} />
                                   </span>
                                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{ch.name}</span>
                                   {ch.topic && <span style={{ fontSize: 10, color: muted, maxWidth: 60, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.topic}</span>}
                                 </button>
-                                {/* Quem está no canal de voz — sempre visível, como no Discord. */}
-                                {ch.kind === 'voice' && (
+                                {/* Quem está no canal de voz/vídeo — sempre visível, como no Discord. */}
+                                {isCallableChannel(ch.kind) && (
                                   <ChannelVoicePeers
                                     communityId={selCommunity!}
                                     channelId={ch.id}
@@ -2440,7 +2448,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                                   ><Icon d={Icons.settings} size={11} /></button>
                                 )}
                                 {/* Threads aninhadas sob o canal-pai; só no canal ABERTO (evita N consultas). */}
-                                {ch.kind !== 'voice' && selConv === ch.id && (
+                                {!isCallableChannel(ch.kind) && selConv === ch.id && (
                                   <ThreadList
                                     communityId={selCommunity!}
                                     parentChannel={ch.id}

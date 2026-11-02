@@ -124,3 +124,15 @@ export function channelsOfKind(
 ): ChannelMeta[] {
   return channels.filter((c) => (c.kind || 'text') === kind)
 }
+
+/**
+ * Canal que ENTRA EM CHAMADA ao clicar (`voice` e `video`).
+ *
+ * O canal de vídeo sempre foi só mais um tipo de texto na UI: clicar abria o
+ * histórico e não acontecia nada. Ele é uma chamada igual à de voz — câmera é
+ * opcional e ligada no botão da própria chamada, então os dois entram pelo
+ * mesmo caminho (`joinVoice`) e mostram o mesmo roster.
+ */
+export function isCallableChannel(kind: ChannelMeta['kind'] | string | undefined): boolean {
+  return kind === 'voice' || kind === 'video'
+}

@@ -32,9 +32,10 @@ export interface VoicePeerRow {
  * barra de voz usa, então quem aparece aqui é quem realmente está conectado.
  * O poll é de 15 s + evento, para não martelar o SQLite numa lista de canais.
  */
-export function useChannelVoicePeers(communityId: string, channelId: string): VoicePeerRow[] {
+export function useChannelVoicePeers(communityId: string, channelId: string, enabled = true): VoicePeerRow[] {
   const [rows, setRows] = useState<VoicePeerRow[]>([])
   useEffect(() => {
+    if (!enabled) { setRows((cur) => (cur.length === 0 ? cur : [])); return }
     let alive = true
     const load = () => {
       services
@@ -70,7 +71,7 @@ export function useChannelVoicePeers(communityId: string, channelId: string): Vo
       }
     })
     return () => { alive = false; window.clearInterval(t); un() }
-  }, [communityId, channelId])
+  }, [communityId, channelId, enabled])
   return rows
 }
 

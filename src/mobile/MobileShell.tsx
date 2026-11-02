@@ -23,6 +23,9 @@ import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { pastedImages } from '../shared/clipboardImage'
 import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
+import MobileServerPanel from './MobileServerPanel'
+import MobileCallChannel from './MobileCallChannel'
+import { isCallableChannel } from '../app/channels'
 import {
   InvitePanel,
   JoinServerForm,
@@ -56,7 +59,7 @@ import {
 } from '../services/notifications'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
-import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage, MemberPairing } from '../services/models'
+import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage, MemberPairing, ChannelMeta } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 
 // DisTorrent mobile — top design mobile-first (não clone do PC antigo)
@@ -634,6 +637,8 @@ export default function MobileShell() {
   const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [isMuted, setIsMuted] = useState(false)
+  /** Surdo/ensurdecido da chamada (mesma fonte do desktop: estado real do manager). */
+  const [isDeafened, setIsDeafened] = useState(false)
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
   const [showCallDiag, setShowCallDiag] = useState(false)
@@ -649,6 +654,13 @@ export default function MobileShell() {
   const [inviteInput, setInviteInput] = useState('')
   /** Pareamento REAL dos membros do servidor selecionado. */
   const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
+  /**
+   * Canais COMPLETOS (tipo, categoria, tópico) do servidor aberto.
+   * `communities[].channels` é só (id, nome): sem esta lista o celular não
+   * sabia distinguir voz de texto nem mostrar categoria — e canal/tag criado
+   * no PC ficava invisível até reabrir o app.
+   */
+  const [channelListCache, setChannelListCache] = useState<ChannelMeta[]>([])
   const [showServerDetails, setShowServerDetails] = useState(false)
   const endRef = useRef<HTMLDivElement | null>(null)
 
@@ -687,7 +699,7 @@ export default function MobileShell() {
   // Pareamento do servidor aberto (evidência real: direto/relay/offline).
   useEffect(() => {
     setMemberPairing([])
-    if (!selCommunity) return
+    if (!selCommunity) { setChannelListCache([]); return }
     let alive = true
     const load = () => {
       services
@@ -697,11 +709,42 @@ export default function MobileShell() {
         })
         .catch(() => { /* motor subindo */ })
     }
+    const loadChannels = () => {
+      services
+        .channelList(selCommunity)
+        .then((list) => { if (alive) setChannelListCache(Array.isArray(list) ? list : []) })
+        .catch(() => { /* sem motor: mantém a última lista boa */ })
+    }
+    // PAREA AGORA e pede o estado: sem isto o servidor recém-aberto só
+    // conectava no tique de até 45 s e a tag/canal criado no PC demorava.
+    try { void services.communityPairNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
+    try { void services.communitySyncNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
     load()
+    loadChannels()
+    // O sync chega como EVENTO (`community_joined`), então a lista precisa
+    // recarregar na hora — `communities.length` não muda e o efeito não roda.
+    const off = services.subscribe((ev) => {
+      if (ev.type === 'community_joined' || ev.type === 'channel_created' || ev.type === 'channel_deleted') {
+        loadChannels()
+      }
+    })
+    // Voltar do segundo plano não pode deixar a lista velha: a WebView do
+    // celular congela e os eventos do intervalo se perdem.
+    const onVisible = () => {
+      if (document.hidden) return
+      load()
+      loadChannels()
+      try { void services.communitySyncNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
     const t = window.setInterval(load, 5000)
     return () => {
       alive = false
       window.clearInterval(t)
+      off()
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
     }
   }, [selCommunity, communities.length])
 
@@ -710,7 +753,11 @@ export default function MobileShell() {
     setCallIdentity(identity ? { fingerprint: identity.fingerprint, nickname: identity.nickname } : null)
   }, [identity])
   useEffect(() => {
-    callManager.bind(setActiveCall)
+    callManager.bind((s: any) => {
+      setActiveCall(s)
+      // Mudo/surdo reais vêm do manager: o botão da chamada não pode mentir.
+      if (s) { setIsMuted(!!s.muted); setIsDeafened(!!s.deafened) }
+    })
     let stopBots: (() => void) | undefined
     try { stopBots = botRuntime.start() } catch { /* runtime é best-effort */ }
     try { downloadManager.load() } catch { /* fila segue vazia */ }
@@ -1118,6 +1165,39 @@ export default function MobileShell() {
       await callManager.enterRoom(c.id, room.kind)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }, [activeCall])
+  /**
+   * Entrar/sair de um canal de VOZ ou VÍDEO pelo celular — mesmo caminho do
+   * desktop (`joinVoice`/`leaveVoice`). Câmera é opcional e mora na barra da
+   * chamada: o canal `video` não abre nada diferente, só deixa o botão à mão.
+   */
+  const enterCallChannel = useCallback(async (communityId: string, channelId: string) => {
+    if (callActionBusy) return
+    const support = getCallsSupport()
+    if (support === 'none') { setError(getCallsUnavailableMessage()); return }
+    setCallActionBusy(true)
+    try {
+      await callManager.joinVoice(communityId, channelId)
+      setSelCommunity(communityId)
+      setSelConv(channelId)
+      setSelPeerFp(null)
+      setShowServerDetails(false)
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+    } finally {
+      setCallActionBusy(false)
+    }
+  }, [callActionBusy])
+  /** Sair da chamada do canal aberto (mesmo `leaveVoice` do desktop). */
+  const leaveCallChannel = useCallback(async () => {
+    const st: any = activeCall
+    const canal = typeof st?.convId === 'string' ? st.convId : ''
+    if (!st || !String(st.callId ?? '').startsWith('voice-') || !selCommunity || !canal) return
+    try {
+      await callManager.leaveVoice(selCommunity, canal)
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+    }
+  }, [activeCall, selCommunity])
   // Lixeira: em grupo abre o diálogo (sair / dono escolhe apagar); DM apaga.
   const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
   /** Fechar o app (segundo plano × encerrar) — não é logout. */
@@ -1445,6 +1525,37 @@ export default function MobileShell() {
   // Nós de mensagem memoizados: parse/lookup 1x por mensagem; social em lote.
   // canal de servidor? (definido aqui porque `messageNodes` já precisa dele)
   const isChannel = !!selCommunity
+  /** Canal em que EU estou na chamada agora (barra de voz do celular). */
+  const inCallChannelId = useMemo(() => {
+    const st: any = activeCall
+    if (!st || !String(st.callId ?? '').startsWith('voice-')) return null
+    // `joinVoice` grava o id do CANAL em `convId`; cortar o `callId` por '-'
+    // não serve (ids de servidor/canal já têm hífen).
+    return typeof st.convId === 'string' && st.convId ? st.convId : null
+  }, [activeCall])
+  /**
+   * Canal de VOZ/VÍDEO aberto: a tela certa é a chamada, não o histórico de
+   * texto. Antes o toque em "voz" caía no compositor de mensagens do canal.
+   */
+  const selCallChannel = useMemo(() => {
+    if (!isChannel || !selConv) return null
+    const meta = channelListCache.find((c) => c.id === selConv)
+    if (meta) return isCallableChannel(meta.kind) ? meta : null
+    // Cache ainda vazio (app abriu direto numa chamada): se a chamada ATIVA é
+    // deste canal, a tela certa continua sendo a chamada — nunca o compositor.
+    const st: any = activeCall
+    if (st && String(st.callId ?? '').startsWith('voice-') && st.convId === selConv) {
+      return {
+        id: selConv,
+        name: activeComm?.channels.find(([id]) => id === selConv)?.[1] ?? selConvObj?.title ?? 'canal',
+        topic: '',
+        category: '',
+        position: 0,
+        kind: 'voice',
+      } as ChannelMeta
+    }
+    return null
+  }, [isChannel, selConv, channelListCache, activeCall, activeComm, selConvObj])
   /** A conversa aberta é um grupo de DM? (afeta cabeçalho e painel de membros) */
   const isGroupConv = selConvObj?.kind === 'group'
   /** Sala de chamada viva nesta conversa (botão Entrar do cabeçalho). */
@@ -2021,6 +2132,41 @@ export default function MobileShell() {
 
   // ---- conversa em tela cheia (lista FLAT, igual desktop) ----
   if (selConv) {
+    // CANAL DE VOZ/VÍDEO: a tela é a CHAMADA, não o histórico de texto.
+    // Antes o toque caía no compositor e não havia como entrar pelo celular.
+    if (selCallChannel) {
+      const st: any = activeCall
+      const dentro = !!inCallChannelId && inCallChannelId === selCallChannel.id
+      const ligando = dentro && (st?.phase === 'connecting' || st?.phase === 'outgoing' || st?.phase === 'reconnecting')
+      const participantes = ((st?.participants ?? []) as any[]).map((p) => ({
+        fp: String(p?.fp ?? ''),
+        nickname: typeof p?.nickname === 'string' ? p.nickname : undefined,
+        muted: !!p?.muted,
+        deafened: !!p?.deafened,
+      }))
+      return (
+        <MobileCallChannel
+          channelName={selCallChannel.name}
+          kind={selCallChannel.kind === 'video' ? 'video' : 'voice'}
+          communityName={activeComm?.name}
+          inCall={dentro}
+          connecting={!!ligando}
+          seconds={dentro ? callDuration : 0}
+          participants={dentro ? participantes : []}
+          myFp={identity?.fingerprint ?? ''}
+          muted={isMuted}
+          deafened={isDeafened}
+          cameraOn={!!st?.cameraOn}
+          error={error}
+          onBack={() => { setSelConv(null); setSelPeerFp(null) }}
+          onJoin={() => { if (!selCommunity || !selCallChannel) return; void enterCallChannel(selCommunity, selCallChannel.id) }}
+          onLeave={() => { void leaveCallChannel() }}
+          onToggleMute={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}
+          onToggleDeafen={() => { const nd = !isDeafened; setIsDeafened(nd); if (nd) setIsMuted(true); callManager.toggleDeafen() }}
+          onToggleCamera={() => { void callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e))) }}
+        />
+      )
+    }
     const channelName = activeComm?.channels.find(([id]) => id === selConv)?.[1] ?? selConvObj?.title ?? peerTitle
     return (
       <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden' }}>
@@ -2676,21 +2822,24 @@ export default function MobileShell() {
                       <Icon d={Icons.chevronRight} size={16} />
                     </button>
                     <div className="m-sec">CANAIS</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      {c.channels.map(([id, name]) => (
-                        <button key={id} className={'chan-row' + (selConv === id ? ' active' : '')} onClick={() => setSelConv(id)}>
-                          <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
-                        </button>
-                      ))}
-                    </div>
+                    {/* Lista REAL por categoria, com voz/vídeo entrando na
+                        chamada e quem está falando agora. */}
+                    <MobileServerPanel
+                      community={c}
+                      myFp={identity?.fingerprint ?? ''}
+                      selectedChannelId={selConv}
+                      inCallChannelId={inCallChannelId}
+                      onOpenText={(channelId) => { setSelCommunity(c.id); setSelConv(channelId); setSelPeerFp(null) }}
+                      onJoinCall={(channelId) => void enterCallChannel(c.id, channelId)}
+                      onLeaveCall={() => { void leaveCallChannel() }}
+                      onError={(msg) => setError(msg)}
+                    />
                   </>
                 )
               })()}
 
-              {/* SERVIDOR: abre em JANELA (sheet) com canais, membros e convite.
-                  Antes os canais eram despejados na lista — precisava abrir
-                  "detalhes" para achar qualquer coisa. */}
+              {/* JANELA do servidor: membros pareados + convite. Os canais
+                  vivem na lista acima (com tipo, categoria e voz ao vivo). */}
               {activeComm && showServerDetails && (
                 <div
                   onClick={() => setShowServerDetails(false)}
@@ -2709,20 +2858,6 @@ export default function MobileShell() {
                         <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>{activeComm.channels.length} canais · {activeComm.members.length} membros</div>
                       </div>
                       <button onClick={() => setShowServerDetails(false)} aria-label="Fechar" style={{ background: 'transparent', border: 'none', color: t.muted, display: 'flex', padding: 4, cursor: 'pointer' }}><Icon d={Icons.x} size={18} /></button>
-                    </div>
-
-                    <div className="m-sec" style={{ marginTop: 0 }}>CANAIS</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      {activeComm.channels.map(([id, name]) => (
-                        <button
-                          key={id}
-                          className={'chan-row' + (selConv === id ? ' active' : '')}
-                          onClick={() => { setSelConv(id); setShowServerDetails(false) }}
-                        >
-                          <span style={{ display: 'flex', flexShrink: 0, opacity: 0.7 }}><Icon d={Icons.hash} size={16} /></span>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, textAlign: 'left' }}>{name}</span>
-                        </button>
-                      ))}
                     </div>
 
                     <div className="m-sec">MEMBROS — pareamento</div>
