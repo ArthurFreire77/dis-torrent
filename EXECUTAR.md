@@ -2,6 +2,11 @@
 
 Guia direto para instalar dependências e rodar. Requisitos gerais: **Node 20+** e **Rust 1.77+**.
 
+> **Projeto educacional.** Serve para estudar rede P2P na prática (identidade
+> criptográfica, NAT traversal, DHT, cifra ponta a ponta). **Não use para fins
+> ilegais** — o autor não se responsabiliza pelo uso indevido. O app não oferece
+> anonimato: leia [`THREAT_MODEL.md`](THREAT_MODEL.md) antes de usar.
+
 ```bash
 npm install          # dependências do frontend
 cargo fetch          # (opcional, pré-baixa crates do motor)

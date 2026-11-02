@@ -1,5 +1,10 @@
 # Security Policy
 
+> **Propósito educacional.** O DisTorrent é um projeto de estudo de rede P2P e
+> não deve ser usado para fins ilegais; o autor não se responsabiliza pelo uso
+> indevido. Este documento descreve as garantias reais — não prometa anonimato
+> em nome do projeto (ver [`THREAT_MODEL.md`](THREAT_MODEL.md)).
+
 ## Reportando uma vulnerabilidade
 
 Abra uma issue marcada como `security` **ou** entre em contato pelo GitHub do projeto. Não reporte por PR público.

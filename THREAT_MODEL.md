@@ -1,5 +1,11 @@
 # THREAT MODEL — DisTorrent
 
+> **Escopo e propósito.** Este documento existe porque o DisTorrent é um
+> **projeto educacional** de rede P2P: o objetivo é mostrar, na prática, as
+> garantias e os limites de um sistema sem servidor. Ele **não deve ser usado
+> para fins ilegais** — o autor não se responsabiliza pelo uso indevido.
+> Nada aqui promete anonimato; leia as garantias abaixo como limites reais.
+
 ## Garantias EXATAS (nem mais, nem menos)
 
 - **PSEUDONIMIDADE** — sua identidade é um par de chaves. Nenhum e-mail, nenhum

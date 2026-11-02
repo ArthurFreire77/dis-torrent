@@ -6,6 +6,12 @@ Sem servidor central. Sem cadastro. Sem e-mail. Sem telefone. A identidade é um
 par de chaves ed25519 que vive no seu dispositivo — não existe conta para criar
 nem senha para esquecer.
 
+> **Projeto educacional.** O DisTorrent é um projeto de estudo sobre redes P2P:
+> serve para explicar, na prática, como funcionam identidade criptográfica,
+> NAT traversal, DHT, hole punching e cifra ponta a ponta. **Não deve ser usado
+> para fins ilegais.** O autor não se responsabiliza pelo uso indevido.
+> Ver [Propósito e uso responsável](#propósito-e-uso-responsável).
+
 ```
 ┌─ React 18 + TypeScript ──────────────────────────────────────┐
 │  UI desktop (ThemeShell) + mobile (MobileShell), markdown     │
@@ -281,6 +287,31 @@ O que **não** está resolvido, documentado em [`THREAT_MODEL.md`](THREAT_MODEL.
   verificável — o `.deb`/`.AppImage` não têm assinatura.
 
 Reporte vulnerabilidades: [`SECURITY.md`](SECURITY.md).
+
+---
+
+## Propósito e uso responsável
+
+O DisTorrent é um **projeto educacional**. Ele existe para tornar concreto o
+funcionamento de uma rede P2P: como uma identidade pode ser só um par de chaves,
+como dois computadores atrás de NAT se encontram, como um DHT descobre peers e
+como uma conversa pode ser cifrada sem servidor no meio.
+
+**O que ele não é:** não é uma ferramenta para burlar lei, distribuir conteúdo
+ilegal, assediar pessoas ou contornar controle parental/empresarial. O projeto
+também não promete anonimato — o [THREAT_MODEL.md](THREAT_MODEL.md) lista, sem
+maquiagem, o que vaza (o relay vê metadados de sessão, o IP aparece para o peer
+direto, e por aí vai).
+
+**Uso esperado:** aprender, ensinar, experimentar em laboratório, conversar com
+quem você conhece.
+
+**Responsabilidade:** o software é distribuído sob a licença MIT, *como está*,
+sem garantia. Quem instala e usa é o único responsável pelo que faz com ele e
+pelo conteúdo que transmite. O autor não se responsabiliza por uso indevido.
+
+Se você encontrou uma falha de segurança, o caminho é [`SECURITY.md`](SECURITY.md)
+— não abra issue pública com detalhes.
 
 ---
 

@@ -1,5 +1,10 @@
 # CONTRIBUTING
 
+> **Projeto educacional.** Contribuições são bem-vindas para estudar e ensinar
+> rede P2P. O projeto não deve ser usado para fins ilegais e o autor não se
+> responsabiliza pelo uso indevido. Não aceitamos mudanças cujo propósito seja
+> burlar lei, ocultar abuso ou prometer anonimato que o código não entrega.
+
 ## Regra de ouro: critério "REAL"
 
 Uma funcionalidade só está pronta quando **funciona de verdade** e tem teste. "A UI existe" não é pronto. "Está mockado" é dívida explícita no código, nunca padrão aceitável.
