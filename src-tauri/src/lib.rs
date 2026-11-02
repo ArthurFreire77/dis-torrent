@@ -4722,6 +4722,7 @@ fn main() {
             updater::update_flag_set,
             updater::update_cleanup,
             updater::open_release_page,
+            updater::open_external,
             identity_get,
             identity_create,
             identity_rename,

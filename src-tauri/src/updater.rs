@@ -497,6 +497,61 @@ pub fn open_release_page(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Entrega um endereço ao SISTEMA (navegador ou app registrado para o esquema).
+///
+/// POR QUE EXISTE: abrir `distorrent://...` como link DENTRO do WebView cria
+/// uma janela interna apontando para um esquema que o engine HTTP não resolve —
+/// a janela nasce com `ECONNREFUSED: Unable to connect` (relato de campo, com
+/// `http://tauri.localhost` na barra). Endereço de fora do app quem abre é o SO.
+///
+/// ALLOWLIST de esquemas de propósito: isto é uma porta para o shell, e aceitar
+/// `file:`/`javascript:`/qualquer string transformaria a UI (ou um XSS) em
+/// execução de comando. `distorrent:` é restrito ao próprio app.
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    let alvo = url.trim();
+    if alvo.is_empty() {
+        return Err("endereço vazio".into());
+    }
+    let minusculo = alvo.to_ascii_lowercase();
+    let permitido = minusculo.starts_with("https://")
+        || minusculo.starts_with("http://")
+        || minusculo.starts_with("distorrent://")
+        || minusculo.starts_with("mailto:");
+    if !permitido {
+        return Err("esquema de endereço não permitido".into());
+    }
+    // Esquema custom só faz sentido se o app estiver registrado; sem isso o
+    // sistema devolve erro e a UI mantém o endereço copiável.
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", alvo])
+            .spawn()
+            .map_err(|e| format!("abrir endereço: {e}"))?;
+    }
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(alvo)
+            .spawn()
+            .map_err(|e| format!("abrir endereço: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(alvo)
+            .spawn()
+            .map_err(|e| format!("abrir endereço: {e}"))?;
+    }
+    #[cfg(target_os = "android")]
+    {
+        // Sem plugin de intent aqui: recusar é mais honesto que fingir abertura.
+        return Err("no Android o convite entra pelo próprio app (sem navegador externo)".into());
+    }
+    Ok(())
+}
+
 /// Sinal de retorno quando o AppImage já foi trocado e reaberto: o front lê
 /// isto e encerra o app pelo caminho normal (não é erro de verdade).
 pub const REINICIAR_SINAL: &str = "ATUALIZADO_E_REINICIADO";

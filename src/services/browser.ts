@@ -1042,6 +1042,12 @@ export const browserServices: DisTorrentServices = {
     // No navegador a própria página pode abrir a aba (não há WebView a escapar).
     window.open(url, '_blank', 'noopener,noreferrer')
   },
+  // Sem shell nativo: o navegador já É quem abre endereços. Esquema custom
+  // (`distorrent://`) só abre se o app estiver instalado; se não abrir, a UI
+  // mantém o endereço copiável (nada de fingir sucesso).
+  openExternal: async (url: string) => {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  },
 
   privacyGet: () => {
     const stored = driver.get<string>('privacy_mode') ?? 'encrypted'

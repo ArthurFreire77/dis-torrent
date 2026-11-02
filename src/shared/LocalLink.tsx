@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { services } from '../services'
+import { isDeepLinkUrl } from './externalLinks'
 import { Ic } from './icons'
 import { Button, ui } from './ui'
 
@@ -106,9 +107,51 @@ export function LocalLink({
   const onLoopback = typeof window !== 'undefined' && isLoopbackHost(window.location.host)
   const lan = addrs?.lan ?? null
 
+  // DEEP LINK (`distorrent://...`): não tem host/porta para trocar por IP de
+  // LAN — quem sabe abrir é o app registrado no sistema, não um navegador.
+  // Num WebView, um `<a target="_blank">` com esse esquema abria uma janela
+  // interna e morria em `ECONNREFUSED: Unable to connect`.
+  const deepLink = isDeepLinkUrl(url)
   // Quando a página JÁ está sendo aberta pelo IP de LAN, o localhost não
   // interessa — o endereço certo é o que está na barra de endereços.
-  const lanUrl = lan ? `http://${lan}${route}` : null
+  const lanUrl = !deepLink && lan ? `http://${lan}${route}` : null
+
+  if (deepLink) {
+    return (
+      <div
+        style={{
+          background: ui.surface,
+          border: `1px solid ${ui.border}`,
+          borderRadius: ui.radius,
+          padding: 14,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <span style={{ color: ui.muted }}>
+            <Ic name="globe" size={15} />
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: ui.heading, letterSpacing: 0.4 }}>
+            {label.toUpperCase()}
+          </span>
+        </div>
+        {context && (
+          <div style={{ fontSize: 12, color: ui.muted, lineHeight: 1.5, marginBottom: 12 }}>
+            {context}
+          </div>
+        )}
+        <LinkRow href={url} onCopy={() => copy(url)} copied={copied === 'ok'} display={url} />
+        <div style={{ fontSize: 11, color: ui.muted, lineHeight: 1.5, marginTop: 8 }}>
+          Este endereço abre o DisTorrent instalado (não é página de site). Para outra pessoa,
+          mande o convite pelo próprio app.
+        </div>
+        {copied === 'fail' && (
+          <div role="status" style={{ fontSize: 11, color: '#ffb3b3', marginTop: 10 }}>
+            Não foi possível copiar automaticamente. Selecione o endereço acima e copie.
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div
@@ -197,6 +240,31 @@ function LinkRow({
   onCopy: () => void
   copied: boolean
 }) {
+  // DEEP LINK (`distorrent://`) não é endereço de navegador: `<a target="_blank">`
+  // dentro do WebView cria uma janela interna apontando para o esquema custom e
+  // ela morre com `ECONNREFUSED: Unable to connect` (era o que aparecia ao
+  // clicar no convite). Aqui o link continua selecionável/copiável e o botão
+  // "Abrir" entrega o endereço ao sistema operacional, que é quem sabe abrir
+  // o app registrado para o esquema.
+  const isDeepLink = isDeepLinkUrl(href)
+  const textStyle = {
+    flex: '1 1 180px',
+    minWidth: 0,
+    color: ui.link,
+    fontFamily: 'JetBrains Mono, monospace',
+    fontSize: 12,
+    textDecoration: 'underline',
+    wordBreak: 'break-all',
+    lineHeight: 1.5,
+  } as const
+  const abrir = () => {
+    if (isDeepLink) {
+      // Sem `window.open`: o WebView trataria como URL e falharia.
+      void services.openExternal(href).catch(() => { /* sem app registrado: copiar ainda funciona */ })
+      return
+    }
+    window.open(href, '_blank', 'noopener')
+  }
   return (
     <div
       style={{
@@ -210,29 +278,17 @@ function LinkRow({
         flexWrap: 'wrap',
       }}
     >
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer noopener"
-        style={{
-          flex: '1 1 180px',
-          minWidth: 0,
-          color: ui.link,
-          fontFamily: 'JetBrains Mono, monospace',
-          fontSize: 12,
-          textDecoration: 'underline',
-          wordBreak: 'break-all',
-          lineHeight: 1.5,
-        }}
-      >
-        {display}
-      </a>
-      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <a href={href} target="_blank" rel="noreferrer noopener" style={{ display: 'inline-flex' }}>
-          <Button icon="externalLink" onClick={() => window.open(href, '_blank', 'noopener')}>
-            Abrir
-          </Button>
+      {isDeepLink ? (
+        <span style={textStyle} title={href}>{display}</span>
+      ) : (
+        <a href={href} target="_blank" rel="noreferrer noopener" style={textStyle}>
+          {display}
         </a>
+      )}
+      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        <Button icon="externalLink" onClick={abrir}>
+          Abrir
+        </Button>
         <Button
           icon={copied ? 'check' : 'copy'}
           onClick={onCopy}

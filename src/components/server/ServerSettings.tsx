@@ -16,6 +16,7 @@ import { mergeChannels } from '../../app/channels'
 import { Ic, type IconName } from '../../shared/icons'
 import { Tooltip } from '../../shared/Tooltip'
 import { LocalLink } from '../../shared/LocalLink'
+import { isTauriRuntime } from '../../shared/runtime'
 import {
   Button,
   EmptyState,
@@ -662,7 +663,18 @@ function ConviteSection({
   }
 
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
-  const inviteUrl = token ? `${origin}/invite/${token}` : ''
+  // DENTRO DO APP (WebView) `origin` é `http://tauri.localhost` — o esquema
+  // interno do Tauri, que NÃO existe para nenhum navegador nem para outra
+  // máquina. Mostrar esse endereço como convite clicável criava exatamente o
+  // erro de campo: a janela nova abria em `tauri.localhost` e o engine
+  // respondia `ECONNREFUSED: Unable to connect`. O link de verdade no app é o
+  // deep link `distorrent://`, que é o mesmo que o wizard já gera.
+  const appRuntime = isTauriRuntime()
+  const inviteUrl = !token
+    ? ''
+    : appRuntime
+      ? `distorrent://invite?invite=${encodeURIComponent(token)}`
+      : `${origin}/invite/${token}`
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: ui.xl, maxWidth: 720 }}>

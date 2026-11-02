@@ -6,6 +6,7 @@ import { NotificationPrompt } from './components/NotificationPrompt'
 import { initAppState } from './services/appState'
 import { initNotifications } from './services/notifications'
 import { offerInvite, tokenFromInviteUrl } from './services/deepLink'
+import { installExternalLinkHandler } from './shared/installExternalLinks'
 
 // A largura decidia o shell só no primeiro render: quem abria no desktop e
 // reduzia a janela (ou girava um tablet) ficava com o layout de PC espremido
@@ -64,6 +65,12 @@ function AppRoutes(){
     initAppState()
     initNotifications()
   }, [])
+
+  // LINKS EXTERNOS: entrega ao sistema operacional em vez de abrir uma janela
+  // interna do WebView (que morria com `ECONNREFUSED` apontando para
+  // tauri.localhost). Vem antes dos convites: o interceptador vale para todo o
+  // app, inclusive os links de convite mostrados nos painéis.
+  React.useEffect(() => installExternalLinkHandler(), [])
 
   // Convites por DEEP LINK (desktop + Android).
   //

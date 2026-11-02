@@ -580,6 +580,12 @@ export interface DisTorrentServices {
   updateCleanup(): Promise<number>
   /** Abre a página da release no navegador (fallback honesto por plataforma). */
   openReleasePage(url: string): Promise<void>
+  /**
+   * Entrega um endereço ao SISTEMA OPERACIONAL (navegador ou app registrado).
+   * Usado por `distorrent://`, que não é URL abrível dentro do WebView: abrir
+   * como janela interna dava `ECONNREFUSED: Unable to connect`.
+   */
+  openExternal(url: string): Promise<void>
   relayStatus(): Promise<RelayLegStatus[]>
   connectAddr(addr: string, expectedFp?: string | null): Promise<void>
   disconnectPeer(fp: string): Promise<void>

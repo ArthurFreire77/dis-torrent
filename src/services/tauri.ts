@@ -77,6 +77,7 @@ export const tauriServices: DisTorrentServices = {
   updateFlagSet: (key, value) => invoke<void>('update_flag_set', { key, value }),
   updateCleanup: () => invoke<number>('update_cleanup'),
   openReleasePage: (url) => invoke<void>('open_release_page', { url }),
+  openExternal: (url) => invoke<void>('open_external', { url }),
 
   relayStatus: () => invoke<RelayLegStatus[]>('relay_status'),
 
