@@ -1220,6 +1220,11 @@ export const browserServices: DisTorrentServices = {
       const ev: any = { type: 'call_incoming', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', kind, target_fp: targetFp }
       // emit() já faz listeners + bc.postMessage + window — sem post duplo
       emit(ev)
+      // No navegador a entrega é local e síncrona: a confirmação de toque é
+      // imediata (mesmo contrato do motor, que responde CallRinging).
+      setTimeout(() => {
+        try { emit({ type: 'call_ringing', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
+      }, 0)
     } catch { /* silent */ }
     return Promise.resolve(callId)
   },

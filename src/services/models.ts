@@ -193,6 +193,8 @@ export type EngineEvent =
   | { type: 'bot_created'; community_id: string; bot_id: string }
   | { type: 'call_incoming'; call_id: string; from_fp: string; kind: string }
   | { type: 'call_accepted'; call_id: string; from_fp: string }
+  /** O outro lado RECEBEU o convite e está tocando (confirmação do invite). */
+  | { type: 'call_ringing'; call_id: string; from_fp: string }
   | { type: 'call_rejected'; call_id: string; from_fp: string; reason: string }
   | { type: 'call_ended'; call_id: string; from_fp: string }
   | { type: 'call_offer'; call_id: string; from_fp: string; sdp: string }

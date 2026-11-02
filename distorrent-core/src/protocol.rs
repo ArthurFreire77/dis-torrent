@@ -287,6 +287,15 @@ pub enum SecureFrame {
     CallAccept {
         call_id: String,
     },
+    /// Confirmação de que o convite CHEGOU e o aparelho está tocando.
+    ///
+    /// Sem isto o chamador só sabia "enviei o invite": se o frame se perdia ou o
+    /// outro lado estava offline, a tela dizia "Chamando…" mentindo — parecia
+    /// que estava tocando do outro lado quando nada tinha chegado. Com o ring
+    /// confirmado, o texto passa a ser honesto nos dois sentidos.
+    CallRinging {
+        call_id: String,
+    },
     CallReject {
         call_id: String,
         reason: String,

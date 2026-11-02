@@ -196,6 +196,11 @@ pub enum EngineEvent {
         call_id: String,
         from_fp: String,
     },
+    /// O outro lado recebeu o convite e está tocando (`CallRinging`).
+    CallRingingEv {
+        call_id: String,
+        from_fp: String,
+    },
     CallRejected {
         call_id: String,
         from_fp: String,
@@ -480,6 +485,7 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         // 0 — realtime: chamada, voz, liveness
         CallInvite { .. }
         | CallAccept { .. }
+        | CallRinging { .. }
         | CallReject { .. }
         | CallEnd { .. }
         | CallOffer { .. }
@@ -12464,11 +12470,37 @@ async fn handle_frame(
             // trava, o ring reiniciava a cada reenvio e o aviso piscava.
             if engine.ring_is_new(&call_id, peer_fp) {
                 let _ = engine.events.send(EngineEvent::CallIncoming {
-                    call_id,
+                    call_id: call_id.clone(),
                     from_fp: peer_fp.into(),
                     kind,
                 });
             }
+            // CONFIRMAÇÃO DE TOQUE: responde que o convite chegou e o aparelho
+            // está tocando AGORA. Idempotente (o chamador só usa como "chegou"),
+            // então o reenvio do invite não gera problema. Sem isto o chamador
+            // ficava em "Chamando…" mesmo quando nada chegou do outro lado.
+            engine.queue_or_send_call_frame(
+                peer_fp,
+                SecureFrame::CallRinging {
+                    call_id: call_id.clone(),
+                },
+            );
+        }
+        SecureFrame::CallRinging { call_id } => {
+            // GATE: só vale para chamada que EU criei — peer qualquer não pode
+            // fingir que atendeu/tocou uma chamada de terceiros.
+            if engine.store.get_call_host(&call_id)?.as_deref()
+                != Some(engine.identity.fingerprint.as_str())
+            {
+                return Err(DistorrentError::Protocol(
+                    "CallRinging para chamada não iniciada por mim".into(),
+                ));
+            }
+            engine.store.join_call(&call_id, peer_fp)?;
+            let _ = engine.events.send(EngineEvent::CallRingingEv {
+                call_id,
+                from_fp: peer_fp.into(),
+            });
         }
         SecureFrame::CallAccept { call_id } => {
             // GATE: aceite só vale para chamada que EU criei (sou o host dela) —

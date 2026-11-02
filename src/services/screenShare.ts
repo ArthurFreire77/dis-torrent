@@ -4,7 +4,7 @@ export { isAndroidRuntime, isIOSRuntime }
 
 export type ScreenSourceKind = 'screen' | 'window' | 'monitor'
 export type ScreenAudioMode = 'none' | 'system' | 'mic' | 'system+mic'
-export type ScreenQualityKey = 'auto' | '480p' | '720p' | '1080p'
+export type ScreenQualityKey = 'auto' | '480p' | '720p' | '1080p' | '1440p' | '4K'
 export type ScreenFpsKey = 'auto' | '30' | '60' | '120'
 
 export interface ScreenQualityStep {
@@ -21,6 +21,12 @@ export const SCREEN_QUALITY_STEPS: ScreenQualityStep[] = [
   { key: '480p', width: 854, height: 480, maxBitrateKbps: 1500, minBitrateKbps: 300, scaleDown: 4, label: '480p' },
   { key: '720p', width: 1280, height: 720, maxBitrateKbps: 3000, minBitrateKbps: 600, scaleDown: 2, label: '720p' },
   { key: '1080p', width: 1920, height: 1080, maxBitrateKbps: 6000, minBitrateKbps: 1200, scaleDown: 1, label: '1080p' },
+  // 1440p/4K: tela é TEXTO. 1080p num monitor grande vira borrão ilegível — o
+  // teto de 6 Mbps não sustentava nem o 1080p em movimento. Bitrate alto de
+  // propósito: a captura sai em resolução nativa e o `maintain-resolution`
+  // preserva o detalhe em vez de derrubar para 720p no primeiro aperto.
+  { key: '1440p', width: 2560, height: 1440, maxBitrateKbps: 12000, minBitrateKbps: 2000, scaleDown: 1, label: '1440p' },
+  { key: '4K', width: 3840, height: 2160, maxBitrateKbps: 20000, minBitrateKbps: 3000, scaleDown: 1, label: '4K' },
 ]
 
 export const SCREEN_MIN_OPERATIONAL = '480p'

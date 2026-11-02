@@ -52,7 +52,8 @@ import { startDownload } from '../services/downloadAction'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
-import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
+import CallSettingsPanel from '../components/calls/CallSettingsPanel'
 import { fileSwarm, encodeFileBody, parseFileBody } from '../services/fileSwarm'
 import { isMediaName } from '../services/fileRules'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
@@ -812,6 +813,9 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [isDeafened, setIsDeafened] = useState(false)
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
+  /** Engrenagem da chamada aberta? (microfone/câmera/resolução/FPS) */
+  const [showCallSettings, setShowCallSettings] = useState(false)
+  const [callMediaPrefsState, setCallMediaPrefsState] = useState(() => getCallMediaPrefs())
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   /** Painel de diagnóstico da chamada (tempo real) dentro do overlay. */
@@ -3383,12 +3387,21 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <span style={{ display: 'block', fontWeight: 800, color: t.heading, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{conversations.find(c=>c.id===activeCall.convId)?.title ?? peerTitle ?? 'Chamada'}</span>
                 {/* v6: fase da chamada (chamando/conectando/reconectando…) com elapsed */}
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
-                  <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} />
+                  <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} ringing={activeCall.ringing} />
                 {/* Cronômetro separado do título (grudado, sumia no badge). */}
                   <span style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{fmtDuration(callDuration)}</span>
                 </span>
               </span>
               <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }} aria-label="Tamanho do painel da chamada">
+                <button
+                  type="button"
+                  data-testid="call-settings"
+                  aria-label="Ajustes da chamada (microfone, câmera, resolução, FPS)"
+                  title="Ajustes: microfone, câmera, resolução e FPS"
+                  aria-expanded={showCallSettings}
+                  onClick={() => setShowCallSettings((v) => !v)}
+                  style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${showCallSettings ? t.accent : borderColor}`, background: inputBg, color: showCallSettings ? t.accent : text, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                ><Icon d={Icons.settings} size={15} /></button>
                 <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'compact' ? muted : text, opacity: callPanelSize === 'compact' ? 0.5 : 1, cursor: callPanelSize === 'compact' ? 'default' : 'pointer' }}>↑</button>
                 <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'expanded' ? muted : text, opacity: callPanelSize === 'expanded' ? 0.5 : 1, cursor: callPanelSize === 'expanded' ? 'default' : 'pointer' }}>↓</button>
               </span>
@@ -3432,6 +3445,19 @@ export default function ThemeShell({ designId }: {designId:string}){
             <div style={{ background: '#232428', borderBottom: `1px solid ${borderColor}`, padding: '6px 16px', fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }} role="status">
               {qualityError ?? (activeCall.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}
             </div>
+          )}
+          {/* AJUSTES AO VIVO: microfone, câmera, resolução e FPS sem sair da chamada. */}
+          {showCallSettings && (
+            <CallSettingsPanel
+              prefs={callMediaPrefsState}
+              onApply={async (patch) => {
+                const aplicado = await callManager.applyMediaPrefs(patch)
+                setCallMediaPrefsState(aplicado)
+                return aplicado
+              }}
+              onClose={() => setShowCallSettings(false)}
+              onError={(m) => setError(m)}
+            />
           )}
           {/* Quadrados da chamada: PESSOA e TELA; colunas contam TILES, e a
               tela cheia é um overlay (`ScreenStage`) acima de tudo. */}

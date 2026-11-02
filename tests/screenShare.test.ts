@@ -49,7 +49,7 @@ test('qualidade: piso operacional é 480p e os degraus sobem em ordem', () => {
   assert.equal(SCREEN_QUALITY_STEPS[0].key, '480p')
   assert.equal(SCREEN_QUALITY_STEPS[0].height, 480)
   const keys = SCREEN_QUALITY_STEPS.map(s => s.key)
-  assert.deepEqual(keys, ['480p', '720p', '1080p'])
+  assert.deepEqual(keys, ['480p', '720p', '1080p', '1440p', '4K'])
   for (let i = 1; i < SCREEN_QUALITY_STEPS.length; i++) {
     const prev = SCREEN_QUALITY_STEPS[i - 1]
     const cur = SCREEN_QUALITY_STEPS[i]
@@ -65,7 +65,10 @@ test('degrau de qualidade: sobe e desce sem passar da ponta', () => {
   assert.equal(lowerScreenQuality('480p'), '480p')
   assert.equal(lowerScreenQuality('auto'), '720p')
   assert.equal(raiseScreenQuality('480p'), '720p')
-  assert.equal(raiseScreenQuality('1080p'), '1080p')
+  // Teto subiu para 4K: 1080p ainda pode subir (texto nítido em monitor grande).
+  assert.equal(raiseScreenQuality('1080p'), '1440p')
+  assert.equal(raiseScreenQuality('1440p'), '4K')
+  assert.equal(raiseScreenQuality('4K'), '4K')
   assert.equal(raiseScreenQuality('auto'), 'auto')
 })
 

@@ -534,6 +534,7 @@ const NATIVE_EV_ALIASES: Record<string, EngineEvent['type']> = {
   file_chunk_request_ev: 'file_chunk_request',
   file_chunk_data_ev: 'file_chunk_data',
   call_accepted_ev: 'call_accepted',
+  call_ringing_ev: 'call_ringing',
   call_offer_ev: 'call_offer',
   call_answer_ev: 'call_answer',
   call_ice_ev: 'call_ice',

@@ -168,6 +168,16 @@ export interface CallState {
    * e saem da lista no instante em que a mídia/estado do peer chega.
    */
   invited?: { fp: string; nickname: string }[]
+  /**
+   * `true` = o outro lado CONFIRMOU que o convite chegou e está tocando
+   * (`CallRinging`). `false`/ausente = só sabemos que enviamos o invite.
+   *
+   * Existe porque a UI dizia "Chamando…" mesmo quando o convite não tinha
+   * chegado a ninguém (peer offline, frame perdido) — parecia que o telefone
+   * do outro lado estava tocando. Com a confirmação, o texto passa a ser
+   * honesto: antes dele, "discando"; depois, "chamando".
+   */
+  ringing?: boolean
 }
 
 // Privacidade×ICE: lógica em ./callIcePrivacy (standalone testável); reexportado daqui.
@@ -178,6 +188,34 @@ export {
   isIcePublicFallbackSuppressed,
   type CallPrivacyMode,
 } from './callIcePrivacy'
+import {
+  CALL_MEDIA_PREFS_KEY,
+  DEFAULT_CALL_MEDIA_PREFS,
+  audioConstraintsFromPrefs,
+  parseCallMediaPrefs,
+  videoConstraintsFromPrefs,
+  type CallMediaPrefs,
+} from './callMediaPrefs'
+
+/** Preferências de mídia atuais (dispositivo/resolução/FPS/processamento). */
+let mediaPrefs: CallMediaPrefs = (() => {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(CALL_MEDIA_PREFS_KEY) : null
+    return parseCallMediaPrefs(raw)
+  } catch { return { ...DEFAULT_CALL_MEDIA_PREFS } }
+})()
+
+/** Lê as preferências ativas (a UI usa para montar os selects). */
+export function getCallMediaPrefs(): CallMediaPrefs {
+  return { ...mediaPrefs }
+}
+
+/** Grava as preferências; o próximo `getUserMedia`/renegociação já usa. */
+export function setCallMediaPrefs(patch: Partial<CallMediaPrefs>): CallMediaPrefs {
+  mediaPrefs = parseCallMediaPrefs({ ...mediaPrefs, ...patch })
+  try { localStorage.setItem(CALL_MEDIA_PREFS_KEY, JSON.stringify(mediaPrefs)) } catch { /* ignore */ }
+  return { ...mediaPrefs }
+}
 
 
 // ── Áudio WebRTC de baixa latência ──────────────────────────────────────────
@@ -496,11 +534,20 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
     }
     // Aplica processamento de voz por padrão (cancelamento de eco, supressão de
     // ruído, ganho, mono) — melhora muito a inteligibilidade em chamada.
+    // As preferências do usuário (dispositivo escolhido + processamento)
+    // entram por baixo: o que veio explícito na chamada continua vencendo.
     const merged: MediaStreamConstraints = { ...constraints }
     if (constraints.audio) {
+      const baseAudio = audioConstraintsFromPrefs(mediaPrefs)
       merged.audio = constraints.audio === true
-        ? { ...AUDIO_CONSTRAINTS }
-        : { ...AUDIO_CONSTRAINTS, ...(constraints.audio as MediaTrackConstraints) }
+        ? baseAudio
+        : { ...baseAudio, ...(constraints.audio as MediaTrackConstraints) }
+    }
+    if (constraints.video && typeof constraints.video === 'object') {
+      // Só completa o que não veio: resolução/FPS pedidos por quem chamou têm
+      // prioridade (ex.: o degrau de qualidade escolhido no seletor).
+      const baseVideo = videoConstraintsFromPrefs(mediaPrefs)
+      merged.video = { ...baseVideo, ...(constraints.video as MediaTrackConstraints) }
     }
     try {
       return await md.getUserMedia(merged)
@@ -1223,6 +1270,13 @@ export class CallManager {
       if (ev.type === 'call_accepted') {
         // o outro lado atendeu → sinalização fluindo, mídia negociando
         if (this.state && this.state.callId === ev.call_id) this.applyPhase('accept')
+      }
+      if (ev.type === 'call_ringing') {
+        // O convite CHEGOU: agora "Chamando…" é verdade (o telefone toca lá).
+        if (this.state && this.state.callId === ev.call_id) {
+          this.state.ringing = true
+          this.onUpdate({ ...this.state })
+        }
       }
       if (ev.type === 'call_rejected') {
         if (this.state && this.state.callId === ev.call_id) {
@@ -1977,6 +2031,9 @@ export class CallManager {
       kind,
       convId,
       phase: 'outgoing',
+      // Só vira `true` quando o outro lado confirmar (CallRinging). Antes disso
+      // o badge diz "Discando…" — não sabemos se o convite chegou.
+      ringing: false,
       muted: false,
       deafened: false,
       // Deriva do track REAL: getLocalMedia pode ter degradado p/ só voz (UI mentia "câmera ligada").
@@ -2743,6 +2800,89 @@ export class CallManager {
   }
 
   /** Troca a qualidade de vídeo (câmera + tela): applyConstraints + renegocia; falha mantém atual. */
+  /**
+   * Aplica uma preferência de mídia AO VIVO (engrenagem da chamada).
+   *
+   * Trocar microfone/câmera exige capturar o device novo e substituir a track
+   * nos senders (`replaceTrack` não renegocia sozinho, mas o `deviceId` exige
+   * nova captura). Resolução/FPS/processamento usam `applyConstraints`, que é
+   * barato e não derruba a mídia.
+   *
+   * Devolve o que foi REALMENTE aplicado — a UI mostra isso, não o que pedimos.
+   */
+  async applyMediaPrefs(patch: Partial<CallMediaPrefs>): Promise<CallMediaPrefs> {
+    const antes = getCallMediaPrefs()
+    const depois = setCallMediaPrefs(patch)
+    const trocouMic = !!antes.audioInputId !== !!depois.audioInputId || antes.audioInputId !== depois.audioInputId
+    const trocouCam = antes.videoInputId !== depois.videoInputId
+
+    // 1) Microfone.
+    const audioTrack = this.localStream?.getAudioTracks()[0] ?? null
+    if (trocouMic) {
+      try {
+        const novo = await getLocalMedia({ audio: audioConstraintsFromPrefs(depois) })
+        const track = novo?.getAudioTracks()[0]
+        if (track) {
+          if (this.localStream) {
+            try { this.localStream.addTrack(track) } catch { /* ignore */ }
+            if (audioTrack) { try { this.localStream.removeTrack(audioTrack); audioTrack.stop() } catch { /* ignore */ } }
+          } else {
+            try { this.localStream = new MediaStream([track]) } catch { /* ignore */ }
+          }
+          for (const pc of this.pcs.values()) {
+            try {
+              const sender = pc.getSenders().find((s) => s.track?.kind === 'audio') ?? null
+              if (sender) await sender.replaceTrack(track)
+            } catch { /* par isolado não derruba os demais */ }
+          }
+        }
+      } catch (e) {
+        // Falhou o device novo: volta a preferência para não mentir na UI.
+        setCallMediaPrefs({ audioInputId: antes.audioInputId })
+        throw new Error(`não foi possível trocar o microfone: ${String((e as Error)?.message ?? e)}`)
+      }
+    } else if (audioTrack) {
+      // Processamento de voz: aplica na track viva (sem recapturar).
+      try {
+        await audioTrack.applyConstraints(audioConstraintsFromPrefs(depois))
+      } catch { /* device pode recusar; segue com o atual */ }
+    }
+
+    // 2) Câmera: só mexe se houver câmera ligada (senão a próxima captura usa).
+    const camTrack = this.localStream?.getVideoTracks()[0] ?? null
+    if (trocouCam && camTrack && camTrack.readyState === 'live') {
+      try {
+        const novo = await getLocalMedia({ video: videoConstraintsFromPrefs(depois) })
+        const track = novo?.getVideoTracks()[0]
+        if (track) {
+          if (this.localStream) {
+            try { this.localStream.addTrack(track) } catch { /* ignore */ }
+            try { this.localStream.removeTrack(camTrack); camTrack.stop() } catch { /* ignore */ }
+          }
+          for (const [fp, pc] of this.pcs) {
+            try {
+              const tr = this.findVideoTransceiver(pc)
+              if (tr) await tr.sender.replaceTrack(track)
+            } catch { /* par isolado */ }
+            // Renegocia para o outro lado ver a fonte nova (idempotente).
+            if (this.state) await this.sendOffer(fp, this.state.callId).catch(() => false)
+          }
+        }
+      } catch (e) {
+        setCallMediaPrefs({ videoInputId: antes.videoInputId })
+        throw new Error(`não foi possível trocar a câmera: ${String((e as Error)?.message ?? e)}`)
+      }
+    } else if (camTrack) {
+      // Resolução/FPS na câmera viva: pedido, não exigência.
+      try {
+        await camTrack.applyConstraints(videoConstraintsFromPrefs(depois))
+      } catch { /* device recusa alguns degraus; mantém o atual */ }
+    }
+
+    if (this.state) this.onUpdate({ ...this.state })
+    return getCallMediaPrefs()
+  }
+
   async setQuality(q: CallQuality): Promise<void> {
     const prev = this.quality
     try {

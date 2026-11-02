@@ -37,6 +37,10 @@ const QUALITY_CHOICES: { value: ScreenQualityKey; label: string }[] = [
   { value: '480p', label: '480p (mínimo)' },
   { value: '720p', label: '720p' },
   { value: '1080p', label: '1080p' },
+  // Texto nítido em monitor grande: acima de 1080p o detalhe vem da captura,
+  // não do encoder (ver SCREEN_QUALITY_STEPS).
+  { value: '1440p', label: '1440p (nítido)' },
+  { value: '4K', label: '4K (máximo)' },
 ]
 
 const FPS_LABELS: Record<ScreenFpsKey, string> = {

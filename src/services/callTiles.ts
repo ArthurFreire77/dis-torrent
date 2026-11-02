@@ -180,6 +180,13 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
     const localScreenStream = isLocal ? local?.screenStream ?? null : null
     const remoteScreenStream = !isLocal ? p.screenStream ?? null : null
     const dedicatedScreen = localScreenStream ?? remoteScreenStream
+    // FALLBACK: existe UM vídeo remoto e o peer está compartilhando tela.
+    //
+    // Quem manda é a TELA, porque é ela que a pessoa está tentando mostrar.
+    // Antes o vídeo único era reaproveitado nos dois quadrados ("a câmera fica
+    // no lugar da tela"): o quadrado da pessoa mostrava o mesmo stream da tela
+    // e a tela aparecia vazia/demorando. Agora a tela consome o stream e a
+    // pessoa fica no avatar — honesto: não há câmera chegando.
     const fallbackScreen = !dedicatedScreen && sharing ? cameraStream : null
     const screenStream = dedicatedScreen ?? fallbackScreen
 

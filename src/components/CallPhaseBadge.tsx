@@ -15,7 +15,7 @@ function formatDuration(nowMs: number, startAt: number): string {
   return `${mm}:${ss}`
 }
 
-export default function CallPhaseBadge({ phase, startAt, nowMs, mediaLive }: {
+export default function CallPhaseBadge({ phase, startAt, nowMs, mediaLive, ringing }: {
   phase: CallPhase
   startAt: number
   nowMs: number
@@ -30,6 +30,14 @@ export default function CallPhaseBadge({ phase, startAt, nowMs, mediaLive }: {
    * falso o badge diz a verdade.
    */
   mediaLive?: boolean
+  /**
+   * O outro lado CONFIRMOU que o convite chegou (`CallRinging`).
+   *
+   * Sem esta confirmação "Chamando…" mente: só sabemos que nós enviamos o
+   * invite. Se o peer estava offline ou o frame se perdeu, nada tocava do
+   * outro lado enquanto a tela dizia que sim. `false`/omitido → "Discando…".
+   */
+  ringing?: boolean
 }) {
   if (phase === 'idle') return null
 
@@ -47,7 +55,10 @@ export default function CallPhaseBadge({ phase, startAt, nowMs, mediaLive }: {
     }
   } else if (phase === 'outgoing') {
     background = t.accent
-    text = 'Chamando…'
+    // "Chamando…" só depois de o outro lado confirmar que recebeu e está
+    // tocando. Antes disso o honesto é "Discando…" (enviamos, não sabemos se
+    // chegou). Com o peer offline a diferença fica visível em vez de mentir.
+    text = ringing ? 'Chamando…' : 'Discando…'
   } else if (phase === 'incoming') {
     background = t.accent
     text = 'Recebendo chamada'
