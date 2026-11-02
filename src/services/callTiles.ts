@@ -67,6 +67,17 @@ export interface CallTile {
    * independente do vídeo e precisa do próprio campo.
    */
   audioStream?: MediaStream
+  /**
+   * Chave de VOLUME/mudo local desta transmissão.
+   *
+   * POR QUE NÃO USAR `fp`: a voz e o áudio da TELA são transmissões distintas
+   * da mesma pessoa, mas compartilhavam a chave `fp` — mexer no volume da tela
+   * mexia na voz (e vice-versa), e mutar um silenciava o outro. Usa o `id`
+   * estável da transmissão (`p:<fp>` / `s:<fp>`), então cada uma tem seu
+   * próprio controle. Sem isso cai em `fp` (compatível com preferências já
+   * salvas de quem nunca compartilhou tela).
+   */
+  audioKey?: string
   /** Frame JPEG (caminho nativo) quando não há MediaStream. */
   videoUrl?: string
   isLocal: boolean
@@ -232,6 +243,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       audioStream: isLocal || audioOwnerIsScreen
         ? undefined
         : (remoteCameraStream ?? cameraStream ?? undefined) ?? undefined,
+      // Voz e tela têm controles de volume SEPARADOS (id da transmissão).
+      audioKey: participantTileId(p.fp),
       videoUrl: participantVideoUrl,
       isLocal,
       sharing,
@@ -255,6 +268,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         // Áudio do sistema: quando o vídeo único caiu na tela, o stream carrega
         // também o som — e é ESTE tile que o <audio> do receptor usa.
         audioStream: audioOwnerIsScreen ? (screenStream ?? undefined) : undefined,
+        // Volume/mudo da TELA é independente da voz (ver `audioKey`).
+        audioKey: screenTileId(p.fp),
         isLocal,
         sharing: true,
         muted: isLocal ? pickBoolean(local?.muted, p.muted) : pickBoolean(p.muted),

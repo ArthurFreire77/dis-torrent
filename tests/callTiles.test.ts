@@ -153,7 +153,36 @@ test('áudio do sistema acompanha o tile que tem a mídia (nunca os dois)', () =
   assert.equal(shared.audioStream, only, 'a tela carrega o áudio do stream único')
 })
 
-test('com streams separados, o áudio continua no tile da pessoa', () => {
+test('volume da TELA é independente da voz (chaves diferentes)', () => {
+  // BUG: voz e tela usavam a chave `fp`, então mudar o volume da transmissão
+  // mexia na voz da pessoa (e mutar um silenciava o outro).
+  const cam = fakeStream()
+  const screen = fakeStream()
+  const tiles = buildCallTiles({
+    participants: [{ fp: PEER, nickname: 'Bob', stream: cam, screenStream: screen, sharing: true, cameraOn: true }],
+    myFp: ME,
+    local: { stream: fakeStream(), cameraOn: false },
+  })
+  const person = tiles.find((t) => t.kind === 'participant' && t.fp === PEER)!
+  const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
+  assert.equal(person.audioKey, `p:${PEER}`)
+  assert.equal(shared.audioKey, `s:${PEER}`)
+  assert.notEqual(person.audioKey, shared.audioKey, 'cada transmissão tem seu próprio controle')
+})
+
+test('com stream único, a chave do áudio acompanha o tile que toca', () => {
+  const only = fakeStream()
+  const tiles = buildCallTiles({
+    participants: [{ fp: PEER, nickname: 'Bob', stream: only, sharing: true }],
+    myFp: ME,
+    local: { stream: fakeStream(), cameraOn: false },
+  })
+  const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
+  assert.equal(shared.audioStream, only)
+  assert.equal(shared.audioKey, `s:${PEER}`)
+})
+
+test('com streams separados, a voz fica no tile da pessoa e a tela não duplica', () => {
   const cam = fakeStream()
   const screen = fakeStream()
   const tiles = buildCallTiles({

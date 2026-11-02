@@ -84,13 +84,16 @@ export function CallTile({
    * montado com `srcObject` nulo e a chamada ficava muda.
    */
   const audioSrc = (tile.isLocal ? null : (tile.audioStream ?? tile.stream)) ?? null
+  // Volume/mudo por TRANSMISSÃO (`p:<fp>` voz, `s:<fp>` tela): a tela tem o
+  // próprio controle em vez de dividir o da voz.
+  const audioKey = tile.audioKey ?? tile.fp
   useEffect(() => {
     if (!audioSrc) return
     const el = audioRef.current
     if (!el) return
     attachStream(el, audioSrc)
-    applyParticipantPlayback(el, tile.fp, callDeafened)
-  }, [tile.isLocal, tile.kind, tile.fp, audioSrc, callDeafened])
+    applyParticipantPlayback(el, audioKey, callDeafened)
+  }, [tile.isLocal, tile.kind, tile.fp, audioKey, audioSrc, callDeafened])
 
   // Proporção real da fonte: no primeiro frame e a cada mudança de resolução.
   const syncAspect = useCallback(() => {
@@ -346,7 +349,7 @@ export function CallTile({
       </div>
 
       {showAudioControls && !tile.isLocal && (
-        <ParticipantAudioControls fp={tile.fp} nickname={tile.nickname} callDeafened={callDeafened} />
+        <ParticipantAudioControls fp={tile.audioKey ?? tile.fp} nickname={tile.kind === 'screen' ? `${tile.nickname} (tela)` : tile.nickname} callDeafened={callDeafened} />
       )}
 
       {/* Áudio remoto SEMPRE presente, mas SÓ no tile de PESSOA. O tile de
@@ -362,13 +365,13 @@ export function CallTile({
         <audio
           autoPlay
           playsInline
-          data-call-audio-fp={tile.fp}
+          data-call-audio-fp={audioKey}
           aria-hidden
           style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none', left: -9999 }}
           ref={(el: HTMLAudioElement | null) => {
             audioRef.current = el
             attachStream(el, tile.audioStream ?? tile.stream)
-            if (el) applyParticipantPlayback(el, tile.fp, callDeafened)
+            if (el) applyParticipantPlayback(el, audioKey, callDeafened)
           }}
         />
       )}
