@@ -7284,9 +7284,24 @@ impl NetworkEngine {
         if !self.auto_register_voice_channel(&call_id, peer_fp) {
             return;
         }
-        if let Ok(Some(sdp)) = self.voice_begin_offer(&call_id, peer_fp) {
-            let _ = self.call_signal(peer_fp, SecureFrame::CallOffer { call_id, sdp });
-        }
+        // OFFER FORA DESTA TASK. `voice_begin_offer` chama `create_offer`, que
+        // BLOQUEIA esperando SDP + ICE (block_in_place). Isto roda dentro do
+        // `handle_frame`, na task de leitura da sessão: bloquear aqui trava o
+        // recebimento do peer inteiro — e com vários pares entrando ao mesmo
+        // tempo (entrar num canal com gente) as workers do runtime acabam
+        // ocupadas, a UI para de responder e o app parece morto ("entro na
+        // chamada e o app trava, as mensagens param").
+        let engine = self.clone();
+        let peer = peer_fp.to_string();
+        tokio::spawn(async move {
+            let e2 = engine.clone();
+            let cid = call_id.clone();
+            let p = peer.clone();
+            let r = tokio::task::spawn_blocking(move || e2.voice_begin_offer(&cid, &p)).await;
+            if let Ok(Ok(Some(sdp))) = r {
+                let _ = engine.call_signal(&peer, SecureFrame::CallOffer { call_id, sdp });
+            }
+        });
     }
 
     pub fn voice_leave(self: &Arc<Self>, community_id: &str, channel_id: &str) -> Result<()> {

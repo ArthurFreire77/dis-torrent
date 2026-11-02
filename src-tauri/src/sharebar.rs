@@ -59,7 +59,10 @@ mod imp {
 
     pub fn hide() -> bool {
         let pid = unsafe { GetCurrentProcessId() };
-        let mut busca = Busca { pid, encontrou: false };
+        let mut busca = Busca {
+            pid,
+            encontrou: false,
+        };
         unsafe { EnumWindows(Some(each), &mut busca as *mut Busca as LPARAM) };
         busca.encontrou
     }
