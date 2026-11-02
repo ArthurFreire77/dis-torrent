@@ -348,17 +348,30 @@ pub fn app_hide_to_tray(app: AppHandle) {
 /// Devolve o estado NOVO para a UI mostrar o ícone certo — nunca chuta:
 /// `is_fullscreen` pode divergir do que o atalho pediu (usuário saiu com Esc,
 /// gerenciador de janelas recusou).
+///
+/// `set_fullscreen` só existe em desktop (no Android a janela é a Activity, e
+/// o tauri não expõe esse controle) — sem o `cfg` o build Android não compila.
 #[tauri::command]
 pub fn window_toggle_fullscreen(app: AppHandle) -> bool {
-    let Some(w) = app.get_webview_window("main") else {
-        return false;
-    };
-    let atual = w.is_fullscreen().unwrap_or(false);
-    let alvo = !atual;
-    if w.set_fullscreen(alvo).is_err() {
-        return atual;
+    #[cfg(desktop)]
+    {
+        let Some(w) = app.get_webview_window("main") else {
+            return false;
+        };
+        let atual = w.is_fullscreen().unwrap_or(false);
+        let alvo = !atual;
+        if w.set_fullscreen(alvo).is_err() {
+            return atual;
+        }
+        alvo
     }
-    alvo
+    #[cfg(not(desktop))]
+    {
+        // Mobile não tem janela redimensionável: devolve `false` (não entrou),
+        // em vez de fingir sucesso.
+        let _ = app;
+        false
+    }
 }
 
 /// Sair DE VERDADE: derruba a rede, remove a bandeja e encerra o processo.
