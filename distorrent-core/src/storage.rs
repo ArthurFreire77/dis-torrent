@@ -348,8 +348,14 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE reputation ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
+    // v9: semeadura de arquivo. Sem o carimbo, o motor não tinha como saber
+    // quais arquivos DESTE nó devem ser re-anunciados quando alguém entra
+    // online — quem baixava um arquivo virava seeder só até fechar o app.
+    if !column_exists(conn, "files", "seeded_at") {
+        conn.execute_batch("ALTER TABLE files ADD COLUMN seeded_at INTEGER NOT NULL DEFAULT 0;")?;
+    }
     conn.execute(
-        "INSERT INTO kv(key,value) VALUES('schema_version','8') ON CONFLICT(key) DO UPDATE SET value='8'",
+        "INSERT INTO kv(key,value) VALUES('schema_version','9') ON CONFLICT(key) DO UPDATE SET value='9'",
         [],
     )?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -523,7 +529,8 @@ CREATE TABLE IF NOT EXISTS files (
   chunks INTEGER NOT NULL,
   hash TEXT NOT NULL,
   owner_fp TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  seeded_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS voice_states (
   community_id TEXT NOT NULL,
@@ -2013,6 +2020,44 @@ impl Store {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Arquivos que ESTE nó tem completos e pode semear, com o instante do
+    /// último anúncio. `seeded_at` 0 = não anunciado desde que a coluna existe
+    /// (arquivo antigo): o tique de re-anúncio trata na primeira passada.
+    #[allow(clippy::type_complexity)]
+    pub fn my_seed_files(
+        &self,
+        owner_fp: &str,
+    ) -> Result<Vec<(String, String, i64, i64, String, i64)>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT file_id,name,size,chunks,hash,seeded_at FROM files
+             WHERE owner_fp=?1 ORDER BY seeded_at",
+        )?;
+        let rows = st
+            .query_map(params![owner_fp], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Marca que este arquivo foi anunciado por mim agora (evita re-anúncio a
+    /// cada tique de 15 s quando ninguém novo entrou).
+    pub fn touch_file_seeded(&self, file_id: &str, at_ms: i64) -> Result<()> {
+        self.locked().execute(
+            "UPDATE files SET seeded_at=?2 WHERE file_id=?1",
+            params![file_id, at_ms],
+        )?;
+        Ok(())
     }
 
     // ---------- canais completos (v4) ----------

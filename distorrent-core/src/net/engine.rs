@@ -7692,6 +7692,9 @@ impl NetworkEngine {
                 ))
                 .ok();
         }
+        let _ = self
+            .store
+            .touch_file_seeded(file_id, crate::identity::now_ms());
         Ok(())
     }
 
@@ -7727,7 +7730,85 @@ impl NetworkEngine {
                 ))
                 .ok();
         }
+        let _ = self
+            .store
+            .touch_file_seeded(file_id, crate::identity::now_ms());
         Ok(())
+    }
+
+    /// Re-anuncia os arquivos que EU tenho, para quem estiver online.
+    ///
+    /// BUG QUE ISTO CORRIGE ("nem todo mundo semeia"): o `file_announce` era
+    /// disparado UMA vez, para os peers online NAQUELE instante. Quem baixava
+    /// um arquivo virava seeder só até fechar o app — o anúncio não era
+    /// persistido em lugar nenhum, então ao reabrir o arquivo continuava no
+    /// disco mas ninguém sabia. Agora o tique de manutenção re-anuncia, e o
+    /// `flush_files_to` cobre quem acabou de subir (abaixo).
+    pub fn reannounce_files(&self) {
+        let me = self.identity.fingerprint.clone();
+        let Ok(arquivos) = self.store.my_seed_files(&me) else {
+            return;
+        };
+        if arquivos.is_empty() {
+            return;
+        }
+        let online = self.online_peer_fps();
+        if online.is_empty() {
+            // Sem ninguém para ouvir: NÃO marca como anunciado, senão o
+            // primeiro peer que subir depois não recebe por 15 s.
+            return;
+        }
+        let now = crate::identity::now_ms();
+        for (file_id, name, size, chunks, hash, seeded_at) in arquivos {
+            // 30 s: anúncio é frame pequeno, mas repetir a cada tique de 15 s
+            // para 20 peers é ruído sem ganho (o flush cobre quem chega).
+            if now.saturating_sub(seeded_at) < 30_000 && seeded_at != 0 {
+                continue;
+            }
+            for fp in &online {
+                self.cmd_tx
+                    .send(EngineCmd::SendToPeer(
+                        fp.clone(),
+                        SecureFrame::FileAnnounce {
+                            file_id: file_id.clone(),
+                            name: name.clone(),
+                            size: size.max(0) as u64,
+                            chunks: chunks.max(0) as u32,
+                            hash: hash.clone(),
+                            chunk_hashes: None,
+                        },
+                    ))
+                    .ok();
+            }
+            let _ = self.store.touch_file_seeded(&file_id, now);
+        }
+    }
+
+    /// Manda para um peer recém-online os arquivos que EU tenho.
+    ///
+    /// O `file_announce` original só alcançava quem já estava online; um peer
+    /// que subia depois ficava sem saber que o arquivo existia aqui — e o
+    /// download dele morria em "sem peers com o arquivo no swarm".
+    pub fn flush_files_to(&self, peer_fp: &str) {
+        let me = self.identity.fingerprint.clone();
+        let Ok(arquivos) = self.store.my_seed_files(&me) else {
+            return;
+        };
+        for (file_id, name, size, chunks, hash, _) in arquivos {
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(
+                    peer_fp.to_string(),
+                    SecureFrame::FileAnnounce {
+                        file_id,
+                        name,
+                        size: size.max(0) as u64,
+                        chunks: chunks.max(0) as u32,
+                        hash,
+                        chunk_hashes: None,
+                    },
+                ))
+                .ok();
+        }
     }
 
     pub fn file_request_chunk(&self, file_id: &str, index: u32, holder_fp: &str) -> Result<()> {
@@ -8862,6 +8943,11 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 //    (`set_voice_state` é upsert) e conserta o roster
                 //    assimétrico sem tocar no protocolo.
                 engine.reannounce_voice_channels();
+                // 6) RE-ANUNCIA os ARQUIVOS que este nó tem. Sem isto quem
+                //    baixava um arquivo semeava só até fechar o app: o anúncio
+                //    nunca foi persistido e o download do outro lado morria
+                //    em "sem peers com o arquivo no swarm".
+                engine.reannounce_files();
                 // 5) Renova o anúncio das SALAS de chamada (grupo/DM): quem
                 //    está na conversa vê "chamada em andamento" e pode entrar,
                 //    sem depender de ter recebido o invite. Salas alheias sem
@@ -10272,6 +10358,12 @@ async fn register_and_run(
             },
         ))
         .ok();
+
+    // ARQUIVOS: manda o que EU tenho para quem acabou de subir. O anúncio
+    // original é enviado uma vez, para os peers online naquele instante; sem
+    // este flush quem entra depois nunca sabe que o arquivo existe aqui e o
+    // download morre em "sem peers com o arquivo no swarm".
+    engine.flush_files_to(peer_fp);
 
     // HOLE PUNCH (estilo torrent/Radmin): sessão relay viva + peer com
     // proto_v>=1 → pede furo TCP simultâneo para meu endpoint público. Não
