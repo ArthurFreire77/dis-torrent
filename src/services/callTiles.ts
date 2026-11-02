@@ -199,6 +199,14 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
     // Vídeo único consumido pela tela → quadrado da pessoa fica no avatar
     // (o bug era "dois quadrados com o mesmo vídeo").
     const cameraConsumedByScreen = !isLocal && !!fallbackScreen && !remoteScreenStream
+    // ÁUDIO DA TELA: quando o vídeo único vai para a tela, esse MESMO stream
+    // costuma carregar o áudio do sistema. O <audio> só era montado no tile da
+    // PESSOA — que nesse caso não tem stream e pode nem ser renderizado. Sem
+    // elemento tocando, o som da transmissão só aparecia depois de mexer em
+    // algum controle (o "tem que abaixar e subir o volume para pegar o áudio").
+    // Aqui o áudio acompanha o tile que REALMENTE tem mídia — e só um deles,
+    // porque montar <audio> nos dois tocava o som em dobro.
+    const audioOwnerIsScreen = !isLocal && cameraConsumedByScreen
     // LOCAL: vídeo só com câmera LIGADA E trilha viva — as duas juntas são o
     // estado honesto (evita `<video>` preto e frame congelado).
     const participantStream = isLocal
@@ -220,7 +228,10 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       stream: participantStream ?? undefined,
       // ÁUDIO: usa o stream remoto BRUTO, mesmo sem vídeo. Era o defeito do
       // "conectado e mudo" quando a câmera do outro estava desligada.
-      audioStream: isLocal ? undefined : (remoteCameraStream ?? cameraStream ?? undefined) ?? undefined,
+      // Quando a tela ficou com o vídeo único, o áudio vai junto para ela.
+      audioStream: isLocal || audioOwnerIsScreen
+        ? undefined
+        : (remoteCameraStream ?? cameraStream ?? undefined) ?? undefined,
       videoUrl: participantVideoUrl,
       isLocal,
       sharing,
@@ -241,6 +252,9 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         label: screenTileLabel(nickname, isLocal),
         stream: screenStream ?? undefined,
         videoUrl: screenVideoUrl,
+        // Áudio do sistema: quando o vídeo único caiu na tela, o stream carrega
+        // também o som — e é ESTE tile que o <audio> do receptor usa.
+        audioStream: audioOwnerIsScreen ? (screenStream ?? undefined) : undefined,
         isLocal,
         sharing: true,
         muted: isLocal ? pickBoolean(local?.muted, p.muted) : pickBoolean(p.muted),

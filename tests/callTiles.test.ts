@@ -137,6 +137,36 @@ test('tela remota não duplica o único vídeo nos dois quadrados', () => {
   assert.equal(shared.label, 'Tela de Bob')
 })
 
+test('áudio do sistema acompanha o tile que tem a mídia (nunca os dois)', () => {
+  // BUG: "tem que abaixar e subir o volume para pegar o áudio da transmissão".
+  // O <audio> só era montado no tile da PESSOA; quando o vídeo único ia para a
+  // tela, ele ficava sem elemento tocando.
+  const only = fakeStream()
+  const tiles = buildCallTiles({
+    participants: [{ fp: PEER, nickname: 'Bob', stream: only, sharing: true }],
+    myFp: ME,
+    local: { stream: fakeStream(), cameraOn: false },
+  })
+  const person = tiles.find((t) => t.kind === 'participant' && t.fp === PEER)!
+  const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
+  assert.equal(person.audioStream, undefined, 'o tile sem mídia não segura o áudio')
+  assert.equal(shared.audioStream, only, 'a tela carrega o áudio do stream único')
+})
+
+test('com streams separados, o áudio continua no tile da pessoa', () => {
+  const cam = fakeStream()
+  const screen = fakeStream()
+  const tiles = buildCallTiles({
+    participants: [{ fp: PEER, nickname: 'Bob', stream: cam, screenStream: screen, sharing: true, cameraOn: true }],
+    myFp: ME,
+    local: { stream: fakeStream(), cameraOn: false },
+  })
+  const person = tiles.find((t) => t.kind === 'participant' && t.fp === PEER)!
+  const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
+  assert.equal(person.audioStream, cam, 'a voz do peer sai no tile da pessoa')
+  assert.equal(shared.audioStream, undefined, 'a tela não duplica o mesmo áudio')
+})
+
 test('câmera e tela remotos em streams separados ocupam quadrados separados', () => {
   const cam = fakeStream()
   const screen = fakeStream()

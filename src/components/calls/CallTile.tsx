@@ -83,7 +83,7 @@ export function CallTile({
    * DEPOIS (offer → ontrack → re-render). Sem este efeito, o `<audio>` ficava
    * montado com `srcObject` nulo e a chamada ficava muda.
    */
-  const audioSrc = tile.kind === 'screen' || tile.isLocal ? null : (tile.audioStream ?? tile.stream)
+  const audioSrc = (tile.isLocal ? null : (tile.audioStream ?? tile.stream)) ?? null
   useEffect(() => {
     if (!audioSrc) return
     const el = audioRef.current
@@ -358,7 +358,7 @@ export function CallTile({
           <audio> a ele deixava a chamada muda.
           NÃO usar `hidden`: no WebView do Android o elemento com display:none
           às vezes não inicia a reprodução. Fora da tela, mas renderizado. */}
-      {!tile.isLocal && !isScreen && (tile.audioStream ?? tile.stream) && (
+      {!tile.isLocal && (tile.audioStream ?? tile.stream) && (
         <audio
           autoPlay
           playsInline
