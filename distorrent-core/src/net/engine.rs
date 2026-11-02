@@ -459,6 +459,14 @@ struct PeerLink {
     tx: Option<mpsc::UnboundedSender<(u8, SecureFrame)>>,
     drop_notify: Notify,
     via_relay: bool, // true = sessão sobre relay (fallback sem porta aberta)
+    /// Esta sessão foi a que EU disciei (true) ou a que o peer abriu (false)?
+    ///
+    /// A eleição por fingerprint só faz sentido quando as duas pontas têm
+    /// sessões OPOSTAS (dial cruzado). Sem saber a direção da sessão atual, um
+    /// dial repetido NOSSO parecia "preferido" e substituía a sessão saudável,
+    /// derrubando writer e frames em voo (era o "peer ONLINE" repetido em
+    /// segundos e a mensagem voltando ao relógio).
+    initiator: bool,
 }
 
 /// QoS: classifica o frame em classe de prioridade (menor número = sai antes).
@@ -594,6 +602,16 @@ pub struct PeerDiagInfo {
     /// lado morrer; sem isto a bolinha verde mentia ("aparece online mas não
     /// recebe nada"). Ping a cada 10s (relay 20s) mantém isto fresco.
     pub last_rx_ms: i64,
+    /// Último `Ack`/`Read` RECEBIDO deste peer (epoch ms) — prova de que o
+    /// caminho de DADOS dele para nós funciona, não só o de controle.
+    ///
+    /// BUG REAL ("aparece online mas a mensagem fica no relógio"): o Ping/Pong
+    /// mantém `last_rx_ms` fresco mesmo quando o caminho de volta perde tudo o
+    /// que não é controle — a sessão segue `Online` e o outbox reenvia para o
+    /// mesmo canal morto até estourar o orçamento. Este campo é a evidência
+    /// que faltava: sem `Ack` novo há muito tempo + mensagens nossas presas,
+    /// o link está meio-vivo e precisa ser refeito.
+    pub last_ack_ms: i64,
 }
 
 /// Diagnóstico GLOBAL da rede: STUN, anúncio de endpoint e DHT BitTorrent.
@@ -637,6 +655,8 @@ mod room_announce_tests;
 mod room_delivery_tests;
 #[cfg(test)]
 mod room_join_tests;
+#[cfg(test)]
+mod session_election_tests;
 
 pub struct NetworkEngine {
     pub store: Arc<Store>,
@@ -2228,6 +2248,97 @@ impl NetworkEngine {
         for fp in mortos {
             self.tunnel_drop(&fp, "sem prova de vida (varredura)");
             self.tunnel_request(&fp);
+        }
+    }
+
+    /// Derruba links MEIO-VIVOS: o Ping/Pong mantém a sessão `Online` (e a
+    /// bolinha verde), mas nenhum `Ack`/`Read` nosso volta há tempo demais
+    /// enquanto temos mensagens presas no outbox.
+    ///
+    /// Por que isso é necessário: o caminho de controle e o de dados podem
+    /// divergir. Quando só o de dados morre (relay com perna de volta perdida,
+    /// NAT assimétrico), `peer_alive` continua verdadeiro (Ping chega), o
+    /// `drop_link_if_dead` nunca vê `tx` fechado, e o outbox reenvia para o
+    /// MESMO canal até estourar o orçamento — o relato exato "o contato aparece
+    /// online mas a mensagem fica no relógio". Refeito o link, o próximo
+    /// `FlushOutbox` sai por uma sessão nova (o receptor dedupa por id).
+    ///
+    /// Nunca dispara para link ocioso: exige `Ack` antigo **e** outbox preso.
+    pub fn reap_half_open_links(&self) {
+        const SEM_ACK_MS: i64 = 120_000; // 2 min sem um único Ack
+        let agora = crate::identity::now_ms();
+        let candidatos: Vec<String> = {
+            let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+            links
+                .iter()
+                .filter(|(_, l)| l.get_state() == PeerLinkState::Online)
+                .map(|(fp, _)| fp.clone())
+                .collect()
+        };
+        for fp in candidatos {
+            // Chamada/voz ativa: o caminho de dados é a mídia, não o `Ack` de
+            // DM — derrubar aqui cortaria a chamada para "consertar" o chat.
+            if self.store.peer_in_active_call(&fp) {
+                continue;
+            }
+            // Link ocioso sem Ack é normal: só investiga com mensagem NOSSA
+            // presa — e conta também as em backoff (fora de `pending_outbox`).
+            let presas = self.store.outbox_len_for_peer(&fp);
+            if presas == 0 {
+                continue;
+            }
+            let (last_ack, last_rx) = {
+                let diag = self.peer_diag.lock().unwrap_or_else(|e| e.into_inner());
+                match diag.get(&fp) {
+                    Some(d) => (d.last_ack_ms, d.last_rx_ms),
+                    // Sem diagnóstico = sessão recém-criada: não acusa.
+                    None => continue,
+                }
+            };
+            // Sem prova de dados NEM de vida: sessão começando, dá o prazo.
+            // (`last_rx == 0` com `last_ack == 0` não pode virar "2 min sem
+            // Ack" por subtração de zero — era um descarte imediato do link.)
+            let referencia = if last_ack > 0 { last_ack } else { last_rx };
+            if referencia == 0 || agora.saturating_sub(referencia) < SEM_ACK_MS {
+                continue;
+            }
+            warn!(
+                peer_fp = %fp,
+                presas,
+                sem_ack_ms = agora.saturating_sub(last_ack),
+                "link meio-vivo: online sem confirmação de dados — refazendo sessão"
+            );
+            self.diag_update(&fp, |d| {
+                d.last_reject = Some(format!(
+                    "link online porém sem confirmação há {}s — sessão refeita",
+                    agora.saturating_sub(referencia) / 1000
+                ));
+                d.last_reject_ms = agora;
+            });
+            // Mesmo desfecho do canal morto: some da memória e o maintain
+            // rediala. Inserir `Reconnecting` na hora evita o buraco de
+            // "offline" até o próximo dial (ver `register_and_run`).
+            {
+                let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(old) = links.remove(&fp) {
+                    old.drop_notify.notify_one();
+                }
+                if self.should_keep_dialing(&fp) {
+                    links.insert(
+                        fp.clone(),
+                        Arc::new(PeerLink {
+                            state: StdMutex::new(PeerLinkState::Reconnecting),
+                            tx: None,
+                            drop_notify: Notify::new(),
+                            via_relay: false,
+                            // Ainda sem sessão: direção só existe no register.
+                            initiator: false,
+                        }),
+                    );
+                }
+            }
+            self.note_dial_failure(&fp);
+            self.emit_state();
         }
     }
 
@@ -8629,6 +8740,12 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 // varredura, um túnel meio-quebrado ficava "estabelecido" para
                 // sempre na memória e engolia o tráfego até reiniciar o app.
                 engine.tunnel_reap_stale();
+                // LINK MEIO-VIVO: Ping/Pong responde (a bolinha fica verde) mas
+                // nenhum `Ack` nosso volta. O outbox reenvia sempre pelo MESMO
+                // canal e o usuário vê "online" + relógio para sempre.
+                // Derrubar aqui é o que transforma "enviado, sem confirmação" em
+                // reconexão de verdade — mesmo caminho do `drop_link_if_dead`.
+                engine.reap_half_open_links();
                 // Reaper de DMs sem ACK: sessão relay agora sobrevive a perda
                 // (não morre mais por 1 frame perdido), então uma DM que se
                 // perdeu ficaria "sent" para sempre. A cada tick, mensagens
@@ -9921,6 +10038,38 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
     }
 }
 
+/// A sessão NOVA deve substituir a que já está `Online`?
+///
+/// Regras (nesta ordem):
+/// 1. **Direta vence relay** — em qualquer direção, sem exceção.
+/// 2. **Mesma rota = não troca.** Dial repetido nosso (maintain + discovery +
+///    relay) não pode derrubar uma sessão saudável: cada troca aborta a writer
+///    e descarta frames em voo (mensagem e `Ack` sumiam e voltavam ao relógio).
+///    Quem precisa refazer a sessão a REMOVE antes (`drop_link_if_dead`,
+///    `reap_half_open_links`) — então, se ela está Online aqui, é a boa.
+/// 3. **Dial cruzado** (uma ponta iniciou, a outra recebeu): vale a eleição por
+///    fingerprint, e as duas pontas chegam à MESMA resposta — cada uma fica com
+///    a sessão cuja direção o fp menor prefere.
+fn nova_sessao_substitui(
+    atual_via_relay: bool,
+    atual_initiator: bool,
+    novo_via_relay: bool,
+    novo_initiator: bool,
+    prefiro_outbound: bool,
+) -> bool {
+    // 1. mesmo transporte?
+    if atual_via_relay == novo_via_relay {
+        // mesmíssimo caminho e mesma direção → duplicata.
+        if atual_initiator == novo_initiator {
+            return false;
+        }
+        // Dial cruzado: fica a sessão na direção que o fp preferido escolheu.
+        return novo_initiator == prefiro_outbound;
+    }
+    // 2. transporte diferente: a DIRETA ganha; relay nunca derruba direta.
+    !novo_via_relay
+}
+
 /// Sessão online de um peer: writer task + reader loop com heartbeat/timeito.
 ///
 /// Eleição de sessão (dial simultâneo é comum: discovery + manual + inbound):
@@ -9938,8 +10087,10 @@ async fn register_and_run(
     peer_proto_v: u32,
 ) -> bool {
     let my_fp = engine.identity.fingerprint.clone();
-    let i_prefer_outbound = my_fp.as_str() < peer_fp; // menor fp prefere a própria dial
-    let this_is_my_preference = initiator == i_prefer_outbound;
+    // Menor fingerprint prefere a sessão que ELE iniciou (`outbound`); o maior
+    // prefere a recebida. Só desempata o DIAL CRUZADO — ver
+    // `nova_sessao_substitui`.
+    let prefiro_outbound = my_fp.as_str() < peer_fp;
 
     // TETO GLOBAL DE SESSÕES: sem isto, um swarm de peers (ou um atacante com
     // N identidades) multiplicava sockets/tasks/fds sem limite central — cada
@@ -9963,21 +10114,20 @@ async fn register_and_run(
     {
         let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = links.get(peer_fp) {
+            if existing.get_state() == PeerLinkState::Online
+                && !nova_sessao_substitui(
+                    existing.via_relay,
+                    existing.initiator,
+                    via_relay,
+                    initiator,
+                    prefiro_outbound,
+                )
+            {
+                debug!(peer_fp, via_relay, "sessão descartada (a atual fica)");
+                return false;
+            }
             if existing.get_state() == PeerLinkState::Online {
-                // direta vence relay nos dois sentidos
-                if !existing.via_relay && via_relay {
-                    debug!(peer_fp, "sessão relay descartada (direta já online)");
-                    return false;
-                }
-                if this_is_my_preference || (existing.via_relay && !via_relay) {
-                    debug!(peer_fp, "eleição: sessão preferida substitui a atual");
-                } else {
-                    debug!(
-                        peer_fp,
-                        "sessão descartada (par já online, preferência dele)"
-                    );
-                    return false;
-                }
+                debug!(peer_fp, "eleição: sessão preferida substitui a atual");
             }
         }
     }
@@ -9998,6 +10148,7 @@ async fn register_and_run(
         tx: Some(frame_tx.clone()),
         drop_notify: Notify::new(),
         via_relay,
+        initiator,
     });
     let replaced = {
         let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -11638,6 +11789,11 @@ async fn handle_frame(
             }
         }
         SecureFrame::Ack { msg_id } => {
+            // PROVA DE DADOS: só o Ack confirma que o caminho de volta carrega
+            // DADO nosso, não só Ping. Ver `PeerDiagInfo::last_ack_ms`.
+            engine.diag_update(peer_fp, |d| {
+                d.last_ack_ms = crate::identity::now_ms();
+            });
             if let Some(m) = engine.store.message_by_id(&msg_id)? {
                 if m.direction == "out" {
                     // GATE: só o destinatário confirma (DM ⇒ peer da conversa;
@@ -11682,6 +11838,11 @@ async fn handle_frame(
             // Visto azul: o outro lado leu as mensagens DELE recebidas até
             // `up_to_ts`. Mesmo gate do Ack (DM ⇒ peer da conversa; grupo ⇒
             // membro) — sem isso peer qualquer forjava "visto".
+            // Prova de dados (ver `PeerDiagInfo::last_ack_ms`): um `Read` só
+            // existe se as NOSSAS mensagens chegaram lá.
+            engine.diag_update(peer_fp, |d| {
+                d.last_ack_ms = crate::identity::now_ms();
+            });
             let ack_ok = match engine
                 .store
                 .get_conversation(&conv_id)?
@@ -13732,6 +13893,9 @@ fn set_link_state(engine: &Arc<NetworkEngine>, fp: &str, state: PeerLinkState) {
                 tx: None,
                 drop_notify: Notify::new(),
                 via_relay: false,
+                // Placeholder: sem sessão ainda; a direção real entra em
+                // `register_and_run`.
+                initiator: false,
             })
         });
         link.set_state(state);
@@ -13982,6 +14146,7 @@ mod tests {
                 tx: Some(tx_b),
                 drop_notify: Notify::new(),
                 via_relay: false,
+                initiator: false,
             }),
         );
 
@@ -14074,6 +14239,7 @@ mod tests {
                 tx: Some(tx_c),
                 drop_notify: Notify::new(),
                 via_relay: false,
+                initiator: false,
             }),
         );
 
@@ -14131,6 +14297,7 @@ mod tests {
                 tx: Some(tx),
                 drop_notify: Notify::new(),
                 via_relay: false,
+                initiator: false,
             }),
         );
 
@@ -14172,6 +14339,7 @@ mod tests {
                 tx: Some(tx),
                 drop_notify: Notify::new(),
                 via_relay: false,
+                initiator: false,
             }),
         );
         e.refresh_peer_relay();
@@ -14230,6 +14398,7 @@ mod tests {
                 tx: Some(tx),
                 drop_notify: Notify::new(),
                 via_relay: false,
+                initiator: false,
             }),
         );
         e.store.set_friend("blockedPeer", "", "blocked").unwrap();
@@ -14757,6 +14926,7 @@ mod tests {
                 tx: Some(tx),
                 drop_notify: Notify::new(),
                 via_relay: false,
+                initiator: false,
             }),
         );
 

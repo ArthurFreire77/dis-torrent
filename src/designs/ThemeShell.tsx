@@ -2859,6 +2859,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 nameOf={nameOfFp}
                 profiles={socialProfiles}
                 presence={socialPresence}
+                peerOnline={!ehGrupo && !!selPeerFp && onlineFps.has(selPeerFp)}
                 emptyBlock={emptyBlock('Nenhuma mensagem ainda', 'Envie a primeira. Se o peer estiver offline, fica pendente e sai ao reconectar.')}
                 onReply={(m) => { setReplyTo(m); setInput('') }}
                 onProfile={(fp) => setProfileFp(fp)}

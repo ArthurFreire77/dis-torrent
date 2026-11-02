@@ -28,6 +28,7 @@ import {
 } from './Social'
 import { Icon, Icons } from '../../shared/icons'
 import { EmojiPicker } from '../../shared/EmojiPicker'
+import { statusGlyph, statusTitle } from './messageStatus'
 
 
 export interface MessageListProps {
@@ -38,6 +39,9 @@ export interface MessageListProps {
   nameOf: (fp: string) => string
   profiles: Record<string, ProfileView>
   presence: Record<string, string>
+  /** DM: o contato desta conversa está ONLINE agora (sessão viva)? Sem esse
+   *  dado o rótulo "aguardando conexão" mentiria para quem está conectado. */
+  peerOnline?: boolean
   emptyBlock: React.ReactNode
   onReply: (m: StoredMessage) => void
   onProfile: (fp: string) => void
@@ -65,7 +69,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const {
     messages, convId, myFp, nameOf, profiles, presence, emptyBlock,
     onReply, onProfile, onForward, onThread, onToast, renderFile, pollChannel, onResend,
-    compact, fontScale,
+    compact, fontScale, peerOnline,
   } = props
   const fs = fontScale && fontScale > 0 ? fontScale : 1
 
@@ -311,7 +315,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     )}
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }}> (editado)</span> : null}
                     {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED, verticalAlign: 'middle' }}><Icon d={Icons.pin} size={11} /></span> : null}
-                    {mine && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={m.status} /></span>}
+                    {mine && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={m.status} peerOnline={peerOnline} /></span>}
                   </div>
                 ) : !grouped && (
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -322,7 +326,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }} title={new Date(meta.edited_at).toLocaleString('pt-BR')}>(editado)</span> : null}
                     {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED }}><Icon d={Icons.pin} size={11} /></span> : null}
                     {meta?.forwarded_from ? <span style={{ fontSize: 10, color: T_MUTED }}>↪ encaminhada de {meta.forwarded_from}</span> : null}
-                    {mine && m.status !== 'ok' && <StatusGlyph status={m.status} />}
+                    {mine && m.status !== 'ok' && <StatusGlyph status={m.status} peerOnline={peerOnline} />}
                   </div>
                 )}
 
@@ -552,17 +556,12 @@ function MenuItem({ label, icon, onClick, danger }: { label: string; icon?: stri
   )
 }
 
-function StatusGlyph({ status }: { status: string }) {
+function StatusGlyph({ status, peerOnline }: { status: string; peerOnline?: boolean }) {
   // Estilo WhatsApp: relógio (aguardando rede) → ✓ (saiu daqui) → ✓✓ cinza
   // (entregue) → ✓✓ azul (lido); ✕ = falhou (clique reenvia).
-  const g =
-    status === 'read' ? '✓✓'
-    : status === 'delivered' ? '✓✓'
-    : status === 'sent' ? '✓'
-    : status === 'sending' ? '○'
-    : status === 'pending' ? '🕓'
-    : status === 'failed' ? '✕'
-    : ''
+  // O texto da dica vem de `messageStatus`: com o contato ONLINE o relógio não
+  // significa "sem conexão", significa "fila sem confirmação".
+  const g = statusGlyph(status)
   if (!g) return null
   const cor =
     status === 'read' ? '#53bdeb'
@@ -570,14 +569,7 @@ function StatusGlyph({ status }: { status: string }) {
     : T_MUTED
   return (
     <span
-      title={
-        status === 'read' ? 'lida'
-        : status === 'delivered' ? 'entregue'
-        : status === 'sent' ? 'enviada'
-        : status === 'sending' ? 'enviando…'
-        : status === 'pending' ? 'aguardando conexão'
-        : 'falhou — clique para reenviar'
-      }
+      title={statusTitle(status, peerOnline)}
       style={{ fontSize: 11, color: cor, fontFamily: 'monospace', fontWeight: 700, letterSpacing: -2 }}
     >
       {g}

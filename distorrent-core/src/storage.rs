@@ -1145,6 +1145,20 @@ impl Store {
         Ok(ids)
     }
 
+    /// Quantas mensagens NOSSAS estão presas no outbox deste peer — inclusive as
+    /// em backoff (que `pending_outbox` esconde). Usado pelo detector de link
+    /// meio-vivo: "online sem confirmação" só é problema se há dado esperando.
+    pub fn outbox_len_for_peer(&self, peer_fp: &str) -> usize {
+        self.locked()
+            .query_row(
+                "SELECT COUNT(*) FROM outbox WHERE peer_fp=?1",
+                params![peer_fp],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as usize)
+            .unwrap_or(0)
+    }
+
     pub fn message_by_id(&self, msg_id: &str) -> Result<Option<StoredMessage>> {
         let conn = self.locked();
         let mut st = conn.prepare(

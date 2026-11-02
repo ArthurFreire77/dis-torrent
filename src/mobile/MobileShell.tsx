@@ -1712,6 +1712,7 @@ export default function MobileShell() {
         botName={m.bot_id ? (bots.find((b) => b.id === m.bot_id)?.name ?? undefined) : undefined}
         renderFile={renderFile}
         fontSize={15 * prefs.fontScale}
+        peerOnline={selConvObj?.kind === 'dm' && !!selConvObj.peer_fp && onlineFps.has(selConvObj.peer_fp)}
         onJumpToReply={(id) => {
           const el = document.getElementById(`mmsg-${id}`)
           if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); setFlash(id) }
@@ -1730,7 +1731,7 @@ export default function MobileShell() {
       />
       </div>
     )
-  }), [messages, identity, selConvObj, fileList, previews, downloadFile, resendMessage, social.reactions, social.meta, social.bodies, richCtx, selConv, selCommunity, actions, bots, myFp, setFlash, profilesByFp, peers, peerNickCacheRef])
+  }), [messages, identity, selConvObj, fileList, previews, downloadFile, resendMessage, social.reactions, social.meta, social.bodies, richCtx, selConv, selCommunity, actions, bots, myFp, setFlash, profilesByFp, peers, peerNickCacheRef, onlineFps])
 
   /** Refs de scroll: cada linha recebe id para o "pular para a citada". */
   useEffect(() => {
