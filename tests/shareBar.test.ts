@@ -1,11 +1,14 @@
 // A barra "está compartilhando sua tela" do WebView2/Chromium.
 //
-// Relato com print: DUAS janelas de aviso em cima da UI, uma com a miniatura da
-// fonte. Causa raiz (achada pelo outro agente): o critério antigo era o NOME DA
+// Relato com print: a janela de aviso aparece em cima da UI, cobre a barra de
+// tarefas e cria uma SEGUNDA entrada na barra de tarefas. Causa raiz (medida em
+// Chromium 156, com getDisplayMedia ativo): o critério antigo era o NOME DA
 // CLASSE `ScreenCaptureNotificationUIViews` — que é o nome do widget no fonte do
-// Chromium, não a classe Win32 (a real é `Chrome_WidgetWin_*`). A barra nunca foi
-// escondida em versão nenhuma. O que a identifica é a FORMA (faixa fina e larga),
-// ser TOPMOST, não ter legenda e pertencer à árvore de processos do app.
+// Chromium, não a classe Win32 (a real é `Chrome_WidgetWin_*`) — e o filtro era
+// pelo PID do app, embora a janela nasça no `msedgewebview2.exe`. Resultado: a
+// barra nunca foi escondida em versão nenhuma. O que a identifica é a FORMA
+// (faixa 472x70), ser TOPMOST, não ter legenda e pertencer à árvore de processos
+// do app.
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -28,7 +31,9 @@ test('identifica a janela por forma/estilo, não pelo nome do widget', () => {
 test('varre a árvore de processos (a barra nasce no msedgewebview2)', () => {
   assert.match(sharebar, /CreateToolhelp32Snapshot/, 'monta a árvore de PIDs')
   assert.match(sharebar, /pids\.contains\(&pid\)/, 'aceita processo descendente')
-  assert.match(sharebar, /EnumChildWindows/, 'cobre janelas filhas/owned')
+  // A barra é janela de TOPO (`e_barra` exige WS_CHILD == 0), então
+  // `EnumChildWindows` só visitaria janelas que o predicado sempre rejeita.
+  assert.doesNotMatch(sharebar, /EnumChildWindows/, 'varredura de filhas é código morto')
 })
 
 test('vigia continuamente enquanto o share durar', () => {
@@ -42,4 +47,14 @@ test('o app liga o vigia no início e desliga no fim do share', () => {
   assert.match(manager, /services\.shareBarWatch\?\.\(false\)/)
   assert.match(runtime, /export function isWindowsRuntime/)
   assert.match(manager, /if \(!isWindowsRuntime\(\)\) return/)
+})
+
+test('nenhum comando registrado duas vezes no generate_handler', () => {
+  // Um comando repetido no `generate_handler!` registra o mesmo nome duas
+  // vezes; `hide_share_bar` já esteve duplicado e passou despercebido.
+  const lib = readFileSync('src-tauri/src/lib.rs', 'utf8')
+  const bloco = lib.slice(lib.indexOf('generate_handler!['))
+  const nomes = [...bloco.matchAll(/^\s{8,}([a-z_][a-zA-Z0-9_:]*),\s*$/gm)].map((m) => m[1])
+  const repetidos = nomes.filter((n, i) => nomes.indexOf(n) !== i)
+  assert.deepEqual(repetidos, [], `comandos duplicados: ${repetidos.join(', ')}`)
 })

@@ -52,7 +52,7 @@ pub fn unwatch_share_bar() {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use windows_sys::Win32::Foundation::{
         CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT, TRUE,
@@ -63,9 +63,9 @@ mod imp {
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumChildWindows, EnumWindows, GetClassNameW, GetWindowLongW, GetWindowRect,
-        GetWindowThreadProcessId, IsWindowVisible, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_HIDE,
-        WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
+        EnumWindows, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId,
+        IsWindowVisible, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_HIDE, WS_CAPTION, WS_CHILD,
+        WS_EX_TOPMOST,
     };
 
     /// Classe das janelas do Chromium (a barra é uma delas).
@@ -94,15 +94,19 @@ mod imp {
     /// segundo. A lista de PIDs é recalculada a cada rodada: o processo do
     /// WebView2 pode nascer depois da captura (e reaparecer após um crash).
     static ATIVO: AtomicBool = AtomicBool::new(false);
+    /// Cada `watch` incrementa; a thread de uma geração antiga morre sozinha.
+    /// Sem isto, um stop/start rápido deixava DUAS threads escondendo janelas.
+    static GERACAO: AtomicU64 = AtomicU64::new(0);
 
     pub fn watch() {
         if ATIVO.swap(true, Ordering::SeqCst) {
             return;
         }
+        let minha = GERACAO.fetch_add(1, Ordering::SeqCst) + 1;
         std::thread::Builder::new()
             .name("sharebar-watch".into())
-            .spawn(|| {
-                while ATIVO.load(Ordering::SeqCst) {
+            .spawn(move || {
+                while ATIVO.load(Ordering::SeqCst) && GERACAO.load(Ordering::SeqCst) == minha {
                     hide();
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
@@ -212,18 +216,6 @@ mod imp {
     unsafe extern "system" fn each_topo(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
         let busca = &mut *(lparam as *mut Busca);
         tentar(hwnd, busca);
-        // A barra é flutuante, mas o Chromium já a criou como owned em algumas
-        // versões: varrer a subárvore cobre as duas formas.
-        if IsWindowVisible(hwnd) != 0 {
-            let ptr = busca as *mut Busca as LPARAM;
-            EnumChildWindows(hwnd, Some(each_filha), ptr);
-        }
-        TRUE
-    }
-
-    unsafe extern "system" fn each_filha(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
-        let busca = &mut *(lparam as *mut Busca);
-        tentar(hwnd, busca);
         TRUE
     }
 
@@ -307,6 +299,87 @@ mod imp {
         #[test]
         fn ignora_janela_com_legenda() {
             assert!(!e_barra("Chrome_WidgetWin_1", 472, 70, BAR_EX, 0x00CF_0000));
+        }
+
+        /// Fim a fim, com janela de verdade: cria uma com os estilos medidos da
+        /// barra e confere que `hide` a esconde.
+        ///
+        /// `ShowWindow` entre threads só POSTA a mensagem, então a thread dona
+        /// precisa bombear — e é o caso real: o processo que cria a barra é o
+        /// message loop do WebView2.
+        #[test]
+        fn esconde_uma_janela_real_no_formato_da_barra() {
+            use crate::sharebar::{unwatch_share_bar, watch_share_bar};
+            use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+            use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IsWindowVisible,
+                PeekMessageW, RegisterClassExW, SetWindowLongW, ShowWindow, TranslateMessage,
+                GWL_STYLE, MSG, PM_REMOVE, SW_SHOWNOACTIVATE, WNDCLASSEXW,
+            };
+
+            unsafe extern "system" fn proc_(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+                DefWindowProcW(h, m, w, l)
+            }
+
+            /// Bombeia por `ms` (message loop do dono da janela).
+            fn pump(ms: u64) {
+                let fim = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                unsafe {
+                    let mut msg: MSG = std::mem::zeroed();
+                    while std::time::Instant::now() < fim {
+                        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                            TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            }
+
+            unsafe {
+                let hinst = GetModuleHandleW(std::ptr::null());
+                let mut cls: WNDCLASSEXW = std::mem::zeroed();
+                cls.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
+                cls.lpfnWndProc = Some(proc_);
+                cls.hInstance = hinst;
+                let nome: Vec<u16> = "Chrome_WidgetWin_1\0".encode_utf16().collect();
+                cls.lpszClassName = nome.as_ptr();
+                if RegisterClassExW(&cls) == 0 {
+                    return; // classe já registrada por outro teste
+                }
+                let titulo: Vec<u16> = "http://127.0.0.1:8787 is sharing your screen.\0"
+                    .encode_utf16()
+                    .collect();
+                let h = CreateWindowExW(
+                    0x0020_0008,
+                    nome.as_ptr(),
+                    titulo.as_ptr(),
+                    0x1608_0000,
+                    100,
+                    900,
+                    472,
+                    70,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    hinst,
+                    std::ptr::null_mut(),
+                );
+                // O Windows acrescenta WS_CAPTION na criação; o Chromium zera o
+                // estilo depois de criar a janela de frame customizado.
+                SetWindowLongW(h, GWL_STYLE, 0x1608_0000);
+                ShowWindow(h, SW_SHOWNOACTIVATE);
+                assert!(IsWindowVisible(h) != 0, "a janela precisa começar visível");
+
+                watch_share_bar();
+                pump(700);
+                let escondida = IsWindowVisible(h) == 0;
+                unwatch_share_bar();
+                if IsWindowVisible(h) != 0 {
+                    DestroyWindow(h);
+                }
+                assert!(escondida, "o vigia tem que esconder a barra");
+            }
         }
     }
 }

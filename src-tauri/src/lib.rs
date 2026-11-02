@@ -4954,8 +4954,6 @@ fn main() {
             app_hide_to_tray,
             app_quit,
             window_toggle_fullscreen,
-            hide_share_bar,
-            share_bar_watch,
             background_set_connection,
             call_ring_start,
             call_ring_stop,

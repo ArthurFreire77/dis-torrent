@@ -4446,13 +4446,12 @@ export class CallManager {
     try {
       this.screenStatsTimer = setInterval(() => { void this.sampleScreenStats() }, 1000)
     } catch { this.screenStatsTimer = null }
-    // BARRA DO WEBVIEW2: recriada a cada 1 s de propósito.
+    // BARRA DO WEBVIEW2: vigiada do lado nativo enquanto o share durar.
     //
-    // O Chromium recria a barra/ miniatura em vários momentos (troca de fonte,
+    // O Chromium recria a barra em vários momentos (troca de fonte,
     // renegociação, foco) e não há evento para isso. Esconder só no start
-    // deixava a janela reaparecer no meio do compartilhamento — era o print com
-    // DUAS janelas de aviso em cima da UI. Um `hide_share_bar` por segundo é
-    // uma enumeração de janelas do próprio processo: barato e idempotente.
+    // deixava a janela reaparecer no meio do compartilhamento. O vigia roda no
+    // Rust (`share_bar_watch`), então não depende do JS e não pisca.
     this.startShareBarWatch()
   }
 
@@ -4469,7 +4468,8 @@ export class CallManager {
   }
 
   private stopShareBarWatch(): void {
-    if (!isWindowsRuntime()) return
+    // Sem guarda de plataforma: sair sem desligar o vigia deixaria a thread
+    // escondendo janelas do Chromium durante uma chamada sem tela.
     try { void services.shareBarWatch?.(false).catch(() => { /* comando opcional */ }) } catch { /* ignore */ }
   }
 
