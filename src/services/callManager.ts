@@ -2,7 +2,7 @@
 
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
-import { setCallVideoSending } from './callMedia'
+import { setCallVideoSending, applyOfferInStable as applyOfferToSession } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
@@ -251,6 +251,25 @@ export async function createTunedOffer(
   const offer = await pc.createOffer(opts?.iceRestart ? { iceRestart: true } : undefined)
   offer.sdp = tuneOpusSdp(offer.sdp ?? '')
   return offer
+}
+
+/**
+ * Cria a offer e a aplica SÓ se o PC continuar em `stable`.
+ *
+ * `createOffer()` é assíncrono: se uma oferta remota chegar no meio, o
+ * `setLocalDescription` estoura "Called in wrong state: have-remote-offer" e a
+ * renegociação (câmera, tela, qualidade, ICE restart) se perde — era a chamada
+ * que só funcionava na segunda tentativa. A lógica pura vive em
+ * `callMedia.ts` (`applyOfferInStable`), testável sem o resto do manager.
+ */
+export async function applyOfferInStable(
+  pc: RTCPeerConnection,
+  opts?: { iceRestart?: boolean },
+): Promise<RTCSessionDescriptionInit | null> {
+  return applyOfferToSession<RTCSessionDescriptionInit>(pc, {
+    ...opts,
+    tuneSdp: tuneOpusSdp,
+  })
 }
 
 /** Answer com Opus afinado (baixa latência). */
@@ -955,6 +974,15 @@ export class CallManager {
   private static readonly ICE_RESTART_BACKOFF_MS = [1000, 4000, 9000]
   /** Timers de restart agendados por peer (evita stack de restarts). */
   private iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /**
+   * Fila de negociação por peer. `createOffer()` é ASSÍNCRONO: uma oferta
+   * remota pode chegar no meio dele e o PC vira `have-remote-offer` — aí o
+   * `setLocalDescription(offer)` estoura "Called in wrong state:
+   * have-remote-offer" e a chamada fica sem áudio na segunda tentativa.
+   * Serializar por peer + conferir o estado na hora de aplicar resolve as duas
+   * pontas: nenhuma offer concorrente e nenhuma aplicada fora de `stable`.
+   */
+  private offerQueue = new Map<string, Promise<unknown>>()
   /** Medidor B1: iceServers efetivos do último PC + relatório por peer. */
   private iceServersUsed: RTCIceServer[] | null = null
   private iceReports = new Map<string, IceMediaReport>()
@@ -1588,6 +1616,29 @@ export class CallManager {
         if (pc.iceGatheringState === 'gathering') { stillGathering = true; break }
       }
       if (stillGathering && this.connectWatchdogGrants < 2) {
+        this.connectWatchdogGrants++
+        this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
+        return
+      }
+      // AINDA NEGOCIANDO NÃO É FALHA.
+      //
+      // BUG REAL ("o botão de entrar é instável", "tem que abrir e fechar o mic
+      // para ir"): com 20s de relógio o watchdog marcava `ice-failed` mesmo com
+      // o ICE em `checking`/`connecting` — que é justamente a fase normal de
+      // quem ENTROU numa sala e espera a offer/answer do outro lado (que pode
+      // estar abrindo o microfone). A UI mostrava erro e o usuário reentrava.
+      // Agora só declara falha com par realmente `failed`/`disconnected`, ou
+      // depois do orçamento total (3 janelas).
+      let negociando = false
+      let algumPC = false
+      for (const pc of this.pcs.values()) {
+        algumPC = true
+        const ice = pc.iceConnectionState
+        if (ice === 'failed' || ice === 'disconnected') continue
+        negociando = true
+        break
+      }
+      if (algumPC && negociando && this.connectWatchdogGrants < 2) {
         this.connectWatchdogGrants++
         this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
         return
@@ -2705,13 +2756,11 @@ export class CallManager {
         } catch { /* track individual pode recusar; segue as demais */ }
       }
       if (tracks.length > 0 && this.state && this.pcs.size > 0) {
-        for (const [fp, pc] of this.pcs) {
+        for (const fp of this.pcs.keys()) {
           try {
-            if (pc.signalingState !== 'stable') continue
-            const offer = await createTunedOffer(pc)
-            await pc.setLocalDescription(offer)
-            // o answer remoto chega via handleAnswer → setRemoteDescription (renegociação completa)
-            await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
+            // Qualidade não pode disputar a fila de negociação com câmera/tela;
+            // `sendOffer` serializa e respeita `stable`.
+            await this.sendOffer(fp, this.state.callId)
           } catch { /* falha por peer não derruba os demais */ }
         }
       }
@@ -3457,10 +3506,12 @@ export class CallManager {
               pc.addTrack(track, this.localStream)
               needsOffer = true
             }
-            if (needsOffer && pc.signalingState === 'stable') {
-              const offer = await createTunedOffer(pc)
-              await pc.setLocalDescription(offer)
-              if (this.state) await services.callOffer(fp, this.state.callId, JSON.stringify(offer))
+            if (needsOffer) {
+              // Fila por peer + estado conferido ao aplicar (ver `sendOffer`):
+              // sem isso, câmera e tela ligadas juntas geravam duas offers e a
+              // segunda morria em "Called in wrong state".
+              const saiu = await this.sendOffer(fp, this.state.callId)
+              if (!saiu) needsOffer = false
             }
             sent++
           } catch (e) {
@@ -3703,12 +3754,11 @@ export class CallManager {
           // ESPERA a sinalização liberar em vez de abortar o share inteiro.
           // Antes, um ICE restart em andamento (comum logo após entrar na
           // chamada) fazia o `throw` aqui e a tela não saía para ninguém.
-          if (!(await this.waitForStable(pc)) || !this.state) {
-            throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
-          }
-          const offer = await createTunedOffer(pc)
-          await pc.setLocalDescription(offer)
-          await services.callOffer(fp, this.state.callId, JSON.stringify(offer))
+          if (!this.state) throw new Error('chamada encerrada durante o compartilhamento')
+          // `sendOffer` espera `stable` e não aplica se uma offer remota chegar
+          // no meio (era o "Called in wrong state: have-remote-offer").
+          const saiu = await this.sendOffer(fp, this.state.callId)
+          if (!saiu) throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
         }
         peersSeeded++
       } catch (e) {
@@ -3847,12 +3897,10 @@ export class CallManager {
           pc.addTrack(cam, this.localStream)
           needsOffer = true
         }
-        if (needsOffer && pc.signalingState === 'stable' && this.state) {
-          const offer = await createTunedOffer(pc).catch(() => null)
-          if (offer) {
-            await pc.setLocalDescription(offer).catch(() => {})
-            await services.callOffer(fp, this.state.callId, JSON.stringify(offer)).catch(() => {})
-          }
+        if (needsOffer && this.state) {
+          // Best-effort: em falha, a próxima renegociação (câmera/tela/mesh)
+          // pega o estado — nunca aplica offer fora de `stable`.
+          await this.sendOffer(fp, this.state.callId).catch(() => false)
         }
       } catch { /* peer isolado não derruba os demais */ }
     }
@@ -4469,10 +4517,9 @@ export class CallManager {
     if (!force && pc.iceConnectionState !== 'failed') return
     try { const anyPc = pc as any; if (typeof anyPc.restartIce === 'function') anyPc.restartIce() } catch { /* ignore */ }
     // restartIce() só marca "renegociar" — é preciso enviar um novo offer.
-    if (pc.signalingState !== 'stable') return
-    const offer = await createTunedOffer(pc)
-    await pc.setLocalDescription(offer)
-    await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+    // `sendOffer` serializa com as outras negociações do peer e NÃO aplica se o
+    // estado mudou (uma offer remota pode ter chegado no meio).
+    await this.sendOffer(fp, callId, { iceRestart: true })
   }
 
   /**
@@ -4486,16 +4533,11 @@ export class CallManager {
    */
   private async renegotiate(fp: string, pc: RTCPeerConnection): Promise<boolean> {
     try {
-      if (!this.state) return false
+      if (!this.state || this.pcs.get(fp) !== pc) return false
       const callId = this.state.callId
-      const pronto = await this.waitForStable(pc)
-      if (!pronto) return false
-      // A chamada pode ter trocado durante a espera.
-      if (!this.state || this.state.callId !== callId || this.pcs.get(fp) !== pc) return false
-      const offer = await createTunedOffer(pc)
-      await pc.setLocalDescription(offer)
-      await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
-      return true
+      // `sendOffer` já espera o estado ficar `stable`, confere de novo na hora
+      // de aplicar e serializa com as demais negociações deste peer.
+      return await this.sendOffer(fp, callId)
     } catch { return false }
   }
 
@@ -4506,6 +4548,48 @@ export class CallManager {
       await new Promise((r) => setTimeout(r, 120))
     }
     return pc.signalingState === 'stable'
+  }
+
+  /**
+   * Envia uma offer para UM peer, serializada com as demais do mesmo peer.
+   *
+   * Duas coisas que estavam faltando e quebravam a renegociação:
+   * 1. FILA por peer — câmera + tela + qualidade podiam pedir offer ao mesmo
+   *    tempo e a segunda caía em `have-local-offer`;
+   * 2. estado conferido na hora de APLICAR (ver `applyOfferInStable`) — entre o
+   *    `createOffer` e o `setLocalDescription` chega a oferta remota, o PC vira
+   *    `have-remote-offer` e o navegador recusa. Era o erro
+   *    "Called in wrong state: have-remote-offer" e a chamada que só pegava na
+   *    segunda tentativa.
+   *
+   * Devolve `true` quando a offer SAUIU. Não espera o answer (quem trata é
+   * `handleAnswer`).
+   */
+  private async sendOffer(fp: string, callId: string, opts?: { iceRestart?: boolean }): Promise<boolean> {
+    const anterior = this.offerQueue.get(fp) ?? Promise.resolve()
+    const tarefa = anterior
+      .catch(() => { /* falha anterior não trava a fila */ })
+      .then(async () => {
+        const pc = this.pcs.get(fp)
+        // O PC pode ter sido trocado/fechado enquanto esperava a vez.
+        if (!pc || pc.signalingState === 'closed') return false
+        // Só bloqueia se a chamada ativa for OUTRA (state null = fluxo sem sessão).
+        if (this.state && this.state.callId !== callId) return false
+        // Espera curta: se a negociação atual ainda não fechou, não empilha.
+        if (!(await this.waitForStable(pc))) return false
+        const offer = await applyOfferInStable(pc, opts)
+        if (!offer) return false
+        if ((this.state && this.state.callId !== callId) || this.pcs.get(fp) !== pc) return false
+        await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+        return true
+      })
+    this.offerQueue.set(fp, tarefa)
+    try {
+      return await tarefa
+    } finally {
+      // Libera a entrada só se ninguém entrou depois (senão apaga a fila nova).
+      if (this.offerQueue.get(fp) === tarefa) this.offerQueue.delete(fp)
+    }
   }
 
   /** Cria/renegocia PC de UM par; PC já conectado NÃO é fechado (bug "um escuta, o outro não"). */
@@ -4537,8 +4621,14 @@ export class CallManager {
     if (initiator) {
       try {
         const offer = await createTunedOffer(pc)
-        await pc.setLocalDescription(offer)
-        await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+        // `createOffer` é assíncrono: a oferta remota pode ter chegado (o peer
+        // abriu o PC dele ao mesmo tempo) e o `setLocalDescription` estouraria
+        // "Called in wrong state: have-remote-offer". Só aplica em `stable`;
+        // quem perdeu a vez aceita a offer do outro em `handleOffer`.
+        if (pc.signalingState === 'stable') {
+          await pc.setLocalDescription(offer)
+          await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+        }
       } catch (e) {
         // oferta falhou (PC fechado, rede instável): fecha e remove — sem vazar PC travado
         try { pc.close() } catch { /* ignore */ }
@@ -4566,11 +4656,13 @@ export class CallManager {
       // Um ICE restart é mais barato que um PC novo e resolve o caso half-open.
       if (pc && cs === 'failed') {
         try {
-          const offer = await createTunedOffer(pc, { iceRestart: true })
-          await pc.setLocalDescription(offer)
-          await services.callOffer(fp, st.callId, JSON.stringify(offer)).catch(() => {})
-          this.setFailureCause(`reparando rota com ${fp.slice(0, 8)}…`)
-          continue
+          // ICE restart pela FILA do peer: nunca aplica offer fora de `stable`
+          // (era o erro "Called in wrong state: have-remote-offer" no reparo).
+          const saiu = await this.sendOffer(fp, st.callId, { iceRestart: true })
+          if (saiu) {
+            this.setFailureCause(`reparando rota com ${fp.slice(0, 8)}…`)
+            continue
+          }
         } catch { /* cai para recriar abaixo */ }
       }
       // `connecting` NÃO é refeito na hora: um par saudável atravessa essa fase
@@ -4700,6 +4792,14 @@ export class CallManager {
     if (pc.signalingState === 'stable' && this.lastRemoteOffer.get(fromFp) === sdpStr) return
 
     const polite = this.isPolite(fromFp)
+    // Ordem das negociações DESTE peer: espera a offer/sua resposta anterior.
+    // Sem isto, a offer remota podia chegar no meio de um `createOffer` nosso e
+    // o `setLocalDescription` estourava "Called in wrong state".
+    const anterior = this.offerQueue.get(fromFp)
+    if (anterior) {
+      try { await anterior.catch(() => {}) } catch { /* a falha da anterior não importa */ }
+      if (this.pcs.get(fromFp) !== pc) return
+    }
     // GLARE (renegociação simultânea de câmera/tela): só um lado cede.
     if (pc.signalingState === 'have-local-offer') {
       if (!polite) {
@@ -4715,10 +4815,15 @@ export class CallManager {
       await pc.setRemoteDescription(offer)
       // Renegociação pode terminar após a chamada já ter mudado: confere ID e instância do PC.
       if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
+      // A resposta pode ter sido descartada enquanto esperávamos (chamada encerrada).
+      if (pc.signalingState !== 'have-remote-offer') return
       this.lastRemoteOffer.set(fromFp, sdpStr)
       // candidatos do ofertante podem ter chegado antes desta offer (relay)
       await this.flushPendingIce(fromFp, pc, callId)
       const answer = await createTunedAnswer(pc)
+      // `createTunedAnswer` é assíncrono: se o estado saiu de `have-remote-offer`
+      // (rollback/renovação), aplicar a answer estouraria o mesmo erro.
+      if (pc.signalingState !== 'have-remote-offer') return
       await pc.setLocalDescription(answer)
       if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       await services.callAnswer(fromFp, callId, JSON.stringify(answer)).catch(() => {})
@@ -4981,7 +5086,6 @@ export class CallManager {
       this.announceSelfToRoom(callId)
       this.startMeshRepair(callId)
       this.publishRoom()
-      this.startMeshRepair(this.state.callId)
       this.onUpdate({ ...this.state })
       this.startCallForeground()
       return this.state
@@ -5088,6 +5192,7 @@ export class CallManager {
     this.pendingIce.clear()
     this.localIce.clear()
     this.pendingOffers.clear()
+    this.offerQueue.clear()
     this.acceptedCalls.clear()
     this.lastRemoteOffer.clear()
     this.iceReports.clear()
