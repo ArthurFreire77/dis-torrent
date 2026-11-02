@@ -31,6 +31,19 @@ export interface CallSettingsPanelProps {
   onClose: () => void
   /** Aviso honesto de erro (permissão, device ocupado). */
   onError?: (msg: string) => void
+  /** Estado da CHAMADA (para os interruptores refletirem o que está ligado). */
+  cameraOn?: boolean
+  sharing?: boolean
+  muted?: boolean
+  /** Liga/desliga câmera (mesmo caminho do botão da barra). */
+  onToggleCamera?: () => void | Promise<void>
+  /** Liga/desliga a transmissão de tela. */
+  onToggleScreen?: () => void | Promise<void>
+  /** Alterar qualidade/FPS da TELA (degraus próprios, ver screenShare.ts). */
+  screenQuality?: string
+  screenFps?: string
+  onScreenQualityChange?: (q: string) => void | Promise<void>
+  onScreenFpsChange?: (f: string) => void | Promise<void>
 }
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -40,6 +53,42 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
       {children}
       {hint ? <span style={{ fontSize: 10.5, color: T_MUTED }}>{hint}</span> : null}
     </label>
+  )
+}
+
+/** Cabeçalho de seção: separa "Câmera", "Tela" e "Microfone" para não virar um bloco só. */
+function Secao({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: `1px solid ${T_BORDER}`, paddingTop: 10 }}>
+      <span style={{ fontSize: 10.5, fontWeight: 900, color: T_ACCENT, letterSpacing: 0.8 }}>{title}</span>
+      {children}
+    </div>
+  )
+}
+
+/** Interruptor liga/desliga com rótulo (o mesmo visual nos dois estados). */
+function Toggle({ on, label, onChange, disabled }: { on: boolean; label: string; onChange: () => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onChange}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+        width: '100%', textAlign: 'left', cursor: disabled ? 'default' : 'pointer',
+        background: on ? `${T_ACCENT}22` : T_INPUT,
+        border: `1px solid ${on ? T_ACCENT : T_BORDER}`,
+        color: on ? T_HEADING : T_MUTED,
+        borderRadius: 8, padding: '8px 10px', fontSize: 12.5, fontWeight: 700,
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      <span>{label}</span>
+      <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: 0.5 }}>{on ? 'LIGADO' : 'DESLIGADO'}</span>
+    </button>
   )
 }
 
@@ -55,7 +104,12 @@ const selectStyle: React.CSSProperties = {
   minWidth: 0,
 }
 
-export default function CallSettingsPanel({ prefs, onApply, onClose, onError }: CallSettingsPanelProps) {
+export default function CallSettingsPanel({
+  prefs, onApply, onClose, onError,
+  cameraOn, sharing, muted,
+  onToggleCamera, onToggleScreen,
+  screenQuality, screenFps, onScreenQualityChange, onScreenFpsChange,
+}: CallSettingsPanelProps) {
   const [audioDevices, setAudioDevices] = useState<DeviceOption[]>([])
   const [videoDevices, setVideoDevices] = useState<DeviceOption[]>([])
   const [local, setLocal] = useState<CallMediaPrefs>(prefs)
@@ -123,7 +177,7 @@ export default function CallSettingsPanel({ prefs, onApply, onClose, onError }: 
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 13, fontWeight: 800, color: T_HEADING }}>Ajustes da chamada</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: T_HEADING }}>Configurações da chamada</span>
         <button
           onClick={onClose}
           aria-label="Fechar ajustes"
@@ -131,72 +185,130 @@ export default function CallSettingsPanel({ prefs, onApply, onClose, onError }: 
         >✕</button>
       </div>
 
-      <Row label="MICROFONE">
-        <select
-          style={selectStyle}
-          value={local.audioInputId}
-          disabled={busy || !ouvinteDisponivel}
-          onChange={(e) => void aplicar({ audioInputId: e.target.value })}
-        >
-          {audioChoices.map((d) => <option key={d.deviceId || 'default'} value={d.deviceId}>{d.label}</option>)}
-        </select>
-      </Row>
+      {/* ── CÂMERA: ligar/desligar + aparelho + qualidade + FPS ── */}
+      <Secao title="CÂMERA">
+        {onToggleCamera && (
+          <Toggle
+            on={!!cameraOn}
+            label={cameraOn ? 'Câmera ligada' : 'Câmera desligada'}
+            disabled={busy}
+            onChange={() => { void onToggleCamera() }}
+          />
+        )}
+        <Row label="APARELHO">
+          <select
+            style={selectStyle}
+            value={local.videoInputId}
+            disabled={busy || !ouvinteDisponivel}
+            onChange={(e) => void aplicar({ videoInputId: e.target.value })}
+          >
+            {videoChoices.map((d) => <option key={d.deviceId || 'default'} value={d.deviceId}>{d.label}</option>)}
+          </select>
+        </Row>
+        <Row label="QUALIDADE" hint={qualityLabel(local.quality, local.fps)}>
+          <select
+            style={selectStyle}
+            value={local.quality}
+            disabled={busy}
+            onChange={(e) => void aplicar({ quality: e.target.value as CallVideoQuality })}
+          >
+            {CALL_VIDEO_QUALITIES.map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+        </Row>
+        <Row label="FPS" hint="Automático deixa o aparelho escolher.">
+          <select
+            style={selectStyle}
+            value={local.fps}
+            disabled={busy}
+            onChange={(e) => void aplicar({ fps: e.target.value as CallFps })}
+          >
+            {CALL_FPS_OPTIONS.map((f) => <option key={f} value={f}>{f === 'auto' ? 'Automático' : `${f} fps`}</option>)}
+          </select>
+        </Row>
+      </Secao>
 
-      <Row label="CÂMERA">
-        <select
-          style={selectStyle}
-          value={local.videoInputId}
-          disabled={busy || !ouvinteDisponivel}
-          onChange={(e) => void aplicar({ videoInputId: e.target.value })}
-        >
-          {videoChoices.map((d) => <option key={d.deviceId || 'default'} value={d.deviceId}>{d.label}</option>)}
-        </select>
-      </Row>
-
-      <Row
-        label="QUALIDADE DA CÂMERA"
-        hint={qualityLabel(local.quality, local.fps)}
-      >
-        <select
-          style={selectStyle}
-          value={local.quality}
-          disabled={busy}
-          onChange={(e) => void aplicar({ quality: e.target.value as CallVideoQuality })}
-        >
-          {CALL_VIDEO_QUALITIES.map((q) => <option key={q} value={q}>{q}</option>)}
-        </select>
-      </Row>
-
-      <Row label="FPS" hint="Automático deixa o aparelho escolher (sem teto artificial).">
-        <select
-          style={selectStyle}
-          value={local.fps}
-          disabled={busy}
-          onChange={(e) => void aplicar({ fps: e.target.value as CallFps })}
-        >
-          {CALL_FPS_OPTIONS.map((f) => <option key={f} value={f}>{f === 'auto' ? 'Automático' : `${f} fps`}</option>)}
-        </select>
-      </Row>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: `1px solid ${T_BORDER}`, paddingTop: 10 }}>
-        <span style={{ fontSize: 11, fontWeight: 800, color: T_MUTED, letterSpacing: 0.4 }}>PROCESSAMENTO DE VOZ</span>
-        {([
-          ['echoCancellation', 'Cancelamento de eco'],
-          ['noiseSuppression', 'Supressão de ruído'],
-          ['autoGainControl', 'Ganho automático'],
-        ] as const).map(([key, label]) => (
-          <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: T_TEXT, cursor: busy ? 'default' : 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={local[key]}
+      {/* ── TELA: ligar/desligar + qualidade e FPS próprios ── */}
+      {(onToggleScreen || onScreenQualityChange) && (
+        <Secao title="TRANSMISSÃO DE TELA">
+          {onToggleScreen && (
+            <Toggle
+              on={!!sharing}
+              label={sharing ? 'Transmitindo' : 'Transmitir tela'}
               disabled={busy}
-              onChange={(e) => void aplicar({ [key]: e.target.checked } as Partial<CallMediaPrefs>)}
-              style={{ accentColor: T_ACCENT, width: 15, height: 15 }}
+              onChange={() => { void onToggleScreen() }}
             />
-            {label}
-          </label>
-        ))}
-      </div>
+          )}
+          {onScreenQualityChange && (
+            <Row label="QUALIDADE DA TELA" hint="Tela é texto: degrau próprio, não usa o da câmera.">
+              <select
+                style={selectStyle}
+                value={screenQuality ?? '720p'}
+                disabled={busy}
+                onChange={(e) => void onScreenQualityChange(e.target.value)}
+              >
+                <option value="auto">Automática</option>
+                <option value="480p">480p (econômica)</option>
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+                <option value="1440p">1440p (nítida)</option>
+                <option value="4K">4K (máxima)</option>
+              </select>
+            </Row>
+          )}
+          {onScreenFpsChange && (
+            <Row label="FPS DA TELA">
+              <select
+                style={selectStyle}
+                value={screenFps ?? '60'}
+                disabled={busy}
+                onChange={(e) => void onScreenFpsChange(e.target.value)}
+              >
+                <option value="auto">Automático</option>
+                <option value="30">30 fps</option>
+                <option value="60">60 fps</option>
+                <option value="120">120 fps (se suportar)</option>
+              </select>
+            </Row>
+          )}
+        </Secao>
+      )}
+
+      {/* ── MICROFONE ── */}
+      <Secao title="MICROFONE">
+        {onToggleCamera && muted !== undefined && (
+          <span style={{ fontSize: 10.5, color: T_MUTED }}>
+            {muted ? 'Seu microfone está silenciado (botão da barra).' : 'Microfone ativo.'}
+          </span>
+        )}
+        <Row label="APARELHO">
+          <select
+            style={selectStyle}
+            value={local.audioInputId}
+            disabled={busy || !ouvinteDisponivel}
+            onChange={(e) => void aplicar({ audioInputId: e.target.value })}
+          >
+            {audioChoices.map((d) => <option key={d.deviceId || 'default'} value={d.deviceId}>{d.label}</option>)}
+          </select>
+        </Row>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {([
+            ['echoCancellation', 'Cancelamento de eco'],
+            ['noiseSuppression', 'Supressão de ruído'],
+            ['autoGainControl', 'Ganho automático'],
+          ] as const).map(([key, label]) => (
+            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: T_TEXT, cursor: busy ? 'default' : 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={local[key]}
+                disabled={busy}
+                onChange={(e) => void aplicar({ [key]: e.target.checked } as Partial<CallMediaPrefs>)}
+                style={{ accentColor: T_ACCENT, width: 15, height: 15 }}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      </Secao>
 
       <span style={{ fontSize: 10.5, color: T_MUTED, lineHeight: 1.4 }}>
         {ouvinteDisponivel

@@ -816,6 +816,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   /** Engrenagem da chamada aberta? (microfone/câmera/resolução/FPS) */
   const [showCallSettings, setShowCallSettings] = useState(false)
   const [callMediaPrefsState, setCallMediaPrefsState] = useState(() => getCallMediaPrefs())
+  /** Re-render após mudar qualidade/FPS da TELA (estado vive no CallManager). */
+  const [, setScreenOptsTick] = useState(0)
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   /** Painel de diagnóstico da chamada (tempo real) dentro do overlay. */
@@ -3480,6 +3482,18 @@ export default function ThemeShell({ designId }: {designId:string}){
               }}
               onClose={() => setShowCallSettings(false)}
               onError={(m) => setError(m)}
+              cameraOn={!!activeCall?.cameraOn}
+              sharing={!!activeCall?.sharing}
+              muted={!!activeCall?.muted}
+              onToggleCamera={() => callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e)))}
+              onToggleScreen={() => {
+                if (activeCall?.sharing) return callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))
+                setShowScreenPicker(true)
+              }}
+              screenQuality={callManager.getScreenShareOptions().quality}
+              screenFps={callManager.getScreenShareOptions().fps}
+              onScreenQualityChange={(q) => { void callManager.setScreenShareOptions({ quality: q as any }).catch((e: any) => setError(String(e?.message ?? e))); setScreenOptsTick((v) => v + 1) }}
+              onScreenFpsChange={(f) => { void callManager.setScreenShareOptions({ fps: f as any }).catch((e: any) => setError(String(e?.message ?? e))); setScreenOptsTick((v) => v + 1) }}
             />
           )}
           {/* Quadrados da chamada: PESSOA e TELA; colunas contam TILES, e a
