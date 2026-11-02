@@ -24,6 +24,8 @@ export interface CallTilesGridProps {
   /** Fundo fora dos tiles (o painel lateral usa um tom mais escuro). */
   background?: string
   padding?: number
+  /** Altura máxima de cada quadrado — sem teto o card esticava a tela toda. */
+  maxTileHeight?: number
 }
 
 export default function CallTilesGrid({
@@ -41,6 +43,8 @@ export default function CallTilesGrid({
   onOpenProfile,
   background = '#1a1a1a',
   padding = 12,
+  /** Altura máxima de cada quadrado — sem teto o card esticava a tela toda. */
+  maxTileHeight = 420,
 }: CallTilesGridProps) {
   const altura = minHeight ?? (compact ? 112 : 150)
   return (
@@ -48,10 +52,10 @@ export default function CallTilesGrid({
       style={{
         flex: 1,
         minHeight: 0,
-        display: 'grid',
-        gridTemplateColumns: `repeat(${Math.min(Math.max(tiles.length, 1), compact ? 1 : 2)}, minmax(0, 1fr))`,
-        gridAutoRows: `minmax(${altura}px, 1fr)`,
-        alignContent: 'stretch',
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignContent: 'flex-start',
+        justifyContent: 'center',
         gap: 10,
         padding,
         overflowY: 'auto',
@@ -59,20 +63,34 @@ export default function CallTilesGrid({
       }}
     >
       {tiles.map((tile) => (
-        <CallTileComponent
+        <div
           key={tile.id}
-          tile={tile}
-          pinned={tile.id === pinnedId}
-          onPin={onPin}
-          onExpand={onExpand}
-          showAudioControls={showAudioControls}
-          callDeafened={deafened}
-          palette={palette}
-          minHeight={altura}
-          avatarColor={avatarColor}
-          avatarB64={avatarB64}
-          onOpenProfile={onOpenProfile}
-        />
+          style={{
+            // Quadrado com TETO de altura: antes `1fr` esticava um único card
+            // por 600px de altura — a tela virava dois retângulos gigantes de
+            // borda a borda (relato: "ficou péssimo o design").
+            flex: `1 1 ${compact ? 240 : 320}px`,
+            maxWidth: tiles.length === 1 ? 520 : undefined,
+            height: maxTileHeight,
+            maxHeight: '100%',
+            minWidth: 0,
+            display: 'flex',
+          }}
+        >
+          <CallTileComponent
+            tile={tile}
+            pinned={tile.id === pinnedId}
+            onPin={onPin}
+            onExpand={onExpand}
+            showAudioControls={showAudioControls}
+            callDeafened={deafened}
+            palette={palette}
+            minHeight={altura}
+            avatarColor={avatarColor}
+            avatarB64={avatarB64}
+            onOpenProfile={onOpenProfile}
+          />
+        </div>
       ))}
     </div>
   )

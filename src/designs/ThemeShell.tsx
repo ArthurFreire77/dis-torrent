@@ -1388,6 +1388,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   })()
   /** Estou na chamada DESTE canal? (decide tela cheia de mídia × botão entrar) */
   const inThisCall = !!activeCall && !!selCallChannel && activeCall.convId === selCallChannel.id
+  /** Chamada de canal aberta (qualquer tipo): o painel lateral é só controles. */
+  const inChannelCall = inThisCall
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
   /** fps que estão em algum grupo meu (para "ONLINE" incluir não-amigos). */
   const groupMemberFps = useMemo<Set<string>>(() => {
@@ -2623,7 +2625,10 @@ export default function ThemeShell({ designId }: {designId:string}){
           </div>
         </div>
 
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: activeCall ? (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
+        {/* Em canal de voz o painel lateral é só CONTROLES (a mídia fica no
+            centro): ele ocupa espaço fixo e estreito, senão sobrava um vão
+            vazio de 520px ao lado dos quadrados. */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: activeCall ? (inChannelCall ? 300 : callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
           {view === 'servidores' && selCommunity ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, display: 'flex' }}>
@@ -3497,7 +3502,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           Em canal de voz/vídeo os QUADRADOS ficam no centro (senão a mesma mídia
           aparece duas vezes e a tela fica sem espaço): aqui só os controles. */}
       {activeCall && (
-        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)', background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
+        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: inChannelCall ? 300 : (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)'), background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
           <div style={{ minHeight: 56, height: 'auto', background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', gap: 8 }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 250, flex: '1 1 250px' }}>
               <span style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}22`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={16} /> : <Icon d={Icons.phone} size={16} />}</span>

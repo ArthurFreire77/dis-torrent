@@ -1846,28 +1846,22 @@ export class CallManager {
         // seguida): aqui ela ganha o quadrado, igual ao `voice_joined`.
         this.dropInvite(fp)
         st.participants.push({ fp, nickname: fp.slice(0, 6) })
-        // QUEM OFERECE: só o lado de fp MAIOR. Os dois lados abrem PC (quem
-        // entrou pela sala e quem já estava nela), e offer+offer simultâneo
-        // travava a negociação — era o "cliquei Entrar e não conectou".
-        //
-        // E só se NÃO houver PC: o aviso de roster é reenviado a cada 15 s
-        // (`announceSelfToRoom`). Chamar `createPC` sem esta guarda fechava e
-        // refazia a conexão de um par que já estava negociando/conectado.
-        if (this.myFp && this.myFp > fp && !this.pcs.has(fp)) {
-          this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
-        }
       } else if (p.disconnected) {
         // Já estava na lista mas desconectado (caiu e voltou): onPeerBack reconecta; limpa o visual.
         p.disconnected = false
       }
-      // PAR AUSENTE COM A PESSOA JÁ NO ROSTER — o bug do "Conectando…".
+      // PAR GARANTIDO, DOS DOIS LADOS.
       //
-      // Quem ENTRA numa sala anunciada já estava na lista de participantes de
-      // quem hospeda (a sala é publicada com a lista). Então `!p` era falso no
-      // host, este bloco não rodava e NINGUÉM abria o RTCPeerConnection: o
-      // convidado ficava com um PC sem offer esperando a vida toda. Aqui o lado
-      // de fp maior garante o par mesmo quando a pessoa já estava listada.
-      if (this.myFp && this.myFp > fp && !this.pcs.has(fp) && isCallPhaseActive(st.phase)) {
+      // Dois bugs moravam aqui: (1) quem ENTRA numa sala já estava na lista de
+      // participantes de quem hospeda, então o ramo `!p` não rodava e ninguém
+      // abria o RTCPeerConnection; (2) só o fp MAIOR abria, então na estreia
+      // do canal — quando o outro lado ainda não tinha recebido o `VoiceJoin` —
+      // não havia offer nenhuma e a tela ficava em "Conectando…" até sair e
+      // entrar de novo.
+      //
+      // Abrir dos dois lados é seguro: `wirePC` + polite/impolite resolvem a
+      // offer simultânea (glare), e `createPC` não recria par vivo.
+      if (!this.pcs.has(fp) && isCallPhaseActive(st.phase)) {
         this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
       }
       this.onUpdate({ ...st })
@@ -1883,13 +1877,17 @@ export class CallManager {
         this.dropInvite(fp)
         this.onUpdate({ ...st })
       }
-      // MESH NO BROWSER: só o lado de fp MAIOR oferece ao novo (regra determinística, anti-glare).
+      // PAR COM QUEM ENTROU: abre SEMPRE, dos dois lados.
+      //
+      // Antes só o lado de fp MAIOR abria. Quando o menor entrava e o maior
+      // ainda não tinha recebido o `VoiceJoin` (link subindo), ninguém abria
+      // par — era o "só conecta de segunda". Duas offers simultâneas são
+      // resolvidas pelo polite/impolite, então abrir dos dois lados é seguro e
+      // elimina a dependência de ordem de chegada.
       if (
         !(st as any).nativeMedia &&
         !this.pcs.has(fp) &&
-        isCallPhaseActive(st.phase) &&
-        this.myFp &&
-        this.myFp > fp
+        isCallPhaseActive(st.phase)
       ) {
         void this.createPC(fp, callId, true).catch(() => { /* par best-effort */ })
       }
@@ -2227,6 +2225,13 @@ export class CallManager {
       }
       for (const [fp] of states) {
         if (!fp || fp === me.fingerprint) continue
+        // QUEM ENTRA ABRE O PAR, sempre.
+        //
+        // Antes só o fp MAIOR abria — mas o outro lado não sabia que eu entrei
+        // (o meu `VoiceJoin` pode estar a caminho), então ninguém oferecia e a
+        // chamada ficava parada até eu sair e entrar de novo. Quem ENTRA é
+        // quem tem a informação fresca do roster: ele inicia. O glare (duas
+        // offers) é resolvido pelo polite/impolite de `handleOffer`.
         try { await this.createPC(fp, callId, true) } catch { /* par best-effort */ }
       }
     } catch { /* lista best-effort: voice_joined still wires latecomers */ }
@@ -2285,10 +2290,21 @@ export class CallManager {
                 cur.participants.push({ fp, nickname: fp.slice(0, 6) })
                 this.onUpdate({ ...cur })
               }
-              // Sem par = ninguém vai falar. A regra do fp maior inicia.
-              if (!this.pcs.has(fp) && this.myFp && this.myFp > fp) {
-                try { await this.createPC(fp, callId, true) } catch { /* best-effort */ }
-              }
+              if (this.pcs.has(fp)) continue
+              // QUEM ABRE O PAR, AGORA COM PRAZO.
+              //
+              // Antes só o lado de fp MAIOR iniciava — e quem entrava esperava
+              // a offer do outro para sempre. Isso é o "só conecta de segunda":
+              // na estreia o peer maior ainda não tinha recebido meu `VoiceJoin`
+              // (link subindo), então ele também não abria; ao sair e entrar de
+              // novo o aviso já tinha chegado e funcionava.
+              //
+              // Passadas as janelas de espera, ESTE lado assume a iniciativa.
+              // Duas offers simultâneas já são resolvidas pelo polite/impolite.
+              const euInicio = !!this.myFp && this.myFp > fp
+              const esperouOsOutros = !!this.myFp && this.myFp < fp && ms >= 3500
+              if (!euInicio && !esperouOsOutros) continue
+              try { await this.createPC(fp, callId, true) } catch { /* best-effort */ }
             }
           }).catch(() => { /* motor ainda subindo */ })
         }, ms)
@@ -2336,7 +2352,16 @@ export class CallManager {
       if (nativeRoute && nativeRoute !== 'n/d') return nativeRoute
       const reports = [...this.iceReports.values()]
       if (!reports.length) return 'n/d'
-      const routes = reports.map((r) => {
+      // SEM PAR SELECIONADO NÃO EXISTE ROTA.
+      //
+      // BUG REAL: o mapa caía em `'host'` quando `localType`/`remoteType` eram
+      // nulos (nenhum candidate-pair nominado) e 'host' era traduzido como
+      // "LAN". A tela mostrava "rota LAN" VERDE com o ICE ainda em `checking` —
+      // o usuário via rota boa e status "Conectando…" ao mesmo tempo, e não
+      // havia como saber qual dos dois estava mentindo. Agora sem par é 'n/d'.
+      const comPar = reports.filter((r) => !!r.localType || !!r.remoteType)
+      if (!comPar.length) return 'n/d'
+      const routes = comPar.map((r) => {
         const t = r.remoteType || r.localType || 'host'
         return t === 'relay' ? 'TURN' : t === 'srflx' ? 'STUN' : t === 'prflx' ? 'P2P' : 'LAN'
       })
@@ -3637,6 +3662,22 @@ export class CallManager {
         const st = this.state
         if (!st || st.callId !== callId) { this.stopMeshRepair(); return }
         if (!isCallPhaseActive(st.phase)) return
+        // FASE PRESA EM `connecting` COM PAR VIVO — o bug do "Conectando…"
+        // eterno com áudio passando. O evento de ICE se perde fácil (WebView
+        // que só emite `connectionState`, renegociação logo após entrar, par
+        // recriado) e a fase nunca era promovida. Aqui o estado REAL do PC é
+        // consultado a cada tique: se qualquer par está `connected`, a mídia
+        // existe e a fase tem de dizer isso.
+        if (st.phase === 'connecting') {
+          for (const pc of this.pcs.values()) {
+            const cs = (pc as any).connectionState
+            const ice = pc.iceConnectionState
+            if (cs === 'connected' || ice === 'connected' || ice === 'completed') {
+              this.applyPhase('media-connected')
+              break
+            }
+          }
+        }
         // Reapresentação periódica: `CallAddParticipant` perdido deixava pares
         // sem malha para sempre.
         this.announceSelfToRoom(callId)
