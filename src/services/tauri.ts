@@ -471,6 +471,17 @@ export const tauriServices: DisTorrentServices = {
       try { await invoke<boolean>('hide_share_bar') } catch { /* comando opcional */ }
     }
   },
+  /**
+   * Windows: liga/desliga o vigia nativo da barra de compartilhamento.
+   *
+   * O vigia roda no Rust (4x/s): a janela é recriada pelo Chromium ao trocar a
+   * fonte e um `setInterval` de JS deixava a barra piscar na barra de tarefas.
+   */
+  shareBarWatch: async (ativo: boolean) => {
+    if (!isAndroidRuntime()) {
+      try { await invoke<void>('share_bar_watch', { ativo }) } catch { /* comando opcional */ }
+    }
+  },
   windowToggleFullscreen: () => invoke<boolean>('window_toggle_fullscreen'),
   appQuit: async () => {
     // ANDROID: o foreground service mantém o processo vivo mesmo depois de

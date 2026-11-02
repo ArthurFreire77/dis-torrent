@@ -52,3 +52,21 @@ export function isIOSRuntime(): boolean {
 export function isBrowserOnly(): boolean {
   return !isTauriRuntime()
 }
+
+/**
+ * Windows (Win32/WebView2)?
+ *
+ * Usado pelo que depende de janela nativa — hoje só o `hide_share_bar`, que
+ * manipula a janela do Chromium por `user32`. No Android/iOS/Linux o comando
+ * existe mas é no-op honesto.
+ */
+export function isWindowsRuntime(): boolean {
+  try {
+    if (typeof navigator === 'undefined') return false
+    const ua = String(navigator.userAgent ?? '')
+    // `Windows NT` cobre Windows 10/11 no WebView2 e no navegador.
+    return /Windows NT/i.test(ua) && !/Android/i.test(ua)
+  } catch {
+    return false
+  }
+}

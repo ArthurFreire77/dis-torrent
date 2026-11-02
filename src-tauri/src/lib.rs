@@ -269,6 +269,19 @@ fn hide_share_bar() -> bool {
     crate::sharebar::hide_share_bar()
 }
 
+/// Passa a vigiar a barra de compartilhamento (início/fim do share).
+///
+/// A janela é recriada pelo Chromium ao trocar de fonte; vigiar no Rust evita
+/// o piscar e não depende do front estar chamando o comando.
+#[tauri::command]
+fn share_bar_watch(ativo: bool) {
+    if ativo {
+        crate::sharebar::watch_share_bar();
+    } else {
+        crate::sharebar::unwatch_share_bar();
+    }
+}
+
 #[tauri::command]
 fn local_addresses(port: Option<u16>, state: State<AppState>) -> Result<LocalAddresses, String> {
     let lan_all = local_ipv4_addresses();
@@ -4713,6 +4726,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             hide_share_bar,
+            share_bar_watch,
             updater::update_check,
             updater::update_download,
             updater::update_apply,
@@ -4941,6 +4955,7 @@ fn main() {
             app_quit,
             window_toggle_fullscreen,
             hide_share_bar,
+            share_bar_watch,
             background_set_connection,
             call_ring_start,
             call_ring_stop,

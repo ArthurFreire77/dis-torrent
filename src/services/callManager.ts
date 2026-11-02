@@ -2,6 +2,7 @@
 
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
+import { isWindowsRuntime } from '../shared/runtime'
 import { setCallVideoSending, applyOfferInStable as applyOfferToSession } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
@@ -4445,11 +4446,37 @@ export class CallManager {
     try {
       this.screenStatsTimer = setInterval(() => { void this.sampleScreenStats() }, 1000)
     } catch { this.screenStatsTimer = null }
+    // BARRA DO WEBVIEW2: recriada a cada 1 s de propósito.
+    //
+    // O Chromium recria a barra/ miniatura em vários momentos (troca de fonte,
+    // renegociação, foco) e não há evento para isso. Esconder só no start
+    // deixava a janela reaparecer no meio do compartilhamento — era o print com
+    // DUAS janelas de aviso em cima da UI. Um `hide_share_bar` por segundo é
+    // uma enumeração de janelas do próprio processo: barato e idempotente.
+    this.startShareBarWatch()
+  }
+
+  private startShareBarWatch(): void {
+    if (!isWindowsRuntime()) return
+    try {
+      // O vigia nativo esconde a barra 4x por segundo enquanto o share durar:
+      // o Chromium recria a janela sem avisar, e um `setInterval` de JS deixava
+      // a barra visível entre um tick e outro (o piscar na barra de tarefas).
+      void services.shareBarWatch?.(true).catch(() => { /* comando opcional */ })
+      // Reforço único: a barra pode ter nascido antes de o vigia subir.
+      void services.hideShareBar?.().catch(() => { /* comando opcional */ })
+    } catch { /* sem Tauri: nada a esconder */ }
+  }
+
+  private stopShareBarWatch(): void {
+    if (!isWindowsRuntime()) return
+    try { void services.shareBarWatch?.(false).catch(() => { /* comando opcional */ }) } catch { /* ignore */ }
   }
 
   private stopScreenStatsTimer(): void {
     try { if (this.screenStatsTimer) clearInterval(this.screenStatsTimer) } catch { /* ignore */ }
     this.screenStatsTimer = null
+    this.stopShareBarWatch()
   }
 
   /** Uma amostra REAL por segundo: FPS capturado, bitrate, perda, latência. */

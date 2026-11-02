@@ -1676,6 +1676,7 @@ export const browserServices: DisTorrentServices = {
   appHideToTray: async () => {},
   // Navegador puro não tem a barra do WebView2 para esconder.
   hideShareBar: async () => {},
+  shareBarWatch: async () => {},
   // Navegador: a Fullscreen API é a única disponível (sem janela nativa).
   windowToggleFullscreen: async () => {
     try {

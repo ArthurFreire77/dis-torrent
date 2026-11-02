@@ -846,6 +846,8 @@ export interface DisTorrentServices {
   appHideToTray(): Promise<void>
   /** Windows: esconde a barra de compartilhamento que o WebView2 cria. */
   hideShareBar(): Promise<void>
+  /** Windows: liga/desliga o vigia nativo da barra (ver `hideShareBar`). */
+  shareBarWatch(ativo: boolean): Promise<void>
   appQuit(): Promise<void>
   /** Alterna tela cheia da janela (F11). Devolve o estado NOVO real. */
   windowToggleFullscreen(): Promise<boolean>
