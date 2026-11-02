@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## [1.1.42-pre-alpha] - 2026-11-02
+
+### Barra de compartilhamento de tela escondida de verdade
+
+Apareciam **duas** janelas de aviso do Chromium em cima da UI (uma com a
+miniatura da fonte). A barra nunca foi escondida em versão nenhuma.
+
+Causa: o critério era o **nome da classe** `ScreenCaptureNotificationUIViews`.
+Essa string é o nome do *widget* no fonte do Chromium, não a classe Win32 — a
+janela real é `Chrome_WidgetWin_*`. E ela nasce no processo
+`msedgewebview2.exe`, não no PID do app.
+
+Agora a identificação é por **forma e estilo**: `Chrome_WidgetWin_*`, faixa
+fina e larga (proporção ≥ 3:1 — medida 472x70), TOPMOST e sem legenda. O
+critério é proporção, não pixel: a 150% de escala a mesma barra mede ~708x105.
+A varredura usa a árvore de PIDs (ToolHelp) e `EnumChildWindows` (a miniatura é
+owned). Um vigia nativo no Rust esconde a barra 4x/s enquanto o share durar — o
+Chromium a recria ao trocar de fonte e não avisa.
+
+**Verificação:** 8 testes Rust em `sharebar.rs`, 375 testes unitários,
+typecheck e lint limpos.
+
 ## [1.1.41-pre-alpha] - 2026-11-02
 
 ### Chamada: par aberto dos dois lados (o "só conecta de segunda")
