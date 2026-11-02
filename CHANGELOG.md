@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## [1.1.34-pre-alpha] - 2026-11-02
+
+### Volume da tela deixou de mexer no volume da voz
+
+Sintoma: ao ajustar (ou mutar) o áudio da transmissão, o volume da **voz** da
+mesma pessoa mudava junto — não dava para deixar a tela mais baixa e continuar
+ouvindo quem fala.
+
+Causa: o controle de volume local é salvo por chave, e as duas transmissões da
+mesma pessoa usavam a **mesma chave** — o fingerprint. Voz e tela são
+transmissões distintas (`p:<fp>` e `s:<fp>`), mas dividiam o mesmo registro.
+
+Cada quadrado agora carrega `audioKey` (o id da transmissão) e o volume/mudo é
+salvo por ele. O controle no quadrado da tela mostra "Fulano (tela)" para não
+confundir com o da voz. Preferências antigas (salvas por fp) continuam valendo
+para a voz.
+
+Testes: 2 novos em `callTiles` (chaves distintas por transmissão; chave
+acompanhando o tile que realmente toca). 307 testes, 0 falhas.
+
+### Engrenagem na barra e seleção de dispositivo
+
+Da 1.1.33, incluído: o botão de configurações fica na **barra da chamada** (ao
+lado de compartilhar tela, antes do Sair); o painel abre acima dela e traz
+**CÂMERA** (liga/desliga, aparelho, qualidade, FPS), **TRANSMISSÃO DE TELA**
+(liga/desliga, qualidade 480p–4K, FPS) e **MICROFONE** (aparelho, aviso de
+mudo, processamento de voz). As listas mostram os nomes reais dos aparelhos e
+informam quantos foram encontrados.
+
 ## [1.1.33-pre-alpha] - 2026-11-02
 
 ### A engrenagem está onde você procura: na barra da chamada
