@@ -1,5 +1,46 @@
 # CHANGELOG
 
+## [1.1.49-pre-alpha] - 2026-11-03
+
+### Fixar e volume funcionando; cards iguais como no Meet
+
+Pedidos do dono, com prints do Meet: "os cards devem ficar alinhadinhos,
+quadrados/retângulos iguais", "o fixar deve ser funcional e o volume também deve
+ser tudo bem funcional".
+
+**Fixar.** A grade do palco ignorava a ordem e o `pinnedId` — o card fixado
+continuava do mesmo tamanho dos outros e o botão parecia morto. Agora o fixado
+atravessa todas as colunas (`gridColumn: 1 / -1`) e ganha altura maior, como o
+pin do Meet; os demais vão para a fileira de baixo.
+
+**Volume.** O painel era um elemento `details` nativo e o tile remonta a cada
+evento da chamada (novo stream, `onUpdate`, re-render do palco), então o painel
+**fechava ao arrastar o slider** — "o volume não funciona". Virou estado do
+React, com `stopPropagation` no clique (antes mexer no volume também
+fixava/expandia o card) e aviso quando está ensurdecido. O botão agora aparece
+**mesmo sem stream**: quem entrou sem áudio chegando ainda precisa do controle,
+e o valor fica guardado para quando o áudio começar.
+
+**Alinhamento.** `justifyContent: 'center'` numa grade de colunas `1fr` faz cada
+coluna encolher para o conteúdo e o conjunto sair torto. Agora `stretch` nas
+colunas e **altura única por linha** (`gridAutoRows` calculado pela largura da
+coluna em 16:9, piso 160 e teto 420): todos os cards ficam retângulos iguais. Os
+cards perderam `maxWidth`/`maxHeight` por card, que faziam cada um parar num
+limite diferente.
+
+**Texto de espera.** "Você está na chamada…" aparecia **por cima** da tela
+compartilhada, porque a condição era "estou sozinho" e não "o palco está vazio".
+Agora só aparece quando não há mídia nenhuma.
+
+**Release.** O gatilho `push: tags` do workflow saiu. Ele rodava em paralelo com
+o build local e **sobrescrevia o instalador Inno** (limpo no Defender) pelo do
+NSIS (acusado como `Contebrew.A!ml`, que bloqueia o download). Fica só
+`workflow_dispatch` (rodar à mão quando quiser).
+
+**Verificação:** typecheck 0, lint 0, 447 unitários (11 novos), build OK.
+**Não** validado: áudio/vídeo reais e fixar com vídeo de verdade na tela — exige
+dois dispositivos.
+
 ## [1.1.48-pre-alpha] - 2026-11-03
 
 ### Só aparece quem entrou de verdade na chamada
