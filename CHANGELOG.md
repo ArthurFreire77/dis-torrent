@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## [1.1.48-pre-alpha] - 2026-11-03
+
+### Só aparece quem entrou de verdade na chamada
+
+Relato do dono, com print: "não tem ninguém na chamada — não deve aparecer
+ninguém até o cara entrar e ficar na call, por tempo ilimitado, e só fechar
+quando todos saírem".
+
+O usuário "secura" aparecia na chamada sem estar nela. Causa: a tela montava o
+card a partir do `voice_states` do motor, que é um **anúncio** de presença. Quem
+abre o canal anuncia na hora; se nunca negociar mídia (ou fechar o app), a linha
+fica lá. **Anunciar não é estar.**
+
+Agora a fonte dos cards é `activeCall.participants`: só entra quem o manager
+registrou — quem ofereceu/respondeu/trocou ICE. O motor continua sendo
+consultado, mas apenas para enriquecer **mudo/surdo** de quem já está na
+chamada. Eu sempre apareço (sou eu que estou na call). A mesma regra vale no
+desktop e no celular, e a barra "Voz conectada" da sidebar passou a usar a mesma
+lista (com nome, em vez do fingerprint cru do anúncio).
+
+**Espera ilimitada:** a chamada de canal não encerra sozinha por tempo — o
+watchdog de reconexão não arma em `voice-*` (corrigido na 1.1.47). Dá para ficar
+esperando alguém indefinidamente; a tela diz "Esperando alguém entrar" enquanto
+estiver sozinho.
+
+**Verificação:** typecheck 0, lint 0, 436 unitários, `cargo test` 250 no WSL,
+`fmt` limpo. **Não** validado: chamada real com dois aparelhos.
+
 ## [1.1.47-pre-alpha] - 2026-11-03
 
 ### Não cair da call, funcionar com muita gente e aguentar servidor gigante
