@@ -644,13 +644,17 @@ pub fn update_apply(_app: tauri::AppHandle, path: String) -> Result<(), String> 
                 );
             }
         }
+        // REINÍCIO: o Inno reabre o app pelo `[Code]`/`[Run]` (ver
+        // `installer/distorent.iss`). NÃO passar `/NORESTART`: ele anula o
+        // `/RESTARTAPPLICATIONS` e, numa instalação silenciosa, o app fechava e
+        // ficava fechado — o usuário só via a versão nova se abrisse à mão
+        // (metade do "não atualiza sozinho").
         std::process::Command::new(&p)
             .args([
                 "/SILENT",
                 "/SUPPRESSMSGBOXES",
                 "/CLOSEAPPLICATIONS",
                 "/RESTARTAPPLICATIONS",
-                "/NORESTART",
             ])
             .current_dir(p.parent().unwrap_or(std::path::Path::new(".")))
             .spawn()

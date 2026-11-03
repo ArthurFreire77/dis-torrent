@@ -211,10 +211,12 @@ test('instalador que falha é marcado para não reiniciar em loop', async () => 
   })
   const first = await runUpdateFlow(deps, { autoApply: true })
   assert.equal(first.kind, 'error')
-  assert.equal(flags.get(FLAG_FAILED), '1.1.10-pre-alpha')
+  // A marca carrega versão + instante: sem o instante ela nunca expiraria e o
+  // app ficaria preso sem tentar de novo (bug do "não atualiza sozinho").
+  assert.match(flags.get(FLAG_FAILED) ?? '', /^1\.1\.10-pre-alpha\|\d+$/)
   assert.equal(flags.get(FLAG_APPLIED), '', 'falha no instalador desfaz a marca de "aplicado"')
 
-  // Segunda abertura: não tenta de novo sozinho, mas ainda oferece manual.
+  // Segunda abertura logo depois: não tenta de novo sozinho, mas ainda oferece manual.
   const second = await runUpdateFlow(deps, { autoApply: true })
   assert.equal(second.kind, 'later')
 })

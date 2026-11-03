@@ -184,6 +184,25 @@ export const FLAG_FAILED = 'update.failed'
  */
 export const FLAG_APPLIED = 'update.applied'
 /**
+ * Validade de uma falha de update. Passado isso, a versão é tentada de novo:
+ * a causa costuma ser temporária (rede, disco, UAC negado sem querer) e o app
+ * não pode ficar preso numa versão antiga para sempre.
+ */
+export const FAILED_TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * `true` quando a marca de falha expirou (ou nem tem instante — marca antiga,
+ * gravada antes do formato `versao|instante`).
+ */
+export function falhaExpirada(marca: string | null, nowMs = Date.now()): boolean {
+  if (!marca) return true
+  const i = marca.lastIndexOf('|')
+  if (i < 0) return true
+  const ts = Number(marca.slice(i + 1))
+  if (!Number.isFinite(ts) || ts <= 0) return true
+  return nowMs - ts >= FAILED_TTL_MS
+}
+/**
  * Sinal do Rust de que o AppImage já foi substituído e reaberto: não é erro,
  * é o gatilho para encerrar esta cópia antiga.
  */
@@ -214,11 +233,43 @@ export async function runUpdateFlow(
   if (mode === 'link') return { kind: 'later', info }
 
   // FREIO DO LOOP: versão já instalada sem efeito — instalar de novo repete o resultado.
-  const alreadyApplied = (await deps.getFlag(FLAG_APPLIED)) === info.latest
-  if (alreadyApplied) return { kind: 'stalled', info }
+  //
+  // BUG REAL (o app parou de se atualizar sozinho): a marca era gravada ANTES
+  // de rodar o instalador e NUNCA era limpa quando a versão nova finalmente
+  // entrava. Quem estava na 1.1.43, instalou a 1.1.44 e subiu para ela ficava
+  // com `update.applied = 1.1.44` para sempre — e aí TODA checagem seguinte
+  // (inclusive a da 1.1.45) caía aqui e virava `stalled`. O app ficou congelado
+  // na versão instalada, sem nunca mais oferecer nada.
+  //
+  // A regra certa é comparar com a versão que está RODANDO: se o app já está
+  // na versão marcada (ou acima), o update funcionou — a marca é lixo e sai.
+  // Só é "stalled" quando a marca é de uma versão À FRENTE da que roda (o
+  // instalador rodou e a cópia antiga continuou viva).
+  const appliedFlag = await deps.getFlag(FLAG_APPLIED)
+  const alreadyApplied = !!appliedFlag && appliedFlag === info.latest
+  if (alreadyApplied) {
+    if (compareVersions(info.current, appliedFlag) >= 0) {
+      // Entrou de verdade: limpa o freio e segue (pode haver versão mais nova).
+      await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
+    } else {
+      return { kind: 'stalled', info }
+    }
+  }
+  // Marca antiga de OUTRA versão (nem a atual nem a oferecida): também é lixo.
+  if (appliedFlag && appliedFlag !== info.latest && compareVersions(info.current, appliedFlag) >= 0) {
+    await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
+  }
 
-  const failedBefore = (await deps.getFlag(FLAG_FAILED)) === info.latest
-  if (!opts.autoApply || failedBefore) return { kind: 'later', info }
+  const failedFlag = (await deps.getFlag(FLAG_FAILED)) ?? ''
+  // FALHA TEM VALIDADE, NÃO É PARA SEMPRE.
+  //
+  // BUG REAL: uma falha (rede caindo no meio, disco cheio, instalador recusado)
+  // marcava a versão como falhada e o app NUNCA mais tentava aquela versão —
+  // ficava parado até sair outra. Agora a marca guarda a versão + o instante e
+  // expira em 6 h: a próxima abertura depois disso tenta de novo.
+  const failedBefore = !!failedFlag && (failedFlag === info.latest || failedFlag.startsWith(`${info.latest}|`))
+  if (failedBefore && !falhaExpirada(failedFlag)) return { kind: 'later', info }
+  if (!opts.autoApply) return { kind: 'later', info }
 
   // ANDROID: baixa e abre o instalador do sistema como no Linux. Antes o return
   // antecipado impedia o Android de atualizar sozinho; o toque de confirmação
@@ -248,7 +299,7 @@ export async function runUpdateFlow(
     }
     // Falha do INSTALADOR: desfaz a marca e registra a falha para não reiniciar em loop.
     await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
-    await deps.setFlag(FLAG_FAILED, info.latest).catch(() => {})
+    await deps.setFlag(FLAG_FAILED, `${info.latest}|${Date.now()}`).catch(() => {})
     return { kind: 'error', message: msg }
   }
 
