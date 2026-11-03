@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## [1.1.50-pre-alpha] - 2026-11-03
+
+### Tela compartilhada sem sobrepor, reação notificada e 5 versões de compatibilidade
+
+**Tela compartilhada sobrepondo os participantes.** O card de tela tinha
+`aspectRatio` próprio dentro de uma célula de grade com altura fixa: crescia
+além da linha e cobria o card vizinho (print do dono). Agora cada célula
+**recorta** o card e o tile de tela ocupa a **linha inteira** quando divide a
+tela com participantes — grande, mas em posição própria, como no Meet. O vídeo
+continua com `contain`, sem esticar.
+
+**Notificação de reação.** Reagir é uma resposta silenciosa e o app não dava
+sinal nenhum com a janela minimizada. `notifyReaction` segue as mesmas regras do
+resto: só reação **na minha mensagem**, nunca a minha própria, nunca ao remover,
+respeita o nível do canal (só em "tudo", porque reação não é menção) e não avisa
+com a conversa aberta em primeiro plano. Ligado no desktop e no celular.
+
+**Canal de vídeo fora da criação.** O canal de voz já é uma chamada com câmera;
+o tipo "Vídeo" duplicava a mesma coisa na tela de criar canal. Saiu das opções
+no PC e no celular. Canais `video` já existentes continuam funcionando igual.
+
+**Compatibilidade de 5 versões.** Pedido do dono: "eu na 1.47 e meu amigo na
+1.43 — ele deve conectar; cinco versões de distância tem que funcionar". O risco
+real era o `SecureFrame` ser um enum serde *externally tagged*: receber uma
+variante desconhecida faz o `from_slice` **falhar e derrubar a sessão** em vez de
+ignorar o recurso novo. `services/versionCompat.ts` define a janela (5 releases)
+e um gate por recurso; frame novo só vai para quem declarou versão que o
+entende. Versão ilegível não bloqueia — melhor tentar e falhar com erro honesto.
+
+**Verificação:** typecheck 0, lint 0, 460 unitários (13 novos), `cargo test` 250
+no WSL. **Não** validado: dois apps reais em versões diferentes conversando,
+áudio/vídeo reais e a tela compartilhada com dois dispositivos — exige
+aparelhos.
+
 ## [1.1.49-pre-alpha] - 2026-11-03
 
 ### Fixar e volume funcionando; cards iguais como no Meet
