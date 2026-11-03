@@ -147,8 +147,12 @@ export function CallTile({
         overflow: 'hidden',
         position: 'relative',
         minHeight: expanded ? 0 : thumbnail ? 72 : minHeight,
-        // Quadrado normal da tela: borda acompanha a proporção real;
-        // `alignSelf:start` porque o grid estica os itens e anularia o aspect-ratio.
+        // Quadrado normal da tela: SEM `aspectRatio`.
+        //
+        // O aspect-ratio próprio fazia o card crescer além da linha da grade e
+        // cobrir o card vizinho (print do dono: tela sobreposta aos
+        // participantes). Agora ele obedece à célula e o vídeo letterboxa com
+        // `contain` no preto.
         ...(isScreen && aspect
           ? expanded
             ? {
@@ -162,10 +166,7 @@ export function CallTile({
               }
             : thumbnail
               ? null
-              // maxHeight: no palco largo a caixa por largura estouraria a
-              // linha da grade — o clamp letterboxa no preto (o vídeo dentro
-              // já usa `contain`).
-              : { aspectRatio: aspect, minHeight: 0, maxHeight: '100%', alignSelf: 'start', width: '100%' }
+              : { width: '100%', height: '100%', minHeight: 0, alignSelf: 'stretch', justifySelf: 'stretch' }
           : null),
         display: 'flex',
         alignItems: 'center',

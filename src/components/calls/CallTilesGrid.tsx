@@ -79,7 +79,9 @@ export default function CallTilesGrid({
     }
   }, [medir])
 
-  const renderTile = (t: CallTile) => (
+  // `alturaMin` é o mínimo do card; no palco o teto é a própria célula, então
+  // o chamador pode baixar o mínimo para o card não ser cortado pela linha.
+  const renderTile = (t: CallTile, alturaMin = altura) => (
     <CallTileComponent
       tile={t}
       pinned={t.id === pinnedId}
@@ -88,7 +90,7 @@ export default function CallTilesGrid({
       showAudioControls={showAudioControls}
       callDeafened={deafened}
       palette={palette}
-      minHeight={altura}
+      minHeight={alturaMin}
       avatarColor={avatarColor}
       avatarB64={avatarB64}
       onOpenProfile={onOpenProfile}
@@ -140,12 +142,18 @@ export default function CallTilesGrid({
       >
         {tiles.map((t, i) => {
           const fixado = temFixado && i === 0
+          // TELA junto de participantes: linha INTEIRA, na posição dela.
+          // Antes ela dividia a célula com um participante e o card, com
+          // `aspectRatio` próprio, crescia além da linha e cobria o vizinho.
+          const telaCheia = t.kind === 'screen' && tiles.length > 1
           return (
             <div
               key={t.id}
               style={{
                 minWidth: 0,
                 minHeight: 0,
+                // A célula RECORTA o card: nada vaza para a linha de baixo.
+                overflow: 'hidden',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -153,9 +161,12 @@ export default function CallTilesGrid({
                 ...(fixado
                   ? { gridColumn: `1 / -1`, height: alturaFixado }
                   : null),
+                ...(telaCheia && !fixado ? { gridColumn: '1 / -1' } : null),
               }}
             >
-              {renderTile(t)}
+              {/* Sem mínimo: a célula já define a altura (o card não pode
+                  crescer além dela). */}
+              {renderTile(t, 0)}
             </div>
           )
         })}
