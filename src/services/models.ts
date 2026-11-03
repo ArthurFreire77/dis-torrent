@@ -1,10 +1,6 @@
-// Tipos espelhados do distorrent-core (Rust) — contrato único UI↔motor, nada mock.
-
 export type NetworkState = 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'RECONNECTING'
 
 export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed' | 'ok' | 'read'
-
-// Modos de privacidade: normal | encrypted | proxy (esconde IP) | full (Tor SOCKS5).
 
 export type PrivacyMode = 'normal' | 'encrypted' | 'proxy' | 'full'
 
@@ -77,7 +73,6 @@ export interface PrivacySettings {
   udp_discovery: boolean
   metadata_padding: boolean
   traffic_obfuscation: boolean
-  /** Relay está DE FATO roteando por SOCKS5? Fail-closed: false = relay OFF. */
   proxy_effective: boolean
 }
 
@@ -93,13 +88,9 @@ export interface Identity {
   created_at: number
 }
 
-/** Endereços locais — espelha `local_addresses` (Rust). */
 export interface LocalAddresses {
-  /** `http://localhost:<porta>` — válido só nesta máquina. */
   localhost: string
-  /** IP de LAN, ou null se não houver rede. É o que funciona no celular. */
   lan: string | null
-  /** Todos os IPs encontrados, para o usuário escolher. */
   lan_all: string[]
   port: number
 }
@@ -126,16 +117,13 @@ export interface PeerView {
   origin: string
   state: NetworkState
   via_relay?: boolean
-  /** Diagnóstico real do motor (por que conecta ou não) */
   last_direct_error?: string | null
   last_relay_error?: string | null
   direct_attempts?: number
   relay_attempts?: number
   announce_seen_ms?: number
-  /** Motivo de REJEIÇÃO do último frame deste peer (link existe mas receptor recusou). */
   last_reject?: string | null
   last_reject_ms?: number
-  /** Nossas mensagens que desistiram de sair para este peer. */
   send_gave_up?: number
 }
 
@@ -145,9 +133,7 @@ export interface NetDiag {
   stun_ms: number
   announce_addr: string | null
   announce_ms: number
-  /** Origem do endpoint NAT: 'upnp' (local, sem servidor) | 'stun' | null */
   nat_source: string | null
-  /** DHT mainline BitTorrent — null = desligada (testes/proxy/Tor) */
   dht_ok: boolean | null
   dht_ms: number
 }
@@ -169,7 +155,6 @@ export interface StoredMessage {
   sig: string
   direction: 'in' | 'out' | string
   status: MessageStatus
-  /** Não-vazio quando a mensagem foi postada POR UM BOT (id do BotRow). */
   bot_id?: string
 }
 
@@ -193,7 +178,6 @@ export type EngineEvent =
   | { type: 'bot_created'; community_id: string; bot_id: string }
   | { type: 'call_incoming'; call_id: string; from_fp: string; kind: string }
   | { type: 'call_accepted'; call_id: string; from_fp: string }
-  /** O outro lado RECEBEU o convite e está tocando (confirmação do invite). */
   | { type: 'call_ringing'; call_id: string; from_fp: string }
   | { type: 'call_rejected'; call_id: string; from_fp: string; reason: string }
   | { type: 'call_ended'; call_id: string; from_fp: string }
@@ -226,6 +210,7 @@ export type EngineEvent =
   | { type: 'muted'; context: string; reason: string; until_ms: number }
   | { type: 'error'; context: string }
 
+// Seção 1: FriendView
 export interface FriendView {
   fp: string
   nickname: string
@@ -242,15 +227,12 @@ export interface CommunityView {
   owner_fp: string
   channels: [string, string][]
   members: [string, string, string][]
-  /** Metadados do wizard (v6) — ausentes em comunidades legadas. */
   description?: string
   category?: string
   icon?: string
-  /** Sou o dono? Convite só pode ser assinado pelo dono. */
   is_owner?: boolean
 }
 
-/** Estado REAL de pareamento de um membro (`pending_join` ≠ conectado). */
 export type MemberPairingState =
   | 'connected'
   | 'relay'
@@ -269,7 +251,6 @@ export interface MemberPairing {
   is_self: boolean
 }
 
-/** Convite pronto: token cru (fallback universal) + link do esquema. */
 export interface InviteView {
   token: string
   link: string
@@ -277,15 +258,12 @@ export interface InviteView {
   scope: 'open' | 'fp'
 }
 
-// --- Sistema de Canais / Cargos / Bots (estilo Discord) ---
-
 export interface ChannelMeta {
   id: string
   name: string
   topic?: string
   category: string
   position: number
-  /** "forum" = canal de fórum: só posts (threads) com título */
   kind: 'text' | 'voice' | 'video' | 'forum'
 }
 
@@ -312,26 +290,18 @@ export interface BotView {
   online: boolean
   ownerFp: string
   createdAt: number
-  /** Config JSON do runtime web (prefixo, comandos REST, escopos, webhook). */
   config?: string
 }
 
-/** Canal inicial do wizard: nome + tipo + categoria. */
 export interface CommunityChannelSeed { name: string; kind: 'text' | 'voice' | 'video'; category: string }
-/** Cargo inicial do wizard (presets admin/moderador/membro). */
 export interface CommunityRoleSeed { name: string; color: string; permissions: number; hoist: boolean; mentionable: boolean }
 
-/** Opções estendidas do createCommunity (wizard) — tudo opcional p/ compat. */
 export interface CreateCommunityOptions {
   description?: string
   category?: string
-  /** Emoji/ícone de 1-2 chars exibido no rail (vazio = inicial do nome). */
   icon?: string
-  /** Texto de regras do servidor (vai para server_rules como moderadores=[]) */
   rulesText?: string
-  /** Canais com tipo/categoria — quando presente substitui o CSV simples. */
   channelsMeta?: CommunityChannelSeed[]
-  /** Cargos criados já no ato (ex.: Admin/Moderador/Membro). */
   roles?: CommunityRoleSeed[]
 }
 
@@ -340,18 +310,17 @@ export interface MemberRoleAssignment {
   roleIds: string[]
 }
 
-// Bitmask de permissões (compatível com Discord para familiaridade)
 export const PERMS = {
-  ADMINISTRATOR: 1 << 0,   // 1
-  MANAGE_CHANNELS: 1 << 1, // 2
-  MANAGE_ROLES: 1 << 2,    // 4
-  KICK_MEMBERS: 1 << 3,    // 8
-  BAN_MEMBERS: 1 << 4,     // 16
-  SEND_MESSAGES: 1 << 5,   // 32
-  VIEW_CHANNEL: 1 << 6,    // 64
-  MENTION_EVERYONE: 1 << 7, // 128
-  MANAGE_BOT: 1 << 8,      // 256
-  EMBED_LINKS: 1 << 9,     // 512
+  ADMINISTRATOR: 1 << 0,
+  MANAGE_CHANNELS: 1 << 1,
+  MANAGE_ROLES: 1 << 2,
+  KICK_MEMBERS: 1 << 3,
+  BAN_MEMBERS: 1 << 4,
+  SEND_MESSAGES: 1 << 5,
+  VIEW_CHANNEL: 1 << 6,
+  MENTION_EVERYONE: 1 << 7,
+  MANAGE_BOT: 1 << 8,
+  EMBED_LINKS: 1 << 9,
 } as const
 
 export const PERM_LABELS: Record<number, string> = {
@@ -376,17 +345,11 @@ export interface CallView { call_id: string; kind: 'voice'|'video'|'screen'; con
 export interface GroupDmView { id: string; title: string; members: [string,string][] }
 export interface FileSwarmView { file_id: string; name: string; size: number; chunks: number; hash: string; have: number; seeders: string[] }
 
-
-// =====================================================================
-// CAMADA SOCIAL v3 — espelha `distorrent_core::social` (nada aqui é mock)
-// =====================================================================
-
 export interface ReactionSummary {
   msg_id: string
   emoji: string
   count: number
   reactors: string[]
-  /** a reação inclui VOCÊ (contador destacado) */
   mine: boolean
 }export interface MsgMetaView {
   msg_id: string
@@ -420,16 +383,11 @@ export interface ProfileView {
   banner_b64: string
   accent: string
   updated_at: number
-  /** Revisão monotônica do AUTOR (0 = perfil legado, sem revisão). */
   rev?: number
-  /** blake3 do conteúdo público, calculado pelo autor. */
   content_hash?: string
 }
 
-/**
- * Campos editáveis do perfil. `remove_avatar`/`remove_banner` existem porque
- * `''` significa "mantenha a foto atual" — sem flag não havia como apagar.
- */
+// Seção 2: ProfilePatch
 export interface ProfilePatch {
   display_name: string
   about: string
@@ -448,7 +406,6 @@ export interface ThreadView {
   author_fp: string
   created_at: number
   archived: boolean
-  /** "thread" (a partir de mensagem) | "forum" (post de fórum) */
   kind: string
   tags: string
 }
@@ -458,7 +415,6 @@ export interface BanView {
   reason: string
   actor_fp: string
   created_at: number
-  /** 0 = permanente */
   until_ms: number
 }
 
@@ -522,27 +478,20 @@ export interface SearchHit {
 
 export interface SearchQuery {
   text: string
-  /** filtro from: */
   from: string
-  /** filtro in: */
   conv: string
-  /** has: link | file | mention */
   has: string
-  /** filtro before: (ts) */
   before: number
   limit: number
 }
 
 export const EMPTY_SEARCH: SearchQuery = { text: '', from: '', conv: '', has: '', before: 0, limit: 50 }
 
-/** Preferências REAIS de segundo plano (lidas do shell nativo). */
 export interface BackgroundPrefsView {
   close_to_tray: boolean
   start_minimized: boolean
   autostart: boolean
-  /** `true` quando existe ícone de bandeja de verdade nesta plataforma. */
   tray: boolean
-  /** "granted" | "denied" | "prompt" */
   notification_permission: string
 }
 
@@ -554,37 +503,21 @@ export interface DisTorrentServices {
   identityRename(nickname: string): Promise<Identity>
   vaultStatus(): Promise<{ has_identity: boolean; has_vault: boolean }>
   vaultUnlock(password: string): Promise<Identity>
-  /**
-   * Endereços alcançáveis: `localhost` (só aqui) e IP de LAN (celular).
-   * Expostos separadamente — nunca um no lugar do outro.
-   */
   localAddresses(port?: number): Promise<LocalAddresses>
   networkStatus(): Promise<NetworkStatusView>
   peersList(): Promise<PeerView[]>
-  /** Diagnóstico global: STUN (binding NAT) e endpoint anunciado */
   netDiag(): Promise<NetDiag>
-  /** Relata ao Rust o que a página enxerga de WebRTC (diagnóstico do WebKitGTK). */
   webrtcReport(info: string): Promise<void>
 
-  // Atualização: Rust busca/baixa; decisão de versão é pura em `updater.ts`
-  // e o download confere o SHA-256 antes de poder ser executado.
   updateCheck(): Promise<import('./updater').UpdateInfo>
-  /** Salva em `data_dir/updates` e devolve o caminho absoluto. */
   updateDownload(url: string, name: string, digest: string): Promise<string>
-  /** Executa o instalador (Windows: Inno silencioso + reabre o app). */
   updateApply(path: string): Promise<void>
   updateAutoGet(): Promise<boolean>
   updateAutoSet(enabled: boolean): Promise<void>
   updateFlagGet(key: string): Promise<string | null>
   updateFlagSet(key: string, value: string): Promise<void>
   updateCleanup(): Promise<number>
-  /** Abre a página da release no navegador (fallback honesto por plataforma). */
   openReleasePage(url: string): Promise<void>
-  /**
-   * Entrega um endereço ao SISTEMA OPERACIONAL (navegador ou app registrado).
-   * Usado por `distorrent://`, que não é URL abrível dentro do WebView: abrir
-   * como janela interna dava `ECONNREFUSED: Unable to connect`.
-   */
   openExternal(url: string): Promise<void>
   relayStatus(): Promise<RelayLegStatus[]>
   connectAddr(addr: string, expectedFp?: string | null): Promise<void>
@@ -597,19 +530,12 @@ export interface DisTorrentServices {
   friendUnblock(peerFp: string): Promise<void>
   vaultChange(oldPass: string, newPass: string): Promise<void>
   communitiesList(): Promise<CommunityView[]>
-  /** Pareamento por membro (evidência real: online/relay/reconectando/offline). */
   communityMembers(communityId: string): Promise<MemberPairing[]>
   createCommunity(name: string, channels: string[], opts?: CreateCommunityOptions): Promise<string>
-  /**
-   * Token de convite. Sem `memberFp` é ABERTO; passar o próprio fp gerava
-   * token inútil para terceiros (bug do fluxo antigo).
-   */
   makeInvite(communityId: string, memberFp?: string): Promise<string>
-  /** Convite com token + link já montados no core (sem `tauri.localhost`). */
   makeInviteLink(communityId: string, memberFp?: string): Promise<InviteView>
   joinCommunity(token: string): Promise<string>
   communityRename(communityId: string, name: string): Promise<void>
-  /** Atualiza descrição/categoria/ícone (dono) — espelha o wizard. */
   communitySetMeta(communityId: string, patch: { description?: string; category?: string; icon?: string }): Promise<void>
   sendChannelMessage(communityId: string, channelId: string, body: string): Promise<StoredMessage>
   conversationsList(): Promise<Conversation[]>
@@ -617,20 +543,16 @@ export interface DisTorrentServices {
   conversationDelete(convId: string): Promise<void>
   messagesList(convId: string): Promise<StoredMessage[]>
   messageSend(convId: string, body: string): Promise<StoredMessage>
-  /** Reenvia uma mensagem EXISTENTE preservando o id (sem criar bolha nova). */
   messageResend(msgId: string): Promise<StoredMessage>
   sendTyping?(convId: string): Promise<void>
   subscribe(cb: (ev: EngineEvent) => void): () => void
 
-  // Privacidade
   privacyGet(): Promise<PrivacySettings>
   privacySet(mode: PrivacyMode): Promise<PrivacySettings>
   proxyAddrGet(mode?: PrivacyMode): Promise<ProxyConfig>
   proxyAddrSet(addr: string, mode?: PrivacyMode): Promise<void>
-  /** Teste ONLINE do proxy: RTT do 1º circuito que abrir nos brokers do relay */
   proxyTest(addr: string): Promise<number>
 
-  // Vault export/import
   vaultExport(): Promise<{ identity: Identity; vault_blob: string }>
   vaultImport(identityJson: string, vaultBlob: string): Promise<Identity>
   accountsList(): Promise<SavedAccount[]>
@@ -638,7 +560,6 @@ export interface DisTorrentServices {
   accountSwitch(fingerprint: string): Promise<Identity>
   accountRemoveImported(fingerprint: string): Promise<void>
 
-  // Canais — gestão completa
   channelCreate(communityId: string, name: string, opts?: { topic?: string; category?: string; kind?: 'text' | 'voice' | 'video' }): Promise<string>
   channelDelete(communityId: string, channelId: string): Promise<void>
   channelRename(communityId: string, channelId: string, newName: string): Promise<void>
@@ -646,7 +567,6 @@ export interface DisTorrentServices {
   channelSetCategory(communityId: string, channelId: string, category: string): Promise<void>
   channelList(communityId: string): Promise<ChannelMeta[]>
 
-  // Cargos
   roleCreate(communityId: string, data: Omit<RoleView, 'id' | 'community_id' | 'position'> & { position?: number }): Promise<string>
   roleUpdate(communityId: string, roleId: string, patch: Partial<Omit<RoleView, 'id' | 'community_id'>>): Promise<void>
   roleDelete(communityId: string, roleId: string): Promise<void>
@@ -656,62 +576,33 @@ export interface DisTorrentServices {
   memberUnassignRole(communityId: string, fp: string, roleId: string): Promise<void>
   memberKick(communityId: string, fp: string): Promise<void>
 
-  // Bots
   botCreate(communityId: string, data: { name: string; avatar?: string; roleId?: string | null }): Promise<string>
   botUpdate(communityId: string, botId: string, patch: Partial<Pick<BotView, 'name' | 'avatar' | 'roleId' | 'online' | 'config'>>): Promise<void>
   botDelete(communityId: string, botId: string): Promise<void>
   botsList(communityId: string): Promise<BotView[]>
-  /** Posta mensagem COMO O BOT (dono ou quem tem MANAGE_BOT). */
   botPostMessage(communityId: string, channelId: string, botId: string, body: string): Promise<StoredMessage>
-  /** Gera novo token (dono) — invalida o antigo. */
   botRegenToken(communityId: string, botId: string): Promise<string>
-  /** HTTP REST para o runtime de bots (nativo: reqwest no shell, sem CORS). */
   httpFetch(url: string, method: 'GET' | 'POST', headers: Record<string, string>, body: string | null, timeoutMs: number): Promise<{ status: number; body: string }>
 
-  // Grupos DM (estilo Discord)
   createGroup(title: string, members: string[]): Promise<Conversation>
   groupMembers(convId: string): Promise<[string,string][]>
-  /**
-   * Pede o pareamento IMEDIATO de todos os membros do grupo (não-amigos
-   * incluídos). Sem isto eles só eram discados pelo tique de 45 s do motor.
-   */
   groupPairNow?(convId: string): Promise<void>
-  /**
-   * Pede o pareamento IMEDIATO de todos os membros do servidor. Sem isto eles
-   * só eram discados pelo tique de 45 s — abrir o servidor parecia "vazio".
-   */
   communityPairNow?(communityId: string): Promise<void>
-  /**
-   * Pede o estado do servidor agora (canais, cargos/tags, bots, membros).
-   * Chamado quando o app volta ao primeiro plano: no celular a WebView congela
-   * e os eventos do intervalo se perdem.
-   */
   communitySyncNow?(communityId: string): Promise<void>
   groupAdd(convId: string, fp: string): Promise<void>
-  /** Remove um integrante; o roster é re-sincronizado com todos do grupo. */
   groupRemove(convId: string, fp: string): Promise<void>
-  /** Renomeia o grupo; o título novo chega aos membros pela sincronização. */
   groupRename(convId: string, title: string): Promise<void>
-  /** Sai do grupo: apaga local e avisa os membros (o grupo não reaparece). */
   groupLeave(convId: string): Promise<void>
-  /** DONO: apaga o grupo para todos os membros. */
   groupDelete(convId: string): Promise<void>
-  /** Apaga o grupo só nesta máquina (os outros continuam com ele). */
   groupDeleteLocal(convId: string): Promise<void>
 
-  // Salas de chamada anunciadas (grupo/DM): ver, entrar e sair
   callRoomPublish(callId: string, convId: string, kind: string, participants: string[]): Promise<void>
   callRoomClose(convId: string): Promise<void>
-  /** Sai da sala sem encerrá-la para os outros (só o host, sozinho, fecha). */
   callRoomLeave(convId: string): Promise<void>
-  /** Entra numa sala anunciada → `[callId, participantes avisados]`. */
   callRoomJoin(convId: string, kind: string): Promise<[string, string[]]>
-  /** Salas vivas no boot (a UI perdeu os eventos enquanto estava fechada). */
   callRoomsList(): Promise<any[]>
 
-  // Chamadas (voice/video + screen share) — mesh P2P onde todos semeiam
   callInvite(targetFp: string, kind: string): Promise<string>
-  /** Reenvia só o convite (ring) enquanto a chamada não conecta; idempotente no receptor. */
   callRingRetry(callId: string, targetFp: string, kind: string): Promise<void>
   callAccept(callId: string, fromFp: string): Promise<void>
   callReject(callId: string, fromFp: string, reason: string): Promise<void>
@@ -719,35 +610,30 @@ export interface DisTorrentServices {
   callOffer(targetFp: string, callId: string, sdp: string): Promise<void>
   callAnswer(targetFp: string, callId: string, sdp: string): Promise<void>
   callIce(targetFp: string, callId: string, candidate: string, mid: string): Promise<void>
-  /** Grupo: avisa o peer sobre novo participante; `kind` não-vazio toca o ring. */
   callAddParticipant(targetFp: string, callId: string, fp: string, kind: string): Promise<void>
-  /** Sinal dedicado de tela: avisa o receptor que o vídeo é TELA (badge). */
   screenShareOffer(targetFp: string, callId: string, sdp: string): Promise<void>
   screenShareAnswer(targetFp: string, callId: string, sdp: string): Promise<void>
 
-  // Voz em servidor
   voiceJoin(communityId: string, channelId: string): Promise<void>
   voiceLeave(communityId: string, channelId: string): Promise<void>
   voiceState(communityId: string, channelId: string, muted: boolean, deafened: boolean): Promise<void>
   voiceStates(communityId: string, channelId: string): Promise<[string,boolean,boolean][]>
 
-  // Arquivos swarm (todos semeiam)
   fileAnnounce(fileId: string, fileName: string, size: number, chunks: number, hash: string, chunkHashes?: string[]): Promise<void>
   fileRequestChunk(fileId: string, index: number, holderFp: string): Promise<void>
   fileSendChunk(targetFp: string, fileId: string, index: number, dataB64: string): Promise<void>
 
-  // Segurança / anti-spam / moderação (Storm)
   serverRulesGet(communityId: string): Promise<ServerRules>
   serverRulesSet(rules: ServerRules): Promise<void>
   auditList(communityId: string, limit?: number): Promise<AuditEntry[]>
   reputationGet(fp: string): Promise<ReputationView>
   safetyNumber(peerFp: string): Promise<string>
+  // Seção 3: moderate
   moderate(communityId: string, action: ModerationAction, target: string, reason?: string): Promise<void>
   reportUser(targetFp: string, communityId?: string, reason?: string): Promise<void>
   validateName(kind: NameKind, raw: string, existing?: string[]): Promise<NameCheckView>
   randomName(): Promise<string>
 
-  // Cofre portátil .stormvault (5.4) — conta inteira cifrada, sem servidor
   stormvaultExport(password: string, opts?: { includeSecret?: boolean; maxMessages?: number }): Promise<StormVaultExportResult>
   stormvaultImportFile(contentB64: string, password: string): Promise<VaultImportReport>
   stormvaultBackupsList(): Promise<VaultBackupInfo[]>
@@ -756,40 +642,33 @@ export interface DisTorrentServices {
   stormvaultBackupSetRetention(days: number): Promise<void>
   stormvaultBackupGetRetention(): Promise<number>
   vaultWipe(confirm: string): Promise<WipeReport>
-  // Mensagens — janela por timestamp (paginação; beforeTs=null = mais recentes)
   messagesWindow(convId: string, beforeTs: number | null, limit: number): Promise<StoredMessage[]>
-  // Observabilidade (painel dev) + RTT por peer
   metricsSnapshot(): Promise<Record<string, unknown>>
   peerRtt(fp: string): Promise<number | null>
-  // Cache LRU de disco (nativo; browser = localStorage)
   cacheGet(key: string): Promise<string | null>
   cachePut(key: string, dataB64: string): Promise<void>
   cacheDelete(key: string): Promise<void>
   cacheStats(): Promise<CacheStats>
   cacheSetCap(capMb: number): Promise<void>
-  // Segurança de mídia
   mediaSafetyGet(): Promise<MediaSafetySettings>
   mediaSafetySet(stripExif: boolean, blockExecutables: boolean): Promise<void>
+  retentionGet(): Promise<import('./models').RetentionSettings>
+  retentionSet(days: number, servers: boolean, groups: boolean, dms: boolean): Promise<import('./models').RetentionSettings>
+  retentionRun(): Promise<number>
 
-  // Voz NATIVA (webrtc-rs + cpal + Opus): só leitura/controle — a negociação
-  // é no core em Rust. Sem a camada, os métodos são no-op e o WebRTC do
-  // navegador segue responsável.
   voiceMediaAvailable(): Promise<boolean>
   voiceMediaStats(callId: string): Promise<VoiceMediaStats | null>
   voiceSetMuted(callId: string, muted: boolean): Promise<void>
   voiceSetDeafened(callId: string, deafened: boolean): Promise<void>
   voiceHangup(callId: string): Promise<void>
-  // Vídeo NATIVO (Linux): liga/desliga envio de câmera/tela e faz polling do frame remoto.
   voiceVideoStart(callId: string, peerFp: string, source: 'camera' | 'screen', monitorId?: number | null): Promise<string>
   voiceVideoStop(callId: string, peerFp: string): Promise<void>
   voiceVideoFrame(callId: string, peerFp: string, sinceSeq?: number | null): Promise<NativeVideoFrame | null>
-  // Teste de mic NATIVO sem chamada (Linux: WebKitGTK não tem getUserMedia).
   voiceMicTestStart(): Promise<number>
   voiceMicTestLevel(testId: number): Promise<number>
   voiceMicTestStop(testId: number): Promise<void>
   voiceMicName(): Promise<string>
 
-  // ================= CAMADA SOCIAL v3 (paridade Discord) =================
   react(convId: string, msgId: string, emoji: string): Promise<boolean>
   reactions(msgId: string): Promise<ReactionSummary[]>
   reactionsBulk(msgIds: string[]): Promise<ReactionSummary[]>
@@ -799,7 +678,6 @@ export interface DisTorrentServices {
   pin(convId: string, msgId: string, pinned: boolean): Promise<void>
   pins(convId: string): Promise<MsgMetaView[]>
   metaBulk(msgIds: string[]): Promise<MsgMetaView[]>
-  /** (msg_id, corpo efetivo) — edição aplicada, exclusão marcada */
   effectiveBodies(msgIds: string[]): Promise<[string, string][]>
   forward(srcMsgId: string, targetConv: string, targetChannel: string, fromLabel: string): Promise<StoredMessage>
 
@@ -811,13 +689,10 @@ export interface DisTorrentServices {
   presenceSet(status: PresenceStatus, custom: string, customEmoji: string): Promise<void>
   presenceList(): Promise<PresenceView[]>
 
-  // Segundo plano/notificações: no navegador é tudo indisponível e as
-  // implementações devolvem estado honesto em vez de fingir.
   backgroundPrefs(): Promise<BackgroundPrefsView>
   backgroundPrefsSet(patch: { closeToTray?: boolean; startMinimized?: boolean }): Promise<void>
   autostartGet(): Promise<boolean>
   autostartSet(enabled: boolean): Promise<boolean>
-  /** Liga o autostart no primeiro boot (padrão "abre com o Windows"). */
   autostartEnsure(): Promise<boolean>
   notificationShow(args: {
     id: number
@@ -830,33 +705,22 @@ export interface DisTorrentServices {
   notificationCancelAll(): Promise<void>
   notificationPermission(): Promise<string>
   notificationRequestPermission(): Promise<string>
-  /**
-   * Espelha no core as preferências de aviso: o aviso nativo é disparado pelo
-   * motor Rust, que precisa saber mesmo com a janela escondida.
-   */
   notifyPrefsSet(system: boolean, preview: boolean, policy?: string | null): Promise<void>
-  /** Sobe/derruba o serviço que mantém o app conectado com a tela apagada. */
   backgroundServiceSet(on: boolean): Promise<boolean>
-  /** Ação tocada na notificação de chamada com o app FECHADO (drenada 1x). */
   callPendingAction(): Promise<{ action: string; call_id: string }>
-  /** Mostra a notificação de CHAMADA (tela cheia + Atender/Recusar). */
   callNotifyShow(callId: string, title: string, body: string): Promise<void>
   callNotifyCancel(callId: string): Promise<void>
   appShowWindow(): Promise<void>
   appHideToTray(): Promise<void>
-  /** Windows: esconde a barra de compartilhamento que o WebView2 cria. */
   hideShareBar(): Promise<void>
-  /** Windows: liga/desliga o vigia nativo da barra (ver `hideShareBar`). */
   shareBarWatch(ativo: boolean): Promise<void>
   appQuit(): Promise<void>
-  /** Alterna tela cheia da janela (F11). Devolve o estado NOVO real. */
   windowToggleFullscreen(): Promise<boolean>
   backgroundSetConnection(state: string, onlinePeers: number, unread?: number): Promise<void>
   presenceGet(fp: string): Promise<PresenceView>
   profileSet(patch: ProfilePatch): Promise<ProfileView>
   profileGet(fp: string): Promise<ProfileView>
   profileList(): Promise<ProfileView[]>
-  /** Força a reconciliação de perfis agora (o motor já faz no boot/reconexão/10 min). */
   profileSyncNow(): Promise<void>
   nicknameSet(communityId: string, fp: string, nickname: string): Promise<void>
   nicknameGet(communityId: string, fp: string): Promise<string>
@@ -931,10 +795,10 @@ export interface VaultImportReport {
 }
 
 export interface WipeReport {
-  /** .stormvault exportados que sobrevivem em Downloads (apagar manualmente). */
   leftovers: string[]
 }
 
+// Seção 4: VaultBackupInfo
 export interface VaultBackupInfo {
   file: string
   created_ms: number
@@ -952,7 +816,12 @@ export interface MediaSafetySettings {
   block_executables: boolean
 }
 
-// --- Segurança (espelha distorrent-core moderation/names) ---
+export interface RetentionSettings {
+  days: number
+  servers: boolean
+  groups: boolean
+  dms: boolean
+}
 
 export type SpamLevel = 'low' | 'medium' | 'high'
 export type TrustLevel = 'new' | 'trusted' | 'suspicious' | 'banned'
@@ -985,46 +854,28 @@ export interface ReputationView {
   reports: number
 }
 
-/**
- * Estado da camada de voz NATIVA, espelhando `VoiceStats` do Rust (snake_case
- * serializado direto). `null` em `voiceMediaStats` = chamada não nativa; a UI
- * usa então o relatório de `RTCPeerConnection` do navegador.
- */
 export interface VoiceMediaStats {
-  /** "idle" | "connecting" | "connected" | "failed" */
   state: string
-  /** "LAN" | "STUN" | "TURN" | "n/d" */
   route: string
-  /** Profundidade do jitter buffer em ms (50 = interativo). */
   jitter_depth_ms: number
   packets_in: number
   packets_out: number
-  /** frames mascarados por perda (Opus PLC). */
   plc_frames: number
   decode_errors: number
   rtt_ms: number | null
-  /** Último erro de abertura do microfone (cpal); com packets_out 0 = não envia áudio. */
   mic_error?: string | null
-  /** Último erro de ABERTURA do alto-falante; com pacotes chegando = não sai desta máquina. */
   speaker_error?: string | null
-  /** Vídeo nativo: "off" | "starting" | "live" | "failed". */
   video_state?: string | null
   video_codec?: string | null
   video_source?: string | null
   video_error?: string | null
-  /** Pacotes RTP de vídeo recebidos, antes do decode. */
   video_packets_in?: number | null
   frames_in?: number | null
   frames_out?: number | null
-  /**
-   * Pares da chamada em `connected`/total AGORA. `state` é o PIOR par de
-   * propósito; sem esta contagem, `failed` de UM par derrubava a chamada toda.
-   */
   peers_connected?: number | null
   peers_total?: number | null
 }
 
-/** Frame de vídeo REMOTO decodificado (Linux); meta-only quando não mudou. */
 export interface NativeVideoFrame {
   jpeg?: string
   w: number

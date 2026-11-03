@@ -1,6 +1,3 @@
-//! Storage local real: SQLite (rusqlite bundled — zero dependência externa).
-//! A UI NUNCA acessa daqui; passa por services/repos.
-
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,9 +11,9 @@ use crate::Result;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Conversation {
     pub id: String,
-    pub kind: String,    // "dm" | "group"
-    pub title: String,   // fallback: fingerprint do peer
-    pub peer_fp: String, // para DM: fingerprint do outro lado
+    pub kind: String,
+    pub title: String,
+    pub peer_fp: String,
     pub created_at: i64,
 }
 
@@ -28,12 +25,10 @@ pub struct StoredMessage {
     pub body: String,
     pub ts: i64,
     pub sig: String,
-    pub direction: String, // "out" | "in"
-    pub status: String,    // out: pending|sending|sent|delivered|failed; in: ok
-    /// v6: id do bot quando a mensagem foi postada POR UM BOT ("" = humano).
+    pub direction: String,
+    pub status: String,
     #[serde(default)]
     pub bot_id: String,
-    /// v7: id da THREAD dona da mensagem ("" = mensagem de canal/DM comum).
     #[serde(default)]
     pub thread_id: String,
 }
@@ -43,12 +38,11 @@ pub struct PeerRecord {
     pub fp: String,
     pub pubkey_hex: String,
     pub nickname: String,
-    pub addr: Option<String>, // "ip:port" do listener TCP conhecido
+    pub addr: Option<String>,
     pub last_seen: i64,
-    pub origin: String, // "discovery" | "manual" | "handshake"
+    pub origin: String,
 }
 
-/// Linha de canal (v4) — espelha ChannelMeta do frontend.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChannelMetaRow {
     pub id: String,
@@ -59,7 +53,6 @@ pub struct ChannelMetaRow {
     pub position: i64,
 }
 
-/// Cargo de comunidade (v4) — permissões em bitmask estilo Discord.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RoleRow {
     pub id: String,
@@ -72,8 +65,6 @@ pub struct RoleRow {
     pub position: i64,
 }
 
-/// Bot da comunidade (v4) — token é o credential do bot local; config (v6)
-/// sincroniza no CommunityState e o token é mascarado para não-donos.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BotRow {
     pub id: String,
@@ -94,21 +85,16 @@ pub struct BotRow {
     pub config: String,
 }
 
-/// Patch de atualização de bot. `role_id` é duplo-option:
-/// None = não mexer; Some(None) = limpar cargo; Some(Some(x)) = definir cargo.
 #[derive(Debug, Clone, Default)]
 pub struct BotPatch {
     pub name: Option<String>,
     pub avatar: Option<String>,
     pub role_id: Option<Option<String>>,
     pub online: Option<bool>,
-    /// v6: JSON do runtime web. Cap 16KB.
     pub config: Option<String>,
 }
 
-/// Verifica se uma coluna existe (PRAGMA table_info) — ALTER sem IF NOT EXISTS.
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
-    // allowlist para prevenir injection
     if ![
         "channels",
         "roles",
@@ -128,11 +114,9 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         "audit_log",
         "reputation",
         "reports",
-        // v10: `announced_at` (prazo da presença de voz). Sem esta entrada o
-        // `column_exists` devolvia sempre `false` e a migração tentava
-        // adicionar a coluna de novo — "duplicate column name" em todo boot
-        // depois do primeiro.
         "voice_states",
+        "outbox",
+        "local_hidden",
     ]
     .contains(&table)
     {
@@ -148,7 +132,6 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     cols.iter().any(|c| c == column)
 }
 
-/// Migrações (v2..v8): sem perder dados nem quebrar FK em bancos antigos.
 fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
     conn.execute_batch(SCHEMA_V1)?;
@@ -159,7 +142,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             |r| r.get(0),
         )
         .unwrap_or_else(|_| "0".into());
-    if version.as_str() < "2" {
+    let version: u32 = version.trim().parse().unwrap_or(0);
+    if version < 2 {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages_v2 (
                id TEXT PRIMARY KEY,
@@ -181,7 +165,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    if version.as_str() < "3" {
+    if version < 3 {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS group_members (
                conv_id TEXT NOT NULL,
@@ -229,8 +213,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    if version.as_str() < "4" {
-        // v4: canais completos + cargos, bots e assignments (estilo Discord).
+    if version < 4 {
         if !column_exists(conn, "channels", "topic") {
             conn.execute_batch("ALTER TABLE channels ADD COLUMN topic TEXT NOT NULL DEFAULT '';")?;
         }
@@ -254,8 +237,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    if version.as_str() < "5" {
-        // v5: moderação + anti-spam (rules, audit_log, reputation, reports).
+    if version < 5 {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS server_rules (
                community_id TEXT PRIMARY KEY,
@@ -300,9 +282,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    if version.as_str() < "6" {
-        // v6: wizard de servidores (meta da comunidade), messages.bot_id e
-        // bots.config (JSON do runtime web).
+    if version < 6 {
         if !column_exists(conn, "communities", "description") {
             conn.execute_batch(
                 "ALTER TABLE communities ADD COLUMN description TEXT NOT NULL DEFAULT '';",
@@ -329,10 +309,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    if version.as_str() < "7" {
-        // v7: threads. Bloco PRÓPRIO (não dentro do v6): quem já estava em v6
-        // nunca executava o bloco e ficava sem a coluna — quebrava TODA
-        // leitura de mensagem. `column_exists` mantém o bloco idempotente.
+    if version < 7 {
         if !column_exists(conn, "messages", "thread_id") {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';",
@@ -346,48 +323,46 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    // v8: silenciamento de CONTA — mute ganha prazo real consultado pelo
-    // portão de fala do MOTOR (antes só decrementava score que ninguém lia).
+    if version < 11 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS local_hidden (
+               msg_id TEXT PRIMARY KEY,
+               conv_id TEXT NOT NULL,
+               hidden_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_local_hidden_conv ON local_hidden(conv_id);",
+        )?;
+    }
+    if version < 12 {
+        if !column_exists(conn, "outbox", "kind") {
+            conn.execute_batch("ALTER TABLE outbox ADD COLUMN kind TEXT NOT NULL DEFAULT '';")?;
+        }
+    }
     if !column_exists(conn, "reputation", "muted_until") {
         conn.execute_batch(
             "ALTER TABLE reputation ADD COLUMN muted_until INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
-    // v9: semeadura de arquivo. Sem o carimbo, o motor não tinha como saber
-    // quais arquivos DESTE nó devem ser re-anunciados quando alguém entra
-    // online — quem baixava um arquivo virava seeder só até fechar o app.
     if !column_exists(conn, "files", "seeded_at") {
         conn.execute_batch("ALTER TABLE files ADD COLUMN seeded_at INTEGER NOT NULL DEFAULT 0;")?;
     }
-    // v10: PRAZO DE VALIDADE DA PRESENÇA DE VOZ.
-    //
-    // `voice_states` só perdia a linha quando o `VoiceLeave` chegava. Quem
-    // fechava o app (ou travava) sem desligar ficava na chamada PARA SEMPRE —
-    // foi o "secura" que o dono viu aparecer numa call onde a pessoa não
-    // estava. O filtro do frontend (sessões vivas) cobre o caso comum, mas não
-    // o peer que está online no servidor e simplesmente não voltou à chamada.
-    //
-    // Aqui a tabela ganha `announced_at`, usado para EXPIRAR quem parou de
-    // re-anunciar (o motor re-anuncia a cada 15 s). Presença velha é removida
-    // na leitura, sem tocar no caminho quente de escrita.
     if !column_exists(conn, "voice_states", "announced_at") {
         conn.execute_batch(
             "ALTER TABLE voice_states ADD COLUMN announced_at INTEGER NOT NULL DEFAULT 0;",
         )?;
-        // Linhas antigas (sem carimbo) começam a contar de agora: não expulsar
-        // quem está legitimamente numa chamada durante a migração.
         conn.execute_batch(
             "UPDATE voice_states SET announced_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE announced_at = 0;",
         )?;
     }
     conn.execute(
-        "INSERT INTO kv(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO UPDATE SET value='10'",
+        "INSERT INTO kv(key,value) VALUES('schema_version','12') ON CONFLICT(key) DO UPDATE SET value='12'",
         [],
     )?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(())
 }
 
+// Seção 1: friend_row
 fn friend_row() -> impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<PeerRecord> {
     |r| {
         Ok(PeerRecord {
@@ -400,8 +375,6 @@ fn friend_row() -> impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<PeerRecord
         })
     }
 }
-
-// ---------- helpers de escrita de linhas (reusados por upsert e sync) ----------
 
 fn insert_channel_row(conn: &Connection, community_id: &str, r: &ChannelMetaRow) -> Result<()> {
     conn.execute(
@@ -464,12 +437,6 @@ pub struct Store {
 }
 
 impl Store {
-    /// Quanto tempo uma presença de voz sobrevive SEM re-anúncio.
-    ///
-    /// O motor re-anuncia a cada 15 s (`reannounce_voice_channels`). 90 s dá
-    /// seis janelas de folga — cobre um pico de rede sem nunca expulsar quem
-    /// está na chamada de verdade. Acima disso a linha só pode ser resto de app
-    /// fechado/crash sem `VoiceLeave`.
     pub const VOICE_PRESENCE_TTL_MS: u64 = 90_000;
 }
 
@@ -580,6 +547,7 @@ CREATE TABLE IF NOT EXISTS voice_states (
 );
 "#;
 
+// Seção 2: Store
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -606,12 +574,10 @@ impl Store {
         })
     }
 
-    /// rusqlite::Connection não é Sync — acesso serializado por Mutex.
     pub(crate) fn locked(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Nomes das tabelas existentes (testes de migração e diagnóstico de schema).
     pub fn table_names(&self) -> Vec<String> {
         let conn = self.locked();
         let Ok(mut st) = conn.prepare("SELECT name FROM sqlite_master WHERE type='table'") else {
@@ -621,8 +587,6 @@ impl Store {
             .map(|rows| rows.flatten().collect())
             .unwrap_or_default()
     }
-
-    // ---------- kv (identidade, config, estado de sync) ----------
 
     pub fn kv_get(&self, key: &str) -> Option<String> {
         self.locked()
@@ -648,11 +612,8 @@ impl Store {
         Ok(())
     }
 
-    /// Lista `(key, value)` por prefixo (restaura convites pendentes no boot:
-    /// join não confirmado não pode sumir quando o app fecha).
     pub fn kv_list_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
         let conn = self.locked();
-        // LIKE com escape: curingas do SQL são tratados como literal.
         let escaped = prefix
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -666,8 +627,6 @@ impl Store {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-
-    // ---------- identidade ----------
 
     pub fn save_identity(&self, id: &Identity, secret_hex: &str) -> Result<()> {
         self.kv_set(
@@ -687,12 +646,9 @@ impl Store {
         self.kv_get("identity.secret")
     }
 
-    /// Sobrescreve apenas o campo de segredo (blob cifrado do cofre).
     pub fn save_secret_blob(&self, blob_hex: &str) -> Result<()> {
         self.kv_set("identity.secret", blob_hex)
     }
-
-    // ---------- peers ----------
 
     pub fn upsert_peer(&self, p: &PeerRecord) -> Result<()> {
         self.locked().execute(
@@ -753,10 +709,6 @@ impl Store {
         Ok(())
     }
 
-    // ---------- conversas ----------
-
-    /// DM é determinística: id = blake3(fp_menor || fp_maior) — ambos os lados
-    /// derivam o mesmo id sem coordenação.
     pub fn dm_conversation_id(my_fp: &str, peer_fp: &str) -> String {
         use blake3::Hasher;
         let (a, b) = if my_fp <= peer_fp {
@@ -764,6 +716,7 @@ impl Store {
         } else {
             (peer_fp, my_fp)
         };
+        // Seção 3: mut
         let mut h = Hasher::new();
         h.update(b"distorrent/v1|dm|");
         h.update(a.as_bytes());
@@ -843,12 +796,11 @@ impl Store {
         Ok(())
     }
 
-    // ---------- mensagens ----------
-
     pub fn insert_message(&self, m: &MessageEnvelope, direction: &str, status: &str) -> Result<()> {
         self.locked().execute(
             "INSERT OR IGNORE INTO messages(id,conv_id,author_fp,body,ts,sig,direction,status)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8
+             WHERE NOT EXISTS (SELECT 1 FROM local_hidden WHERE msg_id=?1)",
             params![
                 m.id,
                 m.conv_id,
@@ -863,8 +815,6 @@ impl Store {
         Ok(())
     }
 
-    /// v7: insere mensagem dentro de uma THREAD (thread_id = filtro da UI;
-    /// a conversa continua sendo o canal pai).
     pub fn insert_message_in_thread(
         &self,
         m: &MessageEnvelope,
@@ -874,13 +824,13 @@ impl Store {
     ) -> Result<()> {
         self.locked().execute(
             "INSERT OR IGNORE INTO messages(id,conv_id,author_fp,body,ts,sig,direction,status,thread_id)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+             SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9
+             WHERE NOT EXISTS (SELECT 1 FROM local_hidden WHERE msg_id=?1)",
             params![m.id, m.conv_id, m.author_fp, m.body, m.ts, m.sig, direction, status, thread_id],
         )?;
         Ok(())
     }
 
-    /// Mensagens de uma thread (mais recentes, ordem de leitura).
     pub fn list_messages_thread(&self, thread_id: &str, limit: i64) -> Result<Vec<StoredMessage>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -907,8 +857,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// v6: mensagem postada POR UM BOT (bot_id só para display; a assinatura
-    /// real continua sendo do host).
     pub fn insert_message_as_bot(
         &self,
         m: &MessageEnvelope,
@@ -934,14 +882,15 @@ impl Store {
         Ok(())
     }
 
+    // Seção 4: list_messages
     pub fn list_messages(&self, conv_id: &str, limit: i64) -> Result<Vec<StoredMessage>> {
         let conn = self.locked();
         let mut st = conn.prepare(
             "SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id,thread_id FROM messages
-             WHERE conv_id=?1 ORDER BY ts ASC, id ASC LIMIT ?2",
+             WHERE conv_id=?1 ORDER BY ts DESC, id DESC LIMIT ?2",
         )?;
-        let rows = st
-            .query_map(params![conv_id, limit], |r| {
+        let mut rows = st
+            .query_map(params![conv_id, limit.clamp(1, 5000)], |r| {
                 Ok(StoredMessage {
                     id: r.get(0)?,
                     conv_id: r.get(1)?,
@@ -956,7 +905,89 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.reverse();
         Ok(rows)
+    }
+
+    pub fn hide_messages_local(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.locked();
+        let tx = conn.transaction()?;
+        let now = crate::identity::now_ms();
+        let mut n = 0usize;
+        for id in ids {
+            let conv: Option<String> = tx
+                .query_row(
+                    "SELECT conv_id FROM messages WHERE id=?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .ok();
+            let Some(conv_id) = conv else { continue };
+            tx.execute(
+                "INSERT OR IGNORE INTO local_hidden(msg_id,conv_id,hidden_at) VALUES(?1,?2,?3)",
+                params![id, conv_id, now],
+            )?;
+            tx.execute("DELETE FROM messages WHERE id=?1", params![id])?;
+            n += 1;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    pub fn is_message_hidden(&self, msg_id: &str) -> bool {
+        self.locked()
+            .query_row(
+                "SELECT 1 FROM local_hidden WHERE msg_id=?1",
+                params![msg_id],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn expired_message_ids(
+        &self,
+        cutoff_ms: i64,
+        servers: bool,
+        groups: bool,
+        dms: bool,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        if !(servers || groups || dms) {
+            return Ok(Vec::new());
+        }
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT m.id FROM messages m
+             LEFT JOIN conversations c ON c.id = m.conv_id
+             LEFT JOIN local_hidden h ON h.msg_id = m.id
+             WHERE m.ts < ?1 AND h.msg_id IS NULL
+               AND ((?2 = 1 AND c.kind = 'dm')
+                 OR (?3 = 1 AND c.kind = 'group')
+                 OR (?4 = 1 AND (c.id IS NULL OR c.kind NOT IN ('dm','group'))))
+             ORDER BY m.ts ASC LIMIT ?5",
+        )?;
+        let rows = st
+            .query_map(
+                params![
+                    cutoff_ms,
+                    dms as i64,
+                    groups as i64,
+                    servers as i64,
+                    limit.clamp(1, 100_000)
+                ],
+                |r| r.get::<_, String>(0),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn count_hidden(&self) -> Result<i64> {
+        Ok(self
+            .locked()
+            .query_row("SELECT COUNT(*) FROM local_hidden", [], |r| r.get(0))?)
     }
 
     pub fn set_message_status(&self, msg_id: &str, status: &str) -> Result<()> {
@@ -967,9 +998,6 @@ impl Store {
         Ok(())
     }
 
-    /// Visto azul: marca minhas mensagens de saída (até `up_to_ts`) como
-    /// `read`. Monótona — nunca rebaixa `read` de volta (Ack chega depois
-    /// do Read em retransmissão e não pode reverter o visto).
     pub fn mark_read_outgoing(&self, conv_id: &str, up_to_ts: i64) -> Result<Vec<String>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -987,8 +1015,6 @@ impl Store {
         Ok(ids)
     }
 
-    /// Janela de mensagens (paginação por ts) — caminho da UI; `messages_list`
-    /// fica para compat.
     pub fn list_messages_window(
         &self,
         conv_id: &str,
@@ -1017,26 +1043,42 @@ impl Store {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        // consulta DESC (mais recente primeiro) → devolve em ordem de leitura
+        // Seção 5: mut
         let mut rows = rows;
         rows.reverse();
         Ok(rows)
     }
 
-    /// Contagem total de mensagens (para o cofre reportar tamanho real).
     pub fn count_messages(&self) -> Result<i64> {
         let conn = self.locked();
         Ok(conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?)
     }
 
-    // ---------- outbox (mensagens PENDING aguardando conexão) ----------
-
     pub fn enqueue_outbox(&self, msg_id: &str, peer_fp: &str) -> Result<()> {
         self.locked().execute(
-            "INSERT OR IGNORE INTO outbox(msg_id,peer_fp,attempts,next_try) VALUES(?1,?2,0,0)",
+            "INSERT OR IGNORE INTO outbox(msg_id,peer_fp,attempts,next_try,kind) VALUES(?1,?2,0,0,'')",
             params![msg_id, peer_fp],
         )?;
         Ok(())
+    }
+
+    pub fn enqueue_outbox_kind(&self, msg_id: &str, peer_fp: &str, kind: &str) -> Result<()> {
+        self.locked().execute(
+            "INSERT INTO outbox(msg_id,peer_fp,attempts,next_try,kind) VALUES(?1,?2,0,0,?3)
+             ON CONFLICT(msg_id) DO UPDATE SET peer_fp=excluded.peer_fp, kind=excluded.kind",
+            params![msg_id, peer_fp, kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn outbox_kind(&self, msg_id: &str) -> String {
+        self.locked()
+            .query_row(
+                "SELECT kind FROM outbox WHERE msg_id=?1",
+                params![msg_id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default()
     }
 
     pub fn dequeue_outbox(&self, msg_id: &str) -> Result<()> {
@@ -1045,29 +1087,17 @@ impl Store {
         Ok(())
     }
 
-    /// (Re)enfileira ZERANDO o backoff — usado pelo botão "Reenviar".
-    ///
-    /// `enqueue_outbox` é `INSERT OR IGNORE`: numa mensagem que estourou o
-    /// orçamento (`attempts >= OUTBOX_MAX_ATTEMPTS`) a linha continuaria
-    /// inelegível e o reenvio nunca sairia. Aqui o orçamento volta ao início.
     pub fn requeue_outbox(&self, msg_id: &str, peer_fp: &str) -> Result<()> {
         self.locked().execute(
-            "INSERT INTO outbox(msg_id,peer_fp,attempts,next_try) VALUES(?1,?2,0,0)
+            "INSERT INTO outbox(msg_id,peer_fp,attempts,next_try,kind) VALUES(?1,?2,0,0,'')
              ON CONFLICT(msg_id) DO UPDATE SET peer_fp=excluded.peer_fp, attempts=0, next_try=0",
             params![msg_id, peer_fp],
         )?;
         Ok(())
     }
 
-    /// Teto de tentativas de reenvio.
-    ///
-    /// BUG corrigido: retransmissão ILIMITADA (backoff existia só no schema,
-    /// não no código; mensagem voltava a PENDING a cada flush e nunca acabava
-    /// — "recebo a mesma mensagem infinitas vezes"). Com teto, vira `failed`.
     pub const OUTBOX_MAX_ATTEMPTS: i64 = 12;
 
-    /// Mensagens prontas para reenvio AGORA: respeita o backoff (`next_try`) e
-    /// descarta as que estouraram o orçamento de tentativas.
     pub fn pending_outbox(&self, peer_fp: &str) -> Result<Vec<String>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -1088,9 +1118,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Marca uma tentativa: incrementa `attempts` com backoff CRESCENTE
-    /// (15, 30, 60, 120…s) — `+15s` fixo esgotava o orçamento antes de o
-    /// relay reconectar (30s–2min) e dava X vermelho em contato online.
     pub fn bump_outbox(&self, msg_id: &str) -> Result<()> {
         let attempts: i64 = self
             .locked()
@@ -1100,7 +1127,6 @@ impl Store {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        // 15s * 2^n, teto de 8 min por tentativa.
         let passo = (15_000i64).saturating_mul(1i64 << attempts.min(6));
         let espera = passo.min(8 * 60 * 1000);
         self.locked().execute(
@@ -1110,7 +1136,6 @@ impl Store {
         Ok(())
     }
 
-    /// Mensagens que estouraram o orçamento: marca `failed` e tira da fila.
     pub fn give_up_outbox(&self, peer_fp: &str) -> Result<Vec<String>> {
         let ids = {
             let conn = self.locked();
@@ -1133,8 +1158,6 @@ impl Store {
         Ok(ids)
     }
 
-    /// Varredor anti-buraco-negro: out sem ack mais velho que o corte volta a
-    /// PENDING + outbox (receptor dedupa, reenvio é seguro).
     pub fn revert_stale_sent_to_pending(
         &self,
         peer_fp: &str,
@@ -1142,9 +1165,6 @@ impl Store {
     ) -> Result<Vec<String>> {
         let ids = {
             let conn = self.locked();
-            // `NOT EXISTS (outbox)`: sem este filtro o varredor regravava
-            // `pending` por cima de mensagens já enfileiradas (backoff zerado).
-            // `status IN (...)` já exclui `read`: visto não volta a pending.
             let mut st = conn.prepare(
                 "SELECT id FROM messages
                  WHERE direction='out' AND status IN ('sending','sent') AND ts < ?1
@@ -1164,10 +1184,26 @@ impl Store {
         Ok(ids)
     }
 
-    /// Ao cair a conexão: out não-confirmadas voltam a PENDING + outbox.
+    pub fn revert_all_sending_to_pending(&self) -> Result<usize> {
+        let ids = {
+            let conn = self.locked();
+            let mut st =
+                conn.prepare("SELECT id FROM messages WHERE direction='out' AND status='sending'")?;
+            let ids = st
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(st);
+            ids
+        };
+        let mut n = 0usize;
+        for id in &ids {
+            self.set_message_status(id, "pending")?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub fn revert_unacked_to_pending(&self, peer_fp: &str) -> Result<Vec<String>> {
-        // coleta os ids com o lock em escopo próprio — os métodos abaixo
-        // re-adquirem o Mutex (não é reentrante).
         let ids = {
             let conn = self.locked();
             let mut st = conn.prepare(
@@ -1175,6 +1211,7 @@ impl Store {
                  WHERE direction='out' AND status IN ('sending','sent')
                    AND conv_id IN (SELECT id FROM conversations WHERE peer_fp=?1)",
             )?;
+            // Seção 6: ids
             let ids = st
                 .query_map(params![peer_fp], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1188,9 +1225,6 @@ impl Store {
         Ok(ids)
     }
 
-    /// Quantas mensagens NOSSAS estão presas no outbox deste peer — inclusive as
-    /// em backoff (que `pending_outbox` esconde). Usado pelo detector de link
-    /// meio-vivo: "online sem confirmação" só é problema se há dado esperando.
     pub fn outbox_len_for_peer(&self, peer_fp: &str) -> usize {
         self.locked()
             .query_row(
@@ -1224,8 +1258,6 @@ impl Store {
         .optional()
         .map_err(Into::into)
     }
-
-    // ---------- amigos ----------
 
     pub fn set_friend(&self, fp: &str, nickname: &str, status: &str) -> Result<()> {
         self.locked().execute(
@@ -1272,8 +1304,6 @@ impl Store {
             .execute("DELETE FROM friends WHERE fp=?1", params![fp])?;
         Ok(())
     }
-
-    // ---------- comunidades ----------
 
     pub fn create_community(
         &self,
@@ -1348,7 +1378,7 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// v6: metadados do wizard — (descrição, categoria, ícone).
+    // Seção 7: community_meta
     pub fn community_meta(&self, id: &str) -> Result<(String, String, String)> {
         let conn = self.locked();
         conn.query_row(
@@ -1361,8 +1391,6 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// v6: atualiza metadados — cada campo é opcional (None = não mexer).
-    /// Caps anti-abuso; valida no engine quem pode chamar (dono).
     pub fn community_meta_set(
         &self,
         id: &str,
@@ -1371,8 +1399,6 @@ impl Store {
         icon: Option<&str>,
     ) -> Result<usize> {
         let conn = self.locked();
-        // owned Strings: o borrow para ToSql vive até o execute (o `&str`
-        // do if-let morreria no fim do bloco — E0597).
         let mut sets: Vec<(&str, String)> = Vec::new();
         if let Some(d) = description {
             if d.chars().count() > 512 {
@@ -1425,8 +1451,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Comunidade dona de um canal (resolve "de qual servidor é esta conversa"
-    /// antes de qualquer decisão de autorização de moderador).
     pub fn channel_community(&self, channel_id: &str) -> Result<Option<String>> {
         let conn = self.locked();
         let mut st = conn.prepare("SELECT community_id FROM channels WHERE id=?1")?;
@@ -1437,7 +1461,6 @@ impl Store {
         })
     }
 
-    /// Posição de um canal dentro da comunidade (base do drag-to-reorder).
     pub fn channel_position(&self, channel_id: &str) -> Result<Option<i64>> {
         let conn = self.locked();
         conn.query_row(
@@ -1449,9 +1472,6 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Grava a ordem final dos canais numa transação; rejeita ids de outra
-    /// comunidade (frame de rede — sem a checagem, um dono reordenava canais
-    /// alheios) e trava o tamanho do frame.
     pub fn channels_reorder(&self, community_id: &str, ids: &[String]) -> Result<()> {
         if ids.len() > 256 {
             return Err(crate::DistorrentError::Protocol(
@@ -1480,7 +1500,6 @@ impl Store {
         Ok(())
     }
 
-    /// Metadados completos de um canal (comunidade, nome, tipo, tópico).
     pub fn channel_meta(
         &self,
         channel_id: &str,
@@ -1521,6 +1540,7 @@ impl Store {
         Ok(rows)
     }
 
+    // Seção 8: member_role
     pub fn member_role(&self, community_id: &str, fp: &str) -> Option<String> {
         let conn = self.locked();
         conn.query_row(
@@ -1530,8 +1550,6 @@ impl Store {
         )
         .ok()
     }
-
-    // ---------- moderação + anti-spam (v5, Storm camada de segurança) ----------
 
     fn parse_json_list(s: &str) -> Vec<String> {
         serde_json::from_str::<Vec<String>>(s).unwrap_or_default()
@@ -1636,11 +1654,7 @@ impl Store {
         Ok(())
     }
 
-    /// Ajusta reputação atomicamente; transições: ≤-30 banido, ≤-10 suspeito,
-    /// ≥20 confiável, suspeito ≥0 vira novo. Silencia a CONTA (não o servidor)
-    /// até `until_ms` — por isso vive ao lado da reputação, não em timeouts.
     pub fn mute_set(&self, fp: &str, until_ms: i64) -> Result<()> {
-        // Garante a linha: um usuário nunca moderado não tem registro ainda.
         self.locked().execute(
             "INSERT OR IGNORE INTO reputation(fp,trust,score,reports,updated_at,muted_until)
                  VALUES(?1,'new',0,0,?2,0)",
@@ -1653,7 +1667,6 @@ impl Store {
         Ok(())
     }
 
-    /// Prazo do silenciamento ainda vigente (0 = pode falar).
     pub fn mute_active(&self, fp: &str) -> Result<i64> {
         let until: Option<i64> = self
             .locked()
@@ -1690,6 +1703,7 @@ impl Store {
         Ok((trust, score, reports))
     }
 
+    // Seção 9: file_report
     pub fn file_report(
         &self,
         id: &str,
@@ -1731,7 +1745,6 @@ impl Store {
         Ok(())
     }
 
-    // ---------- grupos DM ----------
     pub fn create_group_dm(
         &self,
         my_fp: &str,
@@ -1800,10 +1813,6 @@ impl Store {
         Ok(())
     }
 
-    /// SAIR do grupo (lado local): apaga a conversa, as mensagens e o vínculo
-    /// com os membros. Antes o botão "apagar conversa" só apagava o
-    /// `conversations`, e o grupo reaparecia na próxima sincronização do
-    /// criador (`upsert_group_state` reinsere o roster e a conversa).
     pub fn leave_group_local(&self, conv_id: &str) -> Result<()> {
         let mut conn = self.locked();
         let tx = conn.transaction()?;
@@ -1817,7 +1826,6 @@ impl Store {
         Ok(())
     }
 
-    // ---------- calls ----------
     pub fn create_call(
         &self,
         call_id: &str,
@@ -1864,7 +1872,7 @@ impl Store {
         Ok(())
     }
 
-    /// Host declarado de uma chamada — usado para validar CallAccept remoto.
+    // Seção 10: get_call_host
     pub fn get_call_host(&self, call_id: &str) -> Result<Option<String>> {
         let conn = self.locked();
         conn.query_row(
@@ -1885,8 +1893,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Eu participo desta chamada? Gate de sinalização: em chamada de grupo a
-    /// sinalização de não-amigos é legítima se EU estou na chamada.
     pub fn is_in_call(&self, call_id: &str, fp: &str) -> bool {
         self.locked()
             .query_row(
@@ -1897,8 +1903,6 @@ impl Store {
             .is_ok()
     }
 
-    /// O peer está em alguma chamada ativa? Enquanto estiver, o heartbeat da
-    /// sessão não desacelera (detecção de sessão morta tem de ficar rápida).
     pub fn peer_in_active_call(&self, fp: &str) -> bool {
         self.locked()
             .query_row(
@@ -1911,7 +1915,6 @@ impl Store {
             .is_ok()
     }
 
-    // ---------- voice states ----------
     pub fn set_voice_state(
         &self,
         community_id: &str,
@@ -1920,8 +1923,6 @@ impl Store {
         muted: bool,
         deafened: bool,
     ) -> Result<()> {
-        // `announced_at` renova o prazo: o motor re-anuncia a cada 15 s e é
-        // isso que prova que a pessoa CONTINUA no canal (ver v10 em `migrate`).
         self.locked().execute(
             "INSERT INTO voice_states(community_id,channel_id,fp,muted,deafened,speaking,joined_at,announced_at) VALUES(?1,?2,?3,?4,?5,0,?6,?6)
              ON CONFLICT(community_id,channel_id,fp) DO UPDATE SET muted=excluded.muted, deafened=excluded.deafened, announced_at=excluded.announced_at",
@@ -1938,13 +1939,6 @@ impl Store {
         Ok(())
     }
 
-    /// Quem está REALMENTE no canal.
-    ///
-    /// `announced_at` tem prazo: o motor re-anuncia a presença a cada 15 s, e
-    /// sem re-anúncio por `VOICE_PRESENCE_TTL_MS` a linha é considerada velha
-    /// (app fechado/crash sem `VoiceLeave`) e some da lista — e do banco.
-    /// Era o usuário fantasma que o dono viu numa chamada onde a pessoa não
-    /// estava.
     pub fn list_voice_states(
         &self,
         community_id: &str,
@@ -1953,7 +1947,6 @@ impl Store {
         let agora = crate::identity::now_ms();
         let limite = agora - (Self::VOICE_PRESENCE_TTL_MS as i64);
         let conn = self.locked();
-        // Limpeza preguiçosa: só as linhas DESTE canal, e só as vencidas.
         let _ = conn.execute(
             "DELETE FROM voice_states WHERE community_id=?1 AND channel_id=?2 AND announced_at > 0 AND announced_at < ?3",
             params![community_id, channel_id, limite],
@@ -1973,9 +1966,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Canais de voz em que ESTE fp está (re-anúncio periódico de presença:
-    /// VoiceJoin único perdia quem abrisse o app depois — lista ficava
-    /// assimétrica para sempre).
     pub fn my_voice_states(&self, fp: &str) -> Result<Vec<(String, String, bool, bool)>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -1994,15 +1984,12 @@ impl Store {
         Ok(rows)
     }
 
-    /// Remove TODAS as linhas de voz deste fp (boot: sem expiração, fechava
-    /// app em chamada deixava "fantasma na voz" que abria sessão nativa).
     pub fn clear_my_voice_states(&self, fp: &str) -> Result<()> {
         self.locked()
             .execute("DELETE FROM voice_states WHERE fp=?1", params![fp])?;
         Ok(())
     }
 
-    /// Canais de voz em que `fp` aparece — só LEITURA (não apaga nada).
     pub fn peer_voice_states(&self, fp: &str) -> Result<Vec<(String, String)>> {
         let conn = self.locked();
         let mut st =
@@ -2015,7 +2002,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Remove a linha de voz de UM canal (o peer caiu daquele canal).
     pub fn drop_peer_voice_state(
         &self,
         community_id: &str,
@@ -2029,8 +2015,6 @@ impl Store {
         Ok(())
     }
 
-    /// Remove linhas de voz de OUTRO fp (peer caiu sem VoiceLeave e ficava
-    /// "na voz" para sempre) e devolve os canais de onde ele saiu.
     pub fn drop_peer_voice_states(&self, fp: &str) -> Result<Vec<(String, String)>> {
         let conn = self.locked();
         let mut st =
@@ -2045,7 +2029,6 @@ impl Store {
         Ok(rows)
     }
 
-    // ---------- files swarm ----------
     pub fn announce_file(
         &self,
         file_id: &str,
@@ -2062,6 +2045,7 @@ impl Store {
         Ok(())
     }
 
+    // Seção 11: allow
     #[allow(clippy::type_complexity)]
     pub fn get_file(&self, file_id: &str) -> Result<Option<(String, i64, i64, String, String)>> {
         let conn = self.locked();
@@ -2074,9 +2058,6 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Arquivos que ESTE nó tem completos e pode semear, com o instante do
-    /// último anúncio. `seeded_at` 0 = não anunciado desde que a coluna existe
-    /// (arquivo antigo): o tique de re-anúncio trata na primeira passada.
     #[allow(clippy::type_complexity)]
     pub fn my_seed_files(
         &self,
@@ -2102,8 +2083,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Marca que este arquivo foi anunciado por mim agora (evita re-anúncio a
-    /// cada tique de 15 s quando ninguém novo entrou).
     pub fn touch_file_seeded(&self, file_id: &str, at_ms: i64) -> Result<()> {
         self.locked().execute(
             "UPDATE files SET seeded_at=?2 WHERE file_id=?1",
@@ -2111,8 +2090,6 @@ impl Store {
         )?;
         Ok(())
     }
-
-    // ---------- canais completos (v4) ----------
 
     pub fn channel_rows(&self, community_id: &str) -> Result<Vec<ChannelMetaRow>> {
         let conn = self.locked();
@@ -2149,7 +2126,6 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Atualização parcial: None não mexe; "" em name/category não mexe.
     pub fn update_channel(
         &self,
         community_id: &str,
@@ -2189,8 +2165,6 @@ impl Store {
         self.update_channel(community_id, channel_id, None, None, Some(category))
     }
 
-    /// Substituição completa dos canais da comunidade (sync de membro):
-    /// delete-then-insert em transação — canal removido no host some aqui.
     pub fn community_channels_replace(
         &self,
         community_id: &str,
@@ -2215,7 +2189,6 @@ impl Store {
         Ok(())
     }
 
-    /// Apaga UMA mensagem (moderação); permissão checada via `channel_community`.
     pub fn delete_message_by_id(&self, msg_id: &str) -> Result<usize> {
         Ok(self
             .locked()
@@ -2235,9 +2208,8 @@ impl Store {
         .map_err(Into::into)
     }
 
-    // ---------- cargos (v4) ----------
-
     pub fn roles_list(&self, community_id: &str) -> Result<Vec<RoleRow>> {
+        // Seção 12: conn
         let conn = self.locked();
         let mut st = conn.prepare(
             "SELECT id,community_id,name,color,permissions,hoist,mentionable,position
@@ -2275,8 +2247,6 @@ impl Store {
         insert_role_row(&conn, r)
     }
 
-    /// Patch de cargo: None não mexe; "" em name/color não mexe.
-    /// Retorna false se o cargo não existir.
     #[allow(clippy::too_many_arguments)]
     pub fn role_update_patch(
         &self,
@@ -2319,10 +2289,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Apaga o cargo e limpa dependências em transação (assignments somem,
-    /// bots ficam sem cargo). Proteção de "-everyone" é papel do engine.
     pub fn role_delete(&self, community_id: &str, role_id: &str) -> Result<usize> {
-        // transação: cargo, assignments e vínculos de bots somem JUNTOS
         let mut conn = self.locked();
         let tx = conn.transaction()?;
         let n = tx.execute(
@@ -2354,8 +2321,6 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-
-    // ---------- assignments de cargos (v4) ----------
 
     pub fn member_roles_list(&self, community_id: &str, fp: &str) -> Result<Vec<String>> {
         let conn = self.locked();
@@ -2392,7 +2357,6 @@ impl Store {
         Ok(())
     }
 
-    /// Substituição completa dos assignments (fp -> cargos) da comunidade.
     pub fn member_roles_replace(
         &self,
         community_id: &str,
@@ -2416,8 +2380,7 @@ impl Store {
         Ok(())
     }
 
-    // ---------- bots (v4) ----------
-
+    // Seção 13: bots_list
     pub fn bots_list(&self, community_id: &str) -> Result<Vec<BotRow>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -2449,9 +2412,6 @@ impl Store {
         insert_bot_row(&conn, b)
     }
 
-    /// Patch de bot. `role_id`: None = não mexer; Some(None)/Some(Some(""))
-    /// = limpar cargo; Some(Some(x)) = definir cargo. "" em name/avatar não mexe.
-    /// Retorna false se o bot não existir.
     pub fn bot_update_patch(
         &self,
         community_id: &str,
@@ -2482,7 +2442,6 @@ impl Store {
             b.online = o;
         }
         if let Some(c) = &patch.config {
-            // cap anti-abuso de storage (a UI também valida; revalida no core)
             if c.len() > 16 * 1024 {
                 return Err(DistorrentError::Protocol(
                     "config de bot muito grande (máx 16KB)".into(),
@@ -2517,10 +2476,6 @@ impl Store {
         Ok(())
     }
 
-    // ---------- mensagens de grupo (flush sem outbox por peer) ----------
-
-    /// Cria/atualiza o estado COMPLETO de um grupo (sync do criador).
-    /// INSERT OR IGNORE na conversa + replace da lista de membros.
     pub fn upsert_group_state(
         &self,
         conv_id: &str,
@@ -2553,8 +2508,6 @@ impl Store {
         Ok(())
     }
 
-    /// Conversas de grupo em que o peer participa: (id, título, membros).
-    /// Usado no flush de conexão para re-sincronizar o estado do grupo.
     #[allow(clippy::type_complexity)]
     pub fn group_convs_with_peer(
         &self,
@@ -2580,8 +2533,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Mensagens 'out' pendentes (pending/sending) em conversas de grupo —
-    /// reenviadas no flush de conexão a cada membro do grupo.
     pub fn pending_group_messages(&self) -> Result<Vec<StoredMessage>> {
         let conn = self.locked();
         let mut st = conn.prepare(
@@ -2590,6 +2541,7 @@ impl Store {
              WHERE c.kind='group' AND m.direction='out' AND m.status IN ('pending','sending')
              ORDER BY m.ts ASC, m.id ASC",
         )?;
+        // Seção 14: rows
         let rows = st
             .query_map([], |r| {
                 Ok(StoredMessage {
@@ -2609,8 +2561,6 @@ impl Store {
         Ok(rows)
     }
 
-    /// Ao cair um link: mensagens 'out' de grupos em sending/sent voltam a
-    /// PENDING (sem outbox por peer — o flush de grupo cuida do reenvio).
     pub fn revert_unacked_groups_to_pending(&self) -> Result<Vec<String>> {
         let ids = {
             let conn = self.locked();
@@ -2630,11 +2580,6 @@ impl Store {
         Ok(ids)
     }
 
-    // ---------- sync completo de comunidade (membro) ----------
-
-    /// Aplica o estado oficial do host em UMA transação: upsert da comunidade,
-    /// canais (delete-then-insert — removidos no host somem aqui), cargos,
-    /// bots, assignments e membros (upsert).
     #[allow(clippy::too_many_arguments)]
     pub fn community_full_sync(
         &self,
@@ -2709,10 +2654,7 @@ impl Store {
         Ok(())
     }
 
-    /// Remove uma comunidade inteiramente do storage local (kick recebido):
-    /// canais, membros, comunidade, cargos, bots, assignments e voice states.
     pub fn community_remove_local(&self, community_id: &str) -> Result<()> {
-        // transação: kick recebido não pode deixar metade da comunidade para trás
         let mut conn = self.locked();
         let tx = conn.transaction()?;
         tx.execute(
@@ -2752,16 +2694,12 @@ impl Store {
         Ok(())
     }
 
-    // ---------- stormvault: coleta (export) e mesclagem (import) ----------
-
-    /// Acesso cru à conexão para o stormvault (mesmo crate; UI nunca vê isto).
     pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.locked();
         f(&conn)
     }
 
-    /// Coleta a conta inteira para o `.stormvault`; whitelist evita exportar
-    /// segredos por acidente.
+    // Seção 15: stormvault_collect
     pub(crate) fn stormvault_collect(
         &self,
         secret_hex: Option<String>,
@@ -2775,7 +2713,6 @@ impl Store {
         let conversations = self.list_conversations()?;
         let total_msgs = self.count_messages().unwrap_or(0);
         let cap = max_messages.unwrap_or(crate::stormvault::DEFAULT_MAX_MESSAGES);
-        // pega as mais recentes primeiro (DESC) e inverte para ordem de leitura
         let mut messages: Vec<StoredMessage> = self.with_conn(|conn| {
             let mut st = conn.prepare(
                 "SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id,thread_id FROM messages
@@ -2872,7 +2809,6 @@ impl Store {
                 all_rules.push(r);
             }
         }
-        // reputações, auditoria (cap: log pode crescer sem teto) e denúncias
         let reputations = self.with_conn(|conn| {
             let mut st = conn.prepare(
                 "SELECT fp,trust,score,reports,updated_at FROM reputation ORDER BY updated_at",
@@ -2931,6 +2867,7 @@ impl Store {
             Ok(rows)
         })?;
 
+        // Seção 16: mut
         let mut groups = Vec::new();
         for conv in conversations.iter().filter(|c| c.kind == "group") {
             let members = self.list_group_members(&conv.id)?;
@@ -2984,16 +2921,11 @@ impl Store {
         }
     }
 
-    /// Mescla o cofre importado: NADA local mais recente é sobrescrito
-    /// (mensagens dedup por id com conflito mantendo local; amigos/canais por
-    /// upsert com não-vazio vencendo; settings só preenchem chaves ausentes).
     pub(crate) fn stormvault_merge(
         &self,
         data: &crate::stormvault::StormVaultData,
         report: &mut crate::stormvault::ImportReport,
     ) -> Result<()> {
-        // mensagens em LOTES (2000/transação): importar tudo numa transação
-        // única seguraria o Mutex do banco por minutos; lote mantém UI viva.
         const MSG_BATCH: usize = 2000;
         for chunk in data.messages.chunks(MSG_BATCH) {
             let mut conn = self.locked();
@@ -3007,8 +2939,6 @@ impl Store {
                     )
                     .optional()?;
                 match existing {
-                    // dedup por id; mesma id com conteúdo diferente = conflito
-                    // (mantém local; defensivo contra cofre adulterado)
                     None => {
                         if tx.execute(
                             "INSERT INTO messages(id,conv_id,author_fp,body,ts,sig,direction,status,bot_id)
@@ -3031,7 +2961,7 @@ impl Store {
                     }
                     Some((body, ts)) => {
                         if body != m.body || ts != m.ts {
-                            report.message_conflicts += 1; // local vence
+                            report.message_conflicts += 1;
                         }
                     }
                 }
@@ -3042,8 +2972,6 @@ impl Store {
         let mut conn = self.locked();
         let tx = conn.transaction()?;
 
-        // conversas: OR IGNORE (locais têm precedência; título local é
-        // preferência do device)
         for c in &data.conversations {
             if tx.execute(
                 "INSERT OR IGNORE INTO conversations(id,kind,title,peer_fp,created_at)
@@ -3055,7 +2983,6 @@ impl Store {
             }
         }
 
-        // amigos: novo valor não-vazio vence; added_at maior vence
         for f in &data.friends {
             let existing: Option<(String, i64)> = tx
                 .query_row(
@@ -3105,7 +3032,6 @@ impl Store {
             }
         }
 
-        // peers: preenche vazios, nunca apaga; last_seen é MAX (sem rollback)
         for p in &data.peers {
             if tx.execute(
                 "INSERT INTO peers(fp,pubkey_hex,nickname,addr,last_seen,origin)
@@ -3122,10 +3048,8 @@ impl Store {
             }
         }
 
-        // comunidades: OR IGNORE em tudo — cofre NUNCA sobrescreve estado
-        // local (o host re-sync completa o que faltar); instalação limpa
-        // absorve o cofre inteiro.
         for cm in &data.communities {
+            // Seção 17: community_new
             let community_new = tx.execute(
                 "INSERT OR IGNORE INTO communities(id,name,owner_fp,created_at,description,category,icon) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 params![cm.id, cm.name, cm.owner_fp, cm.created_at, cm.description, cm.category, cm.icon],
@@ -3165,7 +3089,6 @@ impl Store {
                     )?;
                 }
             }
-            // regras do servidor: updated_at maior vence
             if let Some(rules) = data.rules.iter().find(|r| r.community_id == cm.id) {
                 let local_ts: i64 = tx
                     .query_row(
@@ -3200,7 +3123,6 @@ impl Store {
             }
         }
 
-        // reputações: updated_at maior vence (nunca rebaixa por backup velho)
         for rep in &data.reputations {
             let local_ts: i64 = tx
                 .query_row(
@@ -3220,8 +3142,6 @@ impl Store {
             }
         }
 
-        // audit_log e reports: append-only por id (resolução local de denúncia
-        // nunca é revertida por backup)
         for e in &data.audit {
             if tx.execute(
                 "INSERT OR IGNORE INTO audit_log(id,community_id,actor_fp,action,target_fp,reason,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -3241,7 +3161,6 @@ impl Store {
             }
         }
 
-        // grupos DM: conversa + membros
         for g in &data.groups {
             tx.execute(
                 "INSERT OR IGNORE INTO conversations(id,kind,title,peer_fp,created_at)
@@ -3257,7 +3176,6 @@ impl Store {
             report.groups_merged += 1;
         }
 
-        // settings: só preenchem chaves ausentes (preferências do device vencem)
         for (k, v) in &data.settings {
             if tx.execute(
                 "INSERT OR IGNORE INTO kv(key,value) VALUES(?1,?2)",
@@ -3292,6 +3210,7 @@ mod tests {
         assert_eq!(kp2.public_hex(), kp.public_hex());
     }
 
+    // Seção 18: test
     #[test]
     fn dm_conversation_id_symmetric() {
         let a = "aaaaaaaaaaaa";
@@ -3307,11 +3226,6 @@ mod tests {
         );
     }
 
-    /// BUG do "recebo a mesma mensagem infinitas vezes": o retransmissor era
-    /// ilimitado porque o `outbox` tem `attempts`/`next_try` no schema desde
-    /// sempre, mas `pending_outbox` ignorava as duas colunas e `bump_outbox`
-    /// nunca era chamada. O resultado era reenvio a CADA flush (5s) para
-    /// sempre, enquanto o status não virasse `delivered`.
     #[test]
     fn outbox_respeita_backoff_e_teto_de_tentativas() {
         let store = Store::open_in_memory().unwrap();
@@ -3324,22 +3238,17 @@ mod tests {
         store.insert_message(&env, "out", "pending").unwrap();
         store.enqueue_outbox(&env.id, "peerfp000001").unwrap();
 
-        // 1) sem bump: sai no primeiro flush.
         assert_eq!(
             store.pending_outbox("peerfp000001").unwrap(),
             vec![env.id.clone()]
         );
 
-        // 2) depois do bump, a próxima janela é adiada -> NÃO reenvia de novo
-        //    (era o que martelava o peer a cada 5s).
         store.bump_outbox(&env.id).unwrap();
         assert!(
             store.pending_outbox("peerfp000001").unwrap().is_empty(),
             "com backoff ativo o mesmo flush não pode reenviar"
         );
 
-        // 3) esgota o orçamento de tentativas: some da fila e vira 'failed',
-        //    para o usuário ver que não vai acontecer em vez de esperar para sempre.
         for _ in 0..Store::OUTBOX_MAX_ATTEMPTS {
             store.bump_outbox(&env.id).unwrap();
         }
@@ -3353,12 +3262,6 @@ mod tests {
         );
     }
 
-    /// O BACKOFF precisa crescer: com `+15s` fixo, 12 tentativas acabavam em
-    /// ~3 minutos e a mensagem virava `failed` ANTES de o relay reconectar
-    /// (30s–2min) — o X vermelho aparecia num contato que estava online.
-    ///
-    /// Aqui provamos a janela total: soma dos intervalos com o mesmo teto de
-    /// tentativas precisa passar de 30 minutos.
     #[test]
     fn backoff_do_outbox_cresce_e_da_janela_util() {
         let store = Store::open_in_memory().unwrap();
@@ -3371,9 +3274,6 @@ mod tests {
         store.insert_message(&env, "out", "pending").unwrap();
         store.enqueue_outbox(&env.id, "peerfp000002").unwrap();
 
-        // Mede o intervalo REAL de cada tentativa lendo `attempts` + `next_try`
-        // juntos: a diferença de `next_try` satura no teto (fica 0), então ela
-        // não serve para provar crescimento.
         let mut esperas: Vec<i64> = Vec::new();
         for _ in 0..Store::OUTBOX_MAX_ATTEMPTS {
             let antes = crate::identity::now_ms();
@@ -3389,7 +3289,6 @@ mod tests {
             esperas.push(next - antes);
         }
 
-        // Cresce até o teto de 8 min e depois fica plano (o teto é intencional).
         let crescimento: Vec<i64> = esperas.iter().copied().filter(|e| *e < 480_000).collect();
         assert!(
             crescimento.windows(2).all(|w| w[0] <= w[1]),
@@ -3407,10 +3306,6 @@ mod tests {
         );
     }
 
-    /// A retransmissão da MESMA mensagem precisa ser idempotente: quem já tem
-    /// o id confirma (Ack) e não penaliza o remetente, nem gera evento novo.
-    /// Sem isto, o anti-spam de duplicata (60s) rejeitava o reenvio ANTES do
-    /// Ack, e o remetente nunca parava de reenviar.
     #[test]
     fn retransmissao_da_mesma_mensagem_nao_penaliza() {
         let store = Store::open_in_memory().unwrap();
@@ -3420,17 +3315,12 @@ mod tests {
             .ensure_dm_conversation(&me.fingerprint, "peerfp000001", "Peer")
             .unwrap();
         let env = MessageEnvelope::new(&kp, &conv.id, "mesma");
-        // INSERT OR IGNORE: a segunda inserção do mesmo id é ignorada.
         store.insert_message(&env, "in", "ok").unwrap();
         store.insert_message(&env, "in", "ok").unwrap();
         let msgs = store.list_messages(&conv.id, 100).unwrap();
         assert_eq!(msgs.len(), 1, "o id é a chave: reentrega não duplica linha");
     }
 
-    /// O botão "Reenviar" da UI chamava `messageSend`, que fabrica um id NOVO:
-    /// a mensagem aparecia duplicada ao reabrir a conversa. O reenvio agora
-    /// preserva o id e ZERA o orçamento de tentativas (senão uma mensagem que
-    /// estourou o teto continuaria inelegível e nunca sairia).
     #[test]
     fn reenvio_preserva_o_id_e_zera_o_orcamento() {
         let store = Store::open_in_memory().unwrap();
@@ -3442,7 +3332,6 @@ mod tests {
         let env = MessageEnvelope::new(&kp, &conv.id, "reenviar");
         store.insert_message(&env, "out", "failed").unwrap();
 
-        // Simula a mensagem que estourou o orçamento.
         store.enqueue_outbox(&env.id, "peerfp000001").unwrap();
         for _ in 0..Store::OUTBOX_MAX_ATTEMPTS {
             store.bump_outbox(&env.id).unwrap();
@@ -3452,7 +3341,6 @@ mod tests {
             "estourada não sai no flush normal"
         );
 
-        // Reenvio: volta ao orçamento cheio, mesmo id.
         store.requeue_outbox(&env.id, "peerfp000001").unwrap();
         let prontas = store.pending_outbox("peerfp000001").unwrap();
         assert_eq!(prontas, vec![env.id.clone()], "o MESMO id volta a sair");
@@ -3482,7 +3370,6 @@ mod tests {
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].peer_fp, "peerfp000001");
 
-        // outbox
         store.enqueue_outbox(&env.id, "peerfp000001").unwrap();
         assert_eq!(
             store.pending_outbox("peerfp000001").unwrap(),
@@ -3492,9 +3379,9 @@ mod tests {
         assert!(store.pending_outbox("peerfp000001").unwrap().is_empty());
     }
 
+    // Seção 19: test
     #[test]
     fn channel_message_without_conversation_row() {
-        // regressão do FOREIGN KEY constraint failed em canais de comunidade
         let store = Store::open_in_memory().unwrap();
         let kp = crate::identity::Keypair::generate();
         let env = MessageEnvelope::new(&kp, "canal-fake-1", "oi canal");
@@ -3518,7 +3405,7 @@ mod tests {
         p2.nickname = "".into();
         p2.last_seen = 2;
         p2.addr = None;
-        store.upsert_peer(&p2).unwrap(); // não sobrescreve nickname/addr com vazio
+        store.upsert_peer(&p2).unwrap();
         let got = store.get_peer("fp0000000001").unwrap().unwrap();
         assert_eq!(got.nickname, "Node A");
         assert_eq!(got.addr.as_deref(), Some("192.168.0.5:40000"));

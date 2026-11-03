@@ -3,9 +3,6 @@
     windows_subsystem = "windows"
 )]
 
-//! DisTorrent shell — Tauri é apenas a casca: todo o motor (identidade, storage,
-//! rede P2P) vive em distorrent-core. Commands abaixo expõem a API ao WebView.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -16,14 +13,10 @@ use distorrent_core::{Identity, Keypair};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-// Segundo plano (bandeja/autostart) e update automático pelo GitHub.
 mod background;
-// Barra "está compartilhando sua tela" do WebView2 (Windows): escondida pelo app.
 mod sharebar;
-// Atualização automática pelo GitHub (hash conferido antes de executar).
 mod updater;
 
-// Comandos do segundo plano reexportados para o `generate_handler!` abaixo.
 use background::{
     app_hide_to_tray, app_quit, app_show_window, autostart_ensure, autostart_get,
     autostart_mark_decided, autostart_set, background_prefs_get, background_prefs_set,
@@ -32,17 +25,12 @@ use background::{
     notification_show, notify_prefs_set, window_toggle_fullscreen,
 };
 
-/// Plugin `downloads` — só existe no Android: scoped storage nega escrita
-/// direta em Downloads; o Kotlin (MediaStore) copia para o Downloads público.
 fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("downloads")
         .setup(|app, api| {
             #[cfg(target_os = "android")]
             {
-                // Registro NÃO fatal de propósito: um problema no plugin não
-                // pode derrubar o boot — o app avisa e segue.
                 match api.register_android_plugin("com.distorrent.app", "DownloadsPlugin") {
-                    // Handle deve viver enquanto o app viver (antes era descartado).
                     Ok(handle) => {
                         app.manage(handle);
                     }
@@ -63,8 +51,6 @@ fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
-/// Copia o arquivo já gravado para o Downloads PÚBLICO do Android (MediaStore);
-/// sai do Rust pois `plugin:downloads|save` do frontend era barrado pelo ACL.
 #[tauri::command]
 fn save_public_copy(app: AppHandle, path: String, name: String) -> Result<String, String> {
     #[cfg(target_os = "android")]
@@ -95,23 +81,16 @@ fn save_public_copy(app: AppHandle, path: String, name: String) -> Result<String
     }
 }
 
-/// Estado global do app. Engine existe só depois que a identidade existe.
 struct AppState {
     engine: Mutex<Option<Arc<NetworkEngine>>>,
     data_dir: PathBuf,
     unlocked: Mutex<bool>,
     cache: distorrent_core::cache::DiskLru,
-    /// Limite de tentativas de senha/token (no processo nativo — recarregar a
-    /// página não zera).
     auth_limit: distorrent_core::authlimit::AuthLimiter,
 }
 
-/// Origem fixa do desbloqueio (desktop): o limite não depende de nada que o
-/// chamador controle.
 const AUTH_ORIGIN: &str = "desktop";
 
-/// Monta a chave do orçamento de tentativas (por conta; "no-identity" antes
-/// de existir identidade, para somar no mesmo balde).
 fn auth_key(store: &Store, suffix: &str) -> String {
     let account = store
         .load_identity()
@@ -120,8 +99,6 @@ fn auth_key(store: &Store, suffix: &str) -> String {
     distorrent_core::authlimit::AuthLimiter::key(&format!("{account}:{suffix}"), AUTH_ORIGIN)
 }
 
-/// Verifica o orçamento ANTES do Argon2id (impede oráculo de tempo); devolve
-/// erro com os segundos restantes quando bloqueado.
 fn auth_guard(state: &State<AppState>, key: &str) -> Result<(), String> {
     match state.auth_limit.check(key) {
         distorrent_core::authlimit::Decision::Allowed => Ok(()),
@@ -139,8 +116,6 @@ fn auth_guard(state: &State<AppState>, key: &str) -> Result<(), String> {
     }
 }
 
-/// Registra tentativa FALHA e devolve o erro (a 3ª falha instala o bloqueio;
-/// a mensagem de bloqueio aparece na 4ª). Log sem fragmento de segredo.
 fn auth_fail(state: &State<AppState>, key: &str, motivo: &str) -> String {
     let out = state.auth_limit.record_failure(key);
     if out.locked_now {
@@ -151,7 +126,6 @@ fn auth_fail(state: &State<AppState>, key: &str, motivo: &str) -> String {
             bloqueado_s = secs,
             "desbloqueio falhou — limite de tentativas atingido"
         );
-        // A 3ª tentativa foi a última aceita — avisar já na resposta dela.
         return format!("senha incorreta. Mais {secs}s de espera antes de tentar de novo.");
     }
     tracing::warn!(
@@ -163,7 +137,6 @@ fn auth_fail(state: &State<AppState>, key: &str, motivo: &str) -> String {
     "senha incorreta".into()
 }
 
-/// Zera o histórico depois de um desbloqueio bem-sucedido.
 fn auth_ok(state: &State<AppState>, key: &str) {
     state.auth_limit.record_success(key);
     tracing::info!(fingerprint = %key, "cofre desbloqueado");
@@ -175,38 +148,29 @@ struct PeerView {
     record: PeerRecord,
     state: NetworkState,
     via_relay: bool,
-    /// Diagnóstico por peer: erros direto/relay, tentativas, announce (dados
-    /// REAIS do motor; null = sem tentativa).
     last_direct_error: Option<String>,
     last_relay_error: Option<String>,
     direct_attempts: u64,
     relay_attempts: u64,
     announce_seen_ms: i64,
-    /// Por que o último frame foi REJEITADO (explica "online mas sem mensagem").
     last_reject: Option<String>,
     last_reject_ms: i64,
-    /// Nossas mensagens que desistiram de sair para este peer.
     send_gave_up: u64,
 }
 
-/// Diagnóstico global da rede (STUN/announce/DHT) — por que 0 peers.
 #[derive(Debug, Serialize)]
 struct NetDiagView {
-    /// STUN: null = não testado ainda; true = binding NAT ok.
     stun_ok: Option<bool>,
     stun_addr: Option<String>,
     stun_ms: i64,
-    /// Endpoint próprio anunciado (null = não anunciou).
     announce_addr: Option<String>,
     announce_ms: i64,
-    /// Origem do endpoint: "upnp" (local, sem servidor) ou "stun".
     nat_source: Option<String>,
-    /// DHT mainline BitTorrent: null = desligada (testes/proxy); true = nó
-    /// anunciando na rede BitTorrent.
     dht_ok: Option<bool>,
     dht_ms: i64,
 }
 
+// Seção 1: derive
 #[derive(Debug, Serialize)]
 struct NetworkStatusView {
     state: NetworkState,
@@ -226,25 +190,15 @@ fn open_store(state: &State<AppState>) -> Result<Store, String> {
     Store::open(&db_path(state)).map_err(err)
 }
 
-// ---------------- endereços locais ----------------
-
 #[derive(Debug, Serialize)]
 struct LocalAddresses {
-    /// `localhost` — válido SÓ nesta máquina.
     localhost: String,
-    /// IP de LAN (válido no celular, na mesma Wi-Fi); None quando não há rede.
     lan: Option<String>,
-    /// Todos os IPs de LAN encontrados, para o usuário escolher.
     lan_all: Vec<String>,
-    /// A porta em que o servidor de desenvolvimento/UI escuta.
     port: u16,
 }
 
-/// IPs de todas as interfaces locais: `localhost` no celular é o próprio
-/// celular — a UI precisa mostrar o IP de LAN que funciona para convites.
 fn local_ipv4_addresses() -> Vec<String> {
-    // `bind` em porta descartável + `connect` não envia nada: faz o SO
-    // escolher a interface de saída (forma padrão de achar o IP de LAN).
     let mut out: Vec<String> = Vec::new();
     if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
         if s.connect("192.0.2.1:9").is_ok() {
@@ -260,19 +214,11 @@ fn local_ipv4_addresses() -> Vec<String> {
     out
 }
 
-/// Esconde a barra de "compartilhando a tela" do WebView2 (Windows).
-///
-/// É uma janela do Chromium, não do app; o DisTorrent mostra o estado na
-/// própria UI. Devolve `true` se encontrou e escondeu (diagnóstico).
 #[tauri::command]
 fn hide_share_bar() -> bool {
     crate::sharebar::hide_share_bar()
 }
 
-/// Passa a vigiar a barra de compartilhamento (início/fim do share).
-///
-/// A janela é recriada pelo Chromium ao trocar de fonte; vigiar no Rust evita
-/// o piscar e não depende do front estar chamando o comando.
 #[tauri::command]
 fn share_bar_watch(ativo: bool) {
     if ativo {
@@ -295,10 +241,7 @@ fn local_addresses(port: Option<u16>, state: State<AppState>) -> Result<LocalAdd
     })
 }
 
-/// Porta do servidor de desenvolvimento (Vite, `strictPort`) — divergir quebra o link.
 const DEV_PORT: u16 = 5173;
-
-// ---------------- identidade ----------------
 
 #[tauri::command]
 fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identity>, String> {
@@ -308,28 +251,20 @@ fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identit
     };
     let vault_on = store.kv_get("vault.on").as_deref() == Some("1");
     let stored = store.load_secret_hex().unwrap_or_default();
-    let has_valid_blob = stored.len() >= 88; // salt16+nonce12+ct(32secret+16tag), hex
+    let has_valid_blob = stored.len() >= 88;
 
     if vault_on && has_valid_blob {
-        // cofre com senha: engine ainda sem segredo — devolve None para a UI
-        // cair no LockScreen e chamar vault_unlock (export/backup exigem engine).
         return Ok(None);
     }
-    // ORDEM deliberada: SQLite local (ms) antes do keyring do SO (D-Bus pode
-    // TRAVAR por segundos — app ficava na tela cinza).
-    // 1) SQLite direto (caminho quente — o persist_secret salvou aqui)
     if !stored.is_empty() && stored.len() >= 32 {
-        // secret já está no SQLite (caso fallback persist_secret)
         let _ = store.kv_set("identity.secret.backup", &stored);
         let _ = store.kv_delete("vault.on");
         boot_engine_with_store(&app, &state, store)?;
         return Ok(Some(id));
     }
-    // 2) keyring do SO (só quando o SQLite não tem)
     if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
         if let Ok(secret) = entry.get_password() {
             if !secret.is_empty() && secret.len() >= 32 {
-                // restaura no SQLite para robustez futura
                 let _ = store.save_identity(&id, &secret);
                 let _ = store.kv_set("identity.secret.backup", &secret);
                 let _ = store.kv_delete("vault.on");
@@ -338,7 +273,6 @@ fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identit
             }
         }
     }
-    // 3) backup kv
     if let Some(bk) = store.kv_get("identity.secret.backup") {
         if !bk.is_empty() && bk.len() >= 32 {
             let _ = store.save_identity(&id, &bk);
@@ -347,8 +281,6 @@ fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identit
             return Ok(Some(id));
         }
     }
-    // Sem blob válido e sem keyring/SQLite: NÃO apagar automático — erro para
-    // a UI decidir (evita perda irreversível).
     tracing::warn!("identidade sem segredo recuperável — requer intervenção do usuário");
     return Err(
         "segredo da identidade não encontrado — tente reiniciar o app ou restaurar backup".into(),
@@ -377,7 +309,6 @@ fn identity_create(
     let identity = kp.identity(nick);
     match password.as_deref() {
         Some(pass) if !pass.is_empty() => {
-            // cofre: secret cifrada com a senha no SQLite local
             let secret_hex = kp.secret_hex();
             let blob = distorrent_core::vault::seal_secret(&secret_hex, pass).map_err(err)?;
             store
@@ -411,8 +342,7 @@ fn vault_status(state: State<AppState>) -> Result<VaultStatus, String> {
     })
 }
 
-/// Desbloqueia o cofre: orçamento verificado ANTES do Argon2id (impede
-/// atacante bloqueado de gastar o KDF ou medir a senha pelo tempo).
+// Seção 2: tauri
 #[tauri::command]
 fn vault_unlock(
     app: AppHandle,
@@ -430,14 +360,12 @@ fn vault_unlock(
     let secret = match distorrent_core::vault::open_sealed(&blob, &password) {
         Ok(s) => s,
         Err(e) => {
-            // A senha NÃO aparece no log nem no erro devolvido.
             return Err(auth_fail(&state, &key, &e.to_string()));
         }
     };
 
     auth_ok(&state, &key);
 
-    // corrigir pubkey vazio (após account_switch) derivando da secret
     if identity.pubkey_hex.is_empty() {
         if let Ok(kp) = Keypair::from_secret_hex(&secret) {
             identity.pubkey_hex = kp.public_hex();
@@ -449,8 +377,6 @@ fn vault_unlock(
     Ok(identity)
 }
 
-/// Troca de senha (exige a atual), com o MESMO orçamento do unlock — sem
-/// isto, o atacante bloqueado usaria este caminho sem limite.
 #[tauri::command]
 fn vault_change(old: String, new: String, state: State<AppState>) -> Result<(), String> {
     let store = open_store(&state)?;
@@ -474,8 +400,6 @@ fn vault_change(old: String, new: String, state: State<AppState>) -> Result<(), 
     Ok(())
 }
 
-/// Troca de nickname — muda só o nome EXIBIDO (fingerprint é imutável).
-/// Engine é reiniciado para anunciar o novo nick no discovery/handshake.
 #[tauri::command]
 fn identity_rename(
     app: AppHandle,
@@ -500,7 +424,6 @@ fn identity_rename(
     Ok(identity)
 }
 
-/// Chave privada vai para o keyring do SO; indisponível → fallback SQLite.
 fn persist_secret(store: &Store, kp: &Keypair, identity: &Identity) -> Result<(), String> {
     let secret = kp.secret_hex();
     #[cfg(target_os = "android")]
@@ -513,7 +436,6 @@ fn persist_secret(store: &Store, kp: &Keypair, identity: &Identity) -> Result<()
     match keyring::Entry::new("distorrent-app", "identity.secret") {
         Ok(entry) => match entry.set_password(&secret) {
             Ok(_) => {
-                // salva também backup no SQLite para caso keyring fique indisponível após reboot
                 store.save_identity(identity, &secret).map_err(err)?;
                 let _ = store.kv_set("identity.secret.backup", &secret);
             }
@@ -558,8 +480,6 @@ fn load_secret(store: &Store, unlocked: bool) -> Result<String, String> {
     Err("segredo da identidade não encontrado".into())
 }
 
-/// Boot direto a partir de um segredo já aberto (pós-desbloqueio do cofre).
-/// O spawn do engine EXIGE runtime tokio — sempre via block_on.
 fn boot_engine_with_secret(
     app: &AppHandle,
     state: &State<AppState>,
@@ -582,15 +502,12 @@ fn boot_engine_with_secret(
     })
 }
 
-// ---------------- engine boot/restart ----------------
-
 fn boot_engine_if_needed(app: &AppHandle, state: &State<AppState>) -> Result<(), String> {
     let store = open_store(state)?;
     boot_engine_with_store(app, state, store)
 }
 
-/// Boot do motor reusando um `Store` JÁ ABERTO (abrir o mesmo banco de novo
-/// dobrava a espera no disco frio).
+// Seção 3: boot_engine_with_store
 fn boot_engine_with_store(
     app: &AppHandle,
     state: &State<AppState>,
@@ -604,12 +521,19 @@ fn boot_engine_with_store(
     {
         return Ok(());
     }
-    // engine spawn precisa de runtime tokio — commands sync rodam fora dele
     tauri::async_runtime::block_on(async {
         if store.kv_get("vault.on").as_deref() == Some("1")
             && !*state.unlocked.lock().unwrap_or_else(|e| e.into_inner())
         {
-            return Ok(()); // aguardando senha na UI — sem boot
+            return Ok(());
+        }
+        if let Err(e) = store.revert_all_sending_to_pending() {
+            tracing::warn!("recuperação de envios pendentes falhou: {e}");
+        }
+        match retention_apply(&store) {
+            Ok(n) if n > 0 => tracing::info!("limpeza automática escondeu {n} mensagens"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("limpeza automática falhou: {e}"),
         }
         let identity = store.load_identity().ok_or("sem identidade")?;
         let secret = load_secret(&store, true)?;
@@ -634,7 +558,6 @@ fn restart_engine(app: &AppHandle, state: &State<AppState>) -> Result<(), String
             e.shutdown();
         }
     }
-    // sem sleep: peers recebem RST do OS, limpeza imediata
     *state.engine.lock().unwrap_or_else(|e| e.into_inner()) = None;
     boot_engine_if_needed(app, state)
 }
@@ -642,21 +565,16 @@ fn restart_engine(app: &AppHandle, state: &State<AppState>) -> Result<(), String
 fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
     let mut rx = engine.subscribe();
     let handle = app.clone();
-    // Clone para as notificações nativas: o pump nunca depende da WebView viva.
     let notify_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
-                    // AVISO NATIVO antes de emitir: com a janela em segundo
-                    // plano o JS não roda e o Rust decide com o estado REAL.
                     native_notice(&notify_handle, &ev);
                     if let Err(e) = handle.emit("distorrent://event", &ev) {
                         tracing::warn!("emit falhou: {e}");
                     }
                 }
-                // Lagged = UI atrasada >256 eventos: canal segue VIVO, seguir é
-                // obrigatório (antes o `break` matava o pump até reiniciar).
                 Err(distorrent_core::BroadcastRecvError::Lagged(n)) => {
                     tracing::warn!("eventos descartados na UI ({n}) — pump segue vivo");
                 }
@@ -666,8 +584,6 @@ fn forward_events(app: &AppHandle, engine: Arc<NetworkEngine>) {
     });
 }
 
-/// A janela está em primeiro plano AGORA? Lido do SO a cada chamada (um cache
-/// defasado produzia aviso dobrado ou aviso nenhum).
 fn janela_em_primeiro_plano(app: &AppHandle) -> bool {
     match app.get_webview_window("main") {
         Some(w) => {
@@ -679,13 +595,9 @@ fn janela_em_primeiro_plano(app: &AppHandle) -> bool {
     }
 }
 
-/// Mostra o aviso do SISTEMA decidido no Rust (com a janela escondida o JS não
-/// roda). Regras: só o que o motor recebeu; 1º plano → nada; id estável
-/// substitui o aviso; chamada usa canal/prioridade própria.
 fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
     use distorrent_core::EngineEvent as E;
 
-    // Preferências: desligado no SO = nem tenta (nada de aviso fantasma).
     let store_for_prefs = app.try_state::<AppState>().and_then(|s| {
         distorrent_core::storage::Store::open(&s.data_dir.join("distorrent.db")).ok()
     });
@@ -704,7 +616,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
 
     match ev {
         E::MessageNew(m) => {
-            // Mensagem do PRÓPRIO usuário (sincronização/eco) nunca avisa.
             if let Some(eu) = store_for_prefs
                 .as_ref()
                 .and_then(|st| st.load_identity().map(|i| i.fingerprint))
@@ -716,8 +627,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
             if janela_em_primeiro_plano(app) {
                 return;
             }
-            // POLÍTICA de silenciamento espelhada pelo frontend: com o app no
-            // fundo, o motor respeita "silenciado" e "só menções".
             {
                 let level = store_for_prefs
                     .as_ref()
@@ -728,7 +637,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
                         return;
                     }
                     if lv == "mentions" {
-                        // Menção = o meu fingerprint aparece no corpo.
                         let eu = store_for_prefs
                             .as_ref()
                             .and_then(|st| st.load_identity().map(|i| i.fingerprint))
@@ -740,7 +648,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
                 }
             }
             let store = store_for_prefs;
-            // Nome de quem mandou (ou do canal): "Ana" é reconhecível, um fp não.
             let autor = m.author_fp.clone();
             let conv = store
                 .as_ref()
@@ -759,6 +666,7 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
                 })
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| autor.chars().take(8).collect());
+            // Seção 4: corpo
             let corpo = if prefs.1 {
                 resumo_mensagem(&m.body)
             } else {
@@ -797,12 +705,11 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
                 format!("{quem} está ligando"),
                 "Toque para abrir e atender".to_string(),
                 None,
-                true, // chamada: canal/prioridade de chamada
+                true,
                 false,
             );
         }
         E::CallEnded { call_id, .. } => {
-            // Fim da sinalização: o aviso de chamada não pode ficar na tela.
             let id = background::notification_id_for(&format!("call:{call_id}"));
             background::notification_cancel_inner(app, id);
         }
@@ -810,8 +717,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
     }
 }
 
-/// Texto curto para o aviso; arquivo vira "enviou um arquivo" (o corpo carrega
-/// base64 — não vai para a tela de bloqueio).
 fn resumo_mensagem(body: &str) -> String {
     if body.starts_with('\u{1F4CE}') {
         return "Enviou um arquivo".to_string();
@@ -830,8 +735,6 @@ fn resumo_mensagem(body: &str) -> String {
     out
 }
 
-/// Nível de aviso efetivo da conversa, lido da política espelhada
-/// (`notify.policy`); None = política ilegível → avisar (menos grave).
 fn nivel_do_canal(
     raw: &str,
     conv_id: &str,
@@ -847,7 +750,6 @@ fn nivel_do_canal(
     {
         return lvl.to_string();
     }
-    // Canal de servidor silenciado: o servidor inteiro silencia.
     if let Some(srv) = store
         .as_ref()
         .and_then(|st| st.channel_community(conv_id).ok().flatten())
@@ -866,8 +768,6 @@ fn nivel_do_canal(
         .unwrap_or("all")
         .to_string()
 }
-
-// ---------------- rede ----------------
 
 #[tauri::command]
 fn network_status(state: State<AppState>) -> Result<NetworkStatusView, String> {
@@ -905,8 +805,6 @@ fn peers_list(state: State<AppState>) -> Result<Vec<PeerView>, String> {
         .collect())
 }
 
-/// Diagnóstico WebRTC: o que a página enxerga é a ÚNICA prova real (o
-/// `WebKitSettings` aplicado não garante `RTCPeerConnection` existente).
 #[tauri::command]
 fn webrtc_report(info: String) {
     eprintln!("[distorrent-probe] {info}");
@@ -928,8 +826,7 @@ fn net_diag(state: State<AppState>) -> Result<NetDiagView, String> {
     })
 }
 
-/// Diagnóstico honesto das pernas do relay: com motor respeita o modo de
-/// privacidade (probe via SOCKS5); sem motor, probe direto.
+// Seção 5: tauri
 #[tauri::command]
 async fn relay_status(
     state: State<'_, AppState>,
@@ -956,8 +853,6 @@ fn connect_addr(
     if trimmed.is_empty() {
         return Err("endereço vazio".into());
     }
-    // IP:porta → direto; domínio/.onion → connect_host (hostname vai ao SOCKS5
-    // SEM resolver localmente em modo proxy/Tor).
     if let Ok(s) = trimmed.parse::<std::net::SocketAddr>() {
         engine.add_manual_peer(s, expected_fp);
     } else {
@@ -974,8 +869,6 @@ fn disconnect_peer(fp: String, state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
-// ---------------- comunidades ----------------
-
 #[derive(Debug, Serialize)]
 struct CommunityView {
     id: String,
@@ -983,37 +876,28 @@ struct CommunityView {
     owner_fp: String,
     channels: Vec<(String, String)>,
     members: Vec<(String, String, String)>,
-    /// v6 (wizard): descrição/categoria/ícone.
     description: String,
     category: String,
     icon: String,
-    /// Sou o dono? A UI usa isto para mostrar "gerar convite" só ao dono.
     is_owner: bool,
 }
 
-/// Pareamento real de UM membro, exposto à UI.
 #[derive(Debug, Serialize)]
 struct MemberPairingView {
     fp: String,
     nickname: String,
     role: String,
-    /// connected | relay | connecting | reconnecting | pending_join | offline
     state: String,
     via_relay: bool,
     is_owner: bool,
     is_self: bool,
 }
 
-/// Convidado de servidor como a UI precisa: o token e (quando dá) o link.
 #[derive(Debug, Serialize)]
 struct InviteView {
-    /// Token CRU (mecanismo principal: funciona por qualquer app de mensagem).
     token: String,
-    /// Deep link `distorrent://invite?...`; pode não abrir — UI oferece o token.
     link: String,
-    /// Expiração (epoch ms) — token é stateless, não há revogação.
     expires_at_ms: i64,
-    /// Escopo: `open` = qualquer portador; `fp` = só o fingerprint indicado.
     scope: String,
 }
 
@@ -1039,7 +923,6 @@ fn communities_list(state: State<AppState>) -> Result<Vec<CommunityView>, String
     Ok(out)
 }
 
-/// Estado de pareamento por membro — evidência real, não "online" só por roster.
 #[tauri::command]
 fn community_members(
     community_id: String,
@@ -1077,7 +960,6 @@ fn create_community(
         .map_err(err)
 }
 
-/// v6 — atualiza descrição/categoria/ícone da comunidade (dono).
 #[tauri::command]
 fn community_set_meta(
     community_id: String,
@@ -1096,8 +978,6 @@ fn community_set_meta(
         .map_err(err)
 }
 
-/// Gera o token de convite; `member_fp` opcional (padrão = convite aberto).
-/// Antes a UI passava o fp do criador e o convite nunca funcionava fora dele.
 #[tauri::command]
 fn make_invite(
     community_id: String,
@@ -1123,8 +1003,7 @@ fn make_invite(
         .map_err(presentation_error)
 }
 
-/// Erro do motor → texto para a pessoa: remove o rótulo interno
-/// (`protocol:` etc.) que vazava para a tela; nenhuma mensagem é inventada.
+// Seção 6: presentation_error
 fn presentation_error(e: impl std::fmt::Display) -> String {
     let raw = e.to_string();
     raw.strip_prefix("protocol: ")
@@ -1141,8 +1020,6 @@ fn join_community(token: String, state: State<AppState>) -> Result<String, Strin
         .map_err(presentation_error)
 }
 
-/// Gera convite com token E link no MESMO passo (o link era montado com
-/// `window.location.origin`, inválido fora do WebView).
 #[tauri::command]
 fn make_invite_link(
     community_id: String,
@@ -1163,7 +1040,6 @@ fn make_invite_link(
     let token = engine(&state)?
         .make_invite(&community_id, &fp, TTL_MS)
         .map_err(presentation_error)?;
-    // `urlencode` suficiente para query string; percent-encodar é o contrato.
     let link = format!("distorrent://invite?invite={token}");
     Ok(InviteView {
         token,
@@ -1192,10 +1068,6 @@ fn send_channel_message(
         .map_err(err)
 }
 
-// ---------------- servidor: canais / cargos / bots ----------------
-
-/// Patch de cargo aceito como objeto `patch` (formato do frontend) OU args
-/// planos; os planos têm precedência quando presentes.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct RolePatch {
     #[serde(default)]
@@ -1212,7 +1084,6 @@ struct RolePatch {
     position: Option<i64>,
 }
 
-/// Distingue ausente (não mexer) de null (limpar cargo).
 fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: serde::Deserialize<'de>,
@@ -1236,7 +1107,6 @@ struct BotPatch {
     role_id: Option<Option<String>>,
     #[serde(default)]
     online: Option<bool>,
-    /// v6: JSON do runtime web do bot (a UI valida tamanho; o core persiste).
     #[serde(default)]
     config: Option<String>,
 }
@@ -1294,6 +1164,7 @@ fn channel_rename(
         .map_err(err)
 }
 
+// Seção 7: tauri
 #[tauri::command]
 fn channel_set_topic(
     community_id: String,
@@ -1386,7 +1257,6 @@ fn role_update(
     state: State<AppState>,
 ) -> Result<(), String> {
     let p = patch.unwrap_or_default();
-    // args planos vencem o objeto patch quando presentes
     let name = name.or(p.name);
     let color = color.or(p.color);
     let permissions = permissions.or(p.permissions);
@@ -1467,6 +1337,7 @@ fn member_assign_role(
         .map_err(err)
 }
 
+// Seção 8: tauri
 #[tauri::command]
 fn member_unassign_role(
     community_id: String,
@@ -1491,8 +1362,6 @@ fn member_kick(community_id: String, fp: String, state: State<AppState>) -> Resu
         .member_kick(&community_id, fp.trim())
         .map_err(err)
 }
-
-// ---------------- moderação + segurança (Storm) ----------------
 
 #[tauri::command]
 fn server_rules_get(
@@ -1640,6 +1509,7 @@ fn bot_update(
     config: Option<String>,
     state: State<AppState>,
 ) -> Result<(), String> {
+    // Seção 9: p
     let p = patch.unwrap_or_default();
     if let Some(c) = config.as_deref().or(p.config.as_deref()) {
         if c.len() > 16 * 1024 {
@@ -1649,7 +1519,6 @@ fn bot_update(
     let merged = distorrent_core::storage::BotPatch {
         name: name.or(p.name),
         avatar: avatar.or(p.avatar),
-        // flat Some(x) → Some(Some(x)); "" ou null limpam o cargo
         role_id: role_id.map(|r| Some(r)).or(p.role_id),
         online: online.or(p.online),
         config: config.or(p.config),
@@ -1685,7 +1554,6 @@ fn bots_list(
     engine(&state)?.bots_list(&community_id).map_err(err)
 }
 
-/// v6 — posta mensagem COMO O BOT (dono; runtime web roda no host).
 #[tauri::command]
 fn bot_post_message(
     community_id: String,
@@ -1702,7 +1570,6 @@ fn bot_post_message(
         .map_err(err)
 }
 
-/// v6 — novo token (dono); o antigo é invalidado na hora.
 #[tauri::command]
 fn bot_regen_token(
     community_id: String,
@@ -1714,8 +1581,6 @@ fn bot_regen_token(
         .map_err(err)
 }
 
-/// v6 — HTTP REST para o runtime de BOTS, no shell (SEM CORS do WebView).
-/// Limites: http/https, timeout 15s, resposta 256KB, sem secrets no log.
 #[tauri::command]
 async fn http_fetch(
     url: String,
@@ -1726,7 +1591,6 @@ async fn http_fetch(
     _state: State<'_, AppState>,
 ) -> Result<HttpResponse, String> {
     use base64::Engine as _;
-    // valida scheme/host antes de gastar socket
     let parsed = reqwest::Url::parse(&url).map_err(|e| format!("URL inválida: {e}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err("só http/https são permitidos".into());
@@ -1740,7 +1604,6 @@ async fn http_fetch(
         "POST" => reqwest::Method::POST,
         other => return Err(format!("método {other} não suportado (use GET|POST)")),
     };
-    // cap defensivo: 16 headers, chaves/valores pequenos.
     let headers: Vec<(String, String)> = headers
         .into_iter()
         .filter(|(k, _)| !k.trim().is_empty())
@@ -1750,14 +1613,11 @@ async fn http_fetch(
         return Err("header grande demais".into());
     }
     let body_bytes = match body.as_deref() {
-        Some(b) if !b.is_empty() => {
-            // aceita texto puro OU base64 (dados binários de webhook)
-            base64::engine::general_purpose::STANDARD
-                .decode(b)
-                .ok()
-                .map(reqwest::Body::from)
-                .unwrap_or_else(|| reqwest::Body::from(b.to_string()))
-        }
+        Some(b) if !b.is_empty() => base64::engine::general_purpose::STANDARD
+            .decode(b)
+            .ok()
+            .map(reqwest::Body::from)
+            .unwrap_or_else(|| reqwest::Body::from(b.to_string())),
         _ => reqwest::Body::from(Vec::new()),
     };
     let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000).min(15_000));
@@ -1773,13 +1633,11 @@ async fn http_fetch(
     let res = req.body(body_bytes).send().await.map_err(err)?;
     let status = res.status().as_u16();
     let bytes = res.bytes().await.map_err(err)?;
-    // corpo volta como base64 para trafegar binário com segurança de IPC
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let truncated = bytes.len() > 256 * 1024;
     Ok(HttpResponse {
         status,
         body_b64: b64,
-        // já decodifica em texto quando é UTF-8 válido (caso comum: JSON de API)
         body_text: String::from_utf8(bytes[..bytes.len().min(256 * 1024)].to_vec()).ok(),
         truncated,
     })
@@ -1792,8 +1650,6 @@ struct HttpResponse {
     body_text: Option<String>,
     truncated: bool,
 }
-
-// ---------------- amigos ----------------
 
 #[tauri::command]
 fn friends_list(status: Option<String>, state: State<AppState>) -> Result<Vec<PeerRecord>, String> {
@@ -1810,11 +1666,10 @@ fn friend_request(
         return Err("fingerprint deve ter 12 hex chars".into());
     }
     let outcome = engine(&state)?.friend_request(&fp).map_err(err)?;
-    // REMOVIDO o fallback via ntfy.sh (POST externo lento): o pedido vai pelo
-    // motor P2P (relay MQTT push / direta), sem HTTP externo.
     Ok(outcome)
 }
 
+// Seção 10: tauri
 #[tauri::command]
 fn friend_respond(peer_fp: String, accept: bool, state: State<AppState>) -> Result<(), String> {
     engine(&state)?
@@ -1836,8 +1691,6 @@ fn friend_block(peer_fp: String, state: State<AppState>) -> Result<(), String> {
 fn friend_unblock(peer_fp: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.friend_unblock(peer_fp.trim()).map_err(err)
 }
-
-// ---------------- conversas / mensagens ----------------
 
 #[tauri::command]
 fn conversations_list(
@@ -1890,16 +1743,11 @@ fn delete_conversation(conv_id: String, state: State<AppState>) -> Result<(), St
     Ok(())
 }
 
-/// Verificação de assinatura disponível para qualquer camada da UI.
 #[tauri::command]
 fn message_verify(env: MessageEnvelope, pubkey_hex: String) -> Result<bool, String> {
     Ok(env.verify_with_pubkey(&pubkey_hex))
 }
 
-// ---------------- privacidade ----------------
-
-/// Configuração de privacidade persistida no SQLite; cada flag controla uma
-/// camada real de rede/criptografia no engine.
 #[derive(Debug, Clone, Serialize)]
 struct PrivacySettings {
     mode: String,
@@ -1908,18 +1756,15 @@ struct PrivacySettings {
     udp_discovery: bool,
     metadata_padding: bool,
     traffic_obfuscation: bool,
-    /// Estado EFETIVO do proxy (relay roteando por SOCKS5 de fato); UI mostra
-    /// a verdade, não só o modo escolhido (fail-closed = relay OFF).
     proxy_effective: bool,
 }
 
 impl PrivacySettings {
-    /// `proxy_effective` nasce false: quem sabe é o ENGINE (`relay_is_proxied`).
     fn from_mode(mode: &str) -> Self {
         match mode {
             "normal" => PrivacySettings {
                 mode: "normal".into(),
-                encryption_enabled: false, // sem criptografia
+                encryption_enabled: false,
                 tor_proxy: false,
                 udp_discovery: true,
                 metadata_padding: false,
@@ -1928,7 +1773,7 @@ impl PrivacySettings {
             },
             "encrypted" => PrivacySettings {
                 mode: "encrypted".into(),
-                encryption_enabled: true, // X25519 + ChaCha20
+                encryption_enabled: true,
                 tor_proxy: false,
                 udp_discovery: true,
                 metadata_padding: false,
@@ -1937,16 +1782,15 @@ impl PrivacySettings {
             },
             "proxy" => PrivacySettings {
                 mode: "proxy".into(),
-                encryption_enabled: true, // com criptografia + 1 proxy (esconde IP)
-                tor_proxy: false,         // proxy único SOCKS5 (não é Tor)
-                udp_discovery: false,     // sem broadcast para esconder IP
+                encryption_enabled: true,
+                tor_proxy: false,
+                udp_discovery: false,
                 metadata_padding: false,
-                traffic_obfuscation: true, // tráfego via proxy
+                traffic_obfuscation: true,
                 proxy_effective: false,
             },
             "full" => PrivacySettings {
                 mode: "full".into(),
-                // Tor = SOCKS5 do daemon local; nº de saltos é do daemon.
                 encryption_enabled: true,
                 tor_proxy: true,
                 udp_discovery: false,
@@ -1974,8 +1818,6 @@ fn privacy_get(state: State<AppState>) -> Result<PrivacySettings, String> {
         .kv_get("privacy.mode")
         .unwrap_or_else(|| "encrypted".into());
     let mut settings = PrivacySettings::from_mode(&mode);
-    // Estado EFETIVO do proxy: sem isto um proxy morto aparecia "ativado"
-    // (relay fail-closed ficava invisível na UI).
     if let Some(eng) = state
         .engine
         .lock()
@@ -1994,8 +1836,7 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
         return Err("modo inválido — use: normal, encrypted, proxy ou full".into());
     }
 
-    // APLICA NO MOTOR EM TEMPO REAL: `privacy_set_mode` persiste o kv E
-    // re-rota o relay (antes só trocava de rota após reiniciar o app).
+    // Seção 11: engine_opt
     let engine_opt = state
         .engine
         .lock()
@@ -2004,12 +1845,10 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
     if let Some(eng) = engine_opt {
         eng.privacy_set_mode(&mode).map_err(err)?;
     } else {
-        // sem motor (vault trancado): só persiste — o boot lê do kv.
         let store = open_store(&state)?;
         store.kv_set("privacy.mode", &mode).map_err(err)?;
     }
 
-    // Persiste cada flag individualmente para debug e auditoria
     let store = open_store(&state)?;
     let mut settings = PrivacySettings::from_mode(&mode);
     store
@@ -2057,8 +1896,6 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
         obfuscation = settings.traffic_obfuscation,
         "modo de privacidade alterado"
     );
-    // Estado efetivo pós-aplicação: reflete o que está RODANDO agora
-    // (proxy morto = relay fail-closed = false), não a intenção.
     if let Some(eng) = state
         .engine
         .lock()
@@ -2070,8 +1907,6 @@ fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, 
     Ok(settings)
 }
 
-/// Snapshot dos limites de rede — diagnóstico: tetos vigentes e rejeições por
-/// classe. Nada de conteúdo, só contadores.
 #[tauri::command]
 fn net_limits(
     state: State<AppState>,
@@ -2087,15 +1922,12 @@ fn net_limits(
     }
 }
 
-/// Endereço SOCKS5 salvo (ou default por modo: proxy=1080, full/Tor=9050).
 #[derive(Debug, Serialize)]
 struct ProxyConfig {
     addr: String,
     is_default: bool,
 }
 
-/// Chave kv do endereço SOCKS5 por modo (`proxy` × `full`): endereços
-/// separados para proxy do usuário e daemon Tor não se confundirem.
 fn proxy_addr_key(mode: &str) -> &'static str {
     if mode == "full" {
         "privacy.tor_addr"
@@ -2111,8 +1943,6 @@ fn valid_privacy_mode(mode: &str) -> bool {
 #[tauri::command]
 fn proxy_addr_get(mode: Option<String>, state: State<AppState>) -> Result<ProxyConfig, String> {
     let store = open_store(&state)?;
-    // Modo ALVO (o que a UI está configurando), não o modo salvo — antes o
-    // botão "Ativar" persistia o endereço do modo antigo no Tor.
     let mode = mode.filter(|m| valid_privacy_mode(m)).unwrap_or_else(|| {
         store
             .kv_get("privacy.mode")
@@ -2128,7 +1958,6 @@ fn proxy_addr_get(mode: Option<String>, state: State<AppState>) -> Result<ProxyC
             is_default: false,
         }),
         None => {
-            // default alinhado ao motor: Tor=9050, proxy=1080
             let addr = if mode == "full" {
                 "127.0.0.1:9050"
             } else {
@@ -2143,8 +1972,6 @@ fn proxy_addr_get(mode: Option<String>, state: State<AppState>) -> Result<ProxyC
     }
 }
 
-/// Salva o proxy da UI e aplica na hora; `mode` diz a QUAL modo pertence
-/// (a UI salva antes de trocar o modo — sem ele o valor ia à chave errada).
 #[tauri::command]
 fn proxy_addr_set(
     addr: String,
@@ -2168,13 +1995,12 @@ fn proxy_addr_set(
     match engine_opt {
         Some(eng) => eng.set_anonymity_addr(&mode, &addr).map_err(err),
         None => {
-            // sem motor: valida mínimo e persiste para o próximo boot
+            // Seção 12: trimmed
             let trimmed = addr.trim();
             let store = open_store(&state)?;
             if trimmed.is_empty() {
                 store.kv_delete(proxy_addr_key(&mode)).map_err(err)?;
             } else {
-                // valida formato host:porta antes de persistir
                 let (_, port) = trimmed
                     .rsplit_once(':')
                     .ok_or("formato inválido — use host:porta")?;
@@ -2187,8 +2013,6 @@ fn proxy_addr_set(
     }
 }
 
-/// Teste ONLINE do proxy SOCKS5: circuito real até os brokers MQTT públicos
-/// (mesmas pernas do relay); devolve latência ou erro.
 #[tauri::command]
 async fn proxy_test(addr: String) -> Result<u64, String> {
     let trimmed = addr.trim().to_string();
@@ -2198,21 +2022,16 @@ async fn proxy_test(addr: String) -> Result<u64, String> {
     distorrent_core::net::relay::proxy_online_test(&trimmed).await
 }
 
-// ---------------- vault export/import ----------------
-
 #[derive(Debug, Serialize)]
 struct VaultExport {
     identity: Identity,
-    vault_blob: String, // hex do blob criptografado
+    vault_blob: String,
 }
 
-/// Exporta identidade + vault cifrado (só BLOB CIFRADO: sem vault o kv
-/// guarda a secret RAW — exportá-la vazaría a chave privada).
 #[tauri::command]
 fn vault_export(state: State<AppState>) -> Result<VaultExport, String> {
     let store = open_store(&state)?;
     let identity = store.load_identity().ok_or("sem identidade")?;
-    // GATE: só exporta BLOB CIFRADO (sem vault, o kv tem a secret RAW).
     if store.kv_get("vault.on").as_deref() != Some("1") {
         return Err("sem cofre cifrado — defina uma senha (vault) antes de exportar".into());
     }
@@ -2226,7 +2045,6 @@ fn vault_export(state: State<AppState>) -> Result<VaultExport, String> {
     })
 }
 
-/// Importa identidade de outro device; NÃO permite se já existe identidade ativa.
 #[tauri::command]
 fn vault_import(
     identity_json: String,
@@ -2258,7 +2076,6 @@ fn vault_import(
     Ok(identity)
 }
 
-/// Lista contas salvas neste device (para tela de bloqueio).
 #[derive(Debug, Serialize)]
 struct SavedAccount {
     nickname: String,
@@ -2269,14 +2086,12 @@ struct SavedAccount {
 fn accounts_list(state: State<AppState>) -> Result<Vec<SavedAccount>, String> {
     let store = open_store(&state)?;
     let mut out = Vec::new();
-    // conta atual
     if let Some(id) = store.load_identity() {
         out.push(SavedAccount {
             nickname: id.nickname,
             fingerprint: id.fingerprint,
         });
     }
-    // contas importadas no kv — early exit: slot 0 ausente = nenhuma existe
     if store.kv_get(&format!("imported.0.blob")).is_some() {
         for i in 0..20 {
             if let Some(fp) = store.kv_get(&format!("imported.{i}.fp")) {
@@ -2294,7 +2109,6 @@ fn accounts_list(state: State<AppState>) -> Result<Vec<SavedAccount>, String> {
     Ok(out)
 }
 
-/// Salva uma identidade importada como conta alternativa.
 #[tauri::command]
 fn account_save_imported(
     identity_json: String,
@@ -2311,7 +2125,6 @@ fn account_save_imported(
     }
 
     let store = open_store(&state)?;
-    // encontra slot vazio
     for i in 0..20 {
         if store.kv_get(&format!("imported.{i}.fp")).is_none() {
             store
@@ -2332,19 +2145,16 @@ fn account_save_imported(
     Err("máximo de contas importadas atingido (20)".into())
 }
 
-/// Troca pra outra conta salva (ativa a identidade selecionada).
 #[tauri::command]
 fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identity, String> {
     let store = open_store(&state)?;
 
-    // verifica se é a conta atual
     if let Some(id) = store.load_identity() {
         if id.fingerprint == fingerprint {
-            return Ok(id); // já é esta
+            return Ok(id);
         }
     }
 
-    // procura nas importadas
     for i in 0..20 {
         if store.kv_get(&format!("imported.{i}.fp")).as_deref() == Some(&fingerprint) {
             let blob = store
@@ -2353,11 +2163,11 @@ fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identit
             let nick = store
                 .kv_get(&format!("imported.{i}.nick"))
                 .unwrap_or_default();
+            // Seção 13: pubkey_hex
             let pubkey_hex = store
                 .kv_get(&format!("imported.{i}.pubkey"))
                 .unwrap_or_default();
 
-            // salva a conta atual como importada antes de trocar
             if let Some(current_id) = store.load_identity() {
                 if let Some(current_blob) = store.load_secret_hex() {
                     if !current_blob.is_empty() {
@@ -2407,8 +2217,6 @@ fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identit
                 .map_err(err)?;
             store.kv_set("vault.on", "1").map_err(err)?;
 
-            // Motor ainda anunciava a identidade ANTIGA: sem o shutdown, peers
-            // conectavam com quem a UI nem mostrava mais.
             {
                 let guard = state.engine.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(e) = guard.as_ref() {
@@ -2425,7 +2233,6 @@ fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identit
     Err("conta não encontrada".into())
 }
 
-/// Remove uma conta importada.
 #[tauri::command]
 fn account_remove_imported(fingerprint: String, state: State<AppState>) -> Result<(), String> {
     let store = open_store(&state)?;
@@ -2443,10 +2250,6 @@ fn account_remove_imported(fingerprint: String, state: State<AppState>) -> Resul
     }
     Err("conta não encontrada".into())
 }
-
-// =====================================================================
-// CAMADA SOCIAL v3 — paridade Discord; validação no core.
-// =====================================================================
 
 #[tauri::command]
 fn social_react(
@@ -2531,6 +2334,7 @@ fn social_pins(
     open_store(&state)?.pins_list(&conv_id).map_err(err)
 }
 
+// Seção 14: tauri
 #[tauri::command]
 fn social_meta_bulk(
     msg_ids: Vec<String>,
@@ -2539,7 +2343,6 @@ fn social_meta_bulk(
     open_store(&state)?.msg_meta_bulk(&msg_ids).map_err(err)
 }
 
-/// Corpo efetivo de um lote de mensagens (edição aplicada / apagada).
 #[tauri::command]
 fn social_bodies(
     msg_ids: Vec<String>,
@@ -2569,12 +2372,9 @@ fn social_forward(
         .map_err(err)
 }
 
-// ---------- leitura / não-lidas ----------
-
 #[tauri::command]
 fn read_set(conv_id: String, ts: i64, state: State<AppState>) -> Result<(), String> {
     open_store(&state)?.read_set(&conv_id, ts).map_err(err)?;
-    // Visto azul: avisa o remetente (best-effort; sem motor = só cursor local).
     if let Ok(e) = engine(&state) {
         e.notify_read(&conv_id, ts);
     }
@@ -2596,8 +2396,6 @@ fn unread_mentions(state: State<AppState>) -> Result<i64, String> {
     let fp = identity_fp(&state);
     open_store(&state)?.unread_mentions(&fp).map_err(err)
 }
-
-// ---------- presença / perfil ----------
 
 #[tauri::command]
 fn presence_set(
@@ -2626,10 +2424,6 @@ fn presence_get(
     open_store(&state)?.presence_get(&fp).map_err(err)
 }
 
-// `rename_all = "snake_case"`: contrato do frontend (`display_name` etc.).
-// Sem isto o Tauri 2 converte para camelCase e salvar perfil não funcionava.
-// `remove_avatar`/`remove_banner`: string vazia sempre significou "manter" —
-// sem a flag era impossível APAGAR avatar/capa pela interface.
 #[tauri::command(rename_all = "snake_case")]
 fn profile_set(
     display_name: String,
@@ -2654,8 +2448,6 @@ fn profile_set(
         .map_err(err)
 }
 
-/// Força a reconciliação de perfis agora (botão "sincronizar" e boot da UI).
-/// O motor também faz isso sozinho no boot, na reconexão e a cada 10 min.
 #[tauri::command]
 fn profile_sync_now(state: State<AppState>) -> Result<(), String> {
     engine(&state)?.sync_profiles_with_peers();
@@ -2700,8 +2492,6 @@ fn nickname_get(
         .map_err(err)
 }
 
-// ---------- busca / histórico ----------
-
 #[tauri::command]
 fn message_search(
     q: distorrent_core::social::SearchQuery,
@@ -2722,8 +2512,7 @@ fn messages_around(
         .map_err(err)
 }
 
-// ---------- threads ----------
-
+// Seção 15: tauri
 #[tauri::command]
 fn thread_create(
     community_id: String,
@@ -2778,8 +2567,6 @@ fn thread_archive(thread_id: String, archived: bool, state: State<AppState>) -> 
         .social_thread_archive(&thread_id, archived)
         .map_err(err)
 }
-
-// ---------- moderação ----------
 
 #[tauri::command]
 fn member_ban(
@@ -2850,8 +2637,6 @@ fn channel_cfg_get(channel_id: String, state: State<AppState>) -> Result<i64, St
         .map_err(err)
 }
 
-// ---------- enquetes / eventos / emojis ----------
-
 #[tauri::command]
 fn poll_create(
     community_id: String,
@@ -2898,7 +2683,7 @@ fn poll_vote(
         .map_err(err)
 }
 
-/// (contagens, total de votos, meus votos)
+// Seção 16: tauri
 #[tauri::command]
 fn poll_tally(
     poll_id: String,
@@ -2973,8 +2758,6 @@ fn emoji_delete(community_id: String, id: String, state: State<AppState>) -> Res
         .map_err(err)
 }
 
-// ---------- bookmarks ----------
-
 #[tauri::command]
 fn bookmark_set(
     conv_id: String,
@@ -2992,7 +2775,6 @@ fn bookmark_list(conv_id: String, state: State<AppState>) -> Result<Vec<(String,
     open_store(&state)?.bookmark_list(&conv_id).map_err(err)
 }
 
-/// Fingerprint da identidade carregada (usado para "minhas" reações/votos).
 fn identity_fp(state: &State<AppState>) -> String {
     open_store(state)
         .ok()
@@ -3009,10 +2791,6 @@ fn engine(state: &State<AppState>) -> Result<Arc<NetworkEngine>, String> {
         .ok_or_else(|| "motor não iniciado (sem identidade)".to_string())
 }
 
-// ---------------- keyring genérico (reservado para backups futuros) ----------------
-
-/// Chaves reservadas do sistema — a generic API NUNCA as toca (evita expor
-/// a chave privada à WebView).
 fn is_reserved_key(key: &str) -> bool {
     key == "identity.secret" || key == "identity.secret.backup" || key.is_empty() || key.len() > 128
 }
@@ -3053,24 +2831,18 @@ fn group_members(conv_id: String, state: State<AppState>) -> Result<Vec<(String,
     Ok(engine(&state)?.group_members(&conv_id))
 }
 
-/// Pareia AGORA todos os membros do grupo (não-amigos incluídos).
-/// O frontend chama ao abrir a conversa e ao entrar na chamada do grupo.
 #[tauri::command]
 fn group_pair_now(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_pair_now(&conv_id);
     Ok(())
 }
 
-/// Pareia AGORA todos os membros do SERVIDOR (abrir o servidor/mensagens).
-/// Sem isto o primeiro contato esperava até 45 s pelo tique de manutenção.
 #[tauri::command]
 fn community_pair_now(community_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.community_pair_now(&community_id);
     Ok(())
 }
 
-/// Pede o estado do servidor IMEDIATAMENTE (sem o intervalo de 45 s).
-/// Usado quando o app volta ao primeiro plano (WebView do celular congelada).
 #[tauri::command]
 fn community_sync_now(community_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.community_sync_now(&community_id);
@@ -3082,32 +2854,27 @@ fn group_add(conv_id: String, fp: String, state: State<AppState>) -> Result<(), 
     engine(&state)?.group_add(&conv_id, &fp).map_err(err)
 }
 
-/// Remove um integrante do grupo: roster reenviado pelo mesmo `GroupCreated`
-/// da sincronização (sem frame novo no protocolo).
 #[tauri::command]
+// Seção 17: group_remove
 fn group_remove(conv_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_remove(&conv_id, &fp).map_err(err)
 }
 
-/// Renomeia o grupo (título novo viaja no `GroupCreated` de sincronização).
 #[tauri::command]
 fn group_rename(conv_id: String, title: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_rename(&conv_id, &title).map_err(err)
 }
 
-/// Sai do grupo: re-sincroniza o roster sem mim e limpa o banco local.
 #[tauri::command]
 fn group_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_leave(&conv_id).map_err(err)
 }
 
-/// DONO: apaga o grupo para todos (avisa os membros).
 #[tauri::command]
 fn group_delete(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_delete(&conv_id).map_err(err)
 }
 
-/// Apaga o grupo só nesta máquina, sem avisar ninguém.
 #[tauri::command]
 fn group_delete_local(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_delete_local(&conv_id).map_err(err)
@@ -3132,14 +2899,12 @@ fn call_room_close(conv_id: String, state: State<AppState>) -> Result<(), String
     Ok(())
 }
 
-/// Sair da sala SEM encerrá-la para os outros (só o host, sozinho, fecha).
 #[tauri::command]
 fn call_room_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.leave_room(&conv_id);
     Ok(())
 }
 
-/// Entra numa sala anunciada. Devolve `(call_id, participantes_avisados)`.
 #[tauri::command]
 fn call_room_join(
     conv_id: String,
@@ -3149,7 +2914,6 @@ fn call_room_join(
     engine(&state)?.room_join(&conv_id, &kind).map_err(err)
 }
 
-/// Salas vivas no boot (a UI perdeu os eventos enquanto estava fechada).
 #[tauri::command]
 fn call_rooms_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
     let e = engine(&state)?;
@@ -3183,8 +2947,6 @@ async fn call_invite(
     kind: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    // Negociação nativa pode levar segundos: fora da main thread, senão a UI
-    // congela em "Chamando...".
     let e = engine(&state)?;
     tauri::async_runtime::spawn_blocking(move || e.call_invite(&target_fp, &kind))
         .await
@@ -3205,16 +2967,10 @@ async fn call_accept(
         .await
         .map_err(|e| e.to_string())?
         .map_err(err)?;
-    // Absorve a offer/ICE retidos no pré-aceite (ver net/voice_gate.rs).
     e2.resume_held_call(&call_id, &from_fp).await;
     Ok(())
 }
 
-/// Reenvia só o CONVITE (ring) — usado enquanto a chamada sai de "Chamando…".
-///
-/// O invite sai uma vez; se o frame se perder, o outro lado nunca toca e o
-/// chamador fica preso até desistir. `call_ring_retry` é idempotente no
-/// receptor (não abre mídia nem duplica estado).
 #[tauri::command]
 fn call_ring_retry(
     call_id: String,
@@ -3278,6 +3034,7 @@ fn call_answer(
         .map_err(err)
 }
 
+// Seção 18: tauri
 #[tauri::command]
 fn call_ice(
     target_fp: String,
@@ -3298,7 +3055,6 @@ fn call_ice(
         .map_err(err)
 }
 
-/// v6 — grupo (mesh): notifica peer sobre novo participante; kind não-vazio toca no receptor.
 #[tauri::command]
 fn call_add_participant(
     target_fp: String,
@@ -3312,17 +3068,9 @@ fn call_add_participant(
         .map_err(err)
 }
 
-// ---------------- voz nativa (webrtc-rs + cpal + Opus) ----------------
-//
-// Só LEITURA/controle: a negociação acontece dentro do motor, em Rust.
-// `voice_media_available` = false sem mídia nativa → UI segue pelo WebRTC
-// do navegador.
-
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn voice_media_available(state: State<AppState>) -> Result<bool, String> {
-    // Com motor: só a verdade VIVA (antes respondia `true` com mídia morta e
-    // toda chamada nascia sem offer); sem motor: capacidade do build.
     match state
         .engine
         .lock()
@@ -3334,8 +3082,6 @@ fn voice_media_available(state: State<AppState>) -> Result<bool, String> {
     }
 }
 
-/// `null` quando a chamada não é nativa (a UI usa o relatório do navegador;
-/// `Value` porque o Tauri IPC não serializa `Option` no topo).
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn voice_media_stats(call_id: String, state: State<AppState>) -> Result<serde_json::Value, String> {
@@ -3370,13 +3116,6 @@ fn voice_set_deafened(
     Ok(())
 }
 
-// ---------------- vídeo nativo (câmera/tela) — Linux ----------------
-//
-// Ponte do caminho nativo (GStreamer, no core) até a UI: o WebKitGTK não
-// expõe getUserMedia/getDisplayMedia para RTCPeerConnection.
-
-/// Liga o envio de vídeo nativo ("camera"|"screen") para um par da chamada.
-/// Devolve "starting" — o estado sobe em `voice_media_stats` (video_state).
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn voice_video_start(
@@ -3393,7 +3132,6 @@ fn voice_video_start(
     v.video_start(&call_id, &peer_fp, &source, monitor_id)
 }
 
-/// Desliga o envio de vídeo nativo para um par (o recebimento continua).
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn voice_video_stop(
@@ -3408,8 +3146,6 @@ fn voice_video_stop(
     Ok(())
 }
 
-/// Último frame JPEG do vídeo REMOTO (polling); `since_seq` evita re-envio;
-/// `null` = ainda sem frame/decode.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn voice_video_frame(
@@ -3426,7 +3162,6 @@ fn voice_video_frame(
         Some(f) => {
             if let Some(since) = since_seq {
                 if f.seq <= since {
-                    // Mesmo frame de antes: só meta, sem o JPEG pesado de novo.
                     return Ok(serde_json::json!({ "seq": f.seq, "w": f.w, "h": f.h }));
                 }
             }
@@ -3440,8 +3175,6 @@ fn voice_video_frame(
     }
 }
 
-// Fora do Linux a camada nativa NÃO EXISTE no build; os stubs respondem o
-// que o Linux responderia desligada — sem caminho novo para a UI aprender.
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
 fn voice_media_available(_state: State<AppState>) -> Result<bool, String> {
@@ -3465,6 +3198,7 @@ fn voice_set_muted(_call_id: String, _muted: bool, _state: State<AppState>) -> R
 
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
+// Seção 19: voice_hangup
 fn voice_hangup(_call_id: String, _state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
@@ -3479,8 +3213,6 @@ fn voice_set_deafened(
     Ok(())
 }
 
-// Vídeo nativo fora do Linux: o caminho é o getUserMedia/getDisplayMedia do
-// WebView; stubs respondem como Linux desligado.
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
 fn voice_video_start(
@@ -3514,9 +3246,6 @@ fn voice_video_frame(
     Ok(serde_json::Value::Null)
 }
 
-// ---------------- teste de microfone nativo (sem chamada) ----------------
-//
-// getUserMedia não existe no WebKitGTK: o teste mede o nível direto do cpal.
 #[cfg(target_os = "linux")]
 #[tauri::command]
 fn voice_mic_test_start(state: State<AppState>) -> Result<u64, String> {
@@ -3568,14 +3297,11 @@ fn voice_mic_name(_state: State<AppState>) -> Result<String, String> {
     Ok(String::new())
 }
 
-/// Indicador "digitando…": o frame existia no protocolo, mas faltava o comando
-/// (o catch engolia o erro e o indicador ficava morto no app nativo).
 #[tauri::command]
 fn send_typing(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.social_typing(&conv_id).map_err(err)
 }
 
-/// v6 — sinal dedicado de TELA (estado on/off via campo sdp em JSON).
 #[tauri::command]
 fn screen_share_offer(
     target_fp: String,
@@ -3618,7 +3344,6 @@ async fn voice_join(
     channel_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Negociação do canal pode levar segundos: fora da main thread.
     let e = engine(&state)?;
     tauri::async_runtime::spawn_blocking(move || e.voice_join(&community_id, &channel_id))
         .await
@@ -3652,6 +3377,7 @@ fn voice_state(
         .map_err(err)
 }
 
+// Seção 20: tauri
 #[tauri::command]
 fn voice_states(
     community_id: String,
@@ -3715,7 +3441,6 @@ fn save_file(
     state: State<AppState>,
 ) -> Result<String, String> {
     use std::fs;
-    // Teto anti-OOM: sem ele um peer malicioso manda 1GB e o decode derruba o app.
     if data_b64.len() > 280_000_000 {
         return Err("arquivo grande demais para salvar (máx ~200MB)".into());
     }
@@ -3731,8 +3456,6 @@ fn save_file(
             .or_else(|_| hex::decode(&data_b64))
             .map_err(|e| format!("save_file travou em decode base64: {e}"))?
     };
-    // SEGURANÇA DE MÍDIA: nome/extensão vêm de PEER remoto — valida tipo REAL
-    // por magic bytes e limpa metadados de imagens (GPS/câmera/EXIF).
     let safety = open_store(&state)
         .map(|s| media_safety_read(&s))
         .unwrap_or(MediaSafetyView {
@@ -3760,8 +3483,6 @@ fn save_file(
     } else {
         bytes
     };
-    // SANITIZAÇÃO ANTI-TRAVERSAL: o nome vem de peer remoto e o download é
-    // automático — aceita só basename literal, sem separadores/".."/oculto.
     let safe = std::path::Path::new(&name)
         .file_name()
         .and_then(|s| s.to_str())
@@ -3778,14 +3499,10 @@ fn save_file(
             "save_file travou em sanitize: nome de arquivo inválido (traversal bloqueado)".into(),
         );
     }
-    // CAUSA Android: `dirs` não mapeia Downloads lá (`download_dir()` = None;
-    // `home_dir()` aponta para área interna) — o frontend não tinha fallback.
-    let _ = &app; // evita "unused" em desktop (usado só no ramo Android)
+    let _ = &app;
     let downloads = {
         #[cfg(target_os = "android")]
         {
-            // Scoped storage (Android 10+): grava na área do app (sempre
-            // gravável, dentro de `filesDir`) e o plugin MediaStore entrega.
             android_private_download_dir(&app)?
         }
         #[cfg(not(target_os = "android"))]
@@ -3800,11 +3517,8 @@ fn save_file(
         ));
     }
     let path = unique_download_path(&downloads, safe);
-    // ESCRITA ATÔMICA: grava em .tmp e renomeia — crash no meio não deixa
-    // arquivo corrompido com nome final.
     let tmp = path.with_extension("distorrent-part");
     if let Err(e) = fs::write(&tmp, &bytes) {
-        // limpa possível tmp de tentativa anterior antes de reportar
         let _ = fs::remove_file(&tmp);
         return Err(format!(
             "save_file travou em write {}: {e} (Android 10+ com scoped storage pode negar escrita direta; verifique permissão de armazenamento)",
@@ -3821,15 +3535,7 @@ fn save_file(
     Ok(path.to_string_lossy().to_string())
 }
 
-// ---------------------------------------------------------------------------
-// Escrita em LOTES (streaming): `save_file` inteiro em base64 tinha pico de
-// ~8.7x o tamanho do arquivo (200 MB = ~1.7 GB — o renderer morria). Em lotes
-// de 4 MB o pico cai para ~1.15x.
-// ---------------------------------------------------------------------------
-
-/// Acumula lotes de um download; o último lote traz `flush: true`, que faz
-/// rename atômico. Crash no meio sobra `.distorrent-part`, nunca corrompido
-/// com nome final.
+// Seção 21: tauri
 #[tauri::command]
 fn save_file_stream(
     app: AppHandle,
@@ -3843,7 +3549,6 @@ fn save_file_stream(
     use std::fs::{self, OpenOptions};
     use std::io::Write;
 
-    // `job_id` entra no nome do temporário: CRU permitia path traversal.
     if job_id.is_empty()
         || job_id.len() > 64
         || !job_id
@@ -3853,7 +3558,6 @@ fn save_file_stream(
         return Err("save_file_stream: job_id inválido".into());
     }
 
-    // Sanitização anti-traversal ANTES de qualquer escrita (nome de peer remoto).
     let safe = std::path::Path::new(&name)
         .file_name()
         .and_then(|s| s.to_str())
@@ -3869,13 +3573,9 @@ fn save_file_stream(
         return Err("save_file_stream: nome de arquivo inválido (traversal bloqueado)".into());
     }
 
-    // BUG REAL: lotes concatenados tinham `==` no MEIO (262144 % 3 == 1) e
-    // eram rejeitados — nenhum byte gravado, download "concluía" vazio.
-    // Cada pedaço é fatiado nos limites de base64 e decodificado separado.
     let bytes = decode_b64_batches(&data_b64)
         .map_err(|e| format!("save_file_stream travou em decode base64: {e}"))?;
 
-    // Teto anti-OOM por LOTE e por TOTAL (peer malicioso não derruba o processo).
     if bytes.len() > 32 * 1024 * 1024 {
         return Err("save_file_stream: lote acima de 32 MB".into());
     }
@@ -3886,8 +3586,6 @@ fn save_file_stream(
         ));
     }
 
-    // SEGURANÇA DE MÍDIA — paridade com `save_file`: até aqui só o NOME era
-    // sanitizado; um ELF renomeado chegava ao Downloads sem checagem.
     let safety = open_store(&state)
         .map(|s| media_safety_read(&s))
         .unwrap_or(MediaSafetyView {
@@ -3902,8 +3600,6 @@ fn save_file_stream(
     let downloads = {
         #[cfg(target_os = "android")]
         {
-            // Mesma razão do `save_file`: origem TEM de estar em `filesDir`
-            // (plugin MediaStore recusa "caminho fora da área do app").
             android_private_download_dir(&app)?
         }
         #[cfg(not(target_os = "android"))]
@@ -3915,8 +3611,6 @@ fn save_file_stream(
 
     let tmp = downloads.join(format!(".{safe}.{job_id}.distorrent-part"));
 
-    // Magic bytes do PRIMEIRO lote: pega executável disfarçado de imagem/PDF
-    // (vale também para arquivo inteiro num lote único com `flush: true`).
     let primeiro_lote = fs::metadata(&tmp).map(|m| m.len() == 0).unwrap_or(true);
     if primeiro_lote && safety.block_executables && !bytes.is_empty() {
         let sniffed = distorrent_core::media::sniff_mime(&bytes);
@@ -3929,8 +3623,6 @@ fn save_file_stream(
         }
     }
 
-    // Grava o lote ANTES do flush: o último lote chega com `flush: true` E
-    // bytes — o código antigo renomeava sem escrever (arquivo truncado).
     if !bytes.is_empty() {
         let mut f = OpenOptions::new()
             .create(true)
@@ -3942,8 +3634,6 @@ fn save_file_stream(
         f.sync_all().ok();
     }
 
-    // Checa o ACUMULADO (não só o lote): announce pequeno + muitos chunks
-    // enchia o disco sem passar do teto de 32 MB por chamada.
     if total_bytes > 0 {
         if let Ok(m) = fs::metadata(&tmp) {
             if m.len() > total_bytes {
@@ -3956,8 +3646,6 @@ fn save_file_stream(
     }
 
     if flush {
-        // Strip de EXIF/GPS no streaming — paridade com `save_file`: só
-        // imagens, uma vez no fim; falha mantém o original.
         if safety.strip_exif {
             if let Ok(mut f) = fs::File::open(&tmp) {
                 use std::io::Read;
@@ -3986,16 +3674,12 @@ fn save_file_stream(
             let _ = fs::remove_file(&tmp);
             return Err(format!("save_file_stream travou em rename: {e}"));
         }
-        // Devolve caminho FINAL absoluto: no Android o plugin recebia nome
-        // relativo, não achava o arquivo e caía no intent de compartilhar.
         return Ok(dest.to_string_lossy().to_string());
     }
 
     Ok(tmp.to_string_lossy().to_string())
 }
 
-/// Decodifica base64 CONCATENADO (cada bloco com padding próprio `==` no
-/// meio): fatia nos múltiplos de 4 e decodifica um a um, validando cada pedaço.
 fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose, Engine as _};
     let s: &[u8] = data.as_bytes();
@@ -4008,13 +3692,10 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
             s.len()
         ));
     }
-    // Cada `==` ou `=` terminal fecha um pedaço; o próximo começa logo depois.
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
     let mut start = 0usize;
     let mut i = 0usize;
     while i < s.len() {
-        // Um pedaço termina em padding (ou no fim da string); percorre de 4 em 4
-        // para não confundir `=` de dados com padding.
         let end = i + 4;
         let pad = if end >= 4 && s[end - 1] == b'=' {
             if end >= 2 && s[end - 2] == b'=' {
@@ -4026,6 +3707,7 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
             0
         };
         if pad > 0 {
+            // Seção 22: piece
             let piece = &s[start..end];
             let decoded = general_purpose::STANDARD
                 .decode(piece)
@@ -4036,7 +3718,6 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
         i = end;
     }
     if start < s.len() {
-        // Último pedaço sem padding (arquivo cujo fim não caiu em `=`).
         let piece = &s[start..];
         let decoded = general_purpose::STANDARD
             .decode(piece)
@@ -4047,11 +3728,8 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Teto do fluxo em lotes (anti-DoS, não anti-arquivo): 50 GB; a proteção
-/// real do disco é a checagem de espaço e, da memória, o teto de 32 MB/lote.
 const MAX_STREAM_FILE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
-/// Formata bytes como "X MB"/"X GB" para as mensagens de erro.
 pub(crate) fn fmt_mb(b: u64) -> String {
     const MB: u64 = 1024 * 1024;
     if b >= 1024 * MB {
@@ -4061,15 +3739,12 @@ pub(crate) fn fmt_mb(b: u64) -> String {
     }
 }
 
-/// Resolve a pasta Downloads do DESKTOP com estágios honestos: `dirs` →
-/// ~/Download(s) → erro. Não compila no Android (lá é área privada + plugin).
 #[cfg(not(target_os = "android"))]
 fn resolve_downloads_dir() -> Result<PathBuf, String> {
     if let Some(d) = dirs::download_dir() {
         return Ok(d);
     }
     if let Some(h) = dirs::home_dir() {
-        // Desktop sem XDG: tenta ~/Download antes de desistir.
         let dl = h.join("Download");
         let dls = h.join("Downloads");
         if dl.exists() {
@@ -4078,7 +3753,6 @@ fn resolve_downloads_dir() -> Result<PathBuf, String> {
         if dls.exists() {
             return Ok(dls);
         }
-        // Último recurso honesto: home sem Downloads → usa ~/Download (será criada).
         if h.exists() {
             return Ok(dl);
         }
@@ -4088,7 +3762,6 @@ fn resolve_downloads_dir() -> Result<PathBuf, String> {
     )
 }
 
-/// Nome único em Downloads (`foto (1).png`): evita sobrescrever arquivo igual.
 fn unique_download_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     let first = dir.join(file_name);
     if !first.exists() {
@@ -4112,15 +3785,11 @@ fn unique_download_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
 
 #[tauri::command]
 fn get_app_version(app: tauri::AppHandle) -> String {
-    // Versão do APP = tauri.conf.json; CARGO_PKG_VERSION é do CRATE (2.2.0)
-    // e a tela Sobre mostrava a errada.
     app.config()
         .version
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
-
-// ---------------- cofre portátil .stormvault (conta inteira, sem servidor) ----------------
 
 #[derive(Debug, Serialize)]
 struct StormVaultExportView {
@@ -4148,8 +3817,6 @@ fn backup_retention_days(store: &Store) -> i64 {
         .unwrap_or(30)
 }
 
-/// Segredo para export/backup: engine (RAM) > keyring/plain; cofre trancado
-/// sem engine = recusa honesta.
 fn export_secret(state: &State<AppState>, store: &Store) -> Result<String, String> {
     if let Some(eng) = state
         .engine
@@ -4165,7 +3832,6 @@ fn export_secret(state: &State<AppState>, store: &Store) -> Result<String, Strin
     load_secret(store, true)
 }
 
-/// Exporta a conta INTEIRA num `.stormvault` cifrado com Argon2id em Downloads.
 #[tauri::command]
 async fn stormvault_export(
     app: AppHandle,
@@ -4198,18 +3864,17 @@ async fn stormvault_export(
         distorrent_core::identity::now_ms()
     );
     let path = unique_download_path(&base, &fname);
-    // Escrita atômica: tmp + rename (crash não deixa cofre corrompido).
     let tmp = path.with_extension("stormvault-part");
     if let Err(e) = std::fs::write(&tmp, &sealed) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("falha ao gravar o cofre: {e}"));
     }
     if let Err(e) = std::fs::rename(&tmp, &path) {
+        // Seção 23: _
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("falha ao gravar o cofre: {e}"));
     }
     distorrent_core::metrics::metrics().vault_op();
-    // zera a senha da memória asim que possível (best-effort; String não é zeroizável)
     drop(password);
     Ok(StormVaultExportView {
         path: path.to_string_lossy().to_string(),
@@ -4218,7 +3883,6 @@ async fn stormvault_export(
     })
 }
 
-/// Pasta de export: Android usa a área do app (scoped storage), desktop usa Downloads.
 fn export_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
@@ -4232,9 +3896,6 @@ fn export_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
-/// Pasta gravável no Android, DENTRO de `filesDir` (o Tauri resolve
-/// `app_data_dir()` para `dataDir`, pai de `files`): o plugin downloads e o
-/// FileProvider só aceitam arquivos de lá.
 #[cfg(target_os = "android")]
 fn android_files_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let base = app
@@ -4242,18 +3903,14 @@ fn android_files_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .or_else(|_| app.path().app_local_data_dir())
         .map_err(|e| format!("pasta do app indisponível: {e}"))?;
-    // `dataDir/files` é exatamente o `filesDir` que o Kotlin enxerga.
     Ok(base.join("files"))
 }
 
-/// Pasta de rascunho dos downloads no Android (dentro de `filesDir`).
 #[cfg(target_os = "android")]
 fn android_private_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(android_files_dir(app)?.join("Download"))
 }
 
-/// Importa um `.stormvault`: instala em device limpo ou mescla (conta
-/// diferente = recusa). Senha de ARQUIVO = mesmo orçamento de tentativas.
 #[tauri::command]
 async fn stormvault_import(
     content_b64: String,
@@ -4269,14 +3926,10 @@ async fn stormvault_import(
     }
     let store = open_store(&state)?;
 
-    // A chave inclui o fingerprint do ARQUIVO: mesmo arquivo 3× bloqueia,
-    // arquivo novo dá balde novo; orçamento por conta segue valendo.
     let key = auth_key(&store, "stormvault");
     auth_guard(&state, &key)?;
 
     if store.load_identity().is_some() {
-        // merge na conta existente: exige desbloqueio (o arquivo sozinho
-        // não injeta nada)
         engine(&state)?;
     }
     let report = match distorrent_core::stormvault::import_with_password(&store, &bytes, &password)
@@ -4308,8 +3961,6 @@ fn stormvault_backups_list(state: State<AppState>) -> Result<Vec<BackupView>, St
     list_backup_files(&state)
 }
 
-/// Cria um snapshot cifrado AGORA (exige desbloqueado — a chave deriva da
-/// identidade em RAM).
 #[tauri::command]
 async fn stormvault_backup_now(state: State<'_, AppState>) -> Result<BackupView, String> {
     let eng = engine(&state)?;
@@ -4333,13 +3984,11 @@ async fn stormvault_backup_now(state: State<'_, AppState>) -> Result<BackupView,
     })
 }
 
-/// Restaura um snapshot (mescla — nada atual é perdido). Exige desbloqueado.
 #[tauri::command]
 async fn stormvault_backup_restore(
     file: String,
     state: State<'_, AppState>,
 ) -> Result<distorrent_core::stormvault::ImportReport, String> {
-    // sanitiza: basename exato, sem traversal, só o padrão de backup
     let safe = std::path::Path::new(&file)
         .file_name()
         .and_then(|s| s.to_str())
@@ -4384,8 +4033,8 @@ fn stormvault_backup_get_retention(state: State<AppState>) -> Result<i64, String
     Ok(backup_retention_days(&open_store(&state)?))
 }
 
-/// Apaga backups além da retenção (lógica no core — testável).
 fn prune_backups(state: &State<AppState>) -> Result<usize, String> {
+    // Seção 24: store
     let store = open_store(state)?;
     distorrent_core::stormvault::prune_backup_files(
         &backups_dir(state),
@@ -4395,8 +4044,6 @@ fn prune_backups(state: &State<AppState>) -> Result<usize, String> {
     .map_err(err)
 }
 
-/// MODO PÂNICO: apaga identidade, mensagens, contatos, backups e cache DESTE
-/// dispositivo. Exige digitar APAGAR. Sem desfazer.
 #[tauri::command]
 fn vault_wipe(
     app: AppHandle,
@@ -4423,8 +4070,6 @@ fn vault_wipe(
     let _ = std::fs::remove_dir_all(backups_dir(&state));
     let _ = std::fs::remove_dir_all(state.data_dir.join("cache"));
     let _ = state.cache.clear();
-    // .stormvault exportados ficam em Downloads (fora do app_data): o wipe
-    // não apaga arquivo do usuário sem aviso — devolve a lista p/ a UI.
     let mut leftovers = Vec::new();
     if let Ok(base) = export_base_dir(&app) {
         if let Ok(rd) = std::fs::read_dir(&base) {
@@ -4444,29 +4089,19 @@ fn vault_wipe(
 
 #[derive(Debug, Serialize)]
 struct WipeReport {
-    /// .stormvault exportados que SOBREVIVEM em Downloads (a UI orienta a
-    /// apagar manualmente).
     leftovers: Vec<String>,
 }
 
-// ---------------- observabilidade (painel dev) ----------------
-
-/// Snapshot de métricas do motor (só contagens/latências — nada sensível).
 #[tauri::command]
 fn metrics_snapshot() -> serde_json::Value {
     distorrent_core::metrics::metrics().snapshot()
 }
 
-/// RTT estimado (EMA, ms) de um peer — None se ainda sem amostra Ping/Pong.
 #[tauri::command]
 fn peer_rtt(fp: String, state: State<AppState>) -> Result<Option<u64>, String> {
     Ok(engine(&state)?.peer_rtt_ms(fp.trim()))
 }
 
-// ---------------- mensagens: janela (paginação) ----------------
-
-/// Janela de mensagens por timestamp (o caminho da UI; `messages_list` fica
-/// por compat). `before_ts=None` = as mais recentes.
 #[tauri::command]
 fn messages_window(
     conv_id: String,
@@ -4482,8 +4117,6 @@ fn messages_window(
         )
         .map_err(err)
 }
-
-// ---------------- cache LRU de disco ----------------
 
 #[derive(Debug, Serialize)]
 struct CacheStatsView {
@@ -4553,8 +4186,6 @@ fn cache_set_cap(cap_mb: u64, state: State<AppState>) -> Result<(), String> {
     state.cache.set_cap(cap * 1024 * 1024).map_err(err)
 }
 
-// ---------------- segurança de mídia ----------------
-
 #[derive(Debug, Serialize)]
 struct MediaSafetyView {
     strip_exif: bool,
@@ -4569,6 +4200,7 @@ fn media_safety_read(store: &Store) -> MediaSafetyView {
 }
 
 #[tauri::command]
+// Seção 25: media_safety_get
 fn media_safety_get(state: State<AppState>) -> Result<MediaSafetyView, String> {
     Ok(media_safety_read(&open_store(&state)?))
 }
@@ -4592,18 +4224,111 @@ fn media_safety_set(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct RetentionSettings {
+    days: u32,
+    servers: bool,
+    groups: bool,
+    dms: bool,
+}
+
+impl Default for RetentionSettings {
+    fn default() -> Self {
+        Self {
+            days: 30,
+            servers: true,
+            groups: true,
+            dms: false,
+        }
+    }
+}
+
+fn retention_read(store: &Store) -> RetentionSettings {
+    let mut s = RetentionSettings::default();
+    if let Some(v) = store.kv_get("privacy.retention_days") {
+        s.days = v.trim().parse().unwrap_or(s.days);
+    }
+    let flag = |key: &str, default: bool| -> bool {
+        match store.kv_get(key).as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => default,
+        }
+    };
+    s.servers = flag("privacy.retention_servers", s.servers);
+    s.groups = flag("privacy.retention_groups", s.groups);
+    s.dms = flag("privacy.retention_dms", s.dms);
+    s
+}
+
+fn retention_apply(store: &Store) -> Result<usize, String> {
+    let s = retention_read(store);
+    if s.days == 0 || !(s.servers || s.groups || s.dms) {
+        return Ok(0);
+    }
+    let cutoff = distorrent_core::identity::now_ms() - (s.days as i64) * 86_400_000;
+    let mut total = 0usize;
+    loop {
+        let ids = store
+            .expired_message_ids(cutoff, s.servers, s.groups, s.dms, 500)
+            .map_err(err)?;
+        if ids.is_empty() {
+            break;
+        }
+        let n = store.hide_messages_local(&ids).map_err(err)?;
+        total += n;
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+#[tauri::command]
+fn retention_get(state: State<AppState>) -> Result<RetentionSettings, String> {
+    Ok(retention_read(&open_store(&state)?))
+}
+
+#[tauri::command]
+fn retention_set(
+    days: u32,
+    servers: bool,
+    groups: bool,
+    dms: bool,
+    state: State<AppState>,
+) -> Result<RetentionSettings, String> {
+    let store = open_store(&state)?;
+    let days = if days == 0 { 0 } else { days.clamp(1, 3650) };
+    store
+        .kv_set("privacy.retention_days", &days.to_string())
+        .map_err(err)?;
+    store
+        .kv_set("privacy.retention_servers", if servers { "1" } else { "0" })
+        .map_err(err)?;
+    store
+        .kv_set("privacy.retention_groups", if groups { "1" } else { "0" })
+        .map_err(err)?;
+    store
+        .kv_set("privacy.retention_dms", if dms { "1" } else { "0" })
+        .map_err(err)?;
+    retention_apply(&store)?;
+    Ok(retention_read(&store))
+}
+
+#[tauri::command]
+fn retention_run(state: State<AppState>) -> Result<usize, String> {
+    retention_apply(&open_store(&state)?)
+}
+
 fn log_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,distorrent_core=info"))
 }
 
-/// Arquivo de log do app (sem console, o stdout do tracing ia a lugar nenhum;
-/// "tela branca" não tinha diagnóstico). Sem segredos.
 fn log_file_writer() -> Option<std::fs::File> {
     let dir = dirs::data_dir()?.join("com.distorrent.app");
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("distorrent.log");
-    // Rotação simples: acima de 2 MB vira `.1` (uma geração basta p/ relato).
     if let Ok(meta) = std::fs::metadata(&path) {
         if meta.len() > 2 * 1024 * 1024 {
             let _ = std::fs::rename(&path, path.with_extension("log.1"));
@@ -4617,8 +4342,6 @@ fn log_file_writer() -> Option<std::fs::File> {
 }
 
 fn main() {
-    // Logs em ARQUIVO + console (`DISTORRENT_LOG_JSON=1` = JSON). Sem
-    // `boxed()` de propósito: `if/else` com tipo concreto evita a feature.
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     let json = std::env::var("DISTORRENT_LOG_JSON").as_deref() == Ok("1");
@@ -4653,40 +4376,29 @@ fn main() {
                     .json(),
             )
             .try_init(),
-        // Sem arquivo (pasta indisponível): não impede o app de abrir.
         (None, false) => registry
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .try_init(),
     };
+    // Seção 26: _
     let _ = boot;
 
-    // `mut` só é usado no desktop (o autostart é reatribuído); no Android o
-    // bloco `#[cfg(desktop)]` some e o compilador reclamaria de `unused_mut`.
     #[cfg_attr(mobile, allow(unused_mut))]
     let mut builder = tauri::Builder::default();
-    // SINGLE INSTANCE PRIMEIRO (desktop): captura a URL do deep-link e entrega
-    // à 1ª instância (evita 2º motor P2P sobre o mesmo SQLite).
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Traz a janela existente para a frente: quem clicou num convite
-            // espera VER o app.
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
             }
-            // O parsing do argv é feito pelo próprio plugin deep-link — sem
-            // duplicar o parser.
         }));
     }
     builder = builder
         .plugin(downloads_plugin())
         .plugin(tauri_plugin_deep_link::init())
-        // Notificações nativas pelo plugin OFICIAL do Tauri (AUMID do
-        // instalador — nada de janela falsa).
         .plugin(tauri_plugin_notification::init());
-    // Autostart só no desktop; `--minimized` = abrir direto na bandeja.
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_autostart::init(
@@ -4695,21 +4407,6 @@ fn main() {
         ));
     }
     builder
-        // PERMISSÕES DO WEBVIEW — ALLOWLIST, não `Allow` para tudo: um XSS
-        // herdaria todas as permissões do motor. Exceções OBRIGATÓRIAS (testar
-        // nos 3 engines — WebView2, WebKitGTK, Android):
-        // - Microphone/Camera: getUserMedia das chamadas.
-        // - DisplayCapture: kind usado pelo WebKitGTK (no Windows NÃO é emitido).
-        // - Other: no WebView2 a captura de tela chega SEM mapeamento de kind;
-        //   sem permitir o seletor do Windows nem abre. Também absorve kinds
-        //   novos do enum `#[non_exhaustive]`.
-        // - Autoplay: sem gesto, a voz remota da chamada não toca no WebView2.
-        // Todo o resto é Deny (geolocalização, clipboard, MIDI, sensores etc.);
-        // notificações nativas seguem pelo plugin oficial (fora deste handler).
-        // Efeito conhecido: "colar fingerprint" no mobile cai no erro que já
-        // existe (ClipboardRead negado; copiar NÃO passa aqui e funciona).
-        // Linux/WebKitGTK: Deny explícito garante o mesmo resultado nos 3
-        // engines (o default sem handler é DENY). Android: wry cobre mic/câmera.
         .on_permission_request(|_webview, kind| {
             use tauri::webview::{PermissionKind, PermissionResponse};
             match kind {
@@ -4717,8 +4414,6 @@ fn main() {
                 | PermissionKind::Camera
                 | PermissionKind::DisplayCapture
                 | PermissionKind::Autoplay
-                // Other = captura de tela no WebView2 (kind sem mapeamento)
-                // + kinds novos de runtimes futuros.
                 | PermissionKind::Other => PermissionResponse::Allow,
                 _ => PermissionResponse::Deny,
             }
@@ -4791,6 +4486,9 @@ fn main() {
             cache_set_cap,
             media_safety_get,
             media_safety_set,
+            retention_get,
+            retention_set,
+            retention_run,
             secure_store,
             secure_load,
             privacy_get,
@@ -4866,6 +4564,7 @@ fn main() {
             audit_list,
             reputation_get,
             safety_number,
+            // Seção 27: moderate
             moderate,
             report_user,
             validate_name,
@@ -4885,7 +4584,6 @@ fn main() {
             file_request_chunk,
             file_send_chunk,
             save_file,
-            // ---- camada social (paridade Discord) ----
             social_react,
             social_reactions,
             social_reactions_bulk,
@@ -4937,7 +4635,6 @@ fn main() {
             emoji_delete,
             bookmark_set,
             bookmark_list,
-            // ---- segundo plano (bandeja / autostart / notificações) ----
             background_prefs_get,
             background_prefs_set,
             autostart_get,
@@ -4958,8 +4655,6 @@ fn main() {
             call_ring_start,
             call_ring_stop,
         ])
-        // FECHAR A JANELA ≠ ENCERRAR O APP: com fechar-para-bandeja, o X
-        // esconde e o processo segue vivo; "Sair" marca `quitting` e encerra.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 #[cfg(desktop)]
@@ -4971,8 +4666,6 @@ fn main() {
                         if hide {
                             api.prevent_close();
                             let _ = window.hide();
-                            // A UI precisa saber que saiu da tela: só assim a
-                            // presença cai para "ausente" de verdade.
                             background::emit_hidden(app);
                         }
                     }
@@ -4990,10 +4683,8 @@ fn main() {
                 .unwrap_or_else(|_| PathBuf::from("."));
             std::fs::create_dir_all(&dir).ok();
             tracing::info!(?dir, "DisTorrent iniciando");
-            // Cache fontconfig privado (imune ao ~/.cache/fontconfig envenenado).
             #[cfg(target_os = "linux")]
             isolate_fontconfig_cache_managed(&dir);
-            // Cache LRU de disco (avatares/thumbnails/spool) — teto em kv.
             let cap_mb: u64 = Store::open(&dir.join("distorrent.db"))
                 .ok()
                 .and_then(|s| s.kv_get("cache.cap_mb"))
@@ -5010,25 +4701,16 @@ fn main() {
                 data_dir: dir.clone(),
                 unlocked: Mutex::new(false),
                 cache,
-                // 3 tentativas em 15 min, bloqueio de 60s dobrando a cada
-                // reincidência (ver authlimit.rs no core).
                 auth_limit: distorrent_core::authlimit::AuthLimiter::new(),
             });
-            // Segundo plano DEPOIS do AppState: a bandeja lê preferências do kv.
             app.manage(background::Background::new());
             background::init(app.handle());
-            // Pré-aquece o SQLite enquanto a WebView sobe (o primeiro comando
-            // `identity_get` abre este mesmo arquivo — disco frio travava o boot).
             {
                 let warm = dir.join("distorrent.db");
                 std::thread::spawn(move || {
                     let _ = Store::open(&warm);
                 });
             }
-            // REGISTRO DO ESQUEMA DE CONVITE (desktop): sem bundler/`.desktop`
-            // declarando MimeType, clicar no convite dava "nenhum aplicativo
-            // associado". `register_all()` é idempotente; falha não derruba o
-            // boot (convite por token é o fallback obrigatório).
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -5036,10 +4718,6 @@ fn main() {
                     eprintln!("deep-link: não consegui registrar o esquema distorrent:// ({e}) — o convite por token continua funcionando");
                 }
             }
-            // Liga o WebRTC no WebKitGTK — TEM que ser NESTE closure: um
-            // segundo `.setup()` SOBRESCREVE o anterior no Tauri (AppState
-            // nunca seria registrado e todo comando morria com
-            // "state not managed").
             enable_webrtc(app.handle());
             Ok(())
         })
@@ -5047,11 +4725,7 @@ fn main() {
         .expect("erro ao rodar distorrent");
 }
 
-/// LIGA O WEBRTC NO WEBCOMPATÍVEL DO LINUX.
-///
-/// BUG: `RTCPeerConnection` era `undefined` — no WebKitGTK o WebRTC existe
-/// mas vem DESLIGADO por padrão, e o wry esqueceu o `enable_webrtc`. Ligamos
-/// direto no `WebKitSettings` via `WebViewExt` (mesma versão do wry).
+// Seção 28: cfg
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",
@@ -5065,13 +4739,10 @@ fn enable_webrtc(app: &tauri::AppHandle) {
         return;
     };
     let _ = win.with_webview(move |wv| {
-        // `PlatformWebview` é wrapper; `inner()` devolve o `webkit2gtk::WebView`.
         let inner = wv.inner();
         match inner.settings() {
             Some(settings) => {
                 settings.set_enable_webrtc(true);
-                // Console do JS -> stderr: sem isto, erro de CSP/asset/exceção
-                // na UI ficava INVISÍVEL (janela cinza sem explicação).
                 settings.set_enable_write_console_messages_to_stdout(true);
                 eprintln!("[distorrent] WebKitGTK: enable_webrtc = LIGADO");
             }
@@ -5080,7 +4751,6 @@ fn enable_webrtc(app: &tauri::AppHandle) {
     });
 }
 
-/// No Android/macOS/Windows o WebRTC já vem no WebView do sistema. Nada a fazer.
 #[cfg(not(any(
     target_os = "linux",
     target_os = "freebsd",
@@ -5091,25 +4761,17 @@ fn enable_webrtc(_app: &tauri::AppHandle) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run_mobile() {
-    // Android: DHT mainline BitTorrent LIGADA (paridade com desktop).
-    // Sem isto o celular nunca anuncia/faz lookup na rede BitTorrent.
     std::env::set_var("DISTORRENT_DHT", "1");
     main();
 }
 
-/// Entrada desktop — main.rs chama isto. Mesma app do mobile, sem duplicação.
 pub fn run() {
-    // PRODUÇÃO: DHT mainline ligada (descoberta descentralizada); testes não
-    // setam e ficam isolados da rede BitTorrent.
     std::env::set_var("DISTORRENT_DHT", "1");
     #[cfg(target_os = "linux")]
     isolate_fontconfig_cache_best_effort();
     main();
 }
 
-/// Cache fontconfig PRIVADO (Linux): cache compartilhado envenenado trava o
-/// `WebKitWebProcess` antes do paint (janela cinza). `FONTCONFIG_FILE` próprio
-/// com `<cachedir>` privado; respeita `FONTCONFIG_FILE` pré-existente.
 #[cfg(target_os = "linux")]
 fn isolate_fontconfig_cache_best_effort() {
     if std::env::var_os("FONTCONFIG_FILE").is_some() {
@@ -5121,7 +4783,6 @@ fn isolate_fontconfig_cache_best_effort() {
     isolate_fontconfig_cache(&data_dir);
 }
 
-/// Idem, com o data_dir autoritativo do Tauri (dentro do setup).
 #[cfg(target_os = "linux")]
 fn isolate_fontconfig_cache_managed(data_dir: &std::path::Path) {
     if std::env::var_os("FONTCONFIG_FILE").is_some() {
@@ -5152,16 +4813,13 @@ fn isolate_fontconfig_cache(data_dir: &std::path::Path) {
     );
 }
 
-// ============================== TESTES ==============================
 #[cfg(test)]
 mod tests {
     use super::decode_b64_batches;
     use base64::{engine::general_purpose, Engine as _};
 
-    /// Regressão do download preso em 0%: lotes concatenados tinham `==` no meio.
     #[test]
     fn decodifica_lotes_concatenados_com_padding_no_meio() {
-        // 262144 % 3 == 1 -> base64 de cada bloco termina em "=="
         let bloco = vec![0xA5u8; 262_144];
         let um = general_purpose::STANDARD.encode(&bloco);
         assert!(
@@ -5169,7 +4827,6 @@ mod tests {
             "premissa do bug: bloco termina em padding"
         );
         let concatenado = format!("{um}{um}{um}");
-        // A decodificação direta falha — é exatamente o que acontecia.
         assert!(general_purpose::STANDARD.decode(&concatenado).is_err());
 
         let out = decode_b64_batches(&concatenado).expect("lote concatenado deve decodificar");
@@ -5184,7 +4841,6 @@ mod tests {
         assert_eq!(out, b"hello");
     }
 
-    /// Um lote corrompido precisa virar erro, não bytes truncados.
     #[test]
     fn rejeita_lote_corrompido() {
         assert!(decode_b64_batches("aGVsbG8=".to_string().as_str()).is_ok());

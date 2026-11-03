@@ -1,7 +1,3 @@
-// Modo navegador (npm run dev sem Tauri): 100% funcional localmente —
-// identidade ed25519 real, DM/canal em localStorage, presença por heartbeat
-// e eventos fiéis ao core. Online = heartbeat recente, sem peers fake.
-
 import type {
   AuditEntry,
   Conversation,
@@ -32,7 +28,6 @@ import type {
 import { validateNameLocal, randomNameLocal } from '../core/security/names'
 import { createIdentity, type UserIdentity } from '../core/identity/identity'
 import { LocalDriver } from '../core/storage/localDriver'
-// Versão real do package.json (antes hardcodava '0.2.0-web' e a tela Sobre mentia).
 import { version as APP_VERSION } from '../../package.json'
 import { profileContentHash } from './profileRevision'
 import { SessionDriver } from '../core/storage/sessionDriver'
@@ -42,7 +37,6 @@ import { WEB_KEYS, readList, writeJson, writeString } from './browserStore'
 
 const sharedDriver = new LocalDriver()
 const identityDriver = new SessionDriver()
-// migração: se já existe identidade em localStorage (antigo) e não em sessionStorage, copia
 try {
   const oldId = sharedDriver.get<UserIdentity>('identity')
   const sessId = identityDriver.get<UserIdentity>('identity')
@@ -53,9 +47,8 @@ try {
       identityDriver.set('identity:priv', oldPriv)
     }
   }
-} catch { /* ignore */ }
+} catch {  }
 const store = new IdentityStore(identityDriver)
-// driver alias para compatibilidade legada (usado em helpers antigos) — aponta para sharedDriver
 const driver = sharedDriver
 
 function nsKey(base: string): string {
@@ -63,21 +56,17 @@ function nsKey(base: string): string {
   return fp ? `${base}:${fp}` : base
 }
 
-// helpers com namespace por fingerprint + migração de chaves antigas (sem namespace e double prefix)
 function getNamespaced<T>(base: string, fallbackKeys: string[] = []): T | null {
   const ns = nsKey(base)
   let v = sharedDriver.get<T>(ns)
   if (v !== null) return v
   for (const k of fallbackKeys) {
     try {
-      // tenta via sharedDriver com chave direta (ex: 'friends:pending_in')
       v = sharedDriver.get<T>(k)
       if (v !== null) {
-        // migra para namespaced
         sharedDriver.set(ns, v)
         return v
       }
-      // tenta double prefix legado 'distorrent:distorrent:...' via localStorage direto
       const doubleKey = `distorrent:distorrent:${k}`
       const raw = localStorage.getItem(doubleKey)
       if (raw) {
@@ -92,7 +81,7 @@ function getNamespaced<T>(base: string, fallbackKeys: string[] = []): T | null {
         sharedDriver.set(ns, parsed)
         return parsed
       }
-    } catch { /* ignore */ }
+    } catch {  }
   }
   return null
 }
@@ -116,7 +105,6 @@ function writeMsgs(list: StoredMessage[]) {
   setNamespaced(MSG_BASE, list)
 }
 
-// friends helpers namespaced
 function getFriends(status: string): FriendView[] {
   return getNamespaced<FriendView[]>(`friends:${status}`, [`friends:${status}`, `distorrent:friends:${status}`]) ?? []
 }
@@ -124,38 +112,31 @@ function setFriends(status: string, list: FriendView[]): void {
   setNamespaced(`friends:${status}`, list)
 }
 
-// ---------- Event bus + BroadcastChannel ----------
 type CB = (ev: EngineEvent) => void
 const listeners = new Set<CB>()
-// Dedupe: evento já entregue via `listeners` não re-entrega via window bus.
 const viaListeners = new WeakSet<object>()
 let bc: BroadcastChannel | null = null
-/** Salas de chamada desta aba (modo navegador não tem motor). */
 const roomsInBrowser = new Map<string, { call_id: string; conv_id: string; kind: string; state: string; participants: string[]; host_fp: string }>()
 try {
   if (typeof BroadcastChannel !== 'undefined') {
     bc = new BroadcastChannel('distorrent-bus-v2')
     bc.onmessage = (ev) => {
       const data = ev.data as EngineEvent
-      // entrega local sem re-broadcast
       for (const cb of listeners) {
-        try { cb(data) } catch { /* ignore */ }
+        try { cb(data) } catch {  }
       }
       viaListeners.add(data)
-      // também dispara window event para fileSwarm/voice compat
-      try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: data })) } catch { /* ignore */ }
-      // mensagens cross-tab: persistência já compartilhada via localStorage,
-      // mas para DM com direction invertida, tratamos aqui
+      try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: data })) } catch {  }
       handleIncomingBroadcast(data)
     }
   }
 } catch { bc = null }
 
 function emit(ev: EngineEvent) {
-  for (const cb of listeners) try { cb(ev) } catch { /* ignore */ }
+  for (const cb of listeners) try { cb(ev) } catch {  }
   viaListeners.add(ev)
-  try { bc?.postMessage(ev) } catch { /* ignore */ }
-  try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: ev })) } catch { /* ignore */ }
+  try { bc?.postMessage(ev) } catch {  }
+  try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: ev })) } catch {  }
 }
 
 function isChannelMessageId(convId: string): boolean {
@@ -170,24 +151,23 @@ function isChannelMessageId(convId: string): boolean {
         if (arr.some((x) => x.id === convId)) return true
       }
     }
-  } catch { /* ignore */ }
+  } catch {  }
   return false
 }
 
 function handleIncomingBroadcast(ev: EngineEvent) {
-  // amizade: pedido chegando de outra aba → vira pending_in REAL nesta aba
   if ((ev as any).type === 'friend_request_in') {
     const { fp, nickname } = ev as any
+    // Seção 1: me
     const me = store.load()
     if (!me || !fp || fp === me.fingerprint) return
     const pendingIn = getFriends('pending_in')
     if (pendingIn.some(f => f.fp === fp)) return
     setFriends('pending_in', [...pendingIn, { fp, nickname: nickname || fp.slice(0, 8), addr: 'local', pubkey_hex: '', last_seen: Date.now() }])
-    for (const cb of listeners) try { cb({ type: 'friend_request_in', fp, nickname } as any) } catch { /* ignore */ }
+    for (const cb of listeners) try { cb({ type: 'friend_request_in', fp, nickname } as any) } catch {  }
   }
-  // amizade: a outra aba ACEITOU meu pedido → pending_out vira accepted + DM criada
   if ((ev as any).type === 'friend_accepted') {
-    const { fp, nickname } = ev as any // fp = quem aceitou
+    const { fp, nickname } = ev as any
     const me = store.load()
     if (!me || !fp || fp === me.fingerprint) return
     const pendingOut = getFriends('pending_out')
@@ -201,45 +181,34 @@ function handleIncomingBroadcast(ev: EngineEvent) {
       if (!convs.some(c => c.peer_fp === fp)) {
         writeConvos([{ id: 'local-' + fp.slice(0, 8), kind: 'dm', title: nickname || fp.slice(0, 8), peer_fp: fp, created_at: Date.now() }, ...convs])
       }
-      for (const cb of listeners) try { cb({ type: 'friend_accepted', fp, nickname } as any) } catch { /* ignore */ }
+      for (const cb of listeners) try { cb({ type: 'friend_accepted', fp, nickname } as any) } catch {  }
     }
   }
-  // Quando outra aba envia message_new, a aba receptora deve armazenar a cópia com direction='in' se for para ela
   if ((ev as any).type === 'message_new') {
     const m = ev as unknown as StoredMessage & { type: 'message_new' }
-    // ignora mensagens de canal — já tratadas via channel_message_new
     if (m.conv_id && isChannelMessageId(m.conv_id)) return
     const me = store.load()
     if (!me) return
-    if (typeof m.author_fp !== 'string' || typeof m.id !== 'string') return // evento corrompido: ignora
-    // se a mensagem é de outro autor e a conversa é comigo (conv contém meu fp ou peer_fp = meu fp)
-    // No browser, conv.id = 'local-' + peerFp.slice(0,8). Então verificamos peer_fp
+    if (typeof m.author_fp !== 'string' || typeof m.id !== 'string') return
     const isForMe = m.author_fp !== me.fingerprint
     if (!isForMe) return
-    // verifica se já temos essa mensagem (dedupe por id)
     const all = readMsgs()
     if (all.some(x => x.id === m.id)) return
-    // determina conv correspondente no receptor: precisa existir conv com peer = author
     const convs = readConvos()
     let targetConv = convs.find(c => c.peer_fp === m.author_fp)
     if (!targetConv) {
-      // cria conversa automaticamente se for amigo aceito ou mensagem espontânea
       const title = m.author_fp.slice(0, 8)
       targetConv = { id: `local-${m.author_fp.slice(0, 8)}`, kind: 'dm', title, peer_fp: m.author_fp, created_at: Date.now() }
       writeConvos([targetConv, ...convs])
       emit({ type: 'peer_discovered', fp: m.author_fp, nickname: title, addr: 'local' })
     }
     const inbound: StoredMessage = { ...m, conv_id: targetConv.id, direction: 'in', status: 'ok' }
-    // garante conv_id consistente com o receptor
     writeMsgs([...all, inbound])
-    // entrega local sem loop de broadcast — marca viaListeners p/ não duplicar no window
     const inboundEv: any = { ...inbound, type: 'message_new' }
-    for (const cb of listeners) try { cb(inboundEv) } catch { /* ignore */ }
+    for (const cb of listeners) try { cb(inboundEv) } catch {  }
     viaListeners.add(inboundEv)
-    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: inboundEv })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: inboundEv })) } catch {  }
   }
-  // grupo: a aba criadora persiste a conversa no PRÓPRIO namespace (por fp) e
-  // anuncia via group_synced — o receptor cria o espelho no namespace dele.
   if ((ev as any).type === 'group_synced') {
     const { conv_id, title } = ev as any
     if (!conv_id) return
@@ -254,29 +223,27 @@ function handleIncomingBroadcast(ev: EngineEvent) {
       writeConvos([{ id: conv_id, kind: 'group', title: title || 'Grupo', peer_fp: '', created_at: Date.now() }, ...convs])
     }
     const gsEv: any = { type: 'group_synced', conv_id, title: title || 'Grupo' }
-    for (const cb of listeners) try { cb(gsEv) } catch { /* ignore */ }
+    for (const cb of listeners) try { cb(gsEv) } catch {  }
     viaListeners.add(gsEv)
-    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: gsEv })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: gsEv })) } catch {  }
   }
-  // canal: replica channel message para outras abas se ainda não tiver
   if ((ev as any).type === 'channel_message_new') {
     const { channelId, msg } = ev as any
     void channelId
     const m = (msg ?? {}) as Partial<StoredMessage>
-    if (typeof m.id !== 'string' || typeof m.author_fp !== 'string') return // evento corrompido: ignora sem quebrar o bus
+    if (typeof m.id !== 'string' || typeof m.author_fp !== 'string') return
     const all = readMsgs()
     if (all.some(x => x.id === m.id)) return
     const me = store.load()
     const cloned: StoredMessage = { ...(msg as StoredMessage), direction: (msg as StoredMessage).author_fp === me?.fingerprint ? 'out' : 'in' } as any
     writeMsgs([...all, cloned])
     const chEv: any = { ...cloned, type: 'message_new' }
-    for (const cb of listeners) try { cb(chEv) } catch { /* ignore */ }
+    for (const cb of listeners) try { cb(chEv) } catch {  }
     viaListeners.add(chEv)
-    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: chEv })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: chEv })) } catch {  }
   }
 }
 
-// ---------- Presença (heartbeat) ----------
 const PRESENCE_PREFIX = 'distorrent:presence:'
 const PRESENCE_TTL_MS = 30000
 let heartbeatTimer: number | null = null
@@ -287,8 +254,8 @@ function touchPresence() {
   const me = store.load()
   if (!me) return
   const payload = { fp: me.fingerprint, nickname: me.nickname, pubkey_hex: me.pubkey_hex, ts: Date.now() }
-  try { localStorage.setItem(presenceKey(me.fingerprint), JSON.stringify(payload)) } catch { /* ignore */ }
-  try { localStorage.setItem('distorrent:presence:heartbeat', String(Date.now())) } catch { /* ignore */ }
+  try { localStorage.setItem(presenceKey(me.fingerprint), JSON.stringify(payload)) } catch {  }
+  try { localStorage.setItem('distorrent:presence:heartbeat', String(Date.now())) } catch {  }
   try {
     const all = loadAll<PresenceView>(PRESENCE_BASE)
     const current = all[me.fingerprint]
@@ -296,7 +263,7 @@ function touchPresence() {
       all[me.fingerprint] = { ...current, updated_at: Date.now() }
       saveAll(PRESENCE_BASE, all)
     }
-  } catch { /* ignore: presença continua melhor esforço */ }
+  } catch {  }
 }
 
 function getPresenceMap(): Map<string, { fp: string; nickname: string; pubkey_hex: string; ts: number }> {
@@ -308,9 +275,9 @@ function getPresenceMap(): Map<string, { fp: string; nickname: string; pubkey_he
       try {
         const v = JSON.parse(localStorage.getItem(k) ?? '')
         if (v?.fp && typeof v.ts === 'number') map.set(v.fp, v)
-      } catch { /* ignore */ }
+      } catch {  }
     }
-  } catch { /* ignore */ }
+  } catch {  }
   return map
 }
 
@@ -325,30 +292,27 @@ function ensureHeartbeat() {
   touchPresence()
   heartbeatTimer = window.setInterval(() => {
     if (!store.load()) {
-      // identidade removida — para heartbeat
       stopHeartbeat()
       return
     }
     touchPresence()
     flushPendingFriendRequests()
-    // limpa presenças expiradas e notifica peer_offline se necessário
     const now = Date.now()
     const map = getPresenceMap()
     for (const [fp, v] of map) {
       if (now - v.ts > PRESENCE_TTL_MS + 5000) {
-        try { localStorage.removeItem(presenceKey(fp)) } catch { /* ignore */ }
+        try { localStorage.removeItem(presenceKey(fp)) } catch {  }
         emit({ type: 'peer_offline', fp })
         emit({ type: 'state_changed', state: 'DISCONNECTED', online_peers: onlineCount() })
       }
     }
   }, 2000) as unknown as number
-  // marca online imediatamente
   window.addEventListener('beforeunload', onBeforeUnload)
 }
 
 function onBeforeUnload() {
   const me = store.load()
-  if (me) try { localStorage.removeItem(presenceKey(me.fingerprint)) } catch { /* ignore */ }
+  if (me) try { localStorage.removeItem(presenceKey(me.fingerprint)) } catch {  }
 }
 
 export function stopHeartbeat() {
@@ -359,6 +323,7 @@ export function stopHeartbeat() {
   window.removeEventListener('beforeunload', onBeforeUnload)
 }
 
+// Seção 2: onlineCount
 function onlineCount(): number {
   const me = store.load()
   const map = getPresenceMap()
@@ -367,16 +332,11 @@ function onlineCount(): number {
   return c
 }
 
-// inicia heartbeat se já houver identidade carregada
-try { if (store.load()) ensureHeartbeat() } catch { /* ignore */ }
+try { if (store.load()) ensureHeartbeat() } catch {  }
 
-// Escuta storage events para sincronizar presença e mensagens entre abas sem BroadcastChannel
-// Handlers nomeados + teardown explícito: evita duplicar listeners em HMR/StrictMode
-// (listeners anônimos sem cleanup causavam flicker ONLINE/OFFLINE por emit duplicado).
 function onBrowserStorageEvent(e: StorageEvent) {
   if (!e.key) return
   if (e.key.startsWith(PRESENCE_PREFIX)) {
-    // presença mudou
     const fp = e.key.slice(PRESENCE_PREFIX.length)
     if (e.newValue) {
       try {
@@ -384,23 +344,18 @@ function onBrowserStorageEvent(e: StorageEvent) {
         emit({ type: 'peer_online', fp, nickname: v?.nickname ?? fp.slice(0, 8) })
         emit({ type: 'peer_discovered', fp, nickname: v?.nickname ?? fp.slice(0, 8), addr: 'local' })
         flushPendingFriendRequests()
-      } catch { /* ignore */ }
+      } catch {  }
     } else {
       emit({ type: 'peer_offline', fp })
     }
     emit({ type: 'state_changed', state: store.load() ? 'CONNECTED' : 'DISCONNECTED', online_peers: onlineCount() })
   }
-  if (e.key === 'distorrent:messages' || e.key === 'distorrent:conversations') {
-    // outra aba escreveu mensagens/conversas — notifica listeners para refresh
-    // não faz broadcast adicional, apenas sinaliza
-  }
 }
 
-function onLegacyFriendRequest() { /* mantém compat */ }
+function onLegacyFriendRequest() {  }
 
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', onBrowserStorageEvent)
-  // fallback BroadcastChannel via CustomEvent 'distorrent:friend_request' legado
   window.addEventListener('distorrent:friend_request' as any, onLegacyFriendRequest as EventListener)
 }
 
@@ -410,26 +365,23 @@ export function disposeBrowserGlobalListeners() {
   window.removeEventListener('distorrent:friend_request' as any, onLegacyFriendRequest as EventListener)
 }
 
-// HMR (Vite): descarrega listeners globais no hot-reload para não duplicar emits.
 try {
   const hot = (import.meta as any)?.hot
   if (hot?.dispose) hot.dispose(() => disposeBrowserGlobalListeners())
-} catch { /* ignore */ }
+} catch {  }
 
-// reenvia pedidos pendentes cujo peer ficou online
 function flushPendingFriendRequests() {
   const pendingOut = getFriends('pending_out')
   const me = store.load()
   if (!me || pendingOut.length === 0) return
   for (const p of pendingOut) {
     if (isOnline(p.fp)) {
-      try { bc?.postMessage({ type: 'friend_request_in', fp: me.fingerprint, nickname: me.nickname }) } catch { /* ignore */ }
+      try { bc?.postMessage({ type: 'friend_request_in', fp: me.fingerprint, nickname: me.nickname }) } catch {  }
       emit({ type: 'peer_discovered' as any, fp: p.fp, nickname: p.nickname, addr: 'local' } as any)
     }
   }
 }
 
-// ---------- Helpers mensagem ----------
 function genMsgId(): string {
   return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 }
@@ -438,12 +390,6 @@ function pushMessageDirect(msg: StoredMessage) {
   const all = readMsgs()
   writeMsgs([...all, msg])
 }
-
-// ---------- Implementação DisTorrentServices ----------
-
-// =====================================================================
-// CAMADA SOCIAL v3 — implementação local, mesmo contrato observável do nativo.
-// =====================================================================
 
 const RX_BASE = 'social:reactions'
 const META_BASE = 'social:meta'
@@ -466,7 +412,6 @@ function saveAll<T>(base: string, all: Record<string, T>) {
 function meFp(): string {
   return store.load()?.fingerprint ?? ''
 }
-
 
 function blankMeta(msgId: string, convId: string): MsgMetaView {
   return { msg_id: msgId, conv_id: convId, reply_to: '', forwarded_from: '', edited_body: '', edited_at: 0, deleted: false, pinned: false, pinned_by: '', pinned_at: 0, mentioned: false }
@@ -498,7 +443,6 @@ export const browserServices: DisTorrentServices = {
   vaultUnlock: () =>
     Promise.reject(new Error('cofre disponível no app nativo')),
 
-  // No browser o IP de LAN não é descobrível com segurança; `lan: null` é honesto.
   localAddresses: (port) => {
     const p = port ?? (Number(window.location.port) || 5173)
     return Promise.resolve({
@@ -536,7 +480,6 @@ export const browserServices: DisTorrentServices = {
     const pendingIn = getFriends('pending_in')
     const out: PeerView[] = []
 
-    // 1) Amigos aceitos → estado baseado em presença real
     for (const f of accepted) {
       const pres = presence.get(f.fp)
       const online = pres ? Date.now() - pres.ts < PRESENCE_TTL_MS : false
@@ -550,16 +493,11 @@ export const browserServices: DisTorrentServices = {
         state: online ? 'CONNECTED' : 'DISCONNECTED',
       })
     }
-    // 2) Pendentes inbound também aparecem como peers descobertos (para UI de solicitações)
-    // não adiciona como peer full, mas garante que peersList contenha descoberta para badge
-    // 3) Descobertos via presença que não são amigos → mostra como peer descoberto (permite adicionar)
     for (const [fp, pres] of presence) {
       if (me && fp === me.fingerprint) continue
       if (out.some(p => p.fp === fp)) continue
-      // se já é amigo (accepted) já coberto; se não, cria peer descoberto
       const alreadyPending = pendingIn.some(f => f.fp === fp)
-      if (alreadyPending) continue // já está em pending_in, não precisa duplicar
-      // só adiciona se foi visto recentemente
+      if (alreadyPending) continue
       if (Date.now() - pres.ts < PRESENCE_TTL_MS) {
         out.push({
           fp,
@@ -572,7 +510,6 @@ export const browserServices: DisTorrentServices = {
         })
       }
     }
-    // ordena: online primeiro, depois alfabético
     out.sort((a, b) => {
       if (a.state !== b.state) return a.state === 'CONNECTED' ? -1 : 1
       return a.nickname.localeCompare(b.nickname)
@@ -587,7 +524,6 @@ export const browserServices: DisTorrentServices = {
 
   friendsList: (status) => {
     if (!status || status === 'all') {
-      // retorna todos juntos (raramente usado) — concatena
       const all = [...getFriends('accepted'), ...getFriends('pending_in'), ...getFriends('pending_out'), ...getFriends('blocked')]
       return Promise.resolve(all)
     }
@@ -595,6 +531,7 @@ export const browserServices: DisTorrentServices = {
   },
 
   friendRequest: (peerFp) => {
+    // Seção 3: fp
     const fp = peerFp.trim().toLowerCase()
     if (!fp) return Promise.reject(new Error('fingerprint vazio'))
     if (fp.length < 6) return Promise.reject(new Error('fingerprint muito curto'))
@@ -606,13 +543,9 @@ export const browserServices: DisTorrentServices = {
     if (accepted.some(f => f.fp === fp)) return Promise.reject(new Error('já são amigos'))
     const entry: FriendView = { fp, nickname: fp.slice(0, 8), addr: null, pubkey_hex: '', last_seen: Date.now() }
     setFriends('pending_out', [...pendingOut, entry])
-    // SEMPRE broadcast — se a outra aba/device estiver aberta no mesmo domínio via BroadcastChannel,
-    // ela recebe mesmo que isOnline ainda false (race de presença). O isOnline decide o outcome honesto.
-    try { bc?.postMessage({ type: 'friend_request_in', fp: me?.fingerprint ?? 'local', nickname: me?.nickname ?? 'alguém' }) } catch { /* ignore */ }
-    // também emite local para o listener de handleIncomingBroadcast criar pending_in no receptor
-    // (em multi-tab o bc já entrega; emit aqui garante que sender também veja peer_discovered)
+    try { bc?.postMessage({ type: 'friend_request_in', fp: me?.fingerprint ?? 'local', nickname: me?.nickname ?? 'alguém' }) } catch {  }
     emit({ type: 'peer_discovered', fp, nickname: entry.nickname, addr: 'local' } as any)
-    try { window.dispatchEvent(new CustomEvent('distorrent:friend_request', { detail: entry })) } catch { /* ignore */ }
+    try { window.dispatchEvent(new CustomEvent('distorrent:friend_request', { detail: entry })) } catch {  }
     const outcome = isOnline(fp) ? 'sent' : 'queued_offline'
     return Promise.resolve(outcome as any)
   },
@@ -622,27 +555,23 @@ export const browserServices: DisTorrentServices = {
     const acc = getFriends('accepted')
     if (accept) {
       const found = pendingIn.find(f => f.fp === peerFp)
-      // fallback: se não achou no pending_in mas é resposta a um peer descoberto, cria entry
       const entry = found ?? { fp: peerFp, nickname: peerFp.slice(0, 8), addr: 'local', pubkey_hex: '', last_seen: Date.now() }
       setFriends('pending_in', pendingIn.filter(f => f.fp !== peerFp))
       if (!acc.some(f => f.fp === peerFp)) {
         setFriends('accepted', [...acc, { ...entry, last_seen: Date.now() }])
       }
-      // cria conversa DM automaticamente
       const convs = readConvos()
       if (!convs.some(c => c.peer_fp === peerFp)) {
         const conv: Conversation = { id: 'local-' + peerFp.slice(0, 8), kind: 'dm', title: entry.nickname || peerFp, peer_fp: peerFp, created_at: Date.now() }
         writeConvos([conv, ...convs])
       }
-      // também remove de pending_out se existia (caso de aceitação mútua local)
       const pendingOut = getFriends('pending_out')
       if (pendingOut.some(f => f.fp === peerFp)) {
         setFriends('pending_out', pendingOut.filter(f => f.fp !== peerFp))
       }
       emit({ type: 'friend_accepted', fp: peerFp, nickname: entry.nickname })
       emit({ type: 'state_changed', state: 'CONNECTED', online_peers: onlineCount() })
-      // notifica outra aba via BC que foi aceito
-      try { bc?.postMessage({ type: 'friend_accepted', fp: store.load()?.fingerprint ?? 'local', nickname: store.load()?.nickname ?? 'alguém' }) } catch { /* ignore */ }
+      try { bc?.postMessage({ type: 'friend_accepted', fp: store.load()?.fingerprint ?? 'local', nickname: store.load()?.nickname ?? 'alguém' }) } catch {  }
     } else {
       setFriends('pending_in', pendingIn.filter(f => f.fp !== peerFp))
       emit({ type: 'friend_removed', fp: peerFp })
@@ -653,7 +582,6 @@ export const browserServices: DisTorrentServices = {
   friendRemove: (peerFp) => {
     const acc = getFriends('accepted')
     setFriends('accepted', acc.filter(f => f.fp !== peerFp))
-    // também limpa pendentes (cancelamento de ENVIADAS)
     const pendingOut = getFriends('pending_out')
     if (pendingOut.some(f => f.fp === peerFp)) setFriends('pending_out', pendingOut.filter(f => f.fp !== peerFp))
     const pendingIn = getFriends('pending_in')
@@ -687,7 +615,6 @@ export const browserServices: DisTorrentServices = {
   createCommunity: (name, channels, opts) => {
     const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const cid = `local-${Math.random().toString(36).slice(2, 10)}`
-    // wizard: canais com tipo/categoria quando opts.channelsMeta veio; senão CSV simples (compat)
     const seeds: { name: string; kind: 'text' | 'voice' | 'video'; category: string }[] = opts?.channelsMeta?.length
       ? opts.channelsMeta
       : (channels.length ? channels : ['geral']).map(c => ({ name: c, kind: 'text' as const, category: 'CANAIS DE TEXTO' }))
@@ -701,12 +628,9 @@ export const browserServices: DisTorrentServices = {
     }
     list.push(cv)
     writeJson(WEB_KEYS.communities, list)
-    // materializa canais com kind/categoria para o sidebar/voice funcionarem.
-    // Reaproveita o MESMO id da tupla acima, senão o canal aparece duplicado.
     seeds.forEach((c, i) => {
       LX.createLocalChannel(cid, c.name, { kind: c.kind, category: c.category, id: chanTuples[i][0] })
     })
-    // cargos do wizard (presets admin/mod/membro) + regras + meta
     for (const r of opts?.roles ?? []) LX.createLocalRole(cid, r)
     LX.saveCommunityMeta(cid, { description: opts?.description, category: opts?.category, icon: opts?.icon })
     if (opts?.rulesText) {
@@ -714,7 +638,7 @@ export const browserServices: DisTorrentServices = {
       writeString(WEB_KEYS.rulesText(cid), opts.rulesText)
     }
     emit({ type: 'community_joined', community_id: cid, name } as any)
-    try { bc?.postMessage({ type: 'community_joined', community_id: cid, name }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'community_joined', community_id: cid, name }) } catch {  }
     return Promise.resolve(cid)
   },
 
@@ -742,7 +666,7 @@ export const browserServices: DisTorrentServices = {
     list[idx] = { ...list[idx], name: trimmed }
     writeJson(WEB_KEYS.communities, list)
     emit({ type: 'community_joined', community_id: communityId, name: trimmed } as any)
-    try { bc?.postMessage({ type: 'community_joined', community_id: communityId, name: trimmed }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'community_joined', community_id: communityId, name: trimmed }) } catch {  }
     return Promise.resolve()
   },
 
@@ -758,7 +682,6 @@ export const browserServices: DisTorrentServices = {
     })
   },
 
-  // Modo navegador: sem rede, o único estado honesto é "eu conectado".
   communityMembers: (cid) => {
     const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     const me = store.load()
@@ -776,9 +699,9 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve(out)
   },
   joinCommunity: (rawToken) => {
+    // Seção 4: token
     let token = rawToken.trim()
     try {
-      // Aceita tanto o token cru quanto o link copiado da interface.
       if (token.includes('://') || token.startsWith('/')) {
         const u = new URL(token.startsWith('/') ? `${window.location.origin}${token}` : token)
         token = u.searchParams.get('invite') || u.searchParams.get('token') ||
@@ -791,8 +714,6 @@ export const browserServices: DisTorrentServices = {
     const m = token.match(/^local-invite:([^:]+):/)
     if (!m) return Promise.reject(new Error('token inválido'))
     const cid = m[1]
-    // modo navegador (dev local, sem rede): cria o espelho local do servidor
-    // para o fluxo de convite funcionar 100% dentro do escopo local honesto
     const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
     if (!list.some(c => c.id === cid)) {
       const me = store.load()
@@ -807,7 +728,7 @@ export const browserServices: DisTorrentServices = {
       list.push(cv)
       writeJson(WEB_KEYS.communities, list)
       emit({ type: 'community_joined', community_id: cid, name: cv.name } as any)
-      try { bc?.postMessage({ type: 'community_joined', community_id: cid, name: cv.name }) } catch { /* ignore */ }
+      try { bc?.postMessage({ type: 'community_joined', community_id: cid, name: cv.name }) } catch {  }
     }
     return Promise.resolve(cid)
   },
@@ -819,12 +740,9 @@ export const browserServices: DisTorrentServices = {
     const m: StoredMessage = { id, conv_id: channelId, author_fp: me?.fingerprint ?? 'local', body: trimmed, ts: Date.now(), sig: 'local', direction: 'out', status: 'sent' }
     const all = readMsgs()
     writeMsgs([...all, m])
-    // local: entrega direta sem broadcast (evita duplicar nas outras abas)
     const ev: any = { ...m, type: 'message_new' }
-    for (const cb of listeners) try { cb(ev) } catch { /* ignore */ }
-    // cross-tab: só channel_message_new (message_new seria tratado como DM e duplicaria)
-    try { bc?.postMessage({ type: 'channel_message_new', channelId, msg: m }) } catch { /* ignore */ }
-    // simula delivered para quem estiver no canal (todos recebem)
+    for (const cb of listeners) try { cb(ev) } catch {  }
+    try { bc?.postMessage({ type: 'channel_message_new', channelId, msg: m }) } catch {  }
     setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'delivered' } as any), 200)
     return Promise.resolve(m)
   },
@@ -860,7 +778,6 @@ export const browserServices: DisTorrentServices = {
     if (!conv) return Promise.reject(new Error('conversa não encontrada'))
     const targetFp = conv.peer_fp
     const targetOnline = targetFp ? isOnline(targetFp) : false
-    // verifica se é DM para peer bloqueado
     const blocked = getFriends('blocked')
     if (targetFp && blocked.some(f => f.fp === targetFp)) return Promise.reject(new Error('peer bloqueado'))
 
@@ -879,23 +796,17 @@ export const browserServices: DisTorrentServices = {
     const evNew: any = { ...msg, type: 'message_new' }
     emit(evNew)
 
-    // simula ciclo de status realista
     if (targetOnline) {
       setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'sent' } as any), 80)
       setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'delivered' } as any), 350)
-      // visto azul simulado: demo não tem remetente real para "ler"
       setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'read' } as any), 1200)
-      // atualiza storage para refletir delivered
       setTimeout(() => {
         const all = readMsgs()
         const idx = all.findIndex(x => x.id === id)
         if (idx >= 0) { all[idx] = { ...all[idx], status: 'delivered' as const }; writeMsgs(all) }
       }, 360)
     } else {
-      // pending → se peer ficar online, reenvia automaticamente (listener de peer_online)
-      // aqui fica pending mesmo
       setTimeout(() => {
-        // tenta re-entrega se ficou online entretanto
         if (targetFp && isOnline(targetFp)) {
           emit({ type: 'message_status', msg_id: id, status: 'sent' } as any)
           setTimeout(() => emit({ type: 'message_status', msg_id: id, status: 'delivered' } as any), 200)
@@ -905,7 +816,6 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve(msg)
   },
 
-  // Reenvio no modo navegador/demo: preserva o MESMO id (nada de linha nova).
   messageResend: (msgId) => {
     const all = readMsgs()
     const idx = all.findIndex(x => x.id === msgId)
@@ -926,20 +836,17 @@ export const browserServices: DisTorrentServices = {
   sendTyping: (convId) => {
     const me = store.load()
     if (!me || !convId) return Promise.resolve()
-    // efêmero: só broadcast, sem persistir (igual Discord — some em ~3s)
-    try { bc?.postMessage({ type: 'typing', conv_id: convId, convId, fp: me.fingerprint, nickname: me.nickname }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'typing', conv_id: convId, convId, fp: me.fingerprint, nickname: me.nickname }) } catch {  }
     return Promise.resolve()
   },
 
-  // Canais
   channelCreate: (cid, name, opts) => Promise.resolve(LX.createLocalChannel(cid, name, opts)),
-  channelDelete: (cid, channelId) => { LX.deleteLocalChannel(cid, channelId); emit({ type: 'channel_deleted' as any, community_id: cid, channel_id: channelId } as any); try { bc?.postMessage({ type: 'channel_deleted', community_id: cid, channel_id: channelId }) } catch { /* ignore */ }; return Promise.resolve() },
-  channelRename: (cid, channelId, newName) => { LX.updateLocalChannel(cid, channelId, { name: newName.toLowerCase().replace(/\s+/g, '-') }); try { bc?.postMessage({ type: 'channel_created', community_id: cid, channel_id: channelId, name: newName }) } catch { /* ignore */ }; return Promise.resolve() },
+  channelDelete: (cid, channelId) => { LX.deleteLocalChannel(cid, channelId); emit({ type: 'channel_deleted' as any, community_id: cid, channel_id: channelId } as any); try { bc?.postMessage({ type: 'channel_deleted', community_id: cid, channel_id: channelId }) } catch {  }; return Promise.resolve() },
+  channelRename: (cid, channelId, newName) => { LX.updateLocalChannel(cid, channelId, { name: newName.toLowerCase().replace(/\s+/g, '-') }); try { bc?.postMessage({ type: 'channel_created', community_id: cid, channel_id: channelId, name: newName }) } catch {  }; return Promise.resolve() },
   channelSetTopic: (cid, channelId, topic) => { LX.updateLocalChannel(cid, channelId, { topic }); return Promise.resolve() },
   channelSetCategory: (cid, channelId, category) => { LX.updateLocalChannel(cid, channelId, { category }); return Promise.resolve() },
   channelList: (cid) => Promise.resolve(LX.extraChannels(cid)),
 
-  // Cargos
   roleCreate: (cid, data) => Promise.resolve(LX.createLocalRole(cid, data)),
   roleUpdate: (cid, roleId, patch) => { LX.updateLocalRole(cid, roleId, patch); return Promise.resolve() },
   roleDelete: (cid, roleId) => { LX.deleteLocalRole(cid, roleId); return Promise.resolve() },
@@ -949,7 +856,6 @@ export const browserServices: DisTorrentServices = {
   memberUnassignRole: (cid, fp, roleId) => { LX.unassignRole(cid, fp, roleId); return Promise.resolve() },
   memberKick: (cid, fp) => { LX.kickLocal(cid, fp); return Promise.resolve() },
 
-  // Bots
   botCreate: (cid, data) => {
     const me = store.load()
     return Promise.resolve(LX.createLocalBot(cid, data, me?.fingerprint ?? 'local'))
@@ -957,8 +863,8 @@ export const browserServices: DisTorrentServices = {
   botUpdate: (cid, botId, patch) => { LX.updateLocalBot(cid, botId, patch); return Promise.resolve() },
   botDelete: (cid, botId) => { LX.deleteLocalBot(cid, botId); return Promise.resolve() },
   botsList: (cid) => Promise.resolve(LX.botsList(cid)),
-  // Posta COMO o bot (browser: persiste + emite com bot_id — igual nativo).
   botPostMessage: (_cid, channelId, botId, body) => {
+    // Seção 5: trimmed
     const trimmed = body.trim()
     if (!trimmed) return Promise.reject(new Error('mensagem vazia'))
     const bot = LX.botsList(_cid).find(b => b.id === botId)
@@ -970,8 +876,8 @@ export const browserServices: DisTorrentServices = {
     }
     writeMsgs([...readMsgs(), m])
     const ev: any = { ...m, type: 'message_new', bot_name: bot?.name }
-    for (const cb of listeners) try { cb(ev) } catch { /* ignore */ }
-    try { bc?.postMessage({ type: 'channel_message_new', channelId, msg: m } as any) } catch { /* ignore */ }
+    for (const cb of listeners) try { cb(ev) } catch {  }
+    try { bc?.postMessage({ type: 'channel_message_new', channelId, msg: m } as any) } catch {  }
     return Promise.resolve(m)
   },
   botRegenToken: (cid, botId) => {
@@ -979,7 +885,6 @@ export const browserServices: DisTorrentServices = {
     if (!tok) return Promise.reject(new Error('bot não encontrado'))
     return Promise.resolve(tok)
   },
-  // HTTP do runtime de bots no browser: fetch comum (CORS se aplica — honesto).
   httpFetch: async (url, method, headers, body, timeoutMs) => {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), Math.max(1000, Math.min(timeoutMs, 15000)))
@@ -1001,19 +906,17 @@ export const browserServices: DisTorrentServices = {
 
   subscribe: (cb) => {
     listeners.add(cb)
-    // reenvia presença inicial para quem acabou de subscrever
     try {
       const presence = getPresenceMap()
       for (const [fp, v] of presence) {
         if (store.load()?.fingerprint === fp) continue
         if (Date.now() - v.ts < PRESENCE_TTL_MS) cb({ type: 'peer_online', fp, nickname: v.nickname } as any)
       }
-    } catch { /* ignore */ }
-  // Dedupe: evento que já passou por `listeners` não re-entrega (WeakSet).
+    } catch {  }
     const onBus = (e: Event) => {
       const detail = (e as CustomEvent).detail as EngineEvent
       if (detail && typeof detail === 'object' && viaListeners.has(detail)) return
-      try { cb(detail) } catch { /* ignore */ }
+      try { cb(detail) } catch {  }
     }
     window.addEventListener('distorrent:bus', onBus as EventListener)
     return () => {
@@ -1022,14 +925,9 @@ export const browserServices: DisTorrentServices = {
     }
   },
 
-  // modo navegador (dev, sem motor): diagnóstico global indisponível — honesto
-  // Só existe no app nativo (Rust); no navegador não há WebKitGTK para diagnosticar.
   webrtcReport: () => Promise.resolve(),
   netDiag: () => Promise.reject(new Error('diagnóstico de rede só existe no app nativo')),
 
-  // Atualização automática SÓ no app nativo: no navegador não existe instalador
-  // para rodar. A checagem falha de propósito e a UI mostra a versão web — em
-  // vez de prometer uma atualização que não aconteceria.
   updateCheck: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
   updateDownload: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
   updateApply: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
@@ -1039,12 +937,8 @@ export const browserServices: DisTorrentServices = {
   updateFlagSet: () => Promise.resolve(),
   updateCleanup: () => Promise.resolve(0),
   openReleasePage: async (url: string) => {
-    // No navegador a própria página pode abrir a aba (não há WebView a escapar).
     window.open(url, '_blank', 'noopener,noreferrer')
   },
-  // Sem shell nativo: o navegador já É quem abre endereços. Esquema custom
-  // (`distorrent://`) só abre se o app estiver instalado; se não abrir, a UI
-  // mantém o endereço copiável (nada de fingir sucesso).
   openExternal: async (url: string) => {
     window.open(url, '_blank', 'noopener,noreferrer')
   },
@@ -1061,7 +955,6 @@ export const browserServices: DisTorrentServices = {
       udp_discovery: mode === 'normal' || mode === 'encrypted',
       metadata_padding: isFull,
       traffic_obfuscation: isProxy || isFull,
-      // Browser: não há motor SOCKS5 — estado efetivo é sempre "sem proxy".
       proxy_effective: false,
     })
   },
@@ -1082,8 +975,6 @@ export const browserServices: DisTorrentServices = {
   },
 
   proxyAddrGet: (mode) => {
-    // Modo-alvo (proxy × full/Tor) decide chave e default — o mesmo default
-    // por modo do motor nativo: Tor=9050, SOCKS5=1080.
     const target = mode ?? (driver.get<string>('privacy_mode') ?? 'encrypted')
     const key = target === 'full' ? 'privacy_tor_addr' : 'privacy_proxy_addr'
     const saved = driver.get<string>(key)
@@ -1102,7 +993,6 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
 
-  // modo navegador (dev, sem motor): proxy test indisponível — honesto
   proxyTest: () => Promise.reject(new Error('teste online do proxy só existe no app nativo — modo navegador não faz SOCKS5')),
 
   vaultExport: () => Promise.reject(new Error('export disponível no app nativo')),
@@ -1112,7 +1002,6 @@ export const browserServices: DisTorrentServices = {
   accountSwitch: () => Promise.reject(new Error('disponível no app nativo')),
   accountRemoveImported: () => Promise.reject(new Error('disponível no app nativo')),
 
-  // Grupos + chamadas + voz + arquivos — browser fallback 100% funcional
   createGroup: (title, members) => {
     const id = `group-${Math.random().toString(36).slice(2, 8)}`
     const me = store.load()
@@ -1128,28 +1017,26 @@ export const browserServices: DisTorrentServices = {
           cur.push([me.fingerprint, me.nickname])
           localStorage.setItem(k, JSON.stringify(cur))
         }
-      } catch { /* silent */ }
+      } catch {  }
     }
-    try { bc?.postMessage({ type: 'group_synced', conv_id: id, title }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'group_synced', conv_id: id, title }) } catch {  }
     window.dispatchEvent(new CustomEvent('distorrent:groups_changed'))
     emit({ type: 'group_synced' as any, conv_id: id, title } as any)
     return Promise.resolve(conv)
   },
   groupMembers: (cid) => {
-    try { const v = localStorage.getItem(`distorrent:extras:group_members:${cid}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
+    try { const v = localStorage.getItem(`distorrent:extras:group_members:${cid}`); if (v) return Promise.resolve(JSON.parse(v)) } catch {  }
     return Promise.resolve([])
   },
-  // Navegador/demo: não há discagem (sem motor de rede). No-op explícito.
   groupPairNow: () => Promise.resolve(),
-  // Browser/demo não tem motor P2P: pareamento e sync são no-op honestos.
   communityPairNow: () => Promise.resolve(),
   communitySyncNow: () => Promise.resolve(),
   groupAdd: (cid, fp) => {
-    try { const k = `distorrent:extras:group_members:${cid}`; const cur = JSON.parse(localStorage.getItem(k) ?? '[]'); if (!cur.find((x: any) => x[0] === fp)) { cur.push([fp, '']); localStorage.setItem(k, JSON.stringify(cur)) } } catch { /* silent */ }
+    try { const k = `distorrent:extras:group_members:${cid}`; const cur = JSON.parse(localStorage.getItem(k) ?? '[]'); if (!cur.find((x: any) => x[0] === fp)) { cur.push([fp, '']); localStorage.setItem(k, JSON.stringify(cur)) } } catch {  }
     window.dispatchEvent(new CustomEvent('distorrent:groups_changed'))
-    try { bc?.postMessage({ type: 'channel_created', community_id: cid, channel_id: fp, name: fp } as any) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'channel_created', community_id: cid, channel_id: fp, name: fp } as any) } catch {  }
     emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
-    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch {  }
     return Promise.resolve()
   },
   groupRemove: (cid, fp) => {
@@ -1157,41 +1044,39 @@ export const browserServices: DisTorrentServices = {
       const k = `distorrent:extras:group_members:${cid}`
       const cur = JSON.parse(localStorage.getItem(k) ?? '[]') as [string, string][]
       localStorage.setItem(k, JSON.stringify(cur.filter(([f]) => f !== fp)))
-    } catch { /* silent */ }
+    } catch {  }
     emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
-    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch {  }
     return Promise.resolve()
   },
   groupRename: (cid, title) => {
+    // Seção 6: nome
     const nome = title.trim()
     if (!nome) return Promise.reject(new Error('título vazio'))
     writeConvos(readConvos().map((c) => (c.id === cid ? { ...c, title: nome } : c)))
     emit({ type: 'group_synced' as any, conv_id: cid, title: nome } as any)
-    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: nome }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: nome }) } catch {  }
     return Promise.resolve()
   },
-  // Modo navegador: só o estado local (não há motor nem roster remoto).
   groupLeave: (cid) => {
-    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch { /* silent */ }
+    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch {  }
     writeConvos(readConvos().filter((c) => c.id !== cid))
     emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
     return Promise.resolve()
   },
   groupDelete: (cid) => {
-    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch { /* silent */ }
+    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch {  }
     writeConvos(readConvos().filter((c) => c.id !== cid))
     emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
-    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch { /* ignore */ }
+    try { bc?.postMessage({ type: 'group_synced', conv_id: cid, title: '' }) } catch {  }
     return Promise.resolve()
   },
   groupDeleteLocal: (cid) => {
-    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch { /* silent */ }
+    try { localStorage.removeItem(`distorrent:extras:group_members:${cid}`) } catch {  }
     writeConvos(readConvos().filter((c) => c.id !== cid))
     emit({ type: 'group_synced' as any, conv_id: cid, title: '' } as any)
     return Promise.resolve()
   },
-  // Salas: o navegador não tem motor; a sala local é publicada na própria aba
-  // para a UI funcionar igual (entrar/sair continua sendo o fluxo de chamada).
   callRoomPublish: (callId, convId, kind, participants) => {
     const sala = { call_id: callId, conv_id: convId, kind, state: 'open', participants, host_fp: participants[0] ?? '' }
     if (callId) roomsInBrowser.set(convId, sala)
@@ -1203,7 +1088,6 @@ export const browserServices: DisTorrentServices = {
     emit({ type: 'call_room', conv_id: convId, state: 'closed', participants: [] } as any)
     return Promise.resolve()
   },
-  // No navegador só existe a própria aba: sair é o mesmo que fechar a sala.
   callRoomLeave: (convId) => {
     roomsInBrowser.delete(convId)
     emit({ type: 'call_room', conv_id: convId, state: 'closed', participants: [] } as any)
@@ -1227,63 +1111,53 @@ export const browserServices: DisTorrentServices = {
     try {
       localStorage.setItem(`distorrent:call:invite:${callId}`, JSON.stringify({ targetFp, kind, at: Date.now() }))
       const ev: any = { type: 'call_incoming', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', kind, target_fp: targetFp }
-      // emit() já faz listeners + bc.postMessage + window — sem post duplo
       emit(ev)
-      // No navegador a entrega é local e síncrona: a confirmação de toque é
-      // imediata (mesmo contrato do motor, que responde CallRinging).
       setTimeout(() => {
-        try { emit({ type: 'call_ringing', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
+        try { emit({ type: 'call_ringing', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch {  }
       }, 0)
-    } catch { /* silent */ }
+    } catch {  }
     return Promise.resolve(callId)
   },
-  // Modo navegador (aba única): o "convite perdido" não existe — o emit é
-  // local e síncrono. No-op explícito para o contrato não ficar sem defesa.
   callRingRetry: () => Promise.resolve(),
-  // BroadcastChannel — antes eram no-ops e o overlay do outro lado travava.
-  // Aceite/recusa/fim emitem os mesmos eventos do engine nativo pelo
   callAccept: (callId, _fromFp) => {
-    try { emit({ type: 'call_accepted', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
+    try { emit({ type: 'call_accepted', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch {  }
     return Promise.resolve()
   },
   callReject: (callId, _fromFp, reason) => {
-    try { emit({ type: 'call_rejected', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', reason } as any) } catch { /* silent */ }
+    try { emit({ type: 'call_rejected', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', reason } as any) } catch {  }
     return Promise.resolve()
   },
   callEnd: (callId) => {
-    try { emit({ type: 'call_ended', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch { /* silent */ }
+    try { emit({ type: 'call_ended', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local' } as any) } catch {  }
     return Promise.resolve()
   },
   callOffer: (targetFp, callId, sdp) => {
     try {
       emit({ type: 'call_offer', from_fp: store.load()?.fingerprint ?? 'local', call_id: callId, sdp } as any)
-    } catch { /* best-effort */ }
+    } catch {  }
     void targetFp
     return Promise.resolve()
   },
   callAnswer: (targetFp, callId, sdp) => {
     try {
       emit({ type: 'call_answer', from_fp: store.load()?.fingerprint ?? 'local', call_id: callId, sdp } as any)
-    } catch { /* best-effort */ }
+    } catch {  }
     void targetFp
     return Promise.resolve()
   },
   callIce: (targetFp, callId, candidate, mid) => {
     try {
       emit({ type: 'call_ice', from_fp: store.load()?.fingerprint ?? 'local', call_id: callId, candidate, mid } as any)
-    } catch { /* best-effort */ }
+    } catch {  }
     void targetFp
     return Promise.resolve()
   },
-  // Grupo (demo multi-aba): avisa quem está na chamada sobre o novo peer.
-  // kind não-vazio toca o "telefone" do convidado (call_incoming na outra aba).
   callAddParticipant: (targetFp, callId, fp, kind) => {
     emit({ type: 'call_participant_added', call_id: callId, fp } as any)
     if (kind) emit({ type: 'call_incoming', call_id: callId, from_fp: fp, kind } as any)
     void targetFp
     return Promise.resolve()
   },
-  // Sinal dedicado de tela: o receptor marca participant.sharing (badge TELA).
   screenShareOffer: (targetFp, callId, sdp) => {
     emit({ type: 'screen_share_offer', call_id: callId, from_fp: store.load()?.fingerprint ?? 'local', sdp } as any)
     void targetFp
@@ -1293,7 +1167,7 @@ export const browserServices: DisTorrentServices = {
   voiceJoin: (cid, ch) => {
     const me = store.load(); if (!me) return Promise.resolve()
     const k = `distorrent:voice:${cid}:${ch}`
-    let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch { /* silent */ }
+    let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch {  }
     if (!arr.find((x: any) => x[0] === me.fingerprint)) { arr.push([me.fingerprint, false, false]); localStorage.setItem(k, JSON.stringify(arr)) }
     window.dispatchEvent(new CustomEvent('distorrent:voice_changed'))
     emit({ type: 'voice_joined' as any, community_id: cid, channel_id: ch, fp: me.fingerprint } as any)
@@ -1302,7 +1176,7 @@ export const browserServices: DisTorrentServices = {
   voiceLeave: (cid, ch) => {
     const me = store.load(); if (!me) return Promise.resolve()
     const k = `distorrent:voice:${cid}:${ch}`
-    let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch { /* silent */ }
+    let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch {  }
     arr = arr.filter((x: any) => x[0] !== me.fingerprint); localStorage.setItem(k, JSON.stringify(arr))
     window.dispatchEvent(new CustomEvent('distorrent:voice_changed'))
     emit({ type: 'voice_left' as any, community_id: cid, channel_id: ch, fp: me.fingerprint } as any)
@@ -1311,7 +1185,7 @@ export const browserServices: DisTorrentServices = {
   voiceState: (cid, ch, muted, deaf) => {
     const me = store.load(); if (!me) return Promise.resolve()
     const k = `distorrent:voice:${cid}:${ch}`
-    let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch { /* silent */ }
+    let arr: any[] = []; try { arr = JSON.parse(localStorage.getItem(k) ?? '[]') } catch {  }
     const idx = arr.findIndex((x: any) => x[0] === me.fingerprint)
     if (idx >= 0) { arr[idx] = [me.fingerprint, muted, deaf]; localStorage.setItem(k, JSON.stringify(arr)) }
     window.dispatchEvent(new CustomEvent('distorrent:voice_changed'))
@@ -1319,33 +1193,31 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
   voiceStates: (cid, ch) => {
-    try { const v = localStorage.getItem(`distorrent:voice:${cid}:${ch}`); if (v) return Promise.resolve(JSON.parse(v)) } catch { /* silent */ }
+    try { const v = localStorage.getItem(`distorrent:voice:${cid}:${ch}`); if (v) return Promise.resolve(JSON.parse(v)) } catch {  }
     return Promise.resolve([])
   },
   fileAnnounce: (fid, name, size, chunks, hash, chunkHashes?: string[]) => {
     try {
-      // persiste chunk_hashes para verificação (browser local) — usado pelo receptor
       if (chunkHashes?.length) {
-        try { localStorage.setItem(`distorrent:file:chunk_hashes:${fid}`, JSON.stringify(chunkHashes)) } catch { /* ignore */ }
-        try { localStorage.setItem(`distorrent:filemeta:${fid}`, JSON.stringify({ name, size, chunks, hash, chunkHashes })) } catch { /* ignore */ }
+        try { localStorage.setItem(`distorrent:file:chunk_hashes:${fid}`, JSON.stringify(chunkHashes)) } catch {  }
+        try { localStorage.setItem(`distorrent:filemeta:${fid}`, JSON.stringify({ name, size, chunks, hash, chunkHashes })) } catch {  }
       }
       localStorage.setItem(`distorrent:file:${fid}`, JSON.stringify({ name, size, chunks, hash, chunk_hashes: chunkHashes ?? null, at: Date.now(), from: store.load()?.fingerprint ?? 'local' }))
       const ev: any = { type: 'file_announce', file_id: fid, name, size, chunks, hash, chunk_hashes: chunkHashes ?? null, from_fp: store.load()?.fingerprint ?? 'local' }
       emit(ev)
-      try { bc?.postMessage(ev) } catch { /* ignore */ }
+      try { bc?.postMessage(ev) } catch {  }
       window.dispatchEvent(new CustomEvent('distorrent:file_announce', { detail: { file_id: fid, name, size, chunks, hash } }))
-    } catch { /* silent */ }
+    } catch {  }
     return Promise.resolve()
   },
   fileRequestChunk: (fileId: string, index: number, holderFp: string) => {
     try {
       const me = store.load()?.fingerprint ?? 'local'
       const ev: any = { type: 'file_chunk_request', file_id: fileId, index, from_fp: me, holder_fp: holderFp }
-      // emite localmente para o holder na mesma tab (caso self) e broadcast para outras abas
       emit(ev)
-      try { bc?.postMessage(ev) } catch { /* ignore */ }
+      try { bc?.postMessage(ev) } catch {  }
       window.dispatchEvent(new CustomEvent('distorrent:file_chunk_request', { detail: ev }))
-    } catch { /* silent */ }
+    } catch {  }
     return Promise.resolve()
   },
   fileSendChunk: (targetFp: string, fileId: string, index: number, dataB64: string) => {
@@ -1353,25 +1225,25 @@ export const browserServices: DisTorrentServices = {
       const me = store.load()?.fingerprint ?? 'local'
       const ev: any = { type: 'file_chunk_data', file_id: fileId, index, data_b64: dataB64, from_fp: me, target_fp: targetFp }
       emit(ev)
-      try { bc?.postMessage(ev) } catch { /* ignore */ }
+      try { bc?.postMessage(ev) } catch {  }
       window.dispatchEvent(new CustomEvent('distorrent:file_chunk_data', { detail: ev }))
-    } catch { /* silent */ }
+    } catch {  }
     return Promise.resolve()
   },
 
-  // Segurança/moderação: regras/auditoria/reputação locais (localStorage por identidade).
   serverRulesGet: (cid) => {
     try {
       const raw = localStorage.getItem(`distorrent:rules:${cid}`)
       if (raw) return Promise.resolve(JSON.parse(raw) as ServerRules)
-    } catch { /* ignore */ }
+    } catch {  }
     return Promise.resolve({
       community_id: cid, spam_level: 'medium', banned_words: [], blocked_domains: [],
+      // Seção 7: moderators
       moderators: [], shadow_banned: [], updated_at: Date.now(),
     })
   },
   serverRulesSet: (rules) => {
-    try { localStorage.setItem(`distorrent:rules:${rules.community_id}`, JSON.stringify({ ...rules, updated_at: Date.now() })) } catch { /* ignore */ }
+    try { localStorage.setItem(`distorrent:rules:${rules.community_id}`, JSON.stringify({ ...rules, updated_at: Date.now() })) } catch {  }
     appendLocalAudit(rules.community_id, 'rules', '', 'regras atualizadas')
     return Promise.resolve()
   },
@@ -1389,7 +1261,7 @@ export const browserServices: DisTorrentServices = {
         const v = JSON.parse(raw) as { trust: ReputationView['trust']; score: number; reports: number }
         return Promise.resolve(v)
       }
-    } catch { /* ignore */ }
+    } catch {  }
     return Promise.resolve({ trust: 'new', score: 0, reports: 0 })
   },
   safetyNumber: (peerFp) => {
@@ -1402,14 +1274,13 @@ export const browserServices: DisTorrentServices = {
   },
   moderate: (cid, action: ModerationAction, target, reason) => {
     appendLocalAudit(cid, action, target, reason ?? '')
-    // browser local: ban/mute aplicam reputação local honesta
     try {
       const cur = JSON.parse(localStorage.getItem(`distorrent:repute:${target}`) ?? '{"trust":"new","score":0,"reports":0}')
       if (action === 'ban') { cur.trust = 'banned'; cur.score = -100 }
       if (action === 'unban' || action === 'unmute') { cur.trust = 'new'; cur.score = 0 }
       if (action === 'mute') { cur.trust = 'suspicious'; cur.score = Math.min(cur.score, -15) }
       localStorage.setItem(`distorrent:repute:${target}`, JSON.stringify(cur))
-    } catch { /* ignore */ }
+    } catch {  }
     if (action === 'shadow_ban' || action === 'unshadow') {
       try {
         const rk = `distorrent:rules:${cid}`
@@ -1418,7 +1289,7 @@ export const browserServices: DisTorrentServices = {
         if (action === 'shadow_ban') list.add(target)
         else list.delete(target)
         localStorage.setItem(rk, JSON.stringify({ ...rules, community_id: cid, shadow_banned: [...list] }))
-      } catch { /* ignore */ }
+      } catch {  }
     }
     return Promise.resolve()
   },
@@ -1431,14 +1302,13 @@ export const browserServices: DisTorrentServices = {
       if (cur.score <= -30) cur.trust = 'banned'
       else if (cur.score <= -10) cur.trust = 'suspicious'
       localStorage.setItem(`distorrent:repute:${targetFp}`, JSON.stringify(cur))
-    } catch { /* ignore */ }
+    } catch {  }
     return Promise.resolve()
   },
   validateName: (kind: NameKind, raw, existing) =>
     Promise.resolve(validateNameLocal(kind, raw, existing ?? [])),
   randomName: () => Promise.resolve(randomNameLocal()),
 
-  // Browser/dev: janela e cache sobre localStorage; cofre/backups exigem o nativo.
   messagesWindow: (convId, beforeTs, limit) => Promise.resolve(
     readMsgs()
       .filter((m) => m.conv_id === convId && (beforeTs == null || m.ts < beforeTs))
@@ -1464,7 +1334,7 @@ export const browserServices: DisTorrentServices = {
         }
         doomed.forEach((k) => storage.removeItem(k))
       }
-    } catch { /* ignore */ }
+    } catch {  }
     return Promise.resolve({ leftovers: [] })
   },
   metricsSnapshot: () => Promise.resolve({
@@ -1478,11 +1348,11 @@ export const browserServices: DisTorrentServices = {
     try { return Promise.resolve(localStorage.getItem(`distorrent:cache:${key}`)) } catch { return Promise.resolve(null) }
   },
   cachePut: (key, dataB64) => {
-    try { localStorage.setItem(`distorrent:cache:${key}`, dataB64) } catch { /* quota — silencioso */ }
+    try { localStorage.setItem(`distorrent:cache:${key}`, dataB64) } catch {  }
     return Promise.resolve()
   },
   cacheDelete: (key) => {
-    try { localStorage.removeItem(`distorrent:cache:${key}`) } catch { /* ignore */ }
+    try { localStorage.removeItem(`distorrent:cache:${key}`) } catch {  }
     return Promise.resolve()
   },
   cacheStats: () => {
@@ -1510,28 +1380,43 @@ export const browserServices: DisTorrentServices = {
     try {
       localStorage.setItem('distorrent:media:strip_exif', stripExif ? '1' : '0')
       localStorage.setItem('distorrent:media:block_exec', blockExecutables ? '1' : '0')
-    } catch { /* ignore */ }
+    } catch {  }
     return Promise.resolve()
   },
-  // Voz nativa NÃO existe no browser: o áudio é o RTCPeerConnection da página.
+  retentionGet: () => {
+    const days = Number(localStorage.getItem('distorrent:retention:days') ?? '30')
+    return Promise.resolve({
+      days: Number.isFinite(days) ? days : 30,
+      servers: localStorage.getItem('distorrent:retention:servers') !== '0',
+      groups: localStorage.getItem('distorrent:retention:groups') !== '0',
+      dms: localStorage.getItem('distorrent:retention:dms') === '1',
+    })
+  },
+  retentionSet: (days, servers, groups, dms) => {
+    try {
+      localStorage.setItem('distorrent:retention:days', String(days))
+      localStorage.setItem('distorrent:retention:servers', servers ? '1' : '0')
+      localStorage.setItem('distorrent:retention:groups', groups ? '1' : '0')
+      localStorage.setItem('distorrent:retention:dms', dms ? '1' : '0')
+    } catch {  }
+    return Promise.resolve({ days, servers, groups, dms })
+  },
+  retentionRun: () => Promise.resolve(0),
   voiceMediaAvailable: () => Promise.resolve(false),
   voiceMediaStats: () => Promise.resolve(null),
   voiceSetMuted: () => Promise.resolve(),
   voiceSetDeafened: () => Promise.resolve(),
   voiceHangup: () => Promise.resolve(),
-  // Vídeo nativo idem: stubs devolvem erro honesto/null para a UI usar a página.
   voiceVideoStart: () => Promise.reject(new Error('vídeo nativo indisponível no navegador')),
   voiceVideoStop: () => Promise.resolve(),
   voiceVideoFrame: () => Promise.resolve(null),
-  // Teste de mic nativo idem: no browser a página usa getUserMedia direto;
-  // o stub rejeita para a UI cair no caminho do navegador.
   voiceMicTestStart: () => Promise.reject(new Error('teste de mic nativo indisponível no navegador')),
   voiceMicTestLevel: () => Promise.resolve(0),
   voiceMicTestStop: () => Promise.resolve(),
   voiceMicName: () => Promise.resolve(''),
 
-  // ================= CAMADA SOCIAL v3 =================
   react: async (convId, msgId, emoji) => {
+    // Seção 8: all
     const all = loadAll<ReactionSummary[]>(RX_BASE)
     let list = all[msgId] ?? []
     const mineIdx = list.findIndex(r => r.emoji === emoji && r.reactors.includes(meFp()))
@@ -1647,7 +1532,6 @@ export const browserServices: DisTorrentServices = {
       m.ts > (cursors[m.conv_id]?.last_read_ts ?? 0)).length
   },
 
-  // Segundo plano NÃO existe no navegador puro: estado honesto, nada finge funcionar.
   backgroundPrefs: async () => ({
     close_to_tray: false,
     start_minimized: false,
@@ -1658,26 +1542,21 @@ export const browserServices: DisTorrentServices = {
   backgroundPrefsSet: async () => {},
   autostartGet: async () => false,
   autostartSet: async () => false,
-  // No navegador não existe autostart: `false` é a verdade.
   autostartEnsure: async () => false,
   notificationShow: async () => {},
   notificationCancel: async () => {},
   notificationCancelAll: async () => {},
   notificationPermission: async () => 'unsupported',
   notificationRequestPermission: async () => 'unsupported',
-  // Modo navegador não tem aviso nativo do motor: nada a espelhar.
   notifyPrefsSet: async () => {},
-  // Sem Android de verdade, não há serviço em primeiro plano nem full-screen.
   backgroundServiceSet: async () => false,
   callPendingAction: async () => ({ action: '', call_id: '' }),
   callNotifyShow: async () => {},
   callNotifyCancel: async () => {},
   appShowWindow: async () => {},
   appHideToTray: async () => {},
-  // Navegador puro não tem a barra do WebView2 para esconder.
   hideShareBar: async () => {},
   shareBarWatch: async () => {},
-  // Navegador: a Fullscreen API é a única disponível (sem janela nativa).
   windowToggleFullscreen: async () => {
     try {
       if (typeof document === 'undefined') return false
@@ -1702,6 +1581,7 @@ export const browserServices: DisTorrentServices = {
     return presence
   }),
   presenceGet: async (fp) => {
+    // Seção 9: presence
     const presence = loadAll<PresenceView>(PRESENCE_BASE)[fp]
     if (!presence) return {
       fp, status: 'offline' as PresenceStatus, custom: '', custom_emoji: '', updated_at: 0,
@@ -1719,7 +1599,6 @@ export const browserServices: DisTorrentServices = {
       fp: me,
       display_name: patch.display_name,
       about: patch.about,
-      // Mesma semântica do core: '' mantém a foto, `remove_*` apaga.
       avatar_b64: patch.remove_avatar ? '' : (patch.avatar_b64 || cur.avatar_b64),
       banner_b64: patch.remove_banner ? '' : (patch.banner_b64 || cur.banner_b64),
       accent: patch.accent,
@@ -1736,8 +1615,7 @@ export const browserServices: DisTorrentServices = {
     fp, display_name: '', about: '', avatar_b64: '', banner_b64: '', accent: '', updated_at: 0,
   },
   profileList: async () => Object.values(loadAll<ProfileView>(PROFILE_BASE)),
-  // No navegador não há rede P2P: no-op honesto, não sincronização fingida.
-  profileSyncNow: async () => { /* sem peers no modo navegador */ },
+  profileSyncNow: async () => {  },
   nicknameSet: async (communityId, fp, nickname) => {
     const all = loadAll<string>('social:nicknames')
     all[`${communityId}:${fp}`] = nickname
@@ -1865,9 +1743,8 @@ export const browserServices: DisTorrentServices = {
     emit({ type: 'poll_updated', community_id: communityId, channel_id: channelId, poll_id: pollId })
   },
   pollTally: async (pollId) => {
-    // `social:votes` guarda ÍNDICES escolhidos, não contagens — somar por opção
-    // aqui, senão a barra mostrava 0%.
     const chosen: number[] = loadAll<number[]>('social:votes')[pollId] ?? []
+    // Seção 10: poll
     const poll = loadAll<PollView>(POLLS_BASE)[pollId]
     const nOpts = poll?.options?.length ?? 0
     const counts = new Array<number>(nOpts).fill(0)
@@ -1921,7 +1798,6 @@ export const browserServices: DisTorrentServices = {
   bookmarkList: async (convId) => Object.entries(loadAll<Record<string, string>>('social:bookmarks')[convId] ?? {}),
 }
 
-
 function appendLocalAudit(communityId: string, action: string, target: string, reason: string) {
   try {
     const k = `distorrent:audit:${communityId}`
@@ -1933,11 +1809,10 @@ function appendLocalAudit(communityId: string, action: string, target: string, r
       reason: reason.slice(0, 280), created_at: Date.now(),
     })
     localStorage.setItem(k, JSON.stringify(list.slice(-500)))
-  } catch { /* ignore */ }
+  } catch {  }
 }
 
 async function formatSafetyNumber(fpA: string, pubA: string, fpB: string, pubB: string): Promise<string> {
-  // SHA-256 no browser (core usa BLAKE3 — números só coincidem no nativo).
   const [x, y] = fpA <= fpB ? [[fpA, pubA], [fpB, pubB]] : [[fpB, pubB], [fpA, pubA]]
   const data = new TextEncoder().encode(`storm/safety-number/v1|${x[0]}|${x[1]}|${y[0]}|${y[1]}`)
   const d = await crypto.subtle.digest('SHA-256', data as BufferSource)

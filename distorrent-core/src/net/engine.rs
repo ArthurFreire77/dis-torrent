@@ -1,8 +1,3 @@
-//! NetworkEngine: orquestra listener TCP, descoberta LAN, conexões por peer
-//! (heartbeat, reconexão com backoff), outbox e eventos para a UI.
-//!
-//! Estados REAIS por peer e agregados — nada de texto fixo "connected".
-
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
@@ -44,71 +39,27 @@ use crate::{DistorrentError, Result};
 
 pub const PING_INTERVAL: Duration = Duration::from_secs(10);
 pub const PING_TIMEOUT: Duration = Duration::from_secs(25);
-/// Heartbeat do relay: detecção de sessão morta em ~60s (antes 120s).
-/// Poll + POST têm latência de segundos, mas 60s de silêncio é morte certa —
-/// rediala rápido em vez de segurar mensagem como "sending" à toa.
-/// VOZ (frames pequenos/frequentes): o reader usa `timeout(ping_timeout,
-/// recv)` — QUALQUER frame (voz/sinalização/Ping) prova liveness, então rajada
-/// de voz mantém a sessão viva sem Pings extras. 20s/120s: tolera rádio
-/// móvel (sleep/Doze do 4G) sem flapping conecta/desconecta — 60s matava
-/// sessão saudável cujo celular dormiu; 120s de silêncio real é morte certa
-/// e o redial continua rápido após a queda.
 pub const RELAY_PING_INTERVAL: Duration = Duration::from_secs(20);
 pub const RELAY_PING_TIMEOUT: Duration = Duration::from_secs(120);
-/// Timeout do handshake pelo relay (várias rodadas de poll).
 pub const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
-/// Tentativa de DIAL: janela para o handshake relay fechar sob 4G lento.
-/// 20s (era 40s): com Hello retransmitido a cada 1,5s dá ~13 Hellos por
-/// tentativa; se não fechou, rediala MAIS RÁPIDO (backoff 1s→10s) em vez de
-/// segurar 40s numa sessão que não vai nascer — era isso que dava o delay.
 pub const RELAY_DIAL_ATTEMPT: Duration = Duration::from_secs(20);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
-/// Duração padrão do silenciamento de conta quando o moderador não informa
-/// um prazo. 10 minutos é o mesmo piso do Discord: suficiente para a
-/// situação, curto o bastante para um engano não custar o dia do usuário.
 pub const MUTE_DEFAULT_MS: i64 = 10 * 60 * 1000;
 pub const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(15);
 
-/// Carência do túnel virtual: recém-estabelecido, ele pode carregar tráfego
-/// mesmo sem prova, porque é justamente quando costuma funcionar.
 pub const TUNNEL_PROVE_GRACE_MS: i64 = 8_000;
-/// Validade da prova: se o peer abriu algo nos últimos 45s, a rota está viva
-/// nos dois sentidos.
 pub const TUNNEL_PROVE_TTL_MS: i64 = 45_000;
-/// Janela de resposta depois de um ENVIO sem retorno. Passou disso, o tráfego
-/// desvia para o caminho normal (a rota pode ter morrido de um lado).
-///
-/// Separado do `TTL` de propósito: `TTL` responde "a prova ainda vale?" e este
-/// responde "esperei o suficiente para não confiar?". Misturar os dois fazia
-/// túnel ocioso ser tratado como morto.
 pub const TUNNEL_PROVE_WINDOW_MS: i64 = 10_000;
-/// Prazo para declarar a sessão de túnel MORTA e renegociar.
-///
-/// Bem mais longo que a janela de resposta: desviar o tráfego é barato e
-/// reversível; derrubar a sessão custa um handshake.
 pub const TUNNEL_DEAD_MS: i64 = 120_000;
 
-/// Keepalive do mapeamento NAT (UPnP/NAT-PMP): renova antes do lease de 1h
-/// expirar. 15min dá margem folgada p/ roteador lento e mantém o pinhole vivo.
 pub const NAT_RENEW_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-/// Corrente de fallback automática (degrau 3): nº de falhas de estabelecimento
-/// (direto/relay) por peer que dispara a queda para o modo `proxy` (SOCKS5).
 pub const AUTO_PROXY_FAILURE_THRESHOLD: u32 = 6;
 
-/// Apos esta quantidade de falhas DIRETAS seguidas (e sem tempo de sucesso),
-/// o motor para de insistir na rota direta e passa a usar relay/tunel.
-/// Antes o redial repetia indefinidamente (20+ timeouts por peer atras de
-/// CGNAT), queimando CPU e deixando a UI presa em "CONECTANDO" sem Said a.
 pub const DIRECT_UNREACHABLE_THRESHOLD: u32 = 8;
-/// Tempo minimo sem sucesso antes de declarar a rota direta inutil.
 pub const DIRECT_UNREACHABLE_STALL_MS: i64 = 20_000;
-/// Janela sem sessão online (desde a 1ª falha do peer) que também dispara o
-/// fallback, mesmo com menos de `AUTO_PROXY_FAILURE_THRESHOLD` falhas.
 pub const AUTO_PROXY_STALL_MS: i64 = 40_000;
-/// Cooldown por peer da troca automática: evita flapping (não troca de novo
-/// para o MESMO peer nesse intervalo). O usuário pode reverter manualmente.
 pub const AUTO_PROXY_COOLDOWN_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -120,13 +71,11 @@ pub enum NetworkState {
     Reconnecting,
 }
 
-/// Estado de pareamento de UM membro de servidor (evidência real do link).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MemberPairing {
     pub fp: String,
     pub nickname: String,
     pub role: String,
-    /// "connected" | "relay" | "connecting" | "reconnecting" | "pending_join" | "offline"
     pub state: String,
     pub via_relay: bool,
     pub is_owner: bool,
@@ -136,8 +85,8 @@ pub struct MemberPairing {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FriendOutcome {
-    Sent,          // peer online — pedido transmitido agora
-    QueuedOffline, // peer offline — será enviado ao conectar
+    Sent,
+    QueuedOffline,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -196,7 +145,6 @@ pub enum EngineEvent {
         call_id: String,
         from_fp: String,
     },
-    /// O outro lado recebeu o convite e está tocando (`CallRinging`).
     CallRingingEv {
         call_id: String,
         from_fp: String,
@@ -229,26 +177,17 @@ pub enum EngineEvent {
     CallParticipantAdded {
         call_id: String,
         fp: String,
-        /// v6: não-vazio = o receptor deve TOCAR (ring do convidado).
         kind: String,
     },
-    /// Túnel virtual com o peer ESTABELECIDO (handshake X25519 via relay ok).
-    /// `virtual_ip` = fd9d::/8 determinístico do fp (Fase 1: pacotes via relay;
-    /// Fase 2+: UDP direto quando o furo abrir).
     TunnelUp {
         fp: String,
         virtual_ip: String,
     },
-    /// Pong do túnel (resposta ao ping): prova ponta a ponta cifrada.
     TunnelPong {
         fp: String,
         id: u64,
         rtt_ms: i64,
     },
-    /// Endpoint NAT próprio (re)descoberto no tick de announce — a UI usa
-    /// para o degrau da mídia. `source`: "upnp" (local, sem servidor) ou
-    /// "stun" (reflexo público). Serializa como `nat_endpoint` (sem sufixo
-    /// Ev, sem alias no TS).
     NatEndpoint {
         addr: String,
         source: String,
@@ -270,12 +209,10 @@ pub enum EngineEvent {
         muted: bool,
         deafened: bool,
     },
-    /// Sala de chamada mudou (abriu/fechou/lista de participantes).
     CallRoom {
         call_id: String,
         conv_id: String,
         kind: String,
-        /// "open" | "closed"
         state: String,
         participants: Vec<String>,
         host_fp: String,
@@ -287,10 +224,7 @@ pub enum EngineEvent {
         chunks: u32,
         hash: String,
         from_fp: String,
-        /// Hashes blake3 por bloco (autoridade para validar cada chunk).
-        /// Antes ficavam só no kv do core e a UI NUNCA os lia: no app nativo
-        /// a verificação por bloco era um no-op e qualquer peer podia injetar
-        /// bytes num `file_id` alheio.
+        // Seção 1: serde
         #[serde(default)]
         chunk_hashes: Vec<String>,
     },
@@ -310,14 +244,10 @@ pub enum EngineEvent {
         from_fp: String,
         sdp: String,
     },
-    /// Troca AUTOMÁTICA de modo de privacidade (corrente de fallback).
-    /// Informativo p/ a UI; o modo vigente segue em `privacy.mode` (kv).
     ModeAutoSwitched {
         to: String,
         reason: String,
     },
-    // ---------- camada social (v3) ----------
-    /// Uma reação mudou (add/remove) — a UI recarrega as resumo.
     ReactionChanged {
         msg_id: String,
         conv_id: String,
@@ -325,46 +255,38 @@ pub enum EngineEvent {
         add: bool,
         reactor_fp: String,
     },
-    /// Mensagem editada (novo corpo + ts de edição).
     MessageEdited {
         msg_id: String,
         conv_id: String,
         body: String,
     },
-    /// Mensagem apagada (exclusão lógica).
     MessageDeleted {
         msg_id: String,
         conv_id: String,
     },
-    /// Mensagem fixada/desfixada.
     MessagePinned {
         msg_id: String,
         conv_id: String,
         pinned: bool,
     },
-    /// Uma mensagem passou a responder a outra.
     MessageReply {
         msg_id: String,
         reply_to: String,
     },
-    /// Presença de um peer mudou.
     PresenceChanged {
         fp: String,
         status: String,
         custom: String,
         custom_emoji: String,
     },
-    /// Perfil de um peer mudou.
     ProfileChanged {
         fp: String,
         profile: crate::social::ProfileView,
     },
-    /// Thread criada.
     ThreadCreated {
         community_id: String,
         thread: crate::social::ThreadRow,
     },
-    /// Moderador aplicou ban/timeout em alguém.
     ModerationApplied {
         community_id: String,
         target_fp: String,
@@ -372,30 +294,24 @@ pub enum EngineEvent {
         until_ms: i64,
         reason: String,
     },
-    /// Enquete criada/votada.
     PollUpdated {
         community_id: String,
         channel_id: String,
         poll_id: String,
     },
-    /// Evento agendado criado/atualizado.
     EventUpdated {
         community_id: String,
         event_id: String,
     },
-    /// Emoji do servidor criado.
     EmojiUpdated {
         community_id: String,
         emoji_id: String,
     },
-    /// Moderação msg: alguém foi impedido de falar (slowmode/timeout/ban).
     Muted {
         context: String,
         reason: String,
         until_ms: i64,
     },
-    /// "Fp está digitando em conv_id até until_ms" — puramente efêmero, a UI
-    /// expira pelo prazo e nunca persiste.
     PeerTyping {
         fp: String,
         conv_id: String,
@@ -406,9 +322,6 @@ pub enum EngineEvent {
     },
 }
 
-// ── v6: opções do WIZARD de criação de servidor (desserializadas do Tauri) ──
-
-/// Canal inicial com tipo/categoria (text|voice|video).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct CommunityChannelSeed {
@@ -419,7 +332,6 @@ pub struct CommunityChannelSeed {
     pub category: String,
 }
 
-/// Cargo inicial do wizard (presets admin/moderador/membro).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct CommunityRoleSeed {
@@ -434,7 +346,6 @@ pub struct CommunityRoleSeed {
     pub mentionable: bool,
 }
 
-/// Tudo opcional — o fluxo legado (nome + CSV de canais) continua válido.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct CommunityCreateOptions {
@@ -460,29 +371,15 @@ enum PeerLinkState {
 }
 struct PeerLink {
     state: StdMutex<PeerLinkState>,
-    /// comandos → writer task, com classe de prioridade QoS (menor = primeiro).
     tx: Option<mpsc::UnboundedSender<(u8, SecureFrame)>>,
     drop_notify: Notify,
-    via_relay: bool, // true = sessão sobre relay (fallback sem porta aberta)
-    /// Esta sessão foi a que EU disciei (true) ou a que o peer abriu (false)?
-    ///
-    /// A eleição por fingerprint só faz sentido quando as duas pontas têm
-    /// sessões OPOSTAS (dial cruzado). Sem saber a direção da sessão atual, um
-    /// dial repetido NOSSO parecia "preferido" e substituía a sessão saudável,
-    /// derrubando writer e frames em voo (era o "peer ONLINE" repetido em
-    /// segundos e a mensagem voltando ao relógio).
+    via_relay: bool,
     initiator: bool,
 }
 
-/// QoS: classifica o frame em classe de prioridade (menor número = sai antes).
-/// Reordenar ENTRE classes é seguro para o protocolo (subsistemas distintos,
-/// receptor dedupa/ordena por id/nonce); dentro da classe a ordem é FIFO.
-/// Voz/sinalização nunca espera atrás de chunk de arquivo; ping nunca morre
-/// atrás de nada (liveness é o que detecta peer morto).
 pub fn frame_class(frame: &SecureFrame) -> u8 {
     use SecureFrame::*;
     match frame {
-        // 0 — realtime: chamada, voz, liveness
         CallInvite { .. }
         | CallAccept { .. }
         | CallRinging { .. }
@@ -495,14 +392,13 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | CallRoom { .. }
         | ScreenShareOffer { .. }
         | ScreenShareAnswer { .. }
-            | VoiceJoin { .. }
-            | VoiceLeave { .. }
-            | VoiceState { .. }
-            | TunnelOffer { .. }
-            | TunnelAnswer { .. }
-            | Ping { .. }
-            | Pong { .. } => 0,
-        // 1 — controle social/conexão
+        | VoiceJoin { .. }
+        | VoiceLeave { .. }
+        | VoiceState { .. }
+        | TunnelOffer { .. }
+        | TunnelAnswer { .. }
+        | Ping { .. }
+        | Pong { .. } => 0,
         FriendRequest { .. }
         | FriendAccept { .. }
         | FriendReject
@@ -518,8 +414,6 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | PeerRelayPut { .. }
         | PeerRelayGet { .. }
         | PeerRelayData { .. }
-        // camada social: mesma prioridade do controle social (nunca atrás de
-        // bulk de arquivos — uma reação não pode esperar 2MB de chunk).
         | React { .. }
         | Reply { .. }
         | MsgEdit { .. }
@@ -540,102 +434,49 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | EventUpsert { .. }
         | EventInterest { .. }
         | EmojiUpsert { .. }
-        // `Typing` é descartável por natureza (o receptor expira sozinho em
-        // ~6s): vai na mais baixa prioridade de forma proposital, para nunca
-        // disputar fila com mensagem, reação ou chunk.
         | Typing { .. }
         | ChannelReorder { .. }
         | Bye => 1,
-        // 2 — mensagens + acks
         Msg(_) | ChannelMsg { .. } | ChannelAck { .. } | Ack { .. } | Read { .. } => 2,
-        // 3 — bulk: arquivos + estado completo de comunidade
         FileAnnounce { .. }
         | FileChunkRequest { .. }
         | FileChunkData { .. }
         | FileHave { .. }
-        // TunnelData transporta o PAYLOAD de um frame serializado (ate
-        // TUN_FRAME_MAX) fragmentado em pedacos de 48KB. Um chunk de arquivo
-        // de 341KB vira ~8 TunnelData. Com a classe 0 (realtime) eles entravam
-        // NA FRENTE de CallOffer/CallIce/Ping, que tem CLASS_CAP de 8 frames por
-        // lote: um download via relay segurava a negociacao da chamada, e o ping
-        // atrasado derrubava a sessao (timeout em transport.rs). O handshake do
-        // tunel (Offer/Answer) continua realtime; so' os dados vao para o bulk.
         | TunnelData { .. }
         | CommunityState { .. } => 3,
     }
 }
 
-/// Diagnóstico POR PEER — por que está (ou não) conectado. Sem isto a UI só
-/// mostra "CONECTANDO" pra sempre sem motivo técnico. Preenchido pelos laços
-/// de dial (direto/relay) e pelo lookup de announce.
+// Seção 2: derive
 #[derive(Clone, Debug, Default)]
 pub struct PeerDiagInfo {
-    /// Último erro do dial DIRETO (io/timeout/handshake) — None se nunca tentou.
     pub last_direct_err: Option<String>,
-    /// Último dial direto bem-sucedido (epoch ms) — 0 = nunca.
     pub last_direct_ok_ms: i64,
-    /// Último erro do dial RELAY ("timeout — peer offline?" etc).
     pub last_relay_err: Option<String>,
-    /// Última sessão relay estabelecida (epoch ms) — 0 = nunca.
     pub last_relay_ok_ms: i64,
-    /// Vezes que vimos o anúncio de endpoint do peer (epoch ms do último).
     pub announce_seen_ms: i64,
-    /// Contadores de tentativa (direto/relay) para a UI mostrar esforço real.
     pub direct_attempts: u64,
     pub relay_attempts: u64,
-    /// Túnel virtual estabelecido? (Fase 1+)
     pub tunnel_up: bool,
-    /// IP virtual fd9d:: do peer (determinístico do fp; Some com túnel).
     pub virtual_ip: Option<String>,
-    /// Frames recebidos/enviados PELO túnel (prova de uso real na UI).
     pub tunnel_rx_frames: u64,
     pub tunnel_tx_frames: u64,
-    /// Último frame do peer REJEITADO e por quê (epoch ms em `last_reject_ms`).
-    ///
-    /// Existe porque "aparece online mas não chega mensagem" não tinha causa
-    /// visível em lugar nenhum: a rejeição (anti-spam, conv_id divergente,
-    /// assinatura, gate de amigo) morria num `debug!`. Com isto o painel de
-    /// diagnóstico mostra a razão real em vez de "conectado" e silêncio.
     pub last_reject: Option<String>,
     pub last_reject_ms: i64,
-    /// Mensagens NOSSAS que desistiram de sair (viraram `failed`). Se cresce
-    /// com o peer "online", o caminho existe mas o receptor está recusando.
     pub send_gave_up: u64,
-    /// Último toque em qualquer campo (epoch ms) - base do bound LRU do mapa.
     pub last_seen_ms: i64,
-    /// Último FRAME recebido deste peer (epoch ms) — prova de vida real.
-    /// O link pode ficar `Online` na memória depois de o processo do outro
-    /// lado morrer; sem isto a bolinha verde mentia ("aparece online mas não
-    /// recebe nada"). Ping a cada 10s (relay 20s) mantém isto fresco.
     pub last_rx_ms: i64,
-    /// Último `Ack`/`Read` RECEBIDO deste peer (epoch ms) — prova de que o
-    /// caminho de DADOS dele para nós funciona, não só o de controle.
-    ///
-    /// BUG REAL ("aparece online mas a mensagem fica no relógio"): o Ping/Pong
-    /// mantém `last_rx_ms` fresco mesmo quando o caminho de volta perde tudo o
-    /// que não é controle — a sessão segue `Online` e o outbox reenvia para o
-    /// mesmo canal morto até estourar o orçamento. Este campo é a evidência
-    /// que faltava: sem `Ack` novo há muito tempo + mensagens nossas presas,
-    /// o link está meio-vivo e precisa ser refeito.
     pub last_ack_ms: i64,
 }
 
-/// Diagnóstico GLOBAL da rede: STUN, anúncio de endpoint e DHT BitTorrent.
 #[derive(Clone, Debug, Default)]
 pub struct NetDiagInfo {
-    /// STUN funcionou? None = ainda não testado.
     pub stun_ok: Option<bool>,
     pub stun_addr: Option<String>,
     pub stun_ms: i64,
-    /// Endpoint próprio anunciado (addr + quando) — None = não anunciou
-    /// (CGNAT sem UPnP: direto só se o PAR puder receber).
     pub announce_addr: Option<String>,
     pub announce_ms: i64,
-    /// Origem do endpoint anunciado: "upnp" (mapeamento local UPnP/NAT-PMP,
-    /// sem servidor) ou "stun" (reflexo via STUN público). None = sem endpoint.
     pub nat_source: Option<String>,
-    /// DHT mainline BitTorrent: None = não testada/fora do modo; true = nó
-    /// anunciando na rede BitTorrent.
     pub dht_ok: Option<bool>,
     pub dht_ms: i64,
 }
@@ -651,12 +492,9 @@ impl PeerLink {
     }
 }
 
-/// Pareamento imediato + push do estado do servidor (tags/canais) — ver
-/// `net/engine/community_pair.rs`.
 mod community_pair;
 #[cfg(test)]
 mod peer_liveness_tests;
-/// Anúncio da sala de chamada (grupo/DM) — ver `net/engine/room_announce.rs`.
 mod room_announce;
 #[cfg(test)]
 mod room_announce_tests;
@@ -672,208 +510,87 @@ pub struct NetworkEngine {
     keypair: Arc<Keypair>,
     identity: Identity,
     nickname: String,
-    #[allow(dead_code)] // usado por backup/Host (fase seguinte)
+    #[allow(dead_code)]
     data_dir: PathBuf,
     links: StdMutex<HashMap<String, Arc<PeerLink>>>,
     events: broadcast::Sender<EngineEvent>,
     cmd_tx: mpsc::UnboundedSender<EngineCmd>,
-    /// Consumido por `run_engine` no boot — new() não pode spawnar porque
-    /// pode ser chamado fora de um runtime tokio (ex.: commands síncronos do Tauri).
     cmd_rx: StdMutex<Option<mpsc::UnboundedReceiver<EngineCmd>>>,
     pending_joins: StdMutex<HashMap<String, String>>,
-    /// Backoff dos reenvios de `JoinCommunity` por comunidade: `(último_ms, tentativas)`.
-    ///
-    /// Sem isto, um convite colado com o dono offline ficava só na RAM e o
-    /// pedido morria no primeiro erro; e um join confirmado nunca era
-    /// re-sincronizado depois de reiniciar. O backoff é exponencial e limitado
-    /// para não virar enxurrada de dials (que o `netlimiter` bloquearia).
     join_retry: StdMutex<HashMap<String, (i64, u32)>>,
-    /// Último `CommunitySyncRequest` por servidor (epoch ms) — evita pedir o
-    /// estado a cada tique de 5s.
     community_sync_at: StdMutex<HashMap<String, i64>>,
-    /// Último dial de MEMBRO de servidor por fingerprint (epoch ms).
     member_dial_at: StdMutex<HashMap<String, i64>>,
     listen_port: AtomicU16,
     started: StdMutex<bool>,
     shutdown: Arc<Notify>,
     handles: StdMutex<Vec<JoinHandle<()>>>,
-    /// Cancelamento cooperativo das tasks destacadas do `run_engine`
-    /// (accept loop, relay manager, announce, maintain, punch). Sem isto,
-    /// `restart_engine` deixava o engine VELHO vivo: dois listeners TCP na
-    /// mesma porta (SO_REUSEPORT) e dois relay managers com o mesmo client_id
-    /// MQTT se engolindo — as conexões viravam caos até reiniciar o app.
     cancel_tx: tokio::sync::watch::Sender<bool>,
-    /// Entradas de frames do relay por peer (poller → sessão). Quando vazio,
-    /// o poller cria sessão respondente para Hello recém-chegado.
     relay_in: StdMutex<HashMap<String, mpsc::UnboundedSender<Vec<u8>>>>,
-    /// Backend do relay (padrão: MultiRelay público; testes injetam MemRelay).
     relay_backend: StdMutex<Arc<dyn RelayBackend>>,
-    /// Backend foi injetado externamente (testes/host)? Nesse caso o engine
-    /// NÃO o sobrescreve ao (re)aplicar o modo de privacidade.
     relay_backend_custom: AtomicBool,
-    /// Backend atual roteia por SOCKS5 (proxy/Tor): habilita o relay nesses
-    /// modos SEM vazar o IP real (fail-closed quando não há proxy configurado).
     relay_proxied: AtomicBool,
-    /// Kill-switch do relay (`DISTORRENT_NO_RELAY=1` ou `set_relay_disabled(true)`):
-    /// `relay_allowed()` vira false e nenhum post/poll de relay acontece; a
-    /// rota DIRETA (TCP, hole punch, UPnP, LAN) segue normal. Ativado por env
-    /// no boot e alternável em runtime — nunca sobrescreve backend injetado.
     relay_disabled: AtomicBool,
-    /// Kill-switch PRÓPRIO do peer-relay. Diferente do relay público (OPT-IN,
-    /// desligado por padrão), o peer-relay é um transporte p2p que NÃO usa
-    /// broker público — por isso nasce LIGADO (só modo anônimo/backend
-    /// injetado o desabilitam). `DISTORRENT_NO_RELAY`/`set_relay_disabled(true)`
-    /// desligam ambos; o default `relay_disabled=true` NÃO o desliga.
     peer_relay_disabled: AtomicBool,
-    /// (F7) Intermediário por PEER: **AUTOMÁTICO (ligado por padrão)** — quando
-    /// o direto falha, um peer online encaminha os frames cifrados E2E.
-    /// Desliga com `DISTORRENT_NO_RELAY=1` ou `DISTORRENT_PEER_RELAY=0`; off em proxy/full.
     peer_relay_optin: AtomicBool,
-    /// Peer ONLINE escolhido como intermediário do circuito peer-relay (v0).
-    /// `None` = sem intermediário → usa o backend de relay configurado.
-    /// Nunca vira amigo, nunca entra em lista de UI, nunca gera evento.
     peer_relay: Arc<StdMutex<Option<String>>>,
-    /// Cache do backend peer-relay p/ o intermediário atual. PRECISA ser
-    /// estável: o oneshot do `poll` só é resolvido pelo MESMO objeto.
     peer_relay_backend: StdMutex<Option<(String, Arc<PeerRelayBackend>)>>,
-    /// Guards de maintain do relay (um por peer, eterno): evita tempestade de
-    /// dials duplicados (bootstrap reenvia ConnectRelay a cada 5s sem link;
-    /// sem guard, cada redial após disconnect gerava +1 maintain concorrente
-    /// com Hello/eph distintos — livelock de dial cruzado).
     relay_maintains: StdMutex<std::collections::HashSet<String>>,
-    /// Dedup dos dials DIRETOS (`connect_and_maintain`), chave `fp@addr`.
-    /// Sem isto, cada evento de descoberta re-engatilhava um novo laço direto
-    /// (milhares de tarefas/redial em LAN), porque o loop de discovery reenvia
-    /// ConnectTo enquanto o relay está online. Uma tarefa por destino conhecido.
     direct_maintains: StdMutex<std::collections::HashSet<String>>,
-    /// Upgrades relay→direta: peer → geração do loop de Punch. O contador
-    /// evita corrida (o loop antigo NÃO remove a chave de um loop novo) e
-    /// impede empilhar vários loops de furo para a mesma sessão.
     punch_upgrades: StdMutex<HashMap<String, u64>>,
-    /// Rate-limit do `Punch` RECEBIDO por peer (unix_ms do último): evita
-    /// que um peer autenticado nos use como amplificador de dials/SYNs.
     punch_rate: StdMutex<HashMap<String, i64>>,
-    /// Fila de sinalização de chamada por peer (Call*/ScreenShare* quando
-    /// offline): `call_invite/accept/reject/end/signal` enfileiram aqui + disparam
-    /// dial imediato (ConnectRelay + LookupAnnounce, igual a friend_request);
-    /// `register_and_run` drena via FLUSH IMEDIATO na sessão recém-criada
-    /// (mesmo padrão de flush_friend_requests/flush_joins — sem esperar o tick
-    /// de 5s). Cap 64/peer (voz/sinalização é efêmera; além disso descarta a
-    /// mais antiga). NÃO havia fila antes — frames offline eram descartados.
     pending_calls: StdMutex<HashMap<String, Vec<SecureFrame>>>,
-    /// Convites já entregues (`call_id|peer`): o chamador reenvia o ring
-    /// enquanto a chamada não conecta, e o mesmo invite não pode reacender o
-    /// toque nem empilhar overlay no receptor.
     ring_seen: StdMutex<std::collections::HashSet<String>>,
-    /// Salas de chamada VIVAS anunciadas (`net::call_room`): quem está na
-    /// conversa vê que há chamada e pode entrar. Sem isto a chamada só existia
-    /// para quem recebeu o `CallInvite`.
     call_rooms: StdMutex<super::call_room::Rooms>,
-    /// Último endpoint público anunciado (UPnP/ipify) — usado no Punch.
     public_addr: StdMutex<Option<String>>,
-    /// Porta EXTERNA mapeada no roteador (UPnP/NAT-PMP) que DEVE ser anunciada.
-    /// 0 = desconhecida (usa a porta interna do listener). NAT-PMP pode atribuir
-    /// uma porta externa diferente da interna; anunciar a interna quebraria o
-    /// inbound (o peer disca o endpoint publicado).
     nat_external_port: Arc<AtomicU16>,
-    /// Kill-flag do hole punching (`DISTORRENT_PUNCH=0` desliga). A direta normal
-    /// (dial outbound/UPnP/LAN) continua; só o furo coordenado para.
     punch_enabled: AtomicBool,
-    /// Falhas de estabelecimento por peer: `(contagem, 1ª falha unix_ms)`.
-    /// Alimenta o fallback automático para proxy (degrau 3).
     dial_failures: StdMutex<HashMap<String, (u32, i64)>>,
-    /// Diagnóstico por peer (por que conecta ou não) — lido pela UI.
     peer_diag: StdMutex<HashMap<String, PeerDiagInfo>>,
-    /// Diagnóstico global (STUN/announce/DHT) — lido pela UI.
     net_diag: StdMutex<NetDiagInfo>,
-    /// Nó DHT mainline BitTorrent (BEP-5) — descoberta descentralizada.
     bit_dht: StdMutex<Option<Arc<mainline::Dht>>>,
-    /// Último lookup DHT por peer (epoch ms) — rate-limit por peer.
     dht_lookups: StdMutex<HashMap<String, i64>>,
-    /// Fila urgente de lookups DHT (friend_request, maintain) — pop no loop.
     dht_queue: StdMutex<Vec<String>>,
-    /// Última troca AUTOMÁTICA para proxy por peer (unix_ms) — cooldown
-    /// anti-flapping; nunca reverte sozinho.
     auto_proxy_switched: StdMutex<HashMap<String, i64>>,
-    /// Túnel virtual (LAN estilo Radmin): sessões estabelecidas por peer.
     tunnel_sessions: StdMutex<HashMap<String, TunnelSession>>,
-    /// Ofertas de túnel que EU fiz, aguardando resposta (segredo efêmero).
     tunnel_pending: StdMutex<HashMap<String, TunnelPending>>,
-    /// proto_v do handshake por peer (gate dos frames do túnel: >= 2).
     peer_protos: StdMutex<HashMap<String, u32>>,
-    /// Timeouts Tor consecutivos por peer (modo full): 3 → tenta o túnel.
     tor_timeouts: StdMutex<HashMap<String, u32>>,
-    /// Pings do túnel aguardando pong: (fp, id) → enviado_ms (RTT honesto).
     tunnel_pings: StdMutex<HashMap<(String, u64), i64>>,
-    /// Credenciais do peer no túnel (fp → (pubkey_hex, nick)): dispatch de
-    /// frames que chegam PELO túnel precisa autenticar o contexto.
     tunnel_meta: StdMutex<HashMap<String, (String, String)>>,
-    /// Remontagem de frames fragmentados do túnel.
     tunnel_reasm: StdMutex<TunnelReassembler>,
-    /// Kill-flag do túnel (`DISTORRENT_NO_TUNNEL=1` desliga). Direto/relay seguem.
     tunnel_disabled: AtomicBool,
-    /// Anti-spam (Storm camada de segurança): flood por peer
-    /// `(contagem, início_da_janela_ms)` — janela 10s, teto 10 msgs (Medium).
-    /// Estourar = mensagem descartada (sessão preservada) + reputação cai.
     spam_flood: StdMutex<HashMap<String, (u32, i64)>>,
-    /// Anti-spam: último `(hash_do_conteúdo, ts_ms, repetições)` por peer —
-    /// só descarta repetição EM MASSA (6+ cópias idênticas em 60s), nunca
-    /// "sim" dito duas vezes numa conversa.
     spam_dup: StdMutex<HashMap<String, (String, i64, u32)>>,
-    /// Limites próprios para reações recebidas. A identidade da chave é o
-    /// peer autenticado da sessão, nunca o `reactor_fp` declarado no frame.
     reaction_limiter: StdMutex<ReactionLimiter>,
-    /// Limites de rede (rate limits/concorrência/tetos) — o "rate limit para
-    /// tudo": TCP inbound, discovery UDP, relay, frames/bytes por sessão,
-    /// dials outbound. `Arc` porque discovery/mDNS compartilham a MESMA
-    /// instância (limites globais de verdade, não por cópia).
     pub(crate) netlimiter: Arc<NetLimiter>,
-    /// Mídia nativa viva, ou `None` (verbatim do boot). Mutável para o re-arm
-    /// em `voice_gate` (dispositivo de áudio que aparece depois do boot).
     #[cfg(target_os = "linux")]
     pub(super) voice: StdMutex<Option<Arc<VoiceMedia>>>,
-    /// PARES `(call_id, peer_fp)` cuja sinalização é DESTA camada nativa.
-    ///
-    /// Esta é a REGRA DE COEXISTÊNCIA, e ela sozinha que mantém o navegador
-    /// no comando: um `CallOffer`/`CallAnswer`/`CallIce` só é absorvido pela
-    /// mídia nativa se o par estiver AQUI. Sem registro, o frame segue intacto
-    /// para o JS e a WebView cria a `RTCPeerConnection` como sempre. Nada mais
-    /// no motor precisa saber disso.
     #[cfg(target_os = "linux")]
     pub(super) voice_calls: StdMutex<HashMap<String, HashSet<String>>>,
-    /// Ofers/ICE retidos até o aceite (ver `net/voice_gate.rs`).
     #[cfg(target_os = "linux")]
     pub(super) held_calls: StdMutex<HashMap<String, HeldCall>>,
-    /// Canais de voz em que ESTE nó está agora: `voice-{community}-{channel}`
-    /// → (community_id, channel_id). É o registro que autoriza offers de
-    /// canal a virarem sessões nativas: quem NÃO está no canal nunca absorve.
     #[cfg(target_os = "linux")]
     pub(super) voice_channel_calls: StdMutex<HashMap<String, (String, String)>>,
 }
 
 enum EngineCmd {
-    ConnectTo(SocketAddr, Option<String>), // addr, fp esperado
+    ConnectTo(SocketAddr, Option<String>),
     ConnectHost {
         host: String,
         port: u16,
         expected_fp: Option<String>,
-    }, // domínio/IP/.onion
-    ConnectRelay(String),                  // fp — handshake via relay (sem porta aberta)
-    LookupAnnounce(String),                // fp — lookup único de endpoint (direta imediata)
+    },
+    ConnectRelay(String),
+    LookupAnnounce(String),
     PunchDial {
         fp: String,
         endpoint: String,
         at_ms: u64,
-    }, // furo TCP simultâneo coordenado
-    SendToPeer(String, SecureFrame),       // peer fp, frame
-    FlushOutbox(String),                   // peer fp
+    },
+    SendToPeer(String, SecureFrame),
+    FlushOutbox(String),
 }
 
-/// Política do peer-relay por modo de privacidade: `(usar, servir)`.
-/// - `normal`/`encrypted`: PERMITE usar como cliente e atuar como intermediário.
-/// - `proxy`/`full`: NEGA ambos — o intermediário veria o IP real de quem o
-///   contacta (e o cliente exporia sua origem ao intermediário).
-/// - qualquer outro valor: fail-closed (nega ambos).
 pub fn peer_relay_policy(mode: &str) -> (bool, bool) {
     match mode {
         "normal" | "encrypted" => (true, true),
@@ -882,15 +599,6 @@ pub fn peer_relay_policy(mode: &str) -> (bool, bool) {
     }
 }
 
-/// Regra PURA do degrau 3 da corrente de fallback: devemos trocar para o modo
-/// `proxy` (SOCKS5) agora? Fail-closed — qualquer dúvida retorna `false`.
-///
-/// - `enabled`: `DISTORRENT_AUTO_PROXY` ligado (default DESLIGADO — opt-in manual).
-/// - `has_proxy`: existe SOCKS5 configurado (`DISTORRENT_PROXY_ADDR`/kv).
-/// - só troca a partir de `normal`/`encrypted`; NUNCA de `full` (Tor) nem de
-///   `proxy` (já está lá).
-/// - `already_switched`: já houve troca automática p/ este peer (anti-flapping).
-/// - `failures`: falhas de estabelecimento acumuladas; limiar claro (>= 6).
 pub fn auto_proxy_should_switch(
     mode: &str,
     has_proxy: bool,
@@ -907,36 +615,13 @@ pub fn auto_proxy_should_switch(
     matches!(mode, "normal" | "encrypted")
 }
 
-// ============================================================ voz nativa (LINUX)
-//
-// WebRTC do navegador (WebView) é o caminho de voz que já funciona em
-// Windows/Android/macOS e não se mexe. Por isso tudo abaixo é `cfg(linux)`: nas
-// outras plataformas este arquivo não tem uma linha sequer de mídia nativa, e
-// as dependências (webrtc-rs, cpal, libopus) nem entram no build. A camada Rust abaixo é um SEGUNDO
-// caminho, opt-in, que existe porque o WebKitGTK não expõe `RTCPeerConnection`
-// de forma confiável.
-//
-// A coexistência não é feita por condição espalhada: é feita por REGISTRO. O
-// motor só marca um par `(call_id, peer_fp)` como nativo quando ELE MESMO
-// iniciou essa chamada por aqui (`call_invite`/`call_accept`/
-// `call_add_participant`). Todo `CallOffer`/`CallAnswer`/`CallIce` que chega
-// sem registro correspondente atravessa o motor intacto e vira
-// `EngineEvent::Call*` — que é exatamente o que a WebView já consome hoje.
-
-/// A camada nativa de áudio só entra em cena no Linux.
-///
-/// Windows, Android e macOS já têm WebRTC do navegador funcionando e medido.
-/// Trocar esse caminho por cpal+opus nessas plataformas seria trocar algo
-/// validado por algo que ninguém mediu lá — e o requisito de não quebrar esses
-/// três sistemas manda mais que a paridade de código.
 #[cfg(target_os = "linux")]
+// Seção 3: inline
 #[inline]
 fn native_voice_platform_ok() -> bool {
     cfg!(target_os = "linux")
 }
 
-/// Estamos DENTRO de um runtime tokio multi-thread? (único que aceita
-/// `block_in_place`).
 #[cfg(target_os = "linux")]
 #[inline]
 fn in_multi_thread_runtime() -> bool {
@@ -948,17 +633,8 @@ fn in_multi_thread_runtime() -> bool {
     })
 }
 
-/// Kill-switch de emergência (`DISTORRENT_NO_NATIVE_VOICE=1`): desliga a mídia
-/// nativa sem recompilar. Útil para comparar os dois caminhos lado a lado.
 #[cfg(target_os = "linux")]
 #[inline]
-/// Este BUILD tem voz nativa? — independente do motor existir.
-///
-/// BUG que isto corrige: `voice_media_available` consultava o motor, que é
-/// `None` enquanto o cofre está trancado. O app perguntava no boot, recebia
-/// `false`, e o JS cacheava "indisponível" para sempre — mesmo depois de
-/// desbloquear, quando a voz já estava de pé. Capacidade é propriedade do
-/// build, não do estado.
 pub fn native_voice_capable() -> bool {
     native_voice_platform_ok() && native_voice_env_ok()
 }
@@ -974,12 +650,6 @@ fn native_voice_env_ok() -> bool {
     )
 }
 
-/// Constrói o gerenciador de mídia, ou `None` se não der.
-///
-/// TOLERANTE DE FALHA de propósito: sem microfone, sem alto-falante, sem
-/// device, ou até sem runtime — nada disso pode derrubar o motor, porque o
-/// motor também é o caminho de texto/arquivos. Com `None` o app continua
-/// sinalizando chamada normalmente e a WebView faz a voz como sempre.
 #[cfg(target_os = "linux")]
 pub(super) fn build_voice_media() -> Option<Arc<VoiceMedia>> {
     if !(native_voice_platform_ok() && native_voice_env_ok()) {
@@ -987,8 +657,6 @@ pub(super) fn build_voice_media() -> Option<Arc<VoiceMedia>> {
     }
     match VoiceMedia::new() {
         Ok(v) => {
-            // eprintln e não tracing: o subscriber não escreve em stdout, e este
-            // é o log que responde "por que a chamada não usa voz nativa?".
             eprintln!(
                 "[distorrent] voz nativa: ATIVA (microfone: {})",
                 if v.has_capture() {
@@ -1107,9 +775,9 @@ impl NetworkEngine {
         store: Arc<Store>,
         keypair: Keypair,
         identity: Identity,
+        // Seção 4: data_dir
         data_dir: PathBuf,
     ) -> Arc<Self> {
-        // usa identidade armazenada (preserva fingerprint legado d9a8cb... para não quebrar mensagens)
         let nickname = identity.nickname.clone();
         let relay_fp = identity.fingerprint.clone();
         let (events, _) = broadcast::channel(256);
@@ -1195,31 +863,14 @@ impl NetworkEngine {
         &self.identity
     }
 
-    /// Acesso ao repositório para as FACHADAS acima.
-    ///
-    /// Existe para que o resto do crate (e os testes de integração) leia pelo
-    /// mesmo caminho que a escrita — não para expor storage cru. As operações
-    /// que decidem permissão (`social_*`) continuam todas no motor: quem chama
-    /// isto ainda tem de passar por elas para mudar alguma coisa.
     pub fn store_ref(&self) -> &Store {
         &self.store
     }
 
-    /// Cópia do par de chaves do usuário local.
-    ///
-    /// Existe para o caminho de ENTRADA: assinar um envelope com a identidade
-    /// local é a operação de escrita mais básica da API pública (abrir DM,
-    /// mandar mensagem). Sem isto, todo chamador teria de chegar ao par de
-    /// outro jeito, e a maioria acabaria usando a chave de outro peer —
-    /// o que produziria mensagens com assinatura inválida em vez de um erro
-    /// claro. Nunca sai do processo.
     pub fn keypair(&self) -> Keypair {
         (*self.keypair).clone()
     }
 
-    /// Segredo da identidade em RAM (só existe com o app desbloqueado).
-    /// Uso restrito: export do cofre portátil e backups automáticos — o
-    /// chamador (camada Tauri) nunca expõe isto à WebView nem a logs.
     pub fn secret_hex(&self) -> String {
         self.keypair.secret_hex()
     }
@@ -1232,10 +883,6 @@ impl NetworkEngine {
         self.listen_port.load(Ordering::Relaxed)
     }
 
-    /// Porta EXTERNA confirmada para anunciar na DHT BitTorrent.
-    /// Ordem: `public_addr` (cache STUN/UPnP do tick de announce) → porta
-    /// externa mapeada (UPnP/NAT-PMP). `None` = sem endpoint externo conhecido
-    /// → NÃO anuncie (anunciar a TCP interna gera dials mortos e polui a DHT).
     pub fn dht_announce_port(&self) -> Option<u16> {
         if let Some(addr) = self
             .public_addr
@@ -1256,13 +903,10 @@ impl NetworkEngine {
         None
     }
 
-    /// Inicia listener TCP + discovery + loops. Idempotente por instância.
     pub fn start(self: &Arc<Self>) -> Result<()> {
         self.start_with_discovery(true)
     }
 
-    /// Modo solo (sem discovery LAN) — usado por testes e por hosts com peers
-    /// configurados manualmente.
     pub fn start_with_discovery(self: &Arc<Self>, discovery: bool) -> Result<()> {
         {
             let mut s = self.started.lock().unwrap_or_else(|e| e.into_inner());
@@ -1273,7 +917,6 @@ impl NetworkEngine {
         }
         let engine = self.clone();
         let handle = tokio::spawn(async move {
-            // command_loop precisa de runtime — vive dentro desta task
             let cmd_rx = engine
                 .cmd_rx
                 .lock()
@@ -1302,8 +945,7 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Encerra o engine limpamente: aborta tasks, fecha conexões, libera portas.
-    /// Chamado por `restart_engine` e no Drop do AppState.
+    // Seção 5: shutdown
     pub fn shutdown(&self) {
         let _ = self.cancel_tx.send(true);
         let port = self.listen_port.load(Ordering::Relaxed);
@@ -1314,11 +956,9 @@ impl NetworkEngine {
                 .remove(&port);
         }
         self.shutdown.notify_waiters();
-        // desconecta todos os peers
         for fp in self.online_peer_fps() {
             self.disconnect_peer(&fp);
         }
-        // aborta handles registrados
         let mut hs = self.handles.lock().unwrap_or_else(|e| e.into_inner());
         for h in hs.drain(..) {
             h.abort();
@@ -1326,29 +966,12 @@ impl NetworkEngine {
         *self.started.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
-    // ---------- API pública (Tauri / Host / CLI) ----------
-
-    /// Modo de privacidade persistido e lido PELO MOTOR em cada conexão
-    /// (normal | encrypted | proxy | full). API pública — o app e o host usam.
     pub fn privacy_set_mode(&self, mode: &str) -> Result<()> {
         match mode {
             "normal" | "encrypted" | "proxy" | "full" => {
                 self.store.kv_set("privacy.mode", mode)?;
-                // Relay acompanha o modo: em proxy/full as pernas MQTT passam
-                // a sair por túneis SOCKS5 (Tor/proxy) para continuar
-                // funcionando sem abrir porta e SEM vazar o IP; voltando a
-                // normal/encrypted, restaura as rotas públicas diretas.
                 self.refresh_relay_for_privacy();
-                // Reavalia o intermediário peer-relay: em proxy/full (ou sob
-                // kill-switch) a seleção cai para None na hora.
                 self.refresh_peer_relay();
-                // SESSÕES DIRETAS VIVAS NÃO PODEM FICAR FORA DA POLÍTICA NOVA
-                // (correção de estado): ao entrar em proxy/full, as conexões
-                // diretas (que expõem o IP real ao peer) são derrubadas — o
-                // laço de maintain re-discará PELO proxy na próxima tentativa
-                // (lê o modo a cada volta). Sessões relay seguem vivas: nelas
-                // o relay já roda por túnel SOCKS5. Sair do modo anônimo NÃO
-                // derruba nada (mais privacidade que o pedido não viola).
                 if matches!(mode, "proxy" | "full") {
                     let direct: Vec<String> = {
                         let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -1362,9 +985,6 @@ impl NetworkEngine {
                         info!(%fp, "sessão direta encerrada: política anônima em vigor");
                         self.disconnect_peer(&fp);
                     }
-                    // Endpoint público anunciado é segredo morto no modo
-                    // anônimo (punch/announce já são gates; o cache não
-                    // precisa sobreviver à troca).
                     *self.public_addr.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 }
                 Ok(())
@@ -1381,11 +1001,6 @@ impl NetworkEngine {
             .unwrap_or_else(|| "encrypted".to_string())
     }
 
-    /// Chave kv do endereço SOCKS5 de cada modo anônimo. São SEPARADAS de
-    /// propósito: um usuário pode ter um SOCKS5 próprio (proxy) e o daemon
-    /// Tor local (full) em portas diferentes — antes havia uma chave só e
-    /// trocar de modo reaproveitava o endereço do outro (Tor tentando falar
-    /// com o proxy HTTP e vice-versa), o que sempre caía em fail-closed.
     fn anonymity_addr_key(mode: &str) -> &'static str {
         if mode == "full" {
             "privacy.tor_addr"
@@ -1394,39 +1009,26 @@ impl NetworkEngine {
         }
     }
 
-    /// Endereço SOCKS5 `host:porta` usado no modo anônimo atual, ou `None`
-    /// quando o tráfego é direto. `full` (Tor) usa o endereço salvo pelo
-    /// usuário (`privacy.tor_addr`), depois `DISTORRENT_TOR_ADDR`, depois 9050;
-    /// `proxy` usa `privacy.proxy_addr`, depois `DISTORRENT_PROXY_ADDR`, depois
-    /// 1080. É a ÚNICA fonte dessa decisão — relay
-    /// (`refresh_relay_for_privacy`) e diagnóstico (`relay_diagnostics`)
-    /// leem daqui para nunca divergirem (ex.: um vazar IP e o outro não).
     pub fn anonymity_proxy(&self) -> Option<String> {
         let mode = self.privacy_mode();
         match mode.as_str() {
             "full" => {
-                // 1) endereço digitado pelo usuário na UI (privacidade → Tor)
-                // — antes era IGNORADO e o campo aparecia editável: editar a
-                // porta do Tor na tela não mudava nada no motor.
                 if let Some(addr) = self.store.kv_get(Self::anonymity_addr_key(&mode)) {
                     if !addr.trim().is_empty() {
                         return Some(addr);
                     }
                 }
-                // 2) env (self-host/CI); 3) default do daemon Tor
                 Some(
                     std::env::var("DISTORRENT_TOR_ADDR")
                         .unwrap_or_else(|_| "127.0.0.1:9050".to_string()),
                 )
             }
             "proxy" => {
-                // 1) endereço digitado pelo usuário na UI (privacidade → proxy)
                 if let Some(addr) = self.store.kv_get(Self::anonymity_addr_key(&mode)) {
                     if !addr.trim().is_empty() {
                         return Some(addr);
                     }
                 }
-                // 2) env (self-host/CI); 3) default local
                 Some(
                     std::env::var("DISTORRENT_PROXY_ADDR")
                         .unwrap_or_else(|_| "127.0.0.1:1080".to_string()),
@@ -1436,37 +1038,23 @@ impl NetworkEngine {
         }
     }
 
-    /// Salva o endereço SOCKS5 digitado pelo usuário PARA O MODO informado
-    /// (`proxy` ou `full`) e aplica na hora (se o modo já estiver ativo, o
-    /// relay re-rotas os túneis; se não, fica guardado para quando ativar).
-    /// Formato `host:porta`. Recebe o modo explícito porque a UI salva o
-    /// endereço ANTES de trocar o modo — ler `privacy_mode()` aqui gravaria
-    /// no modo errado e o valor nunca valeria.
     pub fn set_anonymity_addr(&self, mode: &str, addr: &str) -> Result<()> {
         let key = Self::anonymity_addr_key(mode);
         let addr = addr.trim();
         if addr.is_empty() {
             self.store.kv_delete(key)?;
         } else {
-            // valida ANTES de persistir — sem porta/env tudo vira "inválido"
             let _ = crate::net::socks5::split_host_port(addr)?;
             self.store.kv_set(key, addr)?;
         }
-        // em modo anônimo o backend troca de túnel AGORA (mesma semântica do
-        // privacy_set_mode — nunca exige reboot para valer).
         self.refresh_relay_for_privacy();
         Ok(())
     }
 
-    /// Compat: salva o endereço do modo `proxy`. Mantido porque host/CLI já
-    /// chamam por este nome; delega para `set_anonymity_addr`.
     pub fn set_proxy_addr(&self, addr: &str) -> Result<()> {
         self.set_anonymity_addr("proxy", addr)
     }
 
-    /// Existe um SOCKS5 configurado? `DISTORRENT_PROXY_ADDR` não-vazio OU um
-    /// endereço persistido pelo usuário em `privacy.proxy_addr`. Fail-closed:
-    /// ausência = sem proxy (não inventa o 127.0.0.1:1080 do caminho de fallback).
     fn proxy_configured(&self) -> bool {
         if let Ok(v) = std::env::var("DISTORRENT_PROXY_ADDR") {
             if !v.trim().is_empty() {
@@ -1479,8 +1067,6 @@ impl NetworkEngine {
             .unwrap_or(false)
     }
 
-    /// Registra uma falha de estabelecimento (direto ou relay) para o peer.
-    /// A 1ª falha marca o início da janela `AUTO_PROXY_STALL_MS`.
     fn record_dial_failure(&self, peer_fp: &str) {
         if peer_fp.is_empty() {
             return;
@@ -1488,7 +1074,7 @@ impl NetworkEngine {
         let now = crate::identity::now_ms();
         let mut map = self.dial_failures.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > 4096 {
-            map.clear(); // poda defensiva (churn de peers)
+            map.clear();
         }
         let e = map.entry(peer_fp.to_string()).or_insert((0, now));
         e.0 = e.0.saturating_add(1);
@@ -1497,7 +1083,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Sessão online com o peer: zera o contador de falhas (corrente recomposta).
     fn reset_dial_failures(&self, peer_fp: &str) {
         self.dial_failures
             .lock()
@@ -1505,29 +1090,14 @@ impl NetworkEngine {
             .remove(peer_fp);
     }
 
-    /// Registra uma falha de estabelecimento e tenta o degrau 3 (proxy).
-    /// Público para testes de integração; os laços de dial usam este caminho.
     pub fn note_dial_failure(&self, peer_fp: &str) {
         self.record_dial_failure(peer_fp);
-        // Com o relay por peer disponivel, `maybe_auto_fallback_proxy` retorna
-        // cedo (o degrau 2 ja cobre). Mas a COBERTURA do relay e lenta
-        // (Handshake por MQTT): sem este nudge, o laco de dial direto insistia
-        // numa rota que nunca vai existir (NAT simetrico dos dois lados) — 20+
-        // timeouts por peer, gastando CPU e deixando a UI presa em
-        // "CONECTANDO" para sempre. Aqui, passado o limiar, pedimos relay/tunel
-        // NA HORA e o diagnostico para de dizer "conectando".
         if self.direct_unreachable(peer_fp) {
             self.request_peer_path(peer_fp);
         }
         self.maybe_auto_fallback_proxy(peer_fp);
     }
 
-    /// O peer ja falhou tantas vezes na rota direta que insistir e desperdicio?
-    ///
-    /// Antes nao existia limite: o laco de redial repetia indefinidamente e o
-    /// relatorio mostrava "CONNECTING (23 tentativas)" para sempre, sem acao.
-    /// Agora, passado o limiar, o motor para de insistir no direto e espera a
-    /// rota alternativa (relay/tunel) — o caminho real atras de CGNAT.
     pub fn direct_unreachable(&self, peer_fp: &str) -> bool {
         let (count, first_ms) = {
             let map = self.dial_failures.lock().unwrap_or_else(|e| e.into_inner());
@@ -1537,12 +1107,10 @@ impl NetworkEngine {
             return false;
         }
         let now = crate::identity::now_ms();
-        // Contagem sozinha nao basta: peer que ja esteve online e caiu pode ser
-        // problema passageiro. Exige tambem tempo sem sucesso.
         first_ms > 0 && now.saturating_sub(first_ms) >= DIRECT_UNREACHABLE_STALL_MS
     }
 
-    /// Pede a rota alternativa (relay por peer + tunel virtual) para o peer.
+    // Seção 6: request_peer_path
     fn request_peer_path(&self, peer_fp: &str) {
         if peer_fp.is_empty() || peer_fp == self.identity.fingerprint {
             return;
@@ -1556,23 +1124,17 @@ impl NetworkEngine {
         self.tunnel_request(peer_fp);
     }
 
-    // ── Diagnóstico por peer/rede (por que 0 peers — nunca mudo) ──────────────
-
-    /// Atualiza o diagnóstico de um peer com mutação atômica (fn fecha o lock).
     fn diag_update(&self, fp: &str, f: impl FnOnce(&mut PeerDiagInfo)) {
         let mut map = self.peer_diag.lock().unwrap_or_else(|e| e.into_inner());
         let now = crate::identity::now_ms();
         let entry = map.entry(fp.to_string()).or_default();
         f(entry);
         entry.last_seen_ms = now;
-        // Bound LRU: mantém só os 512 tocados mais recentemente.
         if map.len() > 512 {
             let mut recent: Vec<(String, i64)> = map
                 .iter()
                 .map(|(k, v)| (k.clone(), v.last_seen_ms))
                 .collect();
-            // Desempate determinístico por fp (mesmo ms → inserção posterior
-            // tem fp maior nos testes e, em produção, qualquer ordem total basta).
             recent.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
             let keep: std::collections::HashSet<String> =
                 recent.into_iter().take(512).map(|(k, _)| k).collect();
@@ -1580,7 +1142,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Snapshot do diagnóstico do peer (para a UI/relatório de suporte).
     pub fn peer_diag(&self, fp: &str) -> PeerDiagInfo {
         self.peer_diag
             .lock()
@@ -1590,7 +1151,6 @@ impl NetworkEngine {
             .unwrap_or_default()
     }
 
-    /// Snapshot do diagnóstico global (STUN/announce).
     pub fn net_diag(&self) -> NetDiagInfo {
         self.net_diag
             .lock()
@@ -1632,16 +1192,11 @@ impl NetworkEngine {
         });
     }
 
-    /// Atualiza o diagnóstico de rede global (STUN/announce/DHT) — mutação sob lock.
     pub fn diag_record_net(&self, f: impl FnOnce(&mut NetDiagInfo)) {
         let mut d = self.net_diag.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut d);
     }
 
-    // ── DHT mainline BitTorrent (descoberta descentralizada) ─────────────────
-
-    /// Garante um nó DHT mainline vivo (bind UDP + bootstrap público).
-    /// Idempotente; erro = sem UDP/bootstrap (rede bloqueada) — loga só.
     pub fn ensure_bit_dht(&self) -> Result<()> {
         let mut guard = self.bit_dht.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
@@ -1660,7 +1215,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Derruba o nó DHT (modo proxy/Tor: UDP vazaria o IP).
     pub fn shutdown_bit_dht(&self) {
         let mut guard = self.bit_dht.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(dht) = guard.take() {
@@ -1668,9 +1222,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Anuncia o próprio endpoint no infohash da identidade (bloqueante —
-    /// chamar via spawn_blocking). `port` DEVE ser a externa confirmada
-    /// (`dht_announce_port()`); nunca a TCP interna efêmera.
     pub fn bit_dht_announce(&self, infohash: mainline::Id, port: u16) -> Result<()> {
         let guard = self.bit_dht.lock().unwrap_or_else(|e| e.into_inner());
         let dht = guard
@@ -1681,9 +1232,6 @@ impl NetworkEngine {
             .map_err(|e| DistorrentError::Protocol(format!("announce_peer: {e}")))
     }
 
-    /// `get_peers` no infohash do amigo e dial direto nos endereços achados
-    /// (bloqueante — chamar via spawn_blocking). bounded: no máx. 8 addrs.
-    /// Devolve quantos endpoints a DHT entregou (rendezvous BitTorrent).
     pub fn bit_dht_lookup_and_dial(&self, peer_fp: String) -> usize {
         self.dht_lookups
             .lock()
@@ -1711,7 +1259,6 @@ impl NetworkEngine {
         }
         if found.is_empty() {
             self.diag_update(&peer_fp, |d| {
-                // motivo técnico honesto: DHT viva mas sem peers p/ esse hash
                 d.last_direct_err = Some("DHT: sem peers no infohash (amigo offline?)".into());
                 d.direct_attempts = d.direct_attempts.saturating_add(1);
             });
@@ -1730,7 +1277,7 @@ impl NetworkEngine {
         n
     }
 
-    /// Enfileira um lookup DHT urgente (chamado por friend_request/maintain).
+    // Seção 7: dht_probe
     pub fn dht_probe(&self, peer_fp: &str) {
         if !crate::net::dht::bit_dht_enabled() {
             return;
@@ -1741,7 +1288,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Pop da fila urgente (sem repetir fp).
     pub fn dht_queue_pop(&self, max: usize) -> Vec<String> {
         let mut q = self.dht_queue.lock().unwrap_or_else(|e| e.into_inner());
         let mut out = Vec::new();
@@ -1754,7 +1300,6 @@ impl NetworkEngine {
         out
     }
 
-    /// Rate-limit: pode fazer lookup DHT deste peer agora? (min_ms desde o último)
     pub fn dht_lookup_due(&self, peer_fp: &str, min_ms: i64) -> bool {
         let map = self.dht_lookups.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(peer_fp) {
@@ -1763,8 +1308,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Amigos (aceitos ou pendentes de saída) SEM sessão online — alvo do
-    /// rodízio de lookups DHT.
     pub fn friends_without_session(&self, max: usize) -> Vec<String> {
         let accepted = self
             .store
@@ -1788,21 +1331,11 @@ impl NetworkEngine {
             .collect()
     }
 
-    /// Corrente de fallback automática — degrau 3. Chamado pelos laços de dial
-    /// quando o direto falha e não há intermediário peer-relay disponível:
-    /// se houver SOCKS5 configurado, liga o modo de privacidade `proxy`
-    /// (relay/diagnóstico passam a rotear pelo SOCKS5) e avisa a UI.
-    ///
-    /// Anti-flapping: só troca uma vez por peer dentro de `AUTO_PROXY_COOLDOWN_MS`;
-    /// NUNCA sai de `full` (Tor) e NUNCA reverte sozinho — o usuário troca o
-    /// modo manualmente. Não segura guard algum ao chamar `privacy_set_mode`.
     pub fn maybe_auto_fallback_proxy(&self, peer_fp: &str) {
-        // Degrau 2 (intermediário por peer) ainda disponível? Não pula p/ proxy.
         if self.peer_relay_fp().is_some() {
             return;
         }
         let now = crate::identity::now_ms();
-        // Snapshot sob lock — solta ANTES de reconfigurar o relay.
         let (count, first_ms) = {
             let map = self.dial_failures.lock().unwrap_or_else(|e| e.into_inner());
             map.get(peer_fp).copied().unwrap_or((0, 0))
@@ -1832,7 +1365,6 @@ impl NetworkEngine {
         ) {
             return;
         }
-        // Marca ANTES de trocar: se `privacy_set_mode` falhar, não reentra em loop.
         self.auto_proxy_switched
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1842,7 +1374,6 @@ impl NetworkEngine {
         );
         match self.privacy_set_mode("proxy") {
             Ok(()) => {
-                // Flag lida pela UI (já observa `privacy.mode` + eventos).
                 let _ = self.store.kv_set("privacy.auto_switched", "1");
                 let _ = self.store.kv_set("privacy.auto_switched.peer", peer_fp);
                 let _ = self.store.kv_set("privacy.auto_switched.reason", &reason);
@@ -1856,17 +1387,11 @@ impl NetworkEngine {
         }
     }
 
-    /// Diagnóstico das pernas do relay respeitando o modo de privacidade:
-    /// em `proxy`/`full` o probe também passa pelo SOCKS5 — ver o IP real nos
-    /// hosts públicos seria justamente o vazamento que o modo evita.
     pub async fn relay_diagnostics(&self) -> Vec<crate::net::relay::RelayLegStatus> {
         let proxy = self.anonymity_proxy();
         crate::net::relay::check_relay_legs_via(proxy.as_deref()).await
     }
 
-    /// Conecta a "host:porta" — aceita IP, domínio DNS e .onion (Tor).
-    /// Em modo proxy/Tor o hostname vai ao SOCKS5 SEM resolução local
-    /// (a rede resolve — nada de DNS que vaza o alvo).
     pub fn connect_host(&self, host_port: &str, expected_fp: Option<String>) -> Result<()> {
         let (host, port) = split_host_port(host_port)?;
         self.cmd_tx
@@ -1885,76 +1410,46 @@ impl NetworkEngine {
             .ok();
     }
 
-    /// Injeta backend de relay (testes usam MemRelay compartilhado).
-    /// Marca como custom: o engine não o sobrescreve ao trocar de privacidade.
     pub fn set_relay_backend(&self, backend: Arc<dyn RelayBackend>) {
         *self.relay_backend.lock().unwrap_or_else(|e| e.into_inner()) = backend;
         self.relay_backend_custom.store(true, Ordering::Relaxed);
         self.relay_proxied.store(false, Ordering::Relaxed);
-        // Injetar um backend implica QUERER relay (testes/host): reabilita.
         self.relay_disabled.store(false, Ordering::Relaxed);
     }
 
-    /// Kill-switch do relay: com `true`, `relay_allowed()` retorna false e
-    /// nenhum post/poll de relay é feito — só a DIRETA (TCP/hole punch/LAN)
-    /// transporta dados. Com `false`, volta ao normal. Um backend injetado
-    /// por teste (`set_relay_backend`) NÃO desliga por si só: só desliga
-    /// quando esta flag é setada (default já lê `DISTORRENT_NO_RELAY`).
     pub fn set_relay_disabled(&self, disabled: bool) {
         self.relay_disabled.store(disabled, Ordering::Relaxed);
-        // O kill-switch explícito derruba TAMBÉM o peer-relay (transporte p2p).
         self.peer_relay_disabled.store(disabled, Ordering::Relaxed);
-        // Reavalia a seleção do intermediário imediatamente (dropa/religa).
         self.refresh_peer_relay();
         debug!(disabled, "relay: kill-switch atualizado");
     }
 
-    /// Relay está desligado por flag/env? (não considera modo de privacidade).
     pub fn relay_is_disabled(&self) -> bool {
         self.relay_disabled.load(Ordering::Relaxed)
     }
 
-    /// O backend de relay atual roda DE FATO por túnel SOCKS5? (estado
-    /// EFETIVO, não o modo escolhido). Em proxy/full com `false` o relay está
-    /// DESLIGADO (fail-closed) — a UI usa isto para não apresentar o modo
-    /// como plenamente ativo quando o proxy não está operando.
     pub fn relay_is_proxied(&self) -> bool {
         self.relay_proxied.load(Ordering::Relaxed)
     }
 
-    /// Snapshot dos limites de rede (comando `net_limits` / diagnóstico) —
-    /// parâmetros vigentes + contadores de rejeição + concorrência ativa.
     pub fn net_limits_snapshot(&self) -> crate::net::netlimit::LimitsSnapshot {
         self.netlimiter.snapshot()
     }
 
-    /// Reconfigura TODOS os limites de rede em runtime (host/ferramentas).
-    /// Ver `netlimit::Limits` para o significado de cada campo.
     pub fn net_limits_reconfigure(&self, l: crate::net::netlimit::Limits) {
         self.netlimiter.reconfigure(l);
     }
 
-    /// Hole punching (furo TCP coordenado) está ligado? Default sim;
-    /// `DISTORRENT_PUNCH=0` desliga. A direta outbound/UPnP/LAN segue normal.
     pub fn punch_enabled(&self) -> bool {
         self.punch_enabled.load(Ordering::Relaxed)
     }
 
-    /// Liga/desliga o furo em runtime (diagnóstico; espelha `DISTORRENT_PUNCH`).
+    // Seção 8: set_punch_enabled
     pub fn set_punch_enabled(&self, on: bool) {
         self.punch_enabled.store(on, Ordering::Relaxed);
         debug!(on, "hole punch: kill-flag atualizado");
     }
 
-    /// (Re)seleciona o backend de relay conforme o modo de privacidade.
-    /// - normal/encrypted → rotas públicas diretas (4 brokers MQTT), menor latência;
-    /// - proxy/full → os MESMOS brokers MQTT, cada um pelo PRÓPRIO túnel
-    ///   SOCKS5 (`SocksTunnel`, hostname resolvido PELO proxy — sem DNS
-    ///   local). Nada sai direto: o broker só vê o IP do proxy/Tor.
-    ///
-    /// Fail-closed: se o proxy não puder ser configurado, `relay_proxied=false`
-    /// e `relay_allowed` desliga o relay nesses modos (nunca vaza).
-    /// Backend injetado por teste (`relay_backend_custom`) nunca é sobrescrito.
     fn refresh_relay_for_privacy(&self) {
         if self.relay_backend_custom.load(Ordering::Relaxed) {
             return;
@@ -1986,13 +1481,10 @@ impl NetworkEngine {
         }
     }
 
-    /// Fixa endpoint público (testes; produção preenche via tick de announce).
-    /// É o endereço que vai no Punch para o peer furar até aqui.
     pub fn set_public_addr(&self, addr: String) {
         *self.public_addr.lock().unwrap_or_else(|e| e.into_inner()) = Some(addr);
     }
 
-    /// true se a sessão online com este peer roda sobre o relay.
     pub fn is_peer_via_relay(&self, fp: &str) -> bool {
         self.links
             .lock()
@@ -2002,10 +1494,6 @@ impl NetworkEngine {
             .unwrap_or(false)
     }
 
-    /// Contadores do plano de dados do relay (`distorrent_r_*`): `(posts, poll_hits)`.
-    /// `posts` = nº de `post()` no tópico de relay; `poll_hits` = nº de `poll()`
-    /// com dados (poll vazio do manager idle não conta; anúncio `distorrent_a_*`
-    /// não conta — ver `RelayStats`). Agrega todas as pernas (MultiRelay soma).
     pub fn relay_stats(&self) -> (u64, u64) {
         let backend = self
             .relay_backend
@@ -2016,8 +1504,6 @@ impl NetworkEngine {
         (s.posts, s.poll_hits)
     }
 
-    /// Fingerprint do intermediário peer-relay selecionado (diagnóstico/UI
-    /// NÃO usa; serve para logs/testes).
     pub fn peer_relay_fp(&self) -> Option<String> {
         self.peer_relay
             .lock()
@@ -2025,15 +1511,10 @@ impl NetworkEngine {
             .clone()
     }
 
-    /// Pode ATUAR como intermediário agora? Não depende do relay público.
-    /// normal/encrypted → sim; proxy/full → não (o intermediário veria o IP
-    /// real de quem o contacta). Kill-switch (`set_relay_disabled`/env
-    /// `DISTORRENT_NO_RELAY`) e backend injetado (testes/host) desligam.
     pub fn peer_relay_serving_enabled(&self) -> bool {
         if self.relay_backend_custom.load(Ordering::Relaxed) {
             return false;
         }
-        // (F7) Exige opt-in explícito (DISTORRENT_RELAY/DISTORRENT_PEER_RELAY).
         if !self.peer_relay_optin.load(Ordering::Relaxed) {
             return false;
         }
@@ -2043,14 +1524,10 @@ impl NetworkEngine {
         peer_relay_policy(&self.privacy_mode()).1
     }
 
-    /// Peer-relay pode ser USADO como cliente agora? Exige modo normal/encrypted
-    /// (em proxy/full o intermediário veria o IP de quem o contacta) e backend
-    /// NÃO-injetado (testes preservam o backend custom). Kill-switch desliga.
     pub fn peer_relay_enabled(&self) -> bool {
         if self.relay_backend_custom.load(Ordering::Relaxed) {
             return false;
         }
-        // (F7) Exige opt-in explícito (DISTORRENT_RELAY/DISTORRENT_PEER_RELAY).
         if !self.peer_relay_optin.load(Ordering::Relaxed) {
             return false;
         }
@@ -2060,17 +1537,12 @@ impl NetworkEngine {
         peer_relay_policy(&self.privacy_mode()).0
     }
 
-    /// (F7) Peer-relay está com opt-in? (independe de modo/backend).
     pub fn peer_relay_optin_enabled(&self) -> bool {
         self.peer_relay_optin.load(Ordering::Relaxed)
     }
 
-    /// (F7) Liga/desliga o opt-in do peer-relay em runtime (host/testes) e
-    /// reelege o intermediário. Não afeta o relay público.
     pub fn set_peer_relay_enabled(&self, on: bool) {
         self.peer_relay_optin.store(on, Ordering::Relaxed);
-        // Desliga o kill-switch próprio só se estamos LIGANDO o opt-in; ao
-        // desligar o opt-in a eleição já cai para None.
         if on {
             self.peer_relay_disabled.store(false, Ordering::Relaxed);
         }
@@ -2078,10 +1550,6 @@ impl NetworkEngine {
         debug!(on, "peer-relay: opt-in atualizado");
     }
 
-    /// Reescolhe UM peer ONLINE conectado DIRETO (não via relay) como
-    /// intermediário. Determinístico (menor fp) p/ dois peers tenderem ao
-    /// mesmo intermediário. Só mexe no campo `peer_relay` — nunca em amigos,
-    /// listas de UI ou eventos.
     fn refresh_peer_relay(&self) {
         let new = if self.peer_relay_enabled() {
             let me = self.identity.fingerprint.clone();
@@ -2097,8 +1565,6 @@ impl NetworkEngine {
                 })
                 .map(|(fp, _)| fp.clone())
                 .collect();
-            // (F4) Exclui peers bloqueados (consulta ao store FORA do lock de
-            // `links`) e mantém só diretos online (já filtrado acima).
             cands.retain(|fp| !self.is_blocked(fp));
             cands.sort();
             cands.into_iter().next()
@@ -2115,9 +1581,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Backend peer-relay ESTÁVEL para o intermediário `relay_fp` (recria só
-    /// quando o intermediário muda; preserva os oneshots pendentes no caso
-    /// comum).
     fn peer_relay_backend_for(self: &Arc<Self>, relay_fp: &str) -> Arc<PeerRelayBackend> {
         let mut cache = self
             .peer_relay_backend
@@ -2140,12 +1603,6 @@ impl NetworkEngine {
         self.store.list_peers().unwrap_or_default()
     }
 
-    /// Envia frame diretamente via link online (usado por PEX/DHT).
-    /// Preferência de caminho (Fase 2/3): direta TCP crua > túnel > sessão
-    /// relay crua. O túnel viaja DENTRO da sessão atual — sobre direta não
-    /// adiciona nada (mesmo socket, cripto dupla), então só tuneliza quando o
-    /// peer está via relay: o relay cru carrega pacotes, o túnel carrega
-    /// SESSÃO (replay/reordenação por peer, não por perna).
     pub fn send_to_peer(&self, peer_fp: String, frame: SecureFrame) {
         if !matches!(
             frame,
@@ -2157,13 +1614,11 @@ impl NetworkEngine {
             if self.tunnel_send_frame(&peer_fp, &frame) {
                 return;
             }
-            // caiu aqui = frame grande demais ou sem sessão: caminho normal.
         }
         self.cmd_tx.send(EngineCmd::SendToPeer(peer_fp, frame)).ok();
     }
 
-    /// Deve este frame ir PELO túnel? Sessão de túnel pronta + peer só
-    /// alcançável via relay (direta crua continua direta).
+    // Seção 9: tunnel_should_carry
     fn tunnel_should_carry(&self, peer_fp: &str) -> bool {
         if !self.tunnel_enabled() || !self.tunnel_established(peer_fp) {
             return false;
@@ -2171,21 +1626,6 @@ impl NetworkEngine {
         if self.peer_state(peer_fp) != NetworkState::Connected || !self.is_peer_via_relay(peer_fp) {
             return false;
         }
-        // PROVA DE VIDA antes de carregar tráfego (ver `TunnelSession::is_proven`).
-        //
-        // BUG REAL ("manda uma mensagem, funciona, depois para e só religando
-        // resolve"): a sessão do túnel era dada como pronta ao derivar a chave,
-        // sem saber se o OUTRO lado tinha a mesma. Se a resposta do handshake se
-        // perdia, um lado carregava tudo por um túnel que o destino descartava
-        // em silêncio (sem sessão, `handle_tunnel_data` retorna mudo): mensagem,
-        // ACK e Ack sumiam. O link seguia `Online` (o Ping não usa o túnel), e
-        // como o mapa é em memória, só reiniciar limpava — exatamente o relato.
-        //
-        // Agora, sem prova e fora da carência, o frame vai pelo caminho normal
-        // (relay/direto). Errar para o lado lento é aceitável; sumir, nunca.
-        //
-        // PREDICADO PURO: roda a cada frame. Quem limpa a sessão morta é
-        // `tunnel_reap_stale`, no tique — um lugar só.
         let agora = crate::identity::now_ms();
         let map = self
             .tunnel_sessions
@@ -2202,11 +1642,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Remove a sessão de túnel de um peer (e o contexto de dispatch associado).
-    ///
-    /// Usado quando o túnel morre por dentro (sem prova) e quando o LINK cai.
-    /// Sem isto, uma sessão antiga sobrevivia ao redial e continuava engolindo
-    /// o tráfego da sessão nova com uma chave que ninguém mais tem.
     fn tunnel_drop(&self, peer_fp: &str, motivo: &str) {
         let tinha = {
             let mut map = self
@@ -2229,19 +1664,12 @@ impl NetworkEngine {
                 .unwrap_or_else(|e| e.into_inner());
             pend.remove(peer_fp);
         }
-        // Oferecer outro handshake é o que devolve o túnel; o `tunnel_request`
-        // respeita proto_v e a própria janela de oferta pendente.
         self.diag_update(peer_fp, |d| {
             d.tunnel_up = false;
         });
         debug!(peer_fp, motivo, "tunel: sessão descartada");
     }
 
-    /// Varre sessões de túnel que pararam de dar prova e as derruba.
-    ///
-    /// Roda no tique do motor. É o que impede o estado preso de durar para
-    /// sempre: sem esta varredura, um túnel quebrado só saía da memória no
-    /// próximo reinício do app.
     pub fn tunnel_reap_stale(&self) {
         let agora = crate::identity::now_ms();
         let mortos: Vec<String> = {
@@ -2260,21 +1688,8 @@ impl NetworkEngine {
         }
     }
 
-    /// Derruba links MEIO-VIVOS: o Ping/Pong mantém a sessão `Online` (e a
-    /// bolinha verde), mas nenhum `Ack`/`Read` nosso volta há tempo demais
-    /// enquanto temos mensagens presas no outbox.
-    ///
-    /// Por que isso é necessário: o caminho de controle e o de dados podem
-    /// divergir. Quando só o de dados morre (relay com perna de volta perdida,
-    /// NAT assimétrico), `peer_alive` continua verdadeiro (Ping chega), o
-    /// `drop_link_if_dead` nunca vê `tx` fechado, e o outbox reenvia para o
-    /// MESMO canal até estourar o orçamento — o relato exato "o contato aparece
-    /// online mas a mensagem fica no relógio". Refeito o link, o próximo
-    /// `FlushOutbox` sai por uma sessão nova (o receptor dedupa por id).
-    ///
-    /// Nunca dispara para link ocioso: exige `Ack` antigo **e** outbox preso.
     pub fn reap_half_open_links(&self) {
-        const SEM_ACK_MS: i64 = 120_000; // 2 min sem um único Ack
+        const SEM_ACK_MS: i64 = 120_000;
         let agora = crate::identity::now_ms();
         let candidatos: Vec<String> = {
             let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -2285,13 +1700,9 @@ impl NetworkEngine {
                 .collect()
         };
         for fp in candidatos {
-            // Chamada/voz ativa: o caminho de dados é a mídia, não o `Ack` de
-            // DM — derrubar aqui cortaria a chamada para "consertar" o chat.
             if self.store.peer_in_active_call(&fp) {
                 continue;
             }
-            // Link ocioso sem Ack é normal: só investiga com mensagem NOSSA
-            // presa — e conta também as em backoff (fora de `pending_outbox`).
             let presas = self.store.outbox_len_for_peer(&fp);
             if presas == 0 {
                 continue;
@@ -2300,13 +1711,9 @@ impl NetworkEngine {
                 let diag = self.peer_diag.lock().unwrap_or_else(|e| e.into_inner());
                 match diag.get(&fp) {
                     Some(d) => (d.last_ack_ms, d.last_rx_ms),
-                    // Sem diagnóstico = sessão recém-criada: não acusa.
                     None => continue,
                 }
             };
-            // Sem prova de dados NEM de vida: sessão começando, dá o prazo.
-            // (`last_rx == 0` com `last_ack == 0` não pode virar "2 min sem
-            // Ack" por subtração de zero — era um descarte imediato do link.)
             let referencia = if last_ack > 0 { last_ack } else { last_rx };
             if referencia == 0 || agora.saturating_sub(referencia) < SEM_ACK_MS {
                 continue;
@@ -2324,9 +1731,6 @@ impl NetworkEngine {
                 ));
                 d.last_reject_ms = agora;
             });
-            // Mesmo desfecho do canal morto: some da memória e o maintain
-            // rediala. Inserir `Reconnecting` na hora evita o buraco de
-            // "offline" até o próximo dial (ver `register_and_run`).
             {
                 let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(old) = links.remove(&fp) {
@@ -2340,7 +1744,6 @@ impl NetworkEngine {
                             tx: None,
                             drop_notify: Notify::new(),
                             via_relay: false,
-                            // Ainda sem sessão: direção só existe no register.
                             initiator: false,
                         }),
                     );
@@ -2351,9 +1754,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Serializa → fragmenta → cifra → emite como TunnelData (via sessão
-    /// atual, por `send_to_peer` recursivo no 1º nível). Devolve false se o
-    /// frame excede o teto (emissor usa o caminho normal).
     fn tunnel_send_frame(&self, peer_fp: &str, frame: &SecureFrame) -> bool {
         let json = match serde_json::to_vec(frame) {
             Ok(v) if v.len() <= TUN_FRAME_MAX => v,
@@ -2377,6 +1777,7 @@ impl NetworkEngine {
                     Err(_) => return false,
                 }
             } else {
+                // Seção 10: id
                 let id = FRAG_ID.fetch_add(1, Ordering::SeqCst);
                 let chunks: Vec<&[u8]> = json.chunks(TUN_FRAG_MAX).collect();
                 let total = chunks.len() as u16;
@@ -2411,9 +1812,6 @@ impl NetworkEngine {
         true
     }
 
-    /// Rekey oportunista (Fase 4): volume ou idade estourados → novo handshake
-    /// (substitui a sessão; pacotes in-flight com a chave velha morrem e as
-    /// camadas acima retentam por ACK). Limites honestos, sem surpresa.
     fn tunnel_housekeep(&self, peer_fp: &str) {
         const REKEY_BYTES: u64 = 256 * 1024 * 1024;
         const REKEY_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -2436,8 +1834,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Força novo handshake do túnel (rekey manual/teste). Sessão velha sai,
-    /// oferta nova entra — o peer responde e tudo segue sem redial TCP.
     pub fn tunnel_rotate(&self, peer_fp: &str) {
         {
             let mut map = self
@@ -2459,13 +1855,10 @@ impl NetworkEngine {
         self.tunnel_request(peer_fp);
     }
 
-    // ---------- túnel virtual (LAN estilo Radmin) ----------
-    /// Túnel ligado? Kill-flag `DISTORRENT_NO_TUNNEL=1` desliga.
     pub fn tunnel_enabled(&self) -> bool {
         !self.tunnel_disabled.load(Ordering::Relaxed)
     }
 
-    /// proto_v conhecido do peer (0 = nunca vimos handshake).
     pub fn peer_proto_v(&self, fp: &str) -> u32 {
         self.peer_protos
             .lock()
@@ -2475,7 +1868,6 @@ impl NetworkEngine {
             .unwrap_or(0)
     }
 
-    /// Sessão de túnel estabelecida com o peer?
     pub fn tunnel_established(&self, fp: &str) -> bool {
         self.tunnel_sessions
             .lock()
@@ -2483,14 +1875,10 @@ impl NetworkEngine {
             .contains_key(fp)
     }
 
-    /// IP virtual determinístico do fp (sempre calculável, sem rede).
     pub fn tunnel_virtual_ip(fp: &str) -> String {
         virtual_ipv6(fp).to_string()
     }
 
-    /// Pede túnel ao peer: oferta X25519 efêmera assinada via sessão atual.
-    /// Idempotente (já tem sessão/oferta pendente recente = não reenvia).
-    /// Só para peers com `proto_v >= 2` — legado derrubaria a sessão.
     pub fn tunnel_request(&self, peer_fp: &str) {
         if !self.tunnel_enabled() || peer_fp.is_empty() {
             return;
@@ -2522,10 +1910,6 @@ impl NetworkEngine {
         let my_fp = self.identity.fingerprint.clone();
         let transcript =
             tunnel_transcript(&my_fp, &eph_pub, &nonce, peer_fp, &[0u8; 32], &[0u8; 16]);
-        // Assina transcript COM placeholder zeros no lado do peer (ele ainda
-        // não tem efêmera/nonce nossos conhecidos? NÃO — ele tem: a oferta
-        // carrega nossa efêmera+nonce; o transcript da oferta usa zeros no
-        // lado respondente porque a resposta ainda não existe).
         let sig = self.keypair.sign(&transcript);
         {
             let mut pend = self
@@ -2555,7 +1939,7 @@ impl NetworkEngine {
         );
     }
 
-    /// Ping pelo túnel (prova ponta a ponta cifrada). Devolve o id.
+    // Seção 11: tunnel_ping
     pub fn tunnel_ping(&self, peer_fp: &str) -> Result<u64> {
         static PING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = PING_ID.fetch_add(1, Ordering::SeqCst);
@@ -2621,8 +2005,6 @@ impl NetworkEngine {
         );
     }
 
-    /// Apelido conhecido do peer (para dispatch de frames vindos pelo túnel):
-    /// peers do handshake (upsert com nickname real), senão prefixo do fp.
     fn tunnel_peer_nick(&self, peer_fp: &str) -> String {
         if let Some(p) = self
             .store
@@ -2647,7 +2029,6 @@ impl NetworkEngine {
         Some((eph, nonce))
     }
 
-    /// PEX: lista de peers conhecidos para gossip (filtra self e sem addr)
     pub fn pex_peers(&self, limit: usize) -> Vec<PeerRecord> {
         let mut v = self.peers();
         v.retain(|p| p.fp != self.identity.fingerprint && p.addr.is_some());
@@ -2665,8 +2046,6 @@ impl NetworkEngine {
             .collect()
     }
 
-    /// Peers ONLINE que são AMIGOS ACEITOS. PEX só gossipa endereços para
-    /// amigos — nunca vaza a lista de peers para um conectado aleatório.
     pub fn online_friend_fps(&self) -> Vec<String> {
         let accepted: std::collections::HashSet<String> = self
             .store
@@ -2693,20 +2072,12 @@ impl NetworkEngine {
                 PeerLinkState::Reconnecting => NetworkState::Reconnecting,
             })
             .unwrap_or(NetworkState::Disconnected);
-        // LINK ZUMBI: a sessão está "Online" na memória mas o outro lado não
-        // manda nada há mais de dois timeouts. Sem esta checagem a bolinha
-        // ficava verde para sempre (peer que fechou o app sem avisar).
         if st == NetworkState::Connected && !self.peer_alive(fp) {
             return NetworkState::Reconnecting;
         }
         st
     }
 
-    /// Prova de vida: frame recebido dentro da janela de heartbeat.
-    ///
-    /// `0` (nunca recebemos nada) conta como vivo: a sessão acabou de subir e
-    /// o primeiro frame pode estar a caminho — senão todo peer novo piscava
-    /// "reconectando" na UI.
     pub fn peer_alive(&self, fp: &str) -> bool {
         let last_rx = self
             .peer_diag
@@ -2718,10 +2089,6 @@ impl NetworkEngine {
         if last_rx == 0 {
             return true;
         }
-        // A janela depende do TRANSPORTE: no caminho direto o ping é de 10 s com
-        // timeout de 25 s; via relay o intervalo é 20 s e o timeout 120 s. Usar
-        // sempre a janela do relay fazia o par DIRETO (o comum no celular em
-        // Wi-Fi) aparecer "reconectando" na UI por até 2 minutos.
         let via_relay = self
             .links
             .lock()
@@ -2737,6 +2104,7 @@ impl NetworkEngine {
         crate::identity::now_ms().saturating_sub(last_rx) <= janela_ms
     }
 
+    // Seção 12: aggregated_state
     pub fn aggregated_state(&self) -> NetworkState {
         let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
         let any = |s: PeerLinkState| links.values().any(|l| l.get_state() == s);
@@ -2761,13 +2129,6 @@ impl NetworkEngine {
         self.store.list_members(cid).unwrap_or_default()
     }
 
-    /// Estado de pareamento POR MEMBRO de um servidor — a evidência real que a
-    /// UI precisa para não mostrar "pareado" só porque o nome está na lista.
-    ///
-    /// `state`: `connected` direto, `relay`, `connecting`, `reconnecting`,
-    /// `pending_join` (convite enviado, host ainda não confirmou) ou
-    /// `offline`. `owner` marca o dono. Nunca inventa: tudo vem do link vivo,
-    /// da fila de joins persistida ou do peerbook.
     pub fn community_member_states(&self, community_id: &str) -> Vec<MemberPairing> {
         let owner = self
             .store
@@ -2831,8 +2192,6 @@ impl NetworkEngine {
         self.store.list_messages(conv_id, 500).unwrap_or_default()
     }
 
-    /// Janela de mensagens (paginação por ts) — o caminho da UI.
-    /// `before_ts = None` devolve as `limit` mais recentes.
     pub fn messages_window(
         &self,
         conv_id: &str,
@@ -2842,12 +2201,10 @@ impl NetworkEngine {
         self.store.list_messages_window(conv_id, before_ts, limit)
     }
 
-    /// RTT estimado (EMA, ms) do peer — None se ainda sem amostra.
     pub fn peer_rtt_ms(&self, fp: &str) -> Option<u64> {
         crate::metrics::metrics().rtt_of(fp)
     }
 
-    /// Abre (ou recupera) a DM com um peer. Determinística por fingerprint.
     pub fn open_dm(&self, peer_fp: &str, peer_nick: &str) -> Result<Conversation> {
         if peer_fp == self.identity.fingerprint {
             return Err(DistorrentError::Protocol(
@@ -2873,10 +2230,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Envia mensagem real: assina, persiste (SENDING/PENDING), transmite ou enfileira.
-    /// Visto azul (emissor): a UI leu esta conversa até `ts` — avisa os peers
-    /// da conversa. Gate de versão (proto_v>=4) e flood simples por conversa.
-    /// Peers legados continuam sem visto: nada quebra, só não há azul lá.
     pub fn notify_read(&self, conv_id: &str, up_to_ts: i64) {
         use std::time::{SystemTime, UNIX_EPOCH};
         static LAST_SENT: std::sync::OnceLock<StdMutex<HashMap<String, u64>>> =
@@ -2887,7 +2240,7 @@ impl NetworkEngine {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         {
-            let mut m = map.lock().unwrap_or_else(|e| e.into_inner()); // 1 s de janela: arrasto de scroll não dispara 100 frames.
+            let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
             if m.get(conv_id).copied().unwrap_or(0) + 1000 > now {
                 return;
             }
@@ -2896,7 +2249,7 @@ impl NetworkEngine {
         let peers = self.social_peers_of(conv_id);
         for fp in peers {
             if self.peer_proto_v(&fp) < 4 {
-                continue; // legado: frame desconhecido derrubaria a sessão
+                continue;
             }
             self.send_to_peer(
                 fp,
@@ -2908,9 +2261,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Envia mensagem real: assina, persiste (SENDING/PENDING), transmite ou
-    /// enfileira. Em grupos: best-effort para os membros online (sem outbox
-    /// por peer — o flush de grupo cuida das pendências na reconexão).
     pub fn send_dm(&self, conv_id: &str, body: &str) -> Result<StoredMessage> {
         let body = body.trim();
         if body.is_empty() {
@@ -2921,6 +2271,7 @@ impl NetworkEngine {
                 "mensagem muito longa (máx 64KB)".into(),
             ));
         }
+        // Seção 13: conv
         let conv = self
             .store
             .get_conversation(conv_id)?
@@ -2930,10 +2281,6 @@ impl NetworkEngine {
             "dm" => {
                 self.store.insert_message(&env, "out", "sending")?;
                 crate::metrics::metrics().message_out();
-                // Só entrega de verdade para AMIGO ACEITO: o receptor rejeita DM
-                // de quem ainda não aceitou (anti-spam). Sem esta checagem a msg
-                // ficava "sent" no remetente mas era descartada no destino — o
-                // usuário via "enviado" e nada chegava até aceitar.
                 let is_friend = self
                     .store
                     .get_friend(&conv.peer_fp)
@@ -2943,16 +2290,6 @@ impl NetworkEngine {
                     .unwrap_or(false);
                 let online = self.link_tx(&conv.peer_fp).is_some();
                 if online && is_friend {
-                    // ORDEM IMPORTA: enfileira no outbox ANTES de tentar enviar.
-                    //
-                    // BUG corrigido ("mensagem aparece como falha e depois chega
-                    // sozinha, duplicada"): o `enqueue_outbox` vinha DEPOIS do
-                    // `cmd_tx.send`. Se o envio falhasse (fila do engine cheia,
-                    // sessão morrendo), a linha ficava `sending` SEM outbox, a
-                    // UI marcava o balão como falhou — e o varredor de 20s
-                    // (`revert_stale_sent_to_pending`, que inclui `sending` sem
-                    // outbox) reenfileirava e ENTREGAVA a mensagem que o usuário
-                    // viu como falha. Ao reabrir a conversa apareciam os dois.
                     self.store.enqueue_outbox(&env.id, &conv.peer_fp)?;
                     if self
                         .cmd_tx
@@ -2962,7 +2299,6 @@ impl NetworkEngine {
                         ))
                         .is_err()
                     {
-                        // Já está na fila: sai sozinha quando o link voltar.
                         self.store.set_message_status(&env.id, "pending")?;
                         let _ = self.events.send(EngineEvent::MessageStatus {
                             msg_id: env.id.clone(),
@@ -2975,22 +2311,12 @@ impl NetworkEngine {
                             DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows)
                         });
                     }
-                    // HONESTO: "sent" é só a SAÍDA daqui — não prova entrega.
-                    // A mensagem SAI do outbox apenas quando o `Ack` do
-                    // destinatário chega (`delivered`). Antes ela saía agora e,
-                    // se o canal estivesse morto (sessão half-open), ficava
-                    // "enviado" na tela com o outro lado sem nada.
-                    //
-                    // Manter no outbox NÃO duplica: o receptor dedupa por id
-                    // (INSERT OR IGNORE) e responde Ack à retransmissão.
                     self.store.set_message_status(&env.id, "sent")?;
                     let _ = self.events.send(EngineEvent::MessageStatus {
                         msg_id: env.id.clone(),
                         status: "sent".into(),
                     });
                 } else {
-                    // Offline OU amizade ainda não aceita → fica PENDING e sai
-                    // sozinha ao aceitar/conectar (FlushOutbox no aceite).
                     self.store.enqueue_outbox(&env.id, &conv.peer_fp)?;
                     self.store.set_message_status(&env.id, "pending")?;
                     let _ = self.events.send(EngineEvent::MessageStatus {
@@ -3022,10 +2348,6 @@ impl NetworkEngine {
                             .ok();
                         sent_any = true;
                     } else {
-                        // NÃO-AMIGO OFFLINE NO GRUPO: sem este dial a mensagem
-                        // ficava `pending` e NUNCA saía — o membro só recebia se
-                        // ELE te discasse primeiro. O tick de `maintain_groups`
-                        // cobre depois, mas discar aqui entrega na hora.
                         self.cmd_tx.send(EngineCmd::ConnectRelay(fp)).ok();
                     }
                 }
@@ -3047,18 +2369,6 @@ impl NetworkEngine {
             .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
     }
 
-    /// Reenvia uma mensagem JÁ EXISTENTE, preservando o `id` original.
-    ///
-    /// POR QUE NÃO USAR `send_dm`: o botão "Reenviar" da UI chamava o envio de
-    /// texto comum, que fabrica um `MessageEnvelope::new` com id NOVO. A linha
-    /// antiga (`failed`/`pending`) continuava no banco e a nova entrava ao lado
-    /// — na memória a UI trocava uma pela outra, mas ao trocar de conversa ou
-    /// reabrir o app as DUAS voltavam, com o texto duplicado. No receptor pior:
-    /// o dedupe é por id, então ele mostrava duas mensagens.
-    ///
-    /// Aqui o envelope é reconstruído da linha gravada (mesmo id, mesma
-    /// assinatura, mesmo `ts`) e reenfileirado com o orçamento de tentativas
-    /// zerado — o que o `FlushOutbox` faz, mas sob demanda.
     pub fn resend_message(self: &Arc<Self>, msg_id: &str) -> Result<StoredMessage> {
         let m = self
             .store
@@ -3083,8 +2393,6 @@ impl NetworkEngine {
         };
         match conv.kind.as_str() {
             "dm" => {
-                // ZERA o backoff: uma mensagem que estourou o orçamento
-                // continuaria inelegível com `enqueue_outbox` (INSERT OR IGNORE).
                 self.store.requeue_outbox(&m.id, &conv.peer_fp)?;
                 self.store.set_message_status(&m.id, "pending")?;
                 if self.link_tx(&conv.peer_fp).is_some() {
@@ -3126,16 +2434,13 @@ impl NetworkEngine {
                 }
                 let status = if sent_any { "sent" } else { "pending" };
                 self.store.set_message_status(&m.id, status)?;
+                // Seção 14: _
                 let _ = self.events.send(EngineEvent::MessageStatus {
                     msg_id: m.id.clone(),
                     status: status.into(),
                 });
             }
             other => {
-                // CANAL de servidor: o `conv_id` da mensagem é o `channel_id`.
-                // Procura a comunidade dona do canal e reenvia o MESMO envelope
-                // (sem moderação de novo: ela já foi aplicada no envio original,
-                // e reenviar não é falar de novo).
                 let mut achou = false;
                 for (cid, _, owner) in self.store.list_communities().unwrap_or_default() {
                     if !self
@@ -3191,9 +2496,6 @@ impl NetworkEngine {
             .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
     }
 
-    // ---------------- servidor: canais, cargos e bots (v4) ----------------
-
-    /// Hex aleatório de n bytes — sufixo curto de ids de canal/cargo/bot.
     fn rand_hex(n: usize) -> String {
         use rand::RngCore;
         let mut buf = vec![0u8; n];
@@ -3201,12 +2503,10 @@ impl NetworkEngine {
         hex::encode(buf)
     }
 
-    /// Normaliza nome de canal igual Discord: minúsculas e espaços → '-'.
     fn normalize_channel_name(name: &str) -> String {
         name.trim().to_lowercase().replace(' ', "-")
     }
 
-    /// Gate de dono: comm.2 == meu fingerprint, senão erro.
     fn require_owner(&self, community_id: &str) -> Result<()> {
         let comm = self
             .store
@@ -3220,26 +2520,8 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Gate anti-spam de ENTRADA — chamar SEMPRE DEPOIS da verificação de
-    /// assinatura (autenticidade primeiro, spam depois). Flood (10 msgs/10s),
-    /// duplicada (60s) e link malicioso derrubam SÓ a mensagem (`Err`) — a
-    /// sessão é preservada (o chamador apenas loga). Reputação do peer cai.
     fn spam_gate(&self, peer_fp: &str, body: &str) -> Result<()> {
         let now = crate::identity::now_ms();
-        // AMIGO ACEITO TEM LIMITE DE GENTE, NÃO DE ROBÔ.
-        //
-        // BUG REAL (o X vermelho em quase toda mensagem): o teto de flood era
-        // fixo em 10 mensagens/10 s para TODO mundo. Uma conversa de verdade —
-        // "cc", "dhdd", "d", "didd", "aa", "xx" — passa disso em segundos e o
-        // receptor descartava sem enviar `Ack`. O remetente reenviava até
-        // estourar o orçamento do outbox (12 tentativas) e o item virava
-        // `failed`: a tela mostrava X em todas as mensagens, mesmo com os dois
-        // lados conectados.
-        //
-        // Contra ABUSO o limite continua valendo; contra AMIGO ele é folgado,
-        // porque a relação já foi aceita explicitamente (e o custo por mensagem
-        // é um INSERT local). 40/10 s = 4/s: ainda corta script de spam, não
-        // corta dedo rápido no teclado.
         let eh_amigo = self
             .store
             .get_friend(peer_fp)
@@ -3248,7 +2530,6 @@ impl NetworkEngine {
             .map(|(_, s)| s == "accepted")
             .unwrap_or(false);
         let teto_flood = if eh_amigo { 40 } else { 10 };
-        // 1. flood: N mensagens por janela de 10s
         {
             let mut flood = self.spam_flood.lock().unwrap_or_else(|e| e.into_inner());
             let e = flood.entry(peer_fp.to_string()).or_insert((0, now));
@@ -3265,17 +2546,6 @@ impl NetworkEngine {
                 )));
             }
         }
-        // 2. repetição: só bloqueia SPAM de verdade.
-        //
-        // A regra anterior descartava qualquer mensagem com o MESMO texto em
-        // até 60 s. Em conversa humana isso é normal e frequente ("sim",
-        // "kkk", "oi", "f") — e cada descarte deixava o remetente sem `Ack`,
-        // virando X vermelho depois de 12 tentativas. Reenvio legítimo já é
-        // deduplicado por ID antes deste ponto, então aqui só interessa
-        // REPETIÇÃO EM MASSA.
-        //
-        // A contagem vive no PRÓPRIO valor do mapa (`hash, ts, repetições`) —
-        // um segundo mapa exigiria limpeza independente e vazaria por peer.
         {
             let h = crate::antispam::DuplicateDetector::content_hash(peer_fp, body);
             let mut dup = self.spam_dup.lock().unwrap_or_else(|e| e.into_inner());
@@ -3296,7 +2566,6 @@ impl NetworkEngine {
             }
             dup.insert(peer_fp.to_string(), (h, now, n));
         }
-        // 3. link malicioso (encurtador só avisa — passa)
         if let crate::antispam::LinkVerdict::Malicious(d) = crate::antispam::check_links(body, &[])
         {
             let _ = d;
@@ -3306,8 +2575,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Regras do servidor (canal) — chamar no HOST após assinatura+spam_gate.
-    /// Shadow-ban e palavras/dominios do servidor derrubam só a mensagem.
     fn server_rules_gate(&self, community_id: &str, author_fp: &str, body: &str) -> Result<()> {
         let rules = self.store.get_server_rules(community_id)?;
         if rules.is_shadow_banned(author_fp) {
@@ -3322,13 +2589,12 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Valida nome de servidor/canal no CORE (a UI valida antes p/ UX, mas o
-    /// core re-valida — nunca confia na UI). `existing` = nomes do escopo.
     fn validate_name_gate(
         kind: crate::names::NameKind,
         raw: &str,
         existing: &[String],
     ) -> Result<String> {
+        // Seção 15: policy
         let policy = crate::names::NamePolicy::for_kind(kind);
         let check = crate::names::validate_name(kind, raw, existing, &policy);
         if check.ok {
@@ -3340,10 +2606,6 @@ impl NetworkEngine {
         )))
     }
 
-    /// Estado oficial da comunidade como frame — usado no join e no broadcast.
-    /// v6: `for_fp` define o DESTINATÁRIO — quem não é o dono recebe o TOKEN
-    /// DOS BOTS MASCARADO (token é credential do dono; antes vazava no sync
-    /// para todos os membros). O dono recebe o token real.
     pub fn community_state_payload(
         &self,
         community_id: &str,
@@ -3364,7 +2626,7 @@ impl NetworkEngine {
         let is_owner_target = for_fp.map(|f| f == owner_fp).unwrap_or(true);
         if !is_owner_target {
             for b in bots.iter_mut() {
-                b.token = String::new(); // MASCARADO — não viaja para membros
+                b.token = String::new();
             }
         }
         let (description, category, icon) = self.store.community_meta(&id).unwrap_or_default();
@@ -3383,8 +2645,6 @@ impl NetworkEngine {
         })
     }
 
-    /// Envia o estado oficial a TODOS os membros online (o host não envia a si).
-    /// v6: payload POR MEMBRO — dono recebe tokens reais, membros mascarados.
     fn broadcast_community_state(&self, community_id: &str) {
         let members = match self.store.list_members(community_id) {
             Ok(m) => m,
@@ -3397,8 +2657,6 @@ impl NetworkEngine {
             let frame = match self.community_state_payload(community_id, Some(&fp)) {
                 Ok(f) => f,
                 Err(e) => {
-                    // `continue`, não `return`: um payload que falha para UM
-                    // membro não pode calar o broadcast para os outros.
                     debug!("broadcast do estado falhou para {community_id}/{fp}: {e}");
                     continue;
                 }
@@ -3409,8 +2667,6 @@ impl NetworkEngine {
         }
     }
 
-    // ---------- canais ----------
-
     pub fn channel_create(
         &self,
         community_id: &str,
@@ -3420,7 +2676,6 @@ impl NetworkEngine {
         kind: &str,
     ) -> Result<ChannelMetaRow> {
         self.require_owner(community_id)?;
-        // validação anti-spoof/anti-injeção no CORE (normaliza p/ minúsculas-hífen)
         let existing: Vec<String> = self
             .store
             .list_channels(community_id)?
@@ -3472,7 +2727,6 @@ impl NetworkEngine {
         if self.store.delete_channel(community_id, channel_id)? == 0 {
             return Err(DistorrentError::Protocol("canal inexistente".into()));
         }
-        // histórico do canal morre junto com ele
         self.store.delete_messages_by_conv(channel_id)?;
         self.broadcast_community_state(community_id);
         Ok(())
@@ -3513,6 +2767,7 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 16: channel_set_topic
     pub fn channel_set_topic(
         &self,
         community_id: &str,
@@ -3555,14 +2810,12 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Leitura — não exige dono.
     pub fn channel_list(&self, community_id: &str) -> Result<Vec<ChannelMetaRow>> {
         self.store.channel_rows(community_id)
     }
 
     pub fn community_rename(&self, community_id: &str, name: &str) -> Result<()> {
         self.require_owner(community_id)?;
-        // gate anti-spoof/anti-injeção (unicidade entre as demais comunidades)
         let others: Vec<String> = self
             .store
             .list_communities()
@@ -3578,8 +2831,6 @@ impl NetworkEngine {
         self.broadcast_community_state(community_id);
         Ok(())
     }
-
-    // ---------- cargos ----------
 
     pub fn role_create(
         &self,
@@ -3616,7 +2867,6 @@ impl NetworkEngine {
         Ok(row)
     }
 
-    /// Patch de cargo: None não mexe; "" em name/color não mexe.
     #[allow(clippy::too_many_arguments)]
     pub fn role_update(
         &self,
@@ -3653,7 +2903,6 @@ impl NetworkEngine {
                 "@everyone não pode ser apagado".into(),
             ));
         }
-        // role_delete no store já limpa assignments e desvincula bots
         if self.store.role_delete(community_id, role_id)? == 0 {
             return Err(DistorrentError::Protocol("cargo inexistente".into()));
         }
@@ -3661,12 +2910,10 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Leitura — não exige dono.
     pub fn roles_list(&self, community_id: &str) -> Result<Vec<RoleRow>> {
         self.store.roles_list(community_id)
     }
 
-    /// Leitura — não exige dono.
     pub fn member_roles(&self, community_id: &str, fp: &str) -> Result<Vec<String>> {
         self.store.member_roles_list(community_id, fp)
     }
@@ -3694,6 +2941,7 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 17: member_unassign_role
     pub fn member_unassign_role(&self, community_id: &str, fp: &str, role_id: &str) -> Result<()> {
         self.require_owner(community_id)?;
         if !self
@@ -3709,7 +2957,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Expulsa membro: some do roster, perde cargos e recebe CommunityKicked.
     pub fn member_kick(&self, community_id: &str, fp: &str) -> Result<()> {
         self.require_owner(community_id)?;
         let comm = self
@@ -3731,7 +2978,6 @@ impl NetworkEngine {
         }
         self.store.remove_member(community_id, fp)?;
         self.store.member_roles_remove_all(community_id, fp)?;
-        // avisa o expulso ANTES do broadcast (estado novo não o inclui mais)
         if self.link_tx(fp).is_some() {
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
@@ -3746,17 +2992,10 @@ impl NetworkEngine {
         Ok(())
     }
 
-    // ---------- moderação (Storm camada de segurança) ----------
-    //
-    // Toda decisão é validada aqui no CORE: dono ou moderador listado ou
-    // bit de permissão no cargo. A UI apenas reflete. Ações geram auditoria.
-
-    /// Regras atuais do servidor (leitura liberada p/ membros; default medium).
     pub fn server_rules_get(&self, community_id: &str) -> Result<crate::moderation::ServerRules> {
         self.store.get_server_rules(community_id)
     }
 
-    /// Salva regras — só dono. Nível validado, listas sanitizadas e limitadas.
     pub fn server_rules_set(&self, mut rules: crate::moderation::ServerRules) -> Result<()> {
         self.require_owner(&rules.community_id)?;
         rules.spam_level = match rules.spam_level.as_str() {
@@ -3786,7 +3025,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Histórico de auditoria (leitura p/ membros).
     pub fn audit_list(
         &self,
         community_id: &str,
@@ -3795,14 +3033,10 @@ impl NetworkEngine {
         self.store.list_audit(community_id, limit)
     }
 
-    /// Reputação de um peer (leitura).
     pub fn reputation_get(&self, fp: &str) -> Result<(String, i32, u32)> {
         self.store.get_reputation(fp)
     }
 
-    /// Safety Number estilo Signal com um peer (requer pubkey no peerbook,
-    /// preenchida no handshake autenticado). Ordem-independente: ambas as
-    /// partes calculam o mesmo número para comparar por voz/QR.
     pub fn safety_number(&self, peer_fp: &str) -> Result<String> {
         let me = &self.identity;
         let peer = self
@@ -3817,8 +3051,6 @@ impl NetworkEngine {
         ))
     }
 
-    /// Ação de moderação: ban/unban/mute/unmute/shadow_ban/unshadow/delete_msg.
-    /// `target` = fp do alvo (ou id da mensagem em delete_msg).
     pub fn moderate(
         &self,
         community_id: &str,
@@ -3845,7 +3077,6 @@ impl NetworkEngine {
                 }
             }
         }
-        // dono não pode ser moderado; ninguém modera a si mesmo
         if target == comm.2 || target == me {
             return Err(DistorrentError::Protocol(
                 "alvo inválido para moderação".into(),
@@ -3891,19 +3122,13 @@ impl NetworkEngine {
                 )?;
             }
             "mute" => {
-                // O mute precisa de um PRAZO. Sem ele a sanção era invisível:
-                // a pontuação de reputação caía mas nada a consultava, então o
-                // usuário continuava falando (ver `gate_speech_for`).
+                // Seção 18: until
                 let until = match reason.trim().parse::<i64>() {
                     Ok(ms) if ms > crate::identity::now_ms() => ms,
                     _ => crate::identity::now_ms() + MUTE_DEFAULT_MS,
                 };
                 self.store.mute_set(target, until)?;
                 self.store.bump_reputation(target, -15, false)?;
-                // Nenhum frame de aviso: um mute não pode mandar `CommunityKicked`
-                // (o cliente apagaria a comunidade da lista ao recebê-lo). O
-                // alvo descobre o silêncio na hora em que tenta falar, que é
-                // quando a informação é útil de verdade.
             }
             "unmute" => {
                 self.store.mute_set(target, 0)?;
@@ -3925,7 +3150,6 @@ impl NetworkEngine {
                 self.store.set_server_rules(&r)?;
             }
             "delete_msg" => {
-                // apaga se a mensagem for de um canal DESTE servidor
                 let msg = self
                     .store
                     .message_by_id_raw(target)?
@@ -3948,8 +3172,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Denunciar usuário: qualquer membro pode. Soma report, derruba score
-    /// (-10) e registra auditoria. 3+ reports abertos = suspeito automático.
     pub fn report_user(&self, target_fp: &str, community_id: &str, reason: &str) -> Result<()> {
         if target_fp == self.identity.fingerprint {
             return Err(DistorrentError::Protocol(
@@ -3974,7 +3196,6 @@ impl NetworkEngine {
             target_fp,
             reason,
         );
-        // auditoria mesmo sem community_id válido (denúncia de DM usa "")
         if self
             .store
             .get_community(community_id)
@@ -3986,8 +3207,6 @@ impl NetworkEngine {
         }
         Ok(())
     }
-
-    // ---------- bots ----------
 
     pub fn bot_create(
         &self,
@@ -4006,8 +3225,6 @@ impl NetworkEngine {
         let role_id = match role_id.map(str::trim) {
             Some("") | None => None,
             Some(r) => {
-                // cargo tem que EXISTIR na comunidade — bot com cargo fantasma
-                // quebrava a lista de cargos do dono na réplica dos membros.
                 let exists = self
                     .store
                     .roles_list(community_id)
@@ -4040,14 +3257,13 @@ impl NetworkEngine {
             online: true,
             owner_fp: self.identity.fingerprint.clone(),
             created_at: crate::identity::now_ms(),
-            config: String::new(), // v6 (outra sessão): config do runtime web do bot
+            config: String::new(),
         };
         self.store.bot_upsert(&row)?;
         self.broadcast_community_state(community_id);
         Ok(row)
     }
 
-    /// Patch de bot (storage::BotPatch): role_id Some(None) ou Some(Some("")) limpa.
     pub fn bot_update(&self, community_id: &str, bot_id: &str, patch: BotPatch) -> Result<()> {
         self.require_owner(community_id)?;
         if !self.store.bot_update_patch(community_id, bot_id, &patch)? {
@@ -4066,13 +3282,11 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Leitura — não exige dono.
+    // Seção 19: bots_list
     pub fn bots_list(&self, community_id: &str) -> Result<Vec<BotRow>> {
         self.store.bots_list(community_id)
     }
 
-    /// v6 — Gera novo token do bot (dono) e re-broadcasta o estado. O token
-    /// antigo é invalidado na hora (credential novo no upsert).
     pub fn bot_regen_token(&self, community_id: &str, bot_id: &str) -> Result<String> {
         self.require_owner(community_id)?;
         let all = self.store.bots_list(community_id)?;
@@ -4085,9 +3299,6 @@ impl NetworkEngine {
         Ok(b.token)
     }
 
-    /// v6 — Posta mensagem COMO O BOT. Só o DONO (o runtime web roda no
-    /// host; membros recebem o post relayado com bot_id). A mensagem é
-    /// assinada pelo host (autor real) e marcada com bot_id para display.
     pub fn bot_post_message(
         &self,
         community_id: &str,
@@ -4125,7 +3336,6 @@ impl NetworkEngine {
                 "mensagem muito longa (máx 64KB)".into(),
             ));
         }
-        // bot tem que estar "online" para postar (toggle do painel)
         if let Some(b) = self
             .store
             .bots_list(community_id)?
@@ -4157,16 +3367,12 @@ impl NetworkEngine {
             .get(peer_fp)
             .cloned();
         if let Some(l) = link {
-            // notify_one guarda permit: a queda nunca se perde (notify_waiters
-            // evaporava se o reader estava dentro de handle_frame). Bye = fim limpo.
             if let Some(tx) = &l.tx {
                 let _ = tx.send((0, SecureFrame::Bye));
             }
             l.drop_notify.notify_one();
         }
     }
-
-    // ---------------- amigos (F10) ----------------
 
     pub fn friends(&self, status: Option<&str>) -> Vec<PeerRecord> {
         self.store.list_friends(status).unwrap_or_default()
@@ -4176,17 +3382,12 @@ impl NetworkEngine {
         matches!(self.store.get_friend(peer_fp).ok().flatten(), Some((_, s)) if s == "blocked")
     }
 
-    /// Envia pedido de amizade. Se peer offline, fica `pending_out` e sai no
-    /// flush de conexão (mesma mecânica do outbox de mensagens).
     pub fn friend_request(&self, peer_fp: &str) -> Result<FriendOutcome> {
         if peer_fp == self.identity.fingerprint {
             return Err(DistorrentError::Protocol(
                 "não é possível adicionar a si mesmo".into(),
             ));
         }
-        // Idempotência/robustez: não rebaixa um amigo já aceito; se já existe um
-        // pedido DELES para mim, aceita na hora (pedido cruzado) em vez de virar
-        // 'pending_out' — era isso que deixava o adicionamento "travado".
         match self.store.get_friend(peer_fp)?.map(|(_, s)| s).as_deref() {
             Some("accepted") => return Ok(FriendOutcome::Sent),
             Some("blocked") => return Err(DistorrentError::Protocol("peer bloqueado".into())),
@@ -4204,28 +3405,17 @@ impl NetworkEngine {
                 nickname: self.identity.nickname.clone(),
             },
         );
-        // relay IMEDIATO (não espera o tick de 5s do announce): dial começa agora
         self.cmd_tx
             .send(EngineCmd::ConnectRelay(peer_fp.to_string()))
             .ok();
-        // direta IMEDIATA em paralelo: se o peer já anunciou, a direta sai
-        // na hora e vence o relay na eleição (menor latência)
         self.cmd_tx
             .send(EngineCmd::LookupAnnounce(peer_fp.to_string()))
             .ok();
-        // DHT BitTorrent: get_peers no infohash do amigo também AGORA
-        // (rendezvous 100% descentralizado — a rede BitTorrent apresenta os dois)
         self.dht_probe(peer_fp);
         Ok(sent)
     }
 
-    /// Responde um pedido recebido (accept/reject). Remove/bloqueio também notificam.
     pub fn friend_respond(&self, peer_fp: &str, accept: bool) -> Result<()> {
-        // Só responde a um pedido ENTRANTE de verdade. Sem este gate, responder
-        // uma linha obsoleta (ou um id digitado na UI) criava uma amizade
-        // "aceita" do nada: o par saía da tela de amigos sem nenhum dos dois
-        // ter pedido, e o outro lado recebia um `FriendAccept` para um pedido
-        // que nunca fez — que é justamente o que o gate do inbound rejeita.
         match self.store.get_friend(peer_fp).ok().flatten() {
             Some((_, status)) if status == "pending_in" => {}
             Some((_, status)) => {
@@ -4250,7 +3440,6 @@ impl NetworkEngine {
         self.store.set_friend(peer_fp, "", status)?;
         if accept {
             let _ = self.deliver_friend_frame(peer_fp, frame);
-            // relay IMEDIATO: o aceite precisa chegar agora, não no próximo tick
             self.cmd_tx
                 .send(EngineCmd::ConnectRelay(peer_fp.to_string()))
                 .ok();
@@ -4264,6 +3453,7 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 20: friend_remove
     pub fn friend_remove(&self, peer_fp: &str) -> Result<()> {
         self.store.remove_friend(peer_fp)?;
         self.deliver_friend_frame(peer_fp, SecureFrame::FriendRemove);
@@ -4281,7 +3471,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Envia frame de amizade se online. Retorna o desfecho real.
     fn deliver_friend_frame(&self, peer_fp: &str, frame: SecureFrame) -> FriendOutcome {
         if self.link_tx(peer_fp).is_some() {
             self.cmd_tx
@@ -4293,26 +3482,16 @@ impl NetworkEngine {
         }
     }
 
-    // ---------------- comunidades (F8) ----------------
-
-    /// Cria comunidade REAL: dono = este dispositivo. Canais padrão se vazio.
-    /// Cria comunidade REAL: dono = este dispositivo. Canais padrão se vazio.
-    /// (Assinatura legada — o wizard usa `create_community_with_options`.)
     pub fn create_community(&self, name: &str, channels: &[String]) -> Result<String> {
         self.create_community_with_options(name, channels, &CommunityCreateOptions::default())
     }
 
-    /// v6 — cria comunidade com metadados do WIZARD: canais com tipo
-    /// (texto/voz/vídeo), cargos iniciais (presets admin/mod/membro),
-    /// descrição/categoria/ícone e texto de regras. Tudo validado no CORE —
-    /// a UI é só sugestão.
     pub fn create_community_with_options(
         &self,
         name: &str,
         channels: &[String],
         opts: &CommunityCreateOptions,
     ) -> Result<String> {
-        // nome do servidor validado no CORE (unicidade global entre comunidades)
         let existing: Vec<String> = self
             .store
             .list_communities()
@@ -4321,7 +3500,6 @@ impl NetworkEngine {
             .map(|(_, n, _)| n)
             .collect();
         let name = Self::validate_name_gate(crate::names::NameKind::Server, name, &existing)?;
-        // canais iniciais validados um a um (unicidade no escopo do novo servidor)
         let mut seen: Vec<String> = vec![];
         let cid = crate::protocol::new_message_id(
             &self.identity.fingerprint,
@@ -4331,7 +3509,6 @@ impl NetworkEngine {
         )[..16]
             .to_string();
 
-        // canais: wizard (com tipo/categoria) ou CSV legado (todos texto)
         let chan_rows: Vec<ChannelMetaRow> = if !opts.channels_meta.is_empty() {
             let mut rows = Vec::with_capacity(opts.channels_meta.len());
             for c in &opts.channels_meta {
@@ -4399,7 +3576,6 @@ impl NetworkEngine {
                 .collect()
         };
 
-        // base: comunidade + dono (canais entram via upsert com tipo certo)
         let empty: Vec<(&str, &str)> = vec![];
         self.store
             .create_community(&cid, &name, &self.identity.fingerprint, &empty)?;
@@ -4413,7 +3589,6 @@ impl NetworkEngine {
             "owner",
         )?;
 
-        // cargos do wizard (presets admin/moderador/membro) — cap defensivo
         for (i, r) in opts.roles.iter().take(12).enumerate() {
             let clean_name = crate::names::sanitize_text(&r.name, 64);
             if clean_name.is_empty() {
@@ -4425,7 +3600,7 @@ impl NetworkEngine {
                 community_id: cid.clone(),
                 name: clean_name,
                 color,
-                permissions: r.permissions & 0x3FF, // só bits conhecidos (10)
+                permissions: r.permissions & 0x3FF,
                 hoist: r.hoist,
                 mentionable: r.mentionable,
                 position: i as i64,
@@ -4433,8 +3608,6 @@ impl NetworkEngine {
             self.store.role_upsert(&row)?;
         }
 
-        // metadados + regras (texto livre vai pro kv; regras de moderação
-        // ficam com o default 'medium' — o painel Storm edita depois)
         self.store.community_meta_set(
             &cid,
             Some(opts.description.trim()),
@@ -4448,6 +3621,7 @@ impl NetworkEngine {
             )?;
         }
 
+        // Seção 21: _
         let _ = self.events.send(EngineEvent::CommunityJoined {
             community_id: cid.clone(),
             name: name.into(),
@@ -4455,7 +3629,6 @@ impl NetworkEngine {
         Ok(cid)
     }
 
-    /// v6 — atualiza descrição/categoria/ícone (dono) e re-broadcasta o estado.
     pub fn community_set_meta(
         &self,
         community_id: &str,
@@ -4475,14 +3648,12 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// v6 — lê metadados (descrição, categoria, ícone).
     pub fn community_meta(&self, community_id: &str) -> Result<(String, String, String)> {
         self.store.community_meta(community_id)
     }
 
-    /// Dono gera convite assinado para um fingerprint específico (com expiração).
     pub fn make_invite(&self, community_id: &str, member_fp: &str, ttl_ms: i64) -> Result<String> {
-        const WILDCARD: &str = "000000000000"; // link genérico: qualquer portador entra
+        const WILDCARD: &str = "000000000000";
         let comm = self
             .store
             .get_community(community_id)?
@@ -4505,23 +3676,8 @@ impl NetworkEngine {
         ))
     }
 
-    /// Entra numa comunidade via token do dono. Conecta ao host e envia JoinCommunity.
-    ///
-    /// Contrato: o `Ok(cid)` significa "pedido VÁLIDO e em andamento", não
-    /// "membro confirmado". A associação só existe quando o host responde com
-    /// `CommunityState` (que grava membros/canais/cargos no SQLite). A UI
-    /// acompanha pelo evento `community_joined`.
-    ///
-    /// O pedido é persistido em `kv` (`join.pending.<cid>`): se o host estiver
-    /// offline, fechar o app não perde o convite — no próximo boot ele é
-    /// reenviado com a mesma assinatura, até o host confirmar ou o token
-    /// expirar.
     pub fn join_community(&self, token: &str) -> Result<String> {
-        // O usuário cola o link inteiro, não apenas o payload base64url.
-        // Normalizar aqui evita o bug que ficava invisível só na UI desktop.
         let normalized = crate::protocol::extract_invite_token(token);
-        // Guarda o token NORMALIZADO: se o usuário colou uma URL, é o payload
-        // que precisa ir no frame (o host não sabe decodificar link).
         let (host_fp, cid, member_fp, exp, sig) = crate::protocol::parse_invite_token(&normalized)?;
         if crate::identity::now_ms() > exp {
             return Err(DistorrentError::Protocol("convite expirado".into()));
@@ -4532,9 +3688,6 @@ impl NetworkEngine {
                 "convite é para outro fingerprint".into(),
             ));
         }
-        // Se o host já está no peerbook, verifica agora. Convites recebidos
-        // antes do primeiro contato são verificados em `flush_joins`, depois
-        // que o handshake autenticado fornecer a chave pública do fingerprint.
         if let Some(host) = self.store.get_peer(&host_fp)? {
             if !Keypair::verify(
                 &host.pubkey_hex,
@@ -4548,9 +3701,6 @@ impl NetworkEngine {
                 ));
             }
         }
-        // Reentrada no MESMO servidor (já sou membro): não reenvia join nem
-        // apaga estado. Só re-sincroniza, que é o que faltava para o servidor
-        // "aparecer vazio" depois de reiniciar.
         if self
             .store
             .member_role(&cid, &self.identity.fingerprint)
@@ -4567,17 +3717,10 @@ impl NetworkEngine {
             .insert(cid.clone(), normalized.clone());
         self.persist_pending_join(&cid, &normalized);
         self.send_join_to_host(&host_fp, &cid, &normalized);
-        // Inicia conexao e busca direta/relay agora, em vez de esperar o
-        // ticker geral. O pedido fica pendente e sera repetido ao conectar.
         self.connect_to_community_peer(&host_fp);
         Ok(cid)
     }
 
-    /// Grava/atualiza o convite pendente no SQLite (namespace `join.pending.`).
-    ///
-    /// Guarda o token NORMALIZADO — o mesmo que vai no frame. Persistir o
-    /// token cru (URL inteira) obrigava o `flush_joins` a re-normalizar e
-    /// deixava dois formatos circulando no banco.
     fn persist_pending_join(&self, community_id: &str, token: &str) {
         let key = format!("join.pending.{community_id}");
         if let Err(e) = self.store.kv_set(&key, token) {
@@ -4599,7 +3742,6 @@ impl NetworkEngine {
             .kv_delete(&format!("join.pending.{community_id}"));
     }
 
-    /// Envia o `JoinCommunity` ao host (se houver sessão viva).
     fn send_join_to_host(&self, host_fp: &str, cid: &str, token: &str) {
         if self.link_tx(host_fp).is_some() {
             self.cmd_tx
@@ -4614,15 +3756,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Este peer tem vínculo que JUSTIFICA continuar discando?
-    ///
-    /// Usado quando a sessão cai: sem isto, `peer_state` devolvia `Disconnected`
-    /// durante toda a reconexão e a pessoa "desaparecia" da UI mesmo sendo
-    /// amiga ou estando no mesmo servidor/grupo.
-    ///
-    /// Amizade (`accepted`/`pending_*`), membro de qualquer servidor meu, ou
-    /// membro de qualquer grupo meu. NÃO inclui "peer já visto no peerbook" —
-    /// senão toda descoberta de LAN ficaria eternamente "reconectando".
     pub fn should_keep_dialing(&self, fp: &str) -> bool {
         if fp.is_empty() || fp == self.identity.fingerprint {
             return false;
@@ -4665,16 +3798,10 @@ impl NetworkEngine {
         false
     }
 
-    /// Pareamento SOB DEMANDA de um grupo: o frontend chama ao abrir a conversa
-    /// (e ao entrar na chamada), para não esperar até 45 s pelo tique.
-    ///
-    /// Pedido do dono: quem está no grupo mas **não é amigo** precisa aparecer
-    /// online e conectar como se fosse. Inbound nunca exigiu amizade; o que
-    /// faltava era o lado que DISCA (ver `maintain_groups`).
+    // Seção 22: group_pair_now
     pub fn group_pair_now(&self, conv_id: &str) {
         let me = self.identity.fingerprint.clone();
         let membros = self.store.list_group_members(conv_id).unwrap_or_default();
-        // Só faz sentido se eu realmente estou no grupo.
         if membros.iter().all(|(fp, _)| fp != &me) {
             return;
         }
@@ -4686,8 +3813,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Pareamento de TODAS as conversas de grupo (chamado no boot/login).
-    /// Fecha o buraco de "abri o app e o grupo inteiro está offline".
     pub fn pair_all_groups_now(&self) {
         let me = self.identity.fingerprint.clone();
         for conv in self.store.list_conversations().unwrap_or_default() {
@@ -4707,7 +3832,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Dial imediato (relay + announce) para um peer que participa de servidor.
     fn connect_to_community_peer(&self, fp: &str) {
         if fp == self.identity.fingerprint {
             return;
@@ -4725,17 +3849,13 @@ impl NetworkEngine {
         self.dht_probe(fp);
     }
 
-    /// Pede o estado atual de um servidor a quem estiver online (host ou seed).
-    ///
-    /// É idempotente e barato (frame de controle). O pedido é rate-limited por
-    /// servidor para o tique de manutenção poder chamar sem floodar.
     pub fn request_community_sync(&self, community_id: &str) {
         if self
             .store
             .member_role(community_id, &self.identity.fingerprint)
             .is_none()
         {
-            return; // não sou membro: não há o que sincronizar
+            return;
         }
         let now = crate::identity::now_ms();
         {
@@ -4756,8 +3876,6 @@ impl NetworkEngine {
                 targets.push(owner);
             }
         }
-        // Seeds: outros membros que já têm sessão. O pedido não expõe nada
-        // além do id (que o peer já conhece por ser membro).
         let mut seen: std::collections::HashSet<String> = targets.iter().cloned().collect();
         for fp in self.online_peer_fps() {
             if fp == self.identity.fingerprint || !seen.insert(fp.clone()) {
@@ -4782,29 +3900,10 @@ impl NetworkEngine {
         }
     }
 
-    /// Tique de manutenção dos SERVIDORES. Roda no motor, a cada 15s.
-    ///
-    /// Antes disto o pareamento de membros de servidor simplesmente não
-    /// existia: o tique só discava para `friends` (accepted/pending). O
-    /// resultado era o sintoma relatado — "só o criador conecta; quem entra
-    /// pelo token nunca aparece online". Aqui:
-    ///
-    /// 1. cada membro conhecido (exceto eu) é discado se não há sessão;
-    /// 2. o host é discado sempre que a sessão dele cair;
-    /// 3. o estado do servidor é re-sincronizado (rate-limited em
-    ///    `request_community_sync`), o que recupera canais/roster após
-    ///    reinício e após um kick/rejoin;
-    /// 4. convites pendentes são reenviados com backoff.
-    ///
-    /// Limites: o dedup/backoff de `ConnectRelay` já mora em `command_loop` e
-    /// no `relay_maintains`, então chamar aqui é idempotente. Ainda assim
-    /// espaçamos o dial direto por membro (`member_dial_at`, 90s) para não
-    /// reengatilhar lookup/announce a cada tique.
     pub fn maintain_communities(&self) {
         let now = crate::identity::now_ms();
         let communities = self.store.list_communities().unwrap_or_default();
         for (cid, _name, owner) in communities {
-            // Sou membro? Se não (saí/kick), não disca nem sincroniza.
             if self
                 .store
                 .member_role(&cid, &self.identity.fingerprint)
@@ -4812,14 +3911,9 @@ impl NetworkEngine {
             {
                 continue;
             }
-            // Host: sessão é o caminho para mensagens/estado. Disca sempre que
-            // faltar (o laço eterno do relay mantém o redial com backoff).
             if owner != self.identity.fingerprint && self.link_tx(&owner).is_none() {
                 self.connect_to_community_peer_throttled(&owner, now, 30_000);
             }
-            // Demais membros: pareamento P2P entre TODOS (não só com o dono).
-            // Sem isto o mesh de voz e a entrega direta de arquivos ficavam
-            // limitados a quem o criador conhecia.
             for (fp, _nick, _role) in self.store.list_members(&cid).unwrap_or_default() {
                 if fp == self.identity.fingerprint || fp == owner {
                     continue;
@@ -4827,11 +3921,6 @@ impl NetworkEngine {
                 if self.link_tx(&fp).is_some() {
                     continue;
                 }
-                // 120 s → 45 s. O valor antigo (documentado como "90s") fazia
-                // uma única falha de dial custar DOIS MINUTOS de silêncio num
-                // membro: o servidor abria no PC e no celular e o celular só
-                // via o PC depois disso. 45 s mantém o custo de announce/DHT
-                // baixo (o de host já é 30 s) e converge em tempo de uso.
                 self.connect_to_community_peer_throttled(&fp, now, 45_000);
             }
             self.request_community_sync(&cid);
@@ -4839,9 +3928,6 @@ impl NetworkEngine {
         self.retry_pending_joins();
     }
 
-    /// Dial de membro com throttle por fingerprint. O `connect_to_community_peer`
-    /// cru é para ações explícitas (join, sync); no tique precisamos de
-    /// intervalo maior para não repetir announce/DHT de 15 em 15s.
     fn connect_to_community_peer_throttled(&self, fp: &str, now: i64, min_ms: i64) {
         {
             let mut seen = self
@@ -4854,28 +3940,13 @@ impl NetworkEngine {
                 }
             }
             if seen.len() > 4096 {
-                seen.clear(); // anti-crescimento (fp de servidores antigos)
+                seen.clear();
             }
             seen.insert(fp.to_string(), now);
         }
         self.connect_to_community_peer(fp);
     }
 
-    /// Pareamento contínuo entre membros de GRUPO (DM de grupo).
-    ///
-    /// BUG ESTRUTURAL corrigido (pedido do dono: "quem está num grupo mas não é
-    /// amigo deve aparecer online e conectar como se fosse amigo"): **não
-    /// existia nenhum laço de discagem para grupo**. `maintain_communities` só
-    /// cobria SERVIDOR e o tick de amigos só cobria `accepted`. Resultado: um
-    /// membro de grupo que não fosse seu amigo nunca era discado — ele só
-    /// aparecia online se ELE te discasse primeiro, se estivesse na mesma LAN
-    /// (discovery) ou se já tivesse `addr` no peerbook. Era o "está no grupo mas
-    /// aparece offline e não conecta".
-    ///
-    /// Mesma estratégia da comunidade: relay + announce + DHT, com throttle de
-    /// 45 s por fingerprint para o custo de descoberta ficar baixo. Inbound já
-    /// era aceito sem amizade, então o pareamento fecha assim que um dos lados
-    /// disca.
     pub fn maintain_groups(&self) {
         let now = crate::identity::now_ms();
         let me = self.identity.fingerprint.clone();
@@ -4884,7 +3955,7 @@ impl NetworkEngine {
             if conv.kind != "group" {
                 continue;
             }
-            // Sou membro deste grupo? (o roster é a fonte de verdade local)
+            // Seção 23: membros
             let membros = self.store.list_group_members(&conv.id).unwrap_or_default();
             if membros.iter().all(|(fp, _)| fp != &me) {
                 continue;
@@ -4896,15 +3967,11 @@ impl NetworkEngine {
                 if self.link_tx(&fp).is_some() {
                     continue;
                 }
-                // 45 s: o mesmo intervalo dos membros de servidor. Cobre
-                // "criou o grupo no PC e abriu no celular" sem martelar
-                // announce/DHT a cada tique.
                 self.connect_to_community_peer_throttled(&fp, now, 45_000);
             }
         }
     }
 
-    /// Mensagem de canal: dono relay para membros; membro envia ao dono (host).
     pub fn send_channel_message(
         &self,
         community_id: &str,
@@ -4939,19 +4006,15 @@ impl NetworkEngine {
                 "mensagem muito longa (máx 64KB)".into(),
             ));
         }
-        // MODERAÇÃO no core (a UI não decide): banido não fala, silenciado
-        // espera, slowmode segura quem manda rápido demais.
         self.gate_speech(community_id, channel_id)?;
         let env = MessageEnvelope::new(&self.keypair, channel_id, body);
         self.store.insert_message(&env, "out", "sending")?;
-        // menção a mim? (barra de menções do canal)
         let my = &self.identity.fingerprint;
         if body.contains(my) || body.contains(&format!("<@{my}>")) {
             self.store.msg_set_mentioned(&env.id, channel_id, true).ok();
         }
         crate::metrics::metrics().message_out();
         if comm.2 == self.identity.fingerprint {
-            // sou o host: relay direto
             self.host_relay(community_id, channel_id, &env, "")?;
             self.store.set_message_status(&env.id, "sent")?;
         } else {
@@ -4979,22 +4042,10 @@ impl NetworkEngine {
             .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
     }
 
-    /// Host: repassa mensagem válida a membros online (exceto autor).
-    /// v6: `bot_id` propaga o post de bot para os membros (display).
-    // ==================================================================
-    // API SOCIAL v3 — chamada pelo shell Tauri. Toda escrita local acontece
-    // AQUI (o shell não toca storage) e a difusão usa a sessão do peer.
-    // ==================================================================
-
-    /// Portão de fala: ban/timeout/slowmode. Emite `Muted` e devolve erro.
     pub fn gate_speech(&self, community_id: &str, channel_id: &str) -> Result<()> {
         self.gate_speech_for(community_id, channel_id, &self.identity.fingerprint)
     }
 
-    /// Mesmo portão, para um autor arbitrário. O HOST precisa deste: a checagem
-    /// de saída usa sempre o fingerprint local, mas quem envia inbound é outro,
-    /// e sem validar o AUTOR o ban vira decoração — o banido contorna banindo
-    /// o host diretamente em vez de falar pelo próprio cliente.
     pub fn gate_speech_for(
         &self,
         community_id: &str,
@@ -5002,9 +4053,6 @@ impl NetworkEngine {
         author_fp: &str,
     ) -> Result<()> {
         let me = author_fp;
-        // Silenciamento de CONTA tem precedência sobre tudo: é a única sanção
-        // que sobrevive à troca de servidor, então consultá-la primeiro evita
-        // um DM (que não tem comunidade) de servir de buraco no mute.
         let mute_until = self.store.mute_active(me).unwrap_or(0);
         if mute_until > crate::identity::now_ms() {
             let mins = ((mute_until - crate::identity::now_ms()) as f64 / 60_000.0).ceil() as i64;
@@ -5066,6 +4114,7 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 24: to_social_peers
     fn to_social_peers(&self, conv_id: &str, frame: SecureFrame) {
         for fp in self.social_peers_of(conv_id) {
             self.cmd_tx
@@ -5074,7 +4123,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Reação local + difusão (toggle: o motor calcula add/remove).
     pub fn social_react(&self, conv_id: &str, msg_id: &str, emoji: &str) -> Result<bool> {
         let me = self.identity.fingerprint.clone();
         let added = self
@@ -5100,10 +4148,6 @@ impl NetworkEngine {
                 reactor_fp: me.clone(),
             },
         );
-        // Reação não tem ACK: se o peer está offline, o SendToPeer acima cai
-        // no vazio em silêncio (sem link, sem fila). Enfileira para os peers
-        // sem link — o flush ao (re)conectar entrega. Sem isto, reagir com o
-        // outro lado desconectado = reação perdida para sempre.
         for fp in self.social_peers_of(conv_id) {
             if self.link_tx(&fp).is_none() {
                 let _ = self
@@ -5114,12 +4158,7 @@ impl NetworkEngine {
         Ok(added)
     }
 
-    /// Resposta: vincula + difunde.
     pub fn social_reply(&self, conv_id: &str, msg_id: &str, reply_to: &str) -> Result<()> {
-        // A citação aponta para OUTRA mensagem. Sem checá-la, um id inválido
-        // fica gravado em `msg_meta` e a UI renderiza um bloco de citação
-        // quebrado para sempre — não há como o usuário corrigir depois, porque
-        // o composer não tem mais ação de "editar citação".
         let alvo = self
             .store
             .message_by_id(reply_to)?
@@ -5233,7 +4272,7 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Encaminha: re-assina o corpo no destino e anota a origem.
+    // Seção 25: social_forward
     pub fn social_forward(
         &self,
         src_msg_id: &str,
@@ -5249,7 +4288,6 @@ impl NetworkEngine {
         if body.len() > 64 * 1024 {
             return Err(DistorrentError::Protocol("mensagem longa demais".into()));
         }
-        // re-assinada por MIM: o destinatário valida minha assinatura
         let env = MessageEnvelope::new(&self.keypair, target_conv, &body);
         self.store.insert_message(&env, "out", "sending")?;
         self.store
@@ -5273,8 +4311,6 @@ impl NetworkEngine {
             .message_by_id(&env.id)?
             .ok_or_else(|| DistorrentError::Protocol("falha ao gravar".into()))?)
     }
-
-    // ---------- presença / perfil ----------
 
     pub fn social_presence_set(&self, status: &str, custom: &str, emoji: &str) -> Result<()> {
         let me = self.identity.fingerprint.clone();
@@ -5312,7 +4348,6 @@ impl NetworkEngine {
         )
     }
 
-    /// Edição de perfil com controle de remoção de foto/capa.
     pub fn social_profile_set_full(
         &self,
         display_name: &str,
@@ -5327,12 +4362,9 @@ impl NetworkEngine {
         let dn = cap_str(display_name, 48);
         let ab = cap_str(about, 400);
         let ac = normalize_accent(accent);
-        // Teto derivado de MAX_FRAME — antes o `ProfileSet` de 2,1 MB estourava
-        // o frame de 1 MiB e derrubava a sessão (foto/capa nunca chegavam).
         let av = cap_b64(avatar_b64, PROFILE_IMG_B64_MAX);
         let bn = cap_b64(banner_b64, PROFILE_BANNER_B64_MAX);
 
-        // Grava e devolve a revisão nova. `None` = nada mudou de verdade.
         let changed = self.store.profile_set_local(
             &me,
             &dn,
@@ -5346,11 +4378,6 @@ impl NetworkEngine {
         if !dn.is_empty() {
             let _ = self.store.set_friend(&me, &dn, "accepted");
         }
-        // A UI local recebe o perfil EFETIVAMENTE PERSISTIDO (com a revisão e
-        // sem campos que o store recusou), não o patch que o usuário mandou.
-        // Era essa a causa do avatar velho no canto inferior esquerdo: o
-        // `profile_set` local não emitia evento nenhum, então só o poll de 15 s
-        // dos shells descobria a mudança — e se o poll falhasse, nunca.
         let profile = self.store.profile_get(&me)?;
         self.events
             .send(EngineEvent::ProfileChanged {
@@ -5359,26 +4386,15 @@ impl NetworkEngine {
             })
             .ok();
 
-        // Só difunde quando houve edição efetiva: reconciliação periódica não
-        // pode gerar tráfego nem revisão nova (idempotência).
         if changed.is_some() {
             self.broadcast_profile(&profile);
         }
         Ok(profile)
     }
 
-    /// Difunde o NOSSO perfil para todos os peers conectados.
-    ///
-    /// Antes isto era um `for` inline dentro de `social_profile_set` que não
-    /// filtrava o próprio fingerprint — o peer mandava `ProfileSet` para si
-    /// mesmo (e o handler regravava/emitia de volta).
     pub fn broadcast_profile(&self, profile: &crate::social::ProfileView) {
         let me = self.identity.fingerprint.clone();
         let frame = profile_frame(profile);
-        // União de duas fontes: a tabela `peers` (quem já conhecíamos) e os
-        // links vivos (um peer recém-conectado pode ainda não estar na tabela).
-        // Sem a segunda, um amigo que conecta no mesmo instante em que editamos
-        // o perfil só descobriria a mudança na próxima reconciliação.
         let mut alvos: std::collections::HashSet<String> = self
             .store
             .list_peers()
@@ -5397,28 +4413,12 @@ impl NetworkEngine {
         }
     }
 
-    /// Reconciliação de perfis: pede a revisão atual a todos os peers online.
-    ///
-    /// É a via BARATA: `ProfileQuery` tem 3 campos, o peer só responde com o
-    /// `ProfileSet` (que carrega avatar/banner) se tiver revisão maior que a
-    /// nossa. Chamada no boot, na reconexão e a cada `PROFILE_SYNC_INTERVAL_SECS`.
-    ///
-    /// ## O `known_rev` é a revisão do OUTRO, não a minha
-    ///
-    /// BUG REAL (perfil, foto e capa "não eram transmitidos"): aqui ia
-    /// `profile_get(&me).rev` — a MINHA revisão. Quem recebe compara com a
-    /// PRÓPRIA revisão (`if p.rev > known_rev`) e conclui "ele já tem algo mais
-    /// novo, não preciso mandar nada". Resultado: quem editou o perfil MENOS
-    /// vezes nunca era recebido pelo outro lado — o amigo com 5 edições nunca
-    /// via a foto de quem tinha 1. O valor correto é o que EU conheço DAQUELE
-    /// peer (0 quando não conheço nada), que é justamente o que ele compara.
     pub fn sync_profiles_with_peers(&self) {
         let me = self.identity.fingerprint.clone();
         for fp in self.online_peer_fps() {
             if fp == me {
                 continue;
             }
-            // Revisão do perfil DESTE peer que já temos em disco.
             let known_rev = self.store.profile_get(&fp).map(|p| p.rev).unwrap_or(0);
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
@@ -5429,8 +4429,6 @@ impl NetworkEngine {
         }
     }
 
-    // ---------- threads ----------
-
     pub fn social_thread_create(
         &self,
         community_id: &str,
@@ -5439,6 +4437,7 @@ impl NetworkEngine {
         kind: &str,
         tags: &str,
     ) -> Result<crate::social::ThreadRow> {
+        // Seção 26: me
         let me = self.identity.fingerprint.clone();
         if self.store.member_role(community_id, &me).is_none() {
             return Err(DistorrentError::Protocol("você não é membro".into()));
@@ -5489,7 +4488,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Mensagem em thread (passa pelas mesmas travas: ban/timeout/slowmode).
     pub fn social_thread_send(
         &self,
         community_id: &str,
@@ -5532,8 +4530,6 @@ impl NetworkEngine {
             .message_by_id(&env.id)?
             .ok_or_else(|| DistorrentError::Protocol("falha ao gravar".into()))?)
     }
-
-    // ---------- moderação ----------
 
     pub fn social_ban(
         &self,
@@ -5599,6 +4595,7 @@ impl NetworkEngine {
         until_ms: i64,
         reason: &str,
     ) -> Result<()> {
+        // Seção 27: me
         let me = self.identity.fingerprint.clone();
         if !self.is_moderator(community_id, &me) {
             return Err(DistorrentError::Protocol(
@@ -5658,8 +4655,6 @@ impl NetworkEngine {
         );
         Ok(())
     }
-
-    // ---------- enquetes / eventos / emojis ----------
 
     pub fn social_poll_create(
         &self,
@@ -5764,6 +4759,7 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 28: social_event_upsert
     pub fn social_event_upsert(&self, ev: crate::social::EventRow) -> Result<()> {
         let me = self.identity.fingerprint.clone();
         let comm = self
@@ -5868,8 +4864,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// "Estou digitando" — só para quem compartilha a conversa, prazo de 6s.
-    /// Nenhum tipo novo de frame: reusa o `Typing` inbound com o peer real.
     pub fn social_typing(&self, conv_id: &str) -> Result<()> {
         let until = crate::identity::now_ms() + 6_000;
         let frame = SecureFrame::Typing {
@@ -5880,8 +4874,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Reordena canais (drag-and-drop na barra lateral). Exige autoridade na
-    /// comunidade — a UI pode tentar, o motor é quem decide.
     pub fn reorder_channels(&self, community_id: &str, ids: &[String]) -> Result<()> {
         let me = &self.identity.fingerprint;
         let is_owner = self
@@ -5926,7 +4918,6 @@ impl NetworkEngine {
                     .ok();
             }
         }
-        // confirma ao autor (se não sou eu)
         if env.author_fp != self.identity.fingerprint && self.link_tx(&env.author_fp).is_some() {
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
@@ -5940,6 +4931,7 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 29: flush_joins
     fn flush_joins(&self, peer_fp: &str) {
         let joins: Vec<(String, String)> = self
             .pending_joins
@@ -5950,8 +4942,6 @@ impl NetworkEngine {
             .collect();
         let now = crate::identity::now_ms();
         for (cid, token) in joins {
-            // O pedido pertence ao host do token e só deve sair depois que o
-            // handshake autenticado permitir validar a assinatura do convite.
             let Some((host_fp, token_cid, member_fp, exp, sig)) =
                 crate::protocol::parse_invite_token(&token).ok()
             else {
@@ -5964,9 +4954,6 @@ impl NetworkEngine {
                 self.clear_pending_join(&cid);
                 continue;
             }
-            // Convite expirado: descarta a pendência e avisa uma única vez.
-            // Antes o pedido ficava para sempre na fila e o `join_community`
-            // devolvia sucesso otimista — a UI fechava o modal sem servidor.
             if now > exp {
                 self.clear_pending_join(&cid);
                 let _ = self.events.send(EngineEvent::Error {
@@ -6008,13 +4995,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Reenvia convites pendentes com backoff (chamado pelo tique de manutenção).
-    ///
-    /// Separação deliberada do `flush_joins` (que é por sessão recém-criada):
-    /// aqui lidamos com host que está ONLINE mas nunca respondeu, cujo frame
-    /// pode ter se perdido no relay. Backoff 15s→2min, jitter embutido pelo
-    /// tique de 15s. Sem isto, uma perda de frame deixava o servidor
-    /// permanentemente fora da lista até reabrir o app.
     fn retry_pending_joins(&self) {
         let now = crate::identity::now_ms();
         let pending: Vec<(String, String)> = self
@@ -6036,15 +5016,13 @@ impl NetworkEngine {
                 continue;
             }
             if self.link_tx(&host_fp).is_none() {
-                // Host ainda offline: o laço de dial é quem cuida da conexão.
-                // Aqui só garantimos que ele continue sendo tentado.
                 self.connect_to_community_peer(&host_fp);
                 continue;
             }
             let should_send = {
                 let mut retry = self.join_retry.lock().unwrap_or_else(|e| e.into_inner());
                 let (last, tries) = retry.get(&cid).copied().unwrap_or((0, 0));
-                let wait = 15_000i64.saturating_mul(1 << tries.min(3)); // 15s,30s,60s,120s
+                let wait = 15_000i64.saturating_mul(1 << tries.min(3));
                 if now.saturating_sub(last) >= wait {
                     retry.insert(cid.clone(), (now, tries.saturating_add(1)));
                     true
@@ -6058,8 +5036,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Ao conectar: reenvia pedidos pendentes de saída (e aceites locais que
-    /// o outro lado pode ter perdido).
     fn flush_friend_requests(&self, peer_fp: &str) {
         if let Some((_, status)) = self.store.get_friend(peer_fp).ok().flatten() {
             match status.as_str() {
@@ -6088,9 +5064,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Drena reações enfileiradas enquanto o peer estava offline. O receptor
-    /// aplica com `add` explícito (idempotente), então re-entregar é seguro.
-    /// Chamado ao (re)conectar e no flush periódico de online.
     fn flush_pending_reacts(&self, peer_fp: &str) {
         let pending = self.store.take_pending_reacts(peer_fp).unwrap_or_default();
         if pending.is_empty() {
@@ -6113,21 +5086,7 @@ impl NetworkEngine {
         }
     }
 
-    /// Rede de segurança da amizade (chamada a cada 5s): reenvia o estado REAL
-    /// do relacionamento a um peer ONLINE.
-    ///
-    /// - `pending_out` → `FriendRequest` (o aceite da volta pode ter se perdido);
-    /// - `accepted` → `FriendAccept` (o NOSSO aceite pode ter se perdido).
-    ///
-    /// BUG REAL ("o cursor de adicionado demora minutos para aparecer"): só o
-    /// `pending_out` era reenviado aqui. Quem ACEITAVA ficava com `accepted`
-    /// local e, se o `FriendAccept` se perdesse (sessão half-open, 4G, relay),
-    /// NADA era reenviado — o outro lado continuava em `pending_out` e a
-    /// amizade só aparecia na próxima sessão NOVA (`flush_friend_requests`, que
-    /// roda no registro) ou quando a detecção de sessão morta chegava
-    /// (RELAY_PING 20s→120s + backoff 10s ⇒ minutos). Ambos os frames são
-    /// idempotentes no receptor (gates em `handle_frame`), então reenviar é
-    /// seguro e barato (1 frame pequeno por peer a cada 5s).
+    // Seção 30: retry_pending_friend_request
     fn retry_pending_friend_request(&self, peer_fp: &str, incluir_aceite: bool) {
         let Some((_, status)) = self.store.get_friend(peer_fp).ok().flatten() else {
             return;
@@ -6139,7 +5098,6 @@ impl NetworkEngine {
             "accepted" if incluir_aceite => SecureFrame::FriendAccept {
                 nickname: self.identity.nickname.clone(),
             },
-            // `pending_in` é decisão do USUÁRIO (aceitar/recusar): não insiste.
             _ => return,
         };
         self.cmd_tx
@@ -6164,7 +5122,6 @@ impl NetworkEngine {
         });
     }
 
-    // ---------- grupos DM ----------
     pub fn create_group(&self, title: &str, members: Vec<String>) -> Result<Conversation> {
         if members.is_empty() {
             return Err(DistorrentError::Protocol(
@@ -6176,10 +5133,6 @@ impl NetworkEngine {
                 "máximo 9 membros + você (10 total)".into(),
             ));
         }
-        // NÃO EXIGE AMIZADE. O gate antigo ("{fp} não é amigo") impedia criar
-        // grupo com alguém que você conhece de um servidor — e o pedido do dono
-        // é justamente que quem está no grupo, amigo ou não, apareça online e
-        // conecte. Só rejeita identidade inválida (vazia ou eu mesmo).
         for fp in &members {
             let f = fp.trim();
             if f.is_empty() || f == self.identity.fingerprint {
@@ -6191,12 +5144,10 @@ impl NetworkEngine {
         let conv = self
             .store
             .create_group_dm(&self.identity.fingerprint, &members, title)?;
-        // sincroniza o grupo REAL para os membros online (offline recebe no flush)
         self.broadcast_group_created(&conv.id);
         Ok(conv)
     }
 
-    /// Envia GroupCreated (estado completo do grupo) a todos os membros online.
     fn broadcast_group_created(&self, conv_id: &str) {
         let members = self.store.list_group_members(conv_id).unwrap_or_default();
         let title = self
@@ -6239,8 +5190,6 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
         self.store.add_group_member(conv_id, fp, "")?;
-        // Readicionei alguém a um grupo que eu tinha apagado: reentrada
-        // explícita, então o bloqueio da lixeira cai.
         let _ = crate::group_trash::restore(&self.store, conv_id);
         let members = self.store.list_group_members(conv_id)?;
         let title = conv.title.clone();
@@ -6251,7 +5200,6 @@ impl NetworkEngine {
             }
             if self.link_tx(mfp).is_some() {
                 if *mfp == fp {
-                    // novo membro recebe o estado COMPLETO do grupo
                     self.cmd_tx
                         .send(EngineCmd::SendToPeer(
                             mfp.clone(),
@@ -6279,18 +5227,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Remove um membro do grupo e reenvia o roster completo aos que ficaram.
-    ///
-    /// POR QUE REENVIAR `GroupCreated` EM VEZ DE CRIAR UM FRAME NOVO: o
-    /// protocolo já trata `GroupCreated` como "estado COMPLETO do grupo" e o
-    /// receptor faz `upsert_group_state`, que dá `DELETE` no roster e reinsere
-    /// (ver `storage::upsert_group_state`). Ou seja: remover membro é o mesmo
-    /// caminho de sincronização que já existe, sem frame novo e sem risco de
-    /// compatibilidade entre versões.
-    ///
-    /// NÃO REMOVE A SI MESMO: o criador é a autoridade do grupo; sem ele na
-    /// lista o receptor recusa (`GroupCreated sem o criador na lista`) e o
-    /// grupo fica órfão.
     pub fn group_remove(&self, conv_id: &str, fp: &str) -> Result<()> {
         let conv = self
             .store
@@ -6309,16 +5245,7 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Sai do grupo (qualquer membro, inclusive quem não é o criador).
-    ///
-    /// Antes "apagar conversa" só removia a linha local: o criador reenviava
-    /// `GroupCreated` no próximo evento e o grupo voltava (era o "não consigo
-    /// sair de grupos pelo celular"). Aqui o roster é re-sincronizado SEM mim e
-    /// meu banco local é limpo — quem ficou deixa de me listar.
-    ///
-    /// O criador NÃO sai: sem ele o grupo fica órfão (`GroupCreated sem o
-    /// criador na lista` é recusado). Ele usa `group_delete` (para todos) ou
-    /// `group_delete_local` (só na máquina dele).
+    // Seção 31: group_leave
     pub fn group_leave(&self, conv_id: &str) -> Result<()> {
         let conv = self
             .store
@@ -6335,7 +5262,6 @@ impl NetworkEngine {
                 "você criou este grupo — escolha apagar para todos ou só para você".into(),
             ));
         }
-        // Avisa os que ficam ANTES de apagar o roster local (a lista é a fonte).
         let restantes: Vec<(String, String)> = membros
             .iter()
             .filter(|(fp, _)| fp != &me)
@@ -6357,13 +5283,11 @@ impl NetworkEngine {
         self.store.leave_group_local(conv_id)?;
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
-            // Vazio = a UI só atualiza a lista (a conversa sumiu para mim).
             title: String::new(),
         });
         Ok(())
     }
 
-    /// DONO: apaga o grupo para TODOS (avisa os membros e limpa o local).
     pub fn group_delete(&self, conv_id: &str) -> Result<()> {
         let conv = self
             .store
@@ -6398,7 +5322,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Apaga o grupo SÓ desta máquina (sem avisar ninguém).
     pub fn group_delete_local(&self, conv_id: &str) -> Result<()> {
         let conv = self
             .store
@@ -6408,8 +5331,6 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
         self.store.leave_group_local(conv_id)?;
-        // LIXEIRA: sem isto, a próxima mensagem de um amigo recriava o grupo
-        // pelo lazy-join ("apago e depois de um tempo ele reaparece").
         let _ = crate::group_trash::dismiss(&self.store, conv_id);
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
@@ -6418,11 +5339,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Renomeia o grupo e propaga o novo título no `GroupCreated`.
-    ///
-    /// O título novo viaja no mesmo frame de sincronização (o receptor faz
-    /// `UPDATE conversations SET title` quando o campo não é vazio), então
-    /// renomear não exige frame novo nem negociação.
     pub fn group_rename(&self, conv_id: &str, title: &str) -> Result<()> {
         let nome = crate::names::sanitize_text(title, 64).trim().to_string();
         if nome.is_empty() {
@@ -6454,14 +5370,6 @@ impl NetworkEngine {
         let call_id = format!("call-{short}-{}", crate::identity::now_ms());
         self.store
             .create_call(&call_id, kind, target_fp, &self.identity.fingerprint)?;
-        // O CHAMADOR É PARTICIPANTE desde o invite.
-        //
-        // Sem esta linha o gate de sinalização de grupo (`is_in_call`) não
-        // reconhecia a própria chamada do chamador: `call_participants` só era
-        // preenchido no aceite (`voice_register`/`join_call`). Em chamada de
-        // grupo com gente que não é amiga, a sinalização de volta (answer/ICE
-        // de um membro) era recusada como "de quem não é amigo" — e o mesh não
-        // fechava, exatamente o "só fica comigo".
         let _ = self.store.join_call(&call_id, &self.identity.fingerprint);
         self.queue_or_send_call_frame(
             target_fp,
@@ -6473,16 +5381,10 @@ impl NetworkEngine {
         );
         #[cfg(target_os = "linux")]
         {
-            // Mic pode ter falhado no boot e nunca mais tentado: cada chamada
-            // nova re-tenta abrir antes de negociar, senão ela nasce
-            // só-recebendo. Re-arm cobre o device que subiu depois do boot.
             self.voice_rearm();
             self.voice_retry_mic();
         }
         #[cfg(target_os = "linux")]
-        // Chamada NATIVA: eu sou o chamador, o offer nasce aqui. Se a mídia
-        // nativa não existir, `voice_begin_offer` devolve None e a WebView faz
-        // a offer dela normalmente — nenhum outro código muda de rota.
         if let Some(sdp) = self.voice_begin_offer(&call_id, target_fp)? {
             self.call_signal(
                 target_fp,
@@ -6495,14 +5397,6 @@ impl NetworkEngine {
         Ok(call_id)
     }
 
-    /// Reenvia SÓ o convite (o ring), sem tocar em SDP/ICE.
-    ///
-    /// A sinalização de chamada sai UMA vez. Se aquele frame se perder no
-    /// caminho — sessão meio-aberta que ainda reporta `Online`, relay que
-    /// trocou de rota, 4G que caiu no meio — o outro lado nunca toca e quem
-    /// ligou fica em "Chamando…" até desistir (o segundo call só funcionava
-    /// porque refazia o link). Reenviar o invite é idempotente no receptor: o
-    /// ring não duplica estado nem reabre mídia.
     pub fn call_ring_retry(&self, call_id: &str, target_fp: &str, kind: &str) -> Result<()> {
         if call_id.trim().is_empty() || target_fp.trim().is_empty() {
             return Err(DistorrentError::Protocol("call_id/alvo vazios".into()));
@@ -6518,14 +5412,11 @@ impl NetworkEngine {
         Ok(())
     }
 
+    // Seção 32: call_accept
     pub fn call_accept(self: &Arc<Self>, call_id: &str, from_fp: &str) -> Result<()> {
         self.store.join_call(call_id, &self.identity.fingerprint)?;
         self.store.join_call(call_id, from_fp)?;
         #[cfg(target_os = "linux")]
-        // Chamada NATIVA: eu sou o convidado. Só REGISTRO o par aqui — a offer
-        // do outro lado ainda vai chegar, e é o arm de `CallOffer` que a
-        // absorve. Se a mídia nativa não existir, o par não é registrado e o
-        // `CallOffer` chega intacto para o JS.
         self.voice_register(call_id, from_fp);
         self.queue_or_send_call_frame(
             from_fp,
@@ -6535,8 +5426,6 @@ impl NetworkEngine {
         );
         #[cfg(target_os = "linux")]
         {
-            // Mesmo retry do chamador: quem atende também pode ter perdido o
-            // mic no boot e estaria entrando mudo sem saber por quê.
             self.voice_rearm();
             self.voice_retry_mic();
         }
@@ -6578,8 +5467,6 @@ impl NetworkEngine {
         }
         self.store.end_call(call_id)?;
         #[cfg(target_os = "linux")]
-        // Encerra a mídia nativa ANTES do evento: se sobrasse sessão viva, o
-        // alto-falante continuaria tocando áudio de uma chamada morta.
         self.voice_hangup(call_id);
         let _ = self.events.send(EngineEvent::CallEnded {
             call_id: call_id.into(),
@@ -6589,17 +5476,10 @@ impl NetworkEngine {
     }
 
     pub fn call_signal(&self, target_fp: &str, frame: SecureFrame) -> Result<()> {
-        // Online → envio imediato (writer task cifra na hora, sem tick).
-        // Offline → enfileira + dial imediato; o flush na sessão nova entrega.
-        // (Antes retornava PeerNotConnected e o frame se perdia.)
         self.queue_or_send_call_frame(target_fp, frame);
         Ok(())
     }
 
-    /// v6 — GRUPO (mesh): notifica `target_fp` sobre novo participante `fp`
-    /// da chamada `call_id`. `kind` não-vazio faz o ALVO TOCAR (ring do
-    /// convidado — CallIncoming no receptor); vazio = só badge de roster
-    /// para quem já está na chamada. Persiste o participante em call_participants.
     pub fn call_add_participant(
         self: &Arc<Self>,
         target_fp: &str,
@@ -6613,12 +5493,9 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("call_id/fp vazios".into()));
         }
         let kind = crate::names::sanitize_text(kind.trim(), 16);
-        // registra o novo participante na chamada (host autoritativo)
         let _ = self.store.join_call(call_id, fp);
         let _ = self.store.join_call(call_id, target_fp);
         #[cfg(target_os = "linux")]
-        // Grupo em modo nativo: o convidado e o host passam a trocar SDP/ICE
-        // pela camada Rust. Sem registro, nada muda para o navegador.
         if self.voice_register(call_id, target_fp) && self.voice_register(call_id, fp) {
             if let Some(sdp) = self.voice_begin_offer(call_id, target_fp)? {
                 self.call_signal(
@@ -6641,33 +5518,21 @@ impl NetworkEngine {
         Ok(())
     }
 
-    // ------------------------------------------------------- voz nativa (API)
-
-    /// Gerenciador de mídia nativa, ou `None` quando ela não existe aqui.
     #[cfg(target_os = "linux")]
     pub fn voice(&self) -> Option<Arc<VoiceMedia>> {
         self.voice_media()
     }
 
-    /// Clone barato (Arc) da mídia nativa viva, ou `None`.
     #[cfg(target_os = "linux")]
     pub(super) fn voice_media(&self) -> Option<Arc<VoiceMedia>> {
         self.voice.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// A camada nativa PODE assumir chamadas agora?
-    ///
-    /// Só há resposta positiva se o `VoiceMedia` foi construído (o que já
-    /// implica plataforma Linux e kill-switch desligado). É o único portão de
-    /// entrada: enquanto for `false`, nenhum registro é criado e, portanto,
-    /// nenhum frame de sinalização é absorvido.
     #[cfg(target_os = "linux")]
     pub fn native_voice_available(&self) -> bool {
         self.voice_media().is_some()
     }
 
-    /// Teste de microfone sem chamada (UI de config no Linux). Devolve o id
-    /// do teste para `voice_mic_test_level`/`voice_mic_test_stop`.
     #[cfg(target_os = "linux")]
     pub fn voice_mic_test_start(&self) -> Result<u64> {
         self.voice_media()
@@ -6676,7 +5541,6 @@ impl NetworkEngine {
             .map_err(DistorrentError::Protocol)
     }
 
-    /// Pico 0..1 do mic desde a última leitura.
     #[cfg(target_os = "linux")]
     pub fn voice_mic_test_level(&self, id: u64) -> f32 {
         self.voice_media()
@@ -6684,7 +5548,6 @@ impl NetworkEngine {
             .unwrap_or(0.0)
     }
 
-    /// Fecha o teste de microfone (idempotente).
     #[cfg(target_os = "linux")]
     pub fn voice_mic_test_stop(&self, id: u64) {
         if let Some(v) = self.voice_media() {
@@ -6692,14 +5555,11 @@ impl NetworkEngine {
         }
     }
 
-    /// Nome do dispositivo de entrada atual (UI mostra o real, não "padrão").
     #[cfg(target_os = "linux")]
     pub fn voice_mic_name(&self) -> String {
         self.voice_media().map(|v| v.mic_name()).unwrap_or_default()
     }
 
-    /// `(call_id, peer_fp)` é uma sessão NATIVA? — a única pergunta que os
-    /// arms de `CallOffer`/`CallAnswer`/`CallIce` fazem.
     #[cfg(target_os = "linux")]
     pub(super) fn voice_is_native(&self, call_id: &str, peer_fp: &str) -> bool {
         self.voice_media().is_some()
@@ -6711,15 +5571,12 @@ impl NetworkEngine {
                 .is_some_and(|peers| peers.contains(peer_fp))
     }
 
-    /// Marca o par como nativo. Devolve `false` (e não registra nada) se a
-    /// mídia não existe — nesse caso a chamada é 100% navegador, de ponta a
-    /// ponta, e nada mais precisa ser feito. Ao registrar, sobe o drenador
-    /// periódico de trickle ICE (ver `spawn_voice_signal_drainer`).
     #[cfg(target_os = "linux")]
     fn voice_register(self: &Arc<Self>, call_id: &str, peer_fp: &str) -> bool {
         if self.voice_media().is_none() {
             return false;
         }
+        // Seção 33: first
         let first = self
             .voice_calls
             .lock()
@@ -6741,11 +5598,6 @@ impl NetworkEngine {
             .remove(call_id);
     }
 
-    /// Offer de CANAL DE VOZ chegou de `peer_fp` e ainda não há sessão nativa
-    /// registrada. Registra se — e somente se — este nó está no canal
-    /// (`voice_channel_calls`, preenchido no `voice_join`) e o par é membro
-    /// da comunidade (o MESMO gate dos frames VoiceJoin/Leave/State).
-    /// `true` = registrado, o absorb do handle_frame conduz o offer/answer.
     #[cfg(target_os = "linux")]
     pub(super) fn auto_register_voice_channel(
         self: &Arc<Self>,
@@ -6767,13 +5619,6 @@ impl NetworkEngine {
         self.voice_register(call_id, peer_fp)
     }
 
-    /// Registra o par nativo de uma sala de chamada e oferece, se eu sou o lado
-    /// que oferece. Usado por `room_join` (entrar numa chamada já no ar).
-    ///
-    /// Quem oferece é o lado de fingerprint MAIOR — a mesma regra da malha dos
-    /// canais —, então os dois lados não se atropelam com offer simultânea. O
-    /// lado menor registra e espera a offer do outro (o registro é o que impede
-    /// essa offer de ser retida como se fosse um pré-aceite).
     #[cfg(target_os = "linux")]
     pub(super) fn native_pair_begin(self: &Arc<Self>, call_id: &str, peer_fp: &str) {
         if !self.voice_register(call_id, peer_fp) {
@@ -6782,8 +5627,6 @@ impl NetworkEngine {
         if self.identity.fingerprint.as_str() <= peer_fp {
             return;
         }
-        // Sem runtime (comando síncrono de teste/startup): oferece direto, como
-        // os outros caminhos nativos já fazem.
         if tokio::runtime::Handle::try_current().is_err() {
             if let Ok(Some(sdp)) = self.voice_begin_offer(call_id, peer_fp) {
                 let _ = self.call_signal(
@@ -6796,7 +5639,6 @@ impl NetworkEngine {
             }
             return;
         }
-        // Fora da task de leitura/da thread do comando: `create_offer` bloqueia.
         let engine = self.clone();
         let cid = call_id.to_string();
         let peer = peer_fp.to_string();
@@ -6810,9 +5652,6 @@ impl NetworkEngine {
         });
     }
 
-    /// Envia o SDP/candidatos que a mídia nativa produziu, pelos MESMOS
-    /// `SecureFrame::Call*` que o navegador usa — nenhum frame novo no
-    /// protocolo, nenhum branch no peer distante.
     #[cfg(target_os = "linux")]
     pub(super) fn voice_flush_signals(&self, call_id: &str, peer_fp: &str) {
         let Some(v) = self.voice_media() else { return };
@@ -6840,8 +5679,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Registra o par como nativo e devolve o offer da mídia, se houver.
-    /// `Ok(None)` = chamada segue pelo navegador (mídia indisponível).
     #[cfg(target_os = "linux")]
     fn voice_begin_offer(self: &Arc<Self>, call_id: &str, peer_fp: &str) -> Result<Option<String>> {
         if !self.voice_register(call_id, peer_fp) {
@@ -6850,14 +5687,6 @@ impl NetworkEngine {
         let Some(v) = self.voice_media() else {
             return Ok(None);
         };
-        // `create_offer` BLOQUEIA (espera o SDP local + o ICE). Se estivermos
-        // dentro de uma task async, travar a worker thread seria errado —
-        // `block_in_place` resolve, o runtime troca a thread e os timers dos
-        // outros tasks continuam.
-        //
-        // Fora de runtime (comando Tauri síncrono, teste) `block_in_place`
-        // PANICA: nesses casos chamamos direto. Os dois caminhos são
-        // equivalentes em custo — o bloqueio é o mesmo.
         let offer = match in_multi_thread_runtime() {
             true => tokio::task::block_in_place(move || v.create_offer(call_id, peer_fp)),
             false => v.create_offer(call_id, peer_fp),
@@ -6869,18 +5698,6 @@ impl NetworkEngine {
             }
             Err(e) => {
                 warn!("voz nativa: offer falhou para {peer_fp} ({e}) — sinalização segue no navegador");
-                // NÃO remova o par do registro nativo se a SESSÃO AINDA EXISTE.
-                //
-                // BUG QUE ISTO CORRIGE (o "conectado mas não se ouve" mais
-                // difícil de achar): `create_offer` pode falhar num par cujo
-                // `Session` já está vivo (renegociação, offer tardia). Remover
-                // o par de `voice_calls` aqui fazia `voice_is_native` virar
-                // `false`: todo `CallOffer/CallAnswer/CallIce` passava a ir
-                // para o JS — que no Linux NÃO tem `RTCPeerConnection` e
-                // descarta em silêncio — e o drainer de sinais parava de
-                // drenar a fila da sessão viva. A UI continuava "conectado"
-                // (lia os stats da sessão), mas não havia mais troca de
-                // SDP/ICE: qualquer perda de rota virava irrecuperável.
                 let sessao_viva = self
                     .voice_media()
                     .map(|v| v.stats_peer(call_id, peer_fp).is_some())
@@ -6900,9 +5717,6 @@ impl NetworkEngine {
         }
     }
 
-    /// `true` = o offer foi absorvido pela mídia (o JS NÃO deve criar
-    /// `RTCPeerConnection`). `false` = o offer não é nosso: o arm emite o
-    /// `EngineEvent` de sempre.
     #[cfg(target_os = "linux")]
     pub(super) async fn voice_absorb_offer(
         &self,
@@ -6921,6 +5735,7 @@ impl NetworkEngine {
             peer_fp.to_string(),
             unwrap_wire_sdp(sdp),
         );
+        // Seção 34: res
         let res = tokio::task::spawn_blocking(move || v.handle_offer(&cid, &pfp, &s)).await;
         match res {
             Ok(Ok(answer)) => {
@@ -6941,7 +5756,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Idem para `CallAnswer` e `CallIce`.
     #[cfg(target_os = "linux")]
     async fn voice_absorb_answer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> bool {
         if !self.voice_is_native(call_id, peer_fp) {
@@ -6976,15 +5790,12 @@ impl NetworkEngine {
             return false;
         };
         let (cand, mid) = unwrap_wire_candidate(cand, mid);
-        // Clone para o log: o `spawn_blocking` move `mid` para dentro da closure.
         let mid_log = mid.clone();
         let (cid, pfp) = (call_id.to_string(), peer_fp.to_string());
         let res =
             tokio::task::spawn_blocking(move || v.add_ice_candidate(&cid, &pfp, &cand, &mid)).await;
         let ok = matches!(res, Ok(Ok(())));
         if !ok {
-            // Antes era silencioso: o candidato do browser era recusado (JSON
-            // não desembrulhado) e a chamada mista falhava sem nenhum rastro.
             tracing::debug!(
                 call_id = %call_id,
                 peer = %peer_fp,
@@ -6996,16 +5807,11 @@ impl NetworkEngine {
         ok
     }
 
-    // --------------------------------------- voz nativa (comandos da UI)
-
     #[cfg(target_os = "linux")]
     pub fn voice_media_available(&self) -> bool {
         self.native_voice_available()
     }
 
-    /// Estado agregado da chamada. `None` quando não há sessão nativa — a UI
-    /// então cai no relatório de `RTCPeerConnection` do navegador, que é o
-    /// comportamento de sempre.
     #[cfg(target_os = "linux")]
     pub fn voice_media_stats(&self, call_id: &str) -> Option<VoiceStats> {
         self.voice_media().and_then(|v| v.stats_agg(call_id))
@@ -7026,9 +5832,6 @@ impl NetworkEngine {
         self.voice_forget_call(call_id);
     }
 
-    // ---------------- video nativo (só Linux) ----------------
-
-    /// Liga o envio de video. `source` = "camera" | "screen".
     #[cfg(target_os = "linux")]
     pub fn native_video_start(
         &self,
@@ -7060,9 +5863,6 @@ impl NetworkEngine {
             .and_then(|v| v.video_frame(call_id, peer_fp))
     }
 
-    /// Re-tenta abrir o microfone. chamado no invite e no accept: uma falha no
-    /// boot (PipeWire subindo, device ocupado) marcava `mic_attempted` para
-    /// sempre e TODAS as chamadas seguintes nasciam só-recebendo.
     #[cfg(target_os = "linux")]
     pub fn voice_retry_mic(&self) {
         if let Some(v) = self.voice_media() {
@@ -7070,7 +5870,6 @@ impl NetworkEngine {
         }
     }
 
-    /// true se o frame é sinalização de chamada/voz efêmera (fila pending_calls).
     fn is_call_frame(frame: &SecureFrame) -> bool {
         matches!(
             frame,
@@ -7088,30 +5887,8 @@ impl NetworkEngine {
         )
     }
 
-    /// Teto de frames de sinalização enfileirados por peer offline.
-    /// Maior que o antigo 64: atrás de CGNAT a ligação P2P demora segundos
-    /// para subir (relay + direta em paralelo), e é nesse intervalo que a
-    /// sinalização da chamada inteira se acumula.
     const PENDING_CALL_MAX: usize = 512;
 
-    /// Descarte a sinalização menos importante, nunca a essencial.
-    ///
-    /// BUG que isto corrige: a fila usava `q.remove(0)` — descartava o frame
-    /// MAIS ANTIGO ao encher. A ordem de chegada numa chamada é
-    /// invite → offer → **candidatos ICE** → answer, então o que caía era
-    /// exatamente o `CallOffer` e os primeiros candidatos (o `srflx` do STUN).
-    /// O peer recebia candidatos de uma offer que nunca chegou: nenhum
-    /// RTCPeerConnection, chamada muda. Só acontecia quando a fila estourava —
-    /// por isso "às vezes não pega", e pior no 4G/CGNAT, onde a ligação P2P é
-    /// justamente o que demora.
-    ///
-    /// Ordem de descarte, do mais descartável ao mais valioso:
-    /// 1. `CallIce` — reenviável; o chamador reenvia a lista inteira quando o
-    ///    gathering termina, e o WebRTC ignora duplicata.
-    /// 2. Convite/encerramento antigos — para o peer que reconecta, não têm valor.
-    /// 3. Offer/answer DUPLICADOS antigos — protege-se o par mais recente, que
-    ///    é a negociação vigente. Se já estiver protegido, não descarta nada:
-    ///    perder a sinalização essencial é pior do que a fila crescer um frame.
     fn evict_call_frame(q: &mut Vec<SecureFrame>) {
         if Self::evict_one(q, |f| matches!(f, SecureFrame::CallIce { .. })) {
             return;
@@ -7124,6 +5901,7 @@ impl NetworkEngine {
         }) {
             return;
         }
+        // Seção 35: newest_offer
         let newest_offer = q.iter().rposition(Self::is_offer_frame);
         let newest_answer = q.iter().rposition(Self::is_answer_frame);
         let victim = (0..q.len()).find(|i| {
@@ -7140,7 +5918,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Remove o primeiro frame que casa com `pred`; devolve se removeu.
     fn evict_one(q: &mut Vec<SecureFrame>, pred: fn(&SecureFrame) -> bool) -> bool {
         match q.iter().position(pred) {
             Some(pos) => {
@@ -7159,11 +5936,6 @@ impl NetworkEngine {
         matches!(f, SecureFrame::CallAnswer { .. })
     }
 
-    /// Envia agora se online; senão enfileira (cap PENDING_CALL_MAX/peer,
-    /// descartando o menos essencial) + dispara dial imediato via relay e
-    /// direta em paralelo.
-    /// Frames pequenos (offer/answer/ice cabem num chunk) têm latência de
-    /// ~RTT + 1 poll após o online, sem esperar tick de 5s.
     fn queue_or_send_call_frame(&self, peer_fp: &str, frame: SecureFrame) {
         if self.link_tx(peer_fp).is_some() {
             self.cmd_tx
@@ -7171,12 +5943,7 @@ impl NetworkEngine {
                 .ok();
             return;
         }
-        // Offline: fila para o flush imediato da sessão recém-criada.
-        // (Qualquer frame via call_signal é enfileirado; o filtro Call* é
-        // documental — o flush drena na ordem de chegada.)
         self.enqueue_call_frame(peer_fp, frame);
-        // Dial IMEDIATO (não espera o tick de 5s do bootstrap): relay primeiro,
-        // direta em paralelo vence na eleição se o NAT deixar.
         self.cmd_tx
             .send(EngineCmd::ConnectRelay(peer_fp.to_string()))
             .ok();
@@ -7185,12 +5952,6 @@ impl NetworkEngine {
             .ok();
     }
 
-    /// Primeira vez que este convite chega de `peer_fp`?
-    ///
-    /// O chamador repete o invite enquanto a chamada não conecta (o frame
-    /// pode se perder). Sem esta trava o telefone reiniciava o toque a cada
-    /// reenvio e o overlay empilhava; ids de chamada são únicos, então o
-    /// conjunto só precisa de um teto para não crescer sem limite.
     fn ring_is_new(&self, call_id: &str, peer_fp: &str) -> bool {
         let mut vistos = self.ring_seen.lock().unwrap_or_else(|e| e.into_inner());
         if vistos.len() > 512 {
@@ -7199,25 +5960,18 @@ impl NetworkEngine {
         vistos.insert(format!("{call_id}|{peer_fp}"))
     }
 
-    /// Enfileira sinalização de chamada para `peer_fp` sem disparar dial.
-    /// Separado do `queue_or_send_call_frame` porque o caminho de ENTREGA
-    /// falha (canal da sessão morto) precisa só repor o frame na fila: quem
-    /// já tratou o link morto foi o `drop_link_if_dead`, e o maintain rediala.
     fn enqueue_call_frame(&self, peer_fp: &str, frame: SecureFrame) {
         let mut map = self.pending_calls.lock().unwrap_or_else(|e| e.into_inner());
         let q = map.entry(peer_fp.to_string()).or_default();
         if q.len() >= Self::PENDING_CALL_MAX {
             Self::evict_call_frame(q);
             if q.len() >= Self::PENDING_CALL_MAX {
-                q.remove(0); // sem vítima elegível: o teto vale mesmo assim
+                q.remove(0);
             }
         }
         q.push(frame);
     }
 
-    /// Drena a fila de chamadas na sessão recém-criada (FLUSH IMEDIATO, sem
-    /// spawn: `cmd_tx` é unbounded e `frame_tx` bufferiza até a writer nascer
-    /// logo abaixo — mesmo padrão de flush_friend_requests/flush_joins).
     fn flush_pending_calls(&self, peer_fp: &str) {
         let frames: Vec<SecureFrame> = self
             .pending_calls
@@ -7226,15 +5980,13 @@ impl NetworkEngine {
             .remove(peer_fp)
             .unwrap_or_default();
         for f in frames {
-            // Drena na ordem de chegada (invite→offer→answer→ice preservada).
-            let _ = Self::is_call_frame(&f); // documental: fila é de sinalização
+            let _ = Self::is_call_frame(&f);
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(peer_fp.to_string(), f))
                 .ok();
         }
     }
 
-    // ---------- voz (canal) ----------
     pub fn voice_join(self: &Arc<Self>, community_id: &str, channel_id: &str) -> Result<()> {
         self.store.set_voice_state(
             community_id,
@@ -7244,17 +5996,7 @@ impl NetworkEngine {
             false,
         )?;
         let call_id = format!("voice-{}-{}", community_id, channel_id);
-        // SAIR DE QUALQUER OUTRO CANAL ANTES DE ENTRAR NESTE.
-        //
-        // Antes o core só empilhava o novo canal: a linha antiga em
-        // `voice_states` e o registro em `voice_channel_calls` continuavam
-        // vivos. Efeito real: o par nos via em DOIS canais e as offers do
-        // canal velho seguiam sendo absorvidas pelo auto-register (chamada
-        // fantasma, áudio de um canal que você já tinha deixado).
         self.voice_leave_other_channels(&call_id);
-        // Registro ANTES do broadcast: se um offer de canal chegar junto com
-        // o VoiceJoin de outro par, o auto-register do handle_frame já nos
-        // considera "no canal".
         #[cfg(target_os = "linux")]
         self.voice_channel_calls
             .lock()
@@ -7263,7 +6005,6 @@ impl NetworkEngine {
                 call_id.clone(),
                 (community_id.to_string(), channel_id.to_string()),
             );
-        // broadcast para membros da comunidade
         for (fp, _, _) in self.store.list_members(community_id)? {
             if fp == self.identity.fingerprint {
                 continue;
@@ -7285,10 +6026,6 @@ impl NetworkEngine {
             channel_id: channel_id.into(),
             fp: self.identity.fingerprint.clone(),
         });
-        // MESH NATIVO (Linux): o core conecta a mídia com quem já está no
-        // canal — o mesmo `voice_register` + `voice_begin_offer` das DMs,
-        // um por par presente. Sem WebRTC de página no WebKitGTK, este é o
-        // ÚNICO caminho de mídia para canais de voz no Linux.
         #[cfg(target_os = "linux")]
         if self.native_voice_available() {
             for (fp, _, _) in self.store.list_voice_states(community_id, channel_id)? {
@@ -7301,14 +6038,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Abre a sessão nativa de mídia com `peer_fp` no canal, se EU sou o lado
-    /// que oferece. Idempotente e sem efeito quando não sou.
-    ///
-    /// A REGRA DO PAR (fingerprint maior oferece) é o que impede offer contra
-    /// offer quando dois nós entram no canal no mesmo instante. Chamada dos
-    /// três pontos em que um par do canal pode aparecer: no meu `voice_join`,
-    /// quando EU recebo o `VoiceJoin` dele e quando eu recebo o `VoiceState`
-    /// dele (o anúncio que o joiner usa para me enxergar).
     #[cfg(target_os = "linux")]
     fn voice_mesh_maybe_offer(
         self: &Arc<Self>,
@@ -7319,29 +6048,20 @@ impl NetworkEngine {
         if !self.native_voice_available() {
             return;
         }
-        // Lado menor: quem oferece é o outro. Só anuncio (ver o arm de VoiceJoin).
         if self.identity.fingerprint.as_str() <= peer_fp {
             return;
         }
         let call_id = format!("voice-{community_id}-{channel_id}");
-        // Já há sessão nativa com este par? Não renegocia (a renegociação
-        // gratuita a cada mute era o que fazia a chamada "cair e voltar").
         if self.voice_is_native(&call_id, peer_fp) {
             return;
         }
         if !self.auto_register_voice_channel(&call_id, peer_fp) {
             return;
         }
-        // OFFER FORA DESTA TASK. `voice_begin_offer` chama `create_offer`, que
-        // BLOQUEIA esperando SDP + ICE (block_in_place). Isto roda dentro do
-        // `handle_frame`, na task de leitura da sessão: bloquear aqui trava o
-        // recebimento do peer inteiro — e com vários pares entrando ao mesmo
-        // tempo (entrar num canal com gente) as workers do runtime acabam
-        // ocupadas, a UI para de responder e o app parece morto ("entro na
-        // chamada e o app trava, as mensagens param").
         let engine = self.clone();
         let peer = peer_fp.to_string();
         tokio::spawn(async move {
+            // Seção 36: e2
             let e2 = engine.clone();
             let cid = call_id.clone();
             let p = peer.clone();
@@ -7356,8 +6076,6 @@ impl NetworkEngine {
         self.store
             .leave_voice(community_id, channel_id, &self.identity.fingerprint)?;
         let call_id = format!("voice-{}-{}", community_id, channel_id);
-        // `call_id` só é usado no ramo Linux; nas outras plataformas o nome
-        // existe apenas para manter o mesmo formato dos índices do core.
         #[cfg(not(target_os = "linux"))]
         let _ = &call_id;
         #[cfg(target_os = "linux")]
@@ -7366,7 +6084,6 @@ impl NetworkEngine {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(&call_id);
-            // Derruba as sessões nativas DESTE canal (PCs, mic, tasks).
             if self
                 .voice_calls
                 .lock()
@@ -7401,12 +6118,6 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Sai de TODOS os canais de voz diferentes de `keep_call_id`.
-    ///
-    /// Vale nas três plataformas: no caminho navegador (Windows/Android) a
-    /// linha antiga em `voice_states` fazia o par nos ver em dois canais e
-    /// criava PC para um canal que já tinha sido abandonado. No Linux, além
-    /// disso, mantinha a sessão nativa viva.
     fn voice_leave_other_channels(&self, keep_call_id: &str) {
         let me = self.identity.fingerprint.clone();
         let mine = match self.store.my_voice_states(&me) {
@@ -7450,19 +6161,12 @@ impl NetworkEngine {
         }
     }
 
-    /// Flush de voz para UM peer que acabou de ficar Online.
-    ///
-    /// Cobre o caso em que o link não existia no instante do `voice_join`:
-    /// manda o `VoiceJoin` + o estado real (mudo/ensurdecido) de cada canal em
-    /// que estamos. Idempotente no receptor (`set_voice_state` é upsert).
     fn flush_voice_state_to(&self, peer_fp: &str) {
         let me = self.identity.fingerprint.clone();
         let Ok(mine) = self.store.my_voice_states(&me) else {
             return;
         };
         for (community_id, channel_id, muted, deafened) in mine {
-            // Só para quem é membro da comunidade: fora isso o receptor recusa
-            // o frame de qualquer forma (gate de membro), e mandar seria spam.
             if self.store.member_role(&community_id, peer_fp).is_none() {
                 continue;
             }
@@ -7490,19 +6194,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Re-anuncia a NOSSA presença em todos os canais de voz em que estamos.
-    /// BUG QUE ISTO CORRIGE (o "conectado mas ninguém aparece"): `voice_join`
-    /// mandava `VoiceJoin` uma única vez e só para membros com link `Online`
-    /// naquele instante. `EngineCmd::SendToPeer` para quem não tem link é
-    /// no-op SILENCIOSO (`engine.rs`, braço do command_loop) — sem fila, sem
-    /// retry, sem log. Em Tor/relay, onde as sessões levam segundos para
-    /// subir, entrar no canal logo depois de abrir o app fazia o anúncio cair
-    /// no vazio para todos. Como não havia reenvio, o roster ficava
-    /// assimétrico para sempre: um lado via o outro, o outro não via ninguém.
-    ///
-    /// Idempotente no receptor: `set_voice_state` é upsert e o evento
-    /// `voice_joined` é deduplicado no front (`addVoiceParticipant`).
-    /// Frames pequenos, uma vez a cada tick de 15 s — custo desprezível.
     fn reannounce_voice_channels(self: &Arc<Self>) {
         let me = self.identity.fingerprint.clone();
         let mine = match self.store.my_voice_states(&me) {
@@ -7510,15 +6201,11 @@ impl NetworkEngine {
             Err(_) => return,
         };
         for (community_id, channel_id, muted, deafened) in mine {
-            // Mesma condição do `voice_join`, agora repetida: quem já está
-            // online recebe o join E o estado atual (mudo/ensurdecido).
             for (fp, _, _) in self.store.list_members(&community_id).unwrap_or_default() {
                 if fp == me {
                     continue;
                 }
                 if self.link_tx(&fp).is_none() {
-                    // Link ainda subindo: o PRÓXIMO tick tenta de novo. É
-                    // exatamente o retry que faltava.
                     continue;
                 }
                 self.cmd_tx
@@ -7543,8 +6230,6 @@ impl NetworkEngine {
                     ))
                     .ok();
             }
-            // Linux: aproveita para reabrir a mesh com quem apareceu no canal
-            // depois do join (e cujo anúncio se perdeu). É idempotente.
             #[cfg(target_os = "linux")]
             if self.native_voice_available() {
                 for (fp, _, _) in self
@@ -7561,27 +6246,12 @@ impl NetworkEngine {
         }
     }
 
-    /// Limpa a presença de voz de um peer que caiu.
-    ///
-    /// Antes, a linha em `voice_states` só era apagada por um `VoiceLeave`
-    /// explícito. Processo morto/crash/queda de rede = participante fantasma
-    /// para sempre no canal (e, no Linux, o `voice_join` ainda abria sessão
-    /// nativa contra esse fingerprint morto, que nunca conectava e mantinha o
-    /// agregado em `failed`).
-    ///
-    /// SÓ LIMPA SE A ROTA ESTIVER MORTA. `PeerOffline` é emitido a cada queda
-    /// da sessão de TRANSPORTE (troca de rede, re-eleição do relay, backoff) e
-    /// o RTP é independente dela: apagar a linha aqui fazia o participante
-    /// sumir do canal e voltar ~15 s depois (quando o re-anúncio chegava),
-    /// mesmo com o áudio fluindo. Era o "aparece e desaparece" do roster.
+    // Seção 37: drop_voice_presence_of
     fn drop_voice_presence_of(&self, peer_fp: &str) {
         let Ok(canais) = self.store.peer_voice_states(peer_fp) else {
             return;
         };
         for (community_id, channel_id) in canais {
-            // Na rota NATIVA dá para PROVAR se a mídia continua viva; nas
-            // outras plataformas o core não vê o RTP da WebView, então a
-            // presença segue a sessão (e o re-anúncio de 15 s a restaura).
             #[cfg(target_os = "linux")]
             let rota_viva = {
                 let call_id = format!("voice-{community_id}-{channel_id}");
@@ -7598,8 +6268,6 @@ impl NetworkEngine {
             };
             #[cfg(not(target_os = "linux"))]
             let rota_viva = false;
-            // Rota viva = a pessoa AINDA está no canal (o transporte piscou,
-            // a mídia não). Manter a linha e não emitir VoiceLeft.
             if rota_viva {
                 continue;
             }
@@ -7660,7 +6328,6 @@ impl NetworkEngine {
             .unwrap_or_default()
     }
 
-    // ---------- arquivos swarm ----------
     pub fn file_announce(
         &self,
         file_id: &str,
@@ -7736,14 +6403,7 @@ impl NetworkEngine {
         Ok(())
     }
 
-    /// Re-anuncia os arquivos que EU tenho, para quem estiver online.
-    ///
-    /// BUG QUE ISTO CORRIGE ("nem todo mundo semeia"): o `file_announce` era
-    /// disparado UMA vez, para os peers online NAQUELE instante. Quem baixava
-    /// um arquivo virava seeder só até fechar o app — o anúncio não era
-    /// persistido em lugar nenhum, então ao reabrir o arquivo continuava no
-    /// disco mas ninguém sabia. Agora o tique de manutenção re-anuncia, e o
-    /// `flush_files_to` cobre quem acabou de subir (abaixo).
+    // Seção 38: reannounce_files
     pub fn reannounce_files(&self) {
         let me = self.identity.fingerprint.clone();
         let Ok(arquivos) = self.store.my_seed_files(&me) else {
@@ -7754,14 +6414,10 @@ impl NetworkEngine {
         }
         let online = self.online_peer_fps();
         if online.is_empty() {
-            // Sem ninguém para ouvir: NÃO marca como anunciado, senão o
-            // primeiro peer que subir depois não recebe por 15 s.
             return;
         }
         let now = crate::identity::now_ms();
         for (file_id, name, size, chunks, hash, seeded_at) in arquivos {
-            // 30 s: anúncio é frame pequeno, mas repetir a cada tique de 15 s
-            // para 20 peers é ruído sem ganho (o flush cobre quem chega).
             if now.saturating_sub(seeded_at) < 30_000 && seeded_at != 0 {
                 continue;
             }
@@ -7784,11 +6440,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Manda para um peer recém-online os arquivos que EU tenho.
-    ///
-    /// O `file_announce` original só alcançava quem já estava online; um peer
-    /// que subia depois ficava sem saber que o arquivo existia aqui — e o
-    /// download dele morria em "sem peers com o arquivo no swarm".
     pub fn flush_files_to(&self, peer_fp: &str) {
         let me = self.identity.fingerprint.clone();
         let Ok(arquivos) = self.store.my_seed_files(&me) else {
@@ -7835,9 +6486,6 @@ impl NetworkEngine {
         index: u32,
         data_b64: &str,
     ) -> Result<()> {
-        // Recusa ANTES de enfileirar: um bloco acima do teto faria o RECEPTOR
-        // derrubar a sessão inteira (`read_frame` rejeita > MAX_FRAME), o que
-        // parece "peer caiu" e queima as tentativas do chunk do outro lado.
         if data_b64.len() > MAX_CHUNK_BYTES * 4 / 3 + 8 {
             return Err(DistorrentError::Protocol(
                 "file_send_chunk: bloco acima do tamanho máximo".into(),
@@ -7861,40 +6509,24 @@ impl NetworkEngine {
     }
 }
 
-/// IP da interface de saída (LAN). Truque do UDP: não envia pacote, só consulta
-/// qual interface o kernel escolheria para a rota padrão. Sem dependência extra.
 fn local_lan_ip() -> Option<std::net::IpAddr> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:80").ok()?;
     sock.local_addr().ok().map(|a| a.ip())
 }
 
-/// STUN pode ser consultado no modo de privacidade atual? Em `proxy`/`full`
-/// o IP real NÃO pode vazar para servidores STUN públicos (fail-closed).
 fn stun_allowed(engine: &Arc<NetworkEngine>) -> bool {
     !matches!(engine.privacy_mode().as_str(), "proxy" | "full")
 }
 
-/// Inbound DIRETO (TCP accept) é permitido no modo atual? Em `proxy`/`full`
-/// NÃO: quem escanear a porta receberia o Hello em claro (fp+nickname) e a
-/// sessão direta que nasceria entregaria o IP real ao peer — exatamente o
-/// que estes modos prometem esconder. Peers continuam alcançando pelo relay
-/// (neste modo ele SÓ roda por túnel SOCKS5 — `refresh_relay_for_privacy`).
-/// O teste Tor E2E continua válido: o RESPONDEDOR roda em modo normal.
 fn direct_inbound_allowed(engine: &Arc<NetworkEngine>) -> bool {
     !matches!(engine.privacy_mode().as_str(), "proxy" | "full")
 }
 
-/// Hole punching (furo TCP/UDP direto) é permitido no modo atual? Em
-/// `proxy`/`full` NÃO: o furo cria conexão TCP/UDP DIRETA ao peer (vaza o IP
-/// real) e publica nosso endpoint público a ele. A sessão relay (proxada) é
-/// a única rota anônima; o upgrade direto fica para os modos normais.
 fn punch_allowed_by_privacy(engine: &Arc<NetworkEngine>) -> bool {
     !matches!(engine.privacy_mode().as_str(), "proxy" | "full")
 }
 
-/// `DISTORRENT_NO_RELAY` liga o kill-switch do relay no boot? Aceita
-/// 1/true/yes/on (case-insensitive); qualquer outro valor = relay ligado.
 fn env_no_relay() -> bool {
     std::env::var("DISTORRENT_NO_RELAY")
         .map(|v| {
@@ -7906,16 +6538,10 @@ fn env_no_relay() -> bool {
         .unwrap_or(false)
 }
 
-/// Relay é **OPT-IN**: por padrão fica DESLIGADO (só DIRETA: TCP/hole punch/LAN).
-/// Ligue explicitamente com `DISTORRENT_RELAY=1`. `DISTORRENT_NO_RELAY=1` força desligado.
 fn env_relay_enabled() -> bool {
     if env_no_relay() {
         return false;
     }
-    // DEFAULT LIGADO (fail-open): o relay MQTT é a via garantida sob CGNAT e
-    // não pode exigir env var para existir — era o bug do "0 peers" (opt-in
-    // silencioso que ninguém setava; só os testes injetavam backend e re-ligavam).
-    // Desliga explicitamente com `DISTORRENT_RELAY=0/false/no/off`.
     !matches!(
         std::env::var("DISTORRENT_RELAY")
             .ok()
@@ -7926,10 +6552,6 @@ fn env_relay_enabled() -> bool {
     )
 }
 
-/// (F7) Regra pura do "intermediário por peer" (testável sem env do processo).
-/// **AUTOMÁTICO por padrão** (o intermediário é um PEER da rede, não o relay
-/// público). Desliga com `DISTORRENT_NO_RELAY=1` ou `DISTORRENT_PEER_RELAY=0/false/off`.
-/// `DISTORRENT_RELAY=0/off` também desliga (compatibilidade).
 pub fn peer_relay_optin_value(relay: Option<&str>, peer: Option<&str>, no_relay: bool) -> bool {
     if no_relay {
         return false;
@@ -7943,11 +6565,10 @@ pub fn peer_relay_optin_value(relay: Option<&str>, peer: Option<&str>, no_relay:
     if off(relay) || off(peer) {
         return false;
     }
-    true // AUTO: intermediário por peer ligado por padrão
+    true
 }
 
-/// Intermediário por peer: **LIGADO por padrão** (automático quando o direto
-/// falha). Desliga com `DISTORRENT_NO_RELAY=1` ou `DISTORRENT_PEER_RELAY=0`.
+// Seção 39: env_peer_relay_enabled
 fn env_peer_relay_enabled() -> bool {
     peer_relay_optin_value(
         std::env::var("DISTORRENT_RELAY").ok().as_deref(),
@@ -7956,14 +6577,11 @@ fn env_peer_relay_enabled() -> bool {
     )
 }
 
-/// Hole punching ligado? Default LIGADO. `DISTORRENT_PUNCH=0` (ou false/no/off)
-/// desliga APENAS o furo coordenado — dial outbound, UPnP/LAN e relay seguem.
 fn env_punch_enabled() -> bool {
     let v = std::env::var("DISTORRENT_PUNCH").ok();
     punch_flag_value(v.as_deref())
 }
 
-/// Regra pura do kill-flag (testável sem mexer no env do processo).
 fn punch_flag_value(v: Option<&str>) -> bool {
     match v {
         None => true,
@@ -7974,11 +6592,6 @@ fn punch_flag_value(v: Option<&str>) -> bool {
     }
 }
 
-/// Fallback AUTOMÁTICO para proxy ligado? Default DESLIGADO — o proxy nunca
-/// é ativado silenciosamente: só o usuário liga (UI/`privacy.mode`) ou,
-/// explicitamente opt-in, via `DISTORRENT_AUTO_PROXY=1/true/yes/on`.
-/// Quando desativado, NENHUMA conexão passa por proxy.
-/// Regra pura separada para teste sem tocar no env do processo.
 fn auto_proxy_flag_value(v: Option<&str>) -> bool {
     match v {
         None => false,
@@ -7993,12 +6606,6 @@ fn auto_proxy_enabled() -> bool {
     auto_proxy_flag_value(std::env::var("DISTORRENT_AUTO_PROXY").ok().as_deref())
 }
 
-/// Announce/descoberta de endpoint por tópico de anúncio (LAN/direta) ligada?
-/// Default LIGADO na produção (direta é preferida — menor latência). Testes
-/// que precisam exercitar SÓ o relay (adverso/lossy/mqtt) setam
-/// `DISTORRENT_NO_ANNOUNCE=1` para desligar a descoberta direta via anúncio e
-/// deixar a eleição determinística (relay-only).
-/// Regra pura separada para teste sem tocar no env do processo.
 fn announce_flag_value(v: Option<&str>) -> bool {
     match v {
         None => true,
@@ -8013,18 +6620,10 @@ fn announce_discovery_enabled() -> bool {
     announce_flag_value(std::env::var("DISTORRENT_NO_ANNOUNCE").ok().as_deref())
 }
 
-/// Renova o mapeamento de porta no roteador. Tenta UPnP IGD (crate `igd`) e,
-/// se indisponível, NAT-PMP (RFC 6886, ver `net::natpmp`) — muitos CGNATs só
-/// falam NAT-PMP. Ao sucesso grava em `ext_port` a porta EXTERNA que deve ser
-/// ANUNCIADA (regra torrent: o endpoint publicado tem que ser o mapeado).
-/// Nunca panica nem bloqueia o engine: roda em thread bloqueante com timeout;
-/// falha vira `debug!` e seguimos no hole punch/relay.
 async fn nat_map_port(port: u16, ext_port: Arc<AtomicU16>) {
     let res = timeout(
         Duration::from_secs(8),
         tokio::task::spawn_blocking(move || -> std::result::Result<u16, String> {
-            // Timeout CURTO no SSDP (default da crate é 10s): sem gateway o
-            // search tem que desistir rápido para dar vez ao NAT-PMP.
             let opts = igd::SearchOptions {
                 timeout: Some(Duration::from_secs(3)),
                 ..Default::default()
@@ -8042,11 +6641,8 @@ async fn nat_map_port(port: u16, ext_port: Arc<AtomicU16>) {
                         3600,
                         "DisTorrent P2P",
                     ) {
-                        // UPnP honra a porta pedida na esmagadora maioria dos IGDs.
                         Ok(()) => Ok(port),
                         Err(e) => {
-                            // Gateway UPnP existe mas recusou o mapeamento —
-                            // alguns só mapeiam via NAT-PMP.
                             debug!("UPnP add_port falhou ({e}) — tentando NAT-PMP");
                             crate::net::natpmp::map_tcp(port, 3600)
                                 .ok_or_else(|| format!("UPnP add_port: {e}; NAT-PMP sem resposta"))
@@ -8077,12 +6673,6 @@ async fn nat_map_port(port: u16, ext_port: Arc<AtomicU16>) {
     }
 }
 
-/// OUTBOUND-FIRST (regra do torrent): SEMPRE tentamos SAIR para o endpoint
-/// anunciado do peer. Quem está atrás de NAT/CGNAT só consegue SAIR; a conexão
-/// de entrada vem do lado alcançável. Consulta trackers HTTP self-hosted (se
-/// configurados via DISTORRENT_BOOTSTRAP_URL) e disca DIRETO. Devolve true se
-/// achou um endpoint e disparou o dial. Sem trackers configurados, nem tenta
-/// (descoberta fica a cargo do MQTT announce / LAN / hole punch).
 async fn tracker_lookup_and_dial(
     engine: &Arc<NetworkEngine>,
     peer_fp: &str,
@@ -8100,7 +6690,6 @@ async fn tracker_lookup_and_dial(
             continue;
         };
         if let Ok(body) = resp.json::<serde_json::Value>().await {
-            // Tracker self-hosted devolve {"addr": "ip:porta", ...} (LAN opcional).
             let addr_opt = body
                 .get("lan")
                 .and_then(|v| v.as_str())
@@ -8122,21 +6711,8 @@ async fn tracker_lookup_and_dial(
 }
 
 async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Result<()> {
-    // 0) Aplica o modo de privacidade ao relay ANTES de subir os loops: em
-    // proxy/Tor o backend passa a MQTT-via-túnel-SOCKS5 (ou o relay fica
-    // desligado, fail-closed) — sem isso o modo `proxy` iniciaria com as
-    // rotas públicas diretas e vazaria o IP no primeiro frame de relay.
     engine.refresh_relay_for_privacy();
 
-    // LIMPEZA DE PRESENÇA DE VOZ NO BOOT.
-    //
-    // `voice_states` é persistente e não tinha expiração: fechar o app (ou ele
-    // morrer) durante uma chamada deixava a linha gravada, e no boot seguinte o
-    // usuário aparecia "na voz" sozinho — no Linux, o `voice_join` ainda abria
-    // sessão nativa contra esses fantasmas, que nunca conectavam e mantinham o
-    // agregado em `failed` (o que derrubava a chamada dos pares vivos).
-    // Só limpamos o NOSSO fingerprint: as linhas de terceiros podem estar
-    // corretas em outro dispositivo e o `PeerOffline` cuida delas.
     if let Err(e) = engine
         .store
         .clear_my_voice_states(&engine.identity.fingerprint)
@@ -8144,12 +6720,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         tracing::debug!(error = %e, "não consegui limpar presença de voz antiga");
     }
 
-    // FAST-CONNECT no boot: não espera o 1º tick de descoberta. Disca já para
-    // peers conhecidos (peerbook) e reengata o relay/announce dos amigos —
-    // corta o tempo até a 1ª mensagem logo que o app abre.
-    // OUTBOUND-FIRST no boot também: o tick de announce dispara IMEDIATAMENTE
-    // (1º `tick()` do interval) e faz o lookup de endpoint anunciado (tracker/
-    // tracker) dos amigos, sem depender do relay — quem tem NAT só SAI.
     {
         for p in engine.store.list_peers().unwrap_or_default() {
             if let Some(addr) = p.addr.as_deref().and_then(|a| a.parse::<SocketAddr>().ok()) {
@@ -8173,13 +6743,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     .ok();
             }
         }
-        // GRUPOS: membros de grupo que NÃO são amigos não estavam em nenhuma
-        // lista de dial do boot — abriam o app com o grupo inteiro "offline".
         engine.pair_all_groups_now();
-        // Convites de servidor que ficaram pendentes no SQLite: o usuário
-        // colou o token, o dono estava offline e o app fechou. Sem esta
-        // restauração o pedido morria junto com o processo e o servidor nunca
-        // aparecia — "tive de colar o token de novo" era exatamente isto.
         for (key, token) in engine
             .store
             .kv_list_prefix("join.pending.")
@@ -8188,6 +6752,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             let Some(cid) = key.strip_prefix("join.pending.") else {
                 continue;
             };
+            // Seção 40: Ok
             let Ok((host_fp, token_cid, member_fp, exp, _sig)) =
                 crate::protocol::parse_invite_token(&token)
             else {
@@ -8211,11 +6776,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         }
     }
 
-    // 1) Listener TCP em porta FIXA estilo torrent (default 51413,
-    // DISTORRENT_PORT sobrescreve) com fallback: fixa+1..+9 e só então efêmera.
-    // Porta estável = mapeamento CGNAT/UPnP estável + DHT/announce coerentes
-    // entre restarts (porta efêmera (:0) mudava tudo a cada boot e invalidava
-    // o endpoint anunciado — o torrent nunca faz isso).
     let listener = {
         let preferred: u16 = std::env::var("DISTORRENT_PORT")
             .ok()
@@ -8232,7 +6792,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     .unwrap_or_else(|e| e.into_inner())
                     .contains(&p)
             {
-                continue; // outro engine DESTE processo já ligou esta porta
+                continue;
             }
             let attempt = (|| -> Result<tokio::net::TcpListener> {
                 let sock = tokio::net::TcpSocket::new_v4()?;
@@ -8267,10 +6827,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
     engine.listen_port.store(port, Ordering::Relaxed);
     info!(port, "listener TCP ativo");
 
-    // NAT automático — igual torrent: abre a porta no roteador sem o usuário
-    // fazer nada (UPnP e, se faltar, NAT-PMP). RENOVA a cada 15min (keepalive
-    // do mapeamento; o lease é 1h) e re-descobre o gateway ao trocar de rede;
-    // falha nunca trava (segue hole punch/relay).
     {
         let port_upnp = port;
         let ext_port = engine.nat_external_port.clone();
@@ -8281,11 +6837,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 if cancelled(&cancel) {
                     break;
                 }
-                // PRIVACIDADE: UPnP/NAT-PMP é descoberta local (SSDP
-                // multicast na LAN) + abre porta no roteador — em modo
-                // anônimo fica OFF junto com o resto da descoberta
-                // (anúncio LAN expõe presença; porta aberta contradiz o
-                // "esconder IP"). O lease existente expira sozinho (1h).
                 if matches!(engine_nat.privacy_mode().as_str(), "proxy" | "full") {
                     debug!("upnp/nat-pmp suspenso: modo anônimo (proxy/full)");
                 } else {
@@ -8299,26 +6850,16 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         });
     }
 
-    // Anúncio automático para bootstrap público (tracker) — não precisa digitar IP igual torrent via tracker/DHT
     {
         let engine_clone = engine.clone();
         let port_clone = port;
         tokio::spawn(async move {
-            // Multi-tracker: DISTORRENT_BOOTSTRAP_URL aceita lista separada por vírgula
-            // (self-hostable via `distorrent-host --bootstrap PORTA`). Sem trackers
-            // configurados, announce/descovery por tracker ficam DESLIGADOS —
-            // UPnP e endereço manual continuam funcionando normalmente.
             let trackers: Vec<String> = std::env::var("DISTORRENT_BOOTSTRAP_URL")
                 .unwrap_or_default()
                 .split(',')
                 .map(|s| s.trim().trim_end_matches('/').to_string())
                 .filter(|s| s.starts_with("http"))
                 .collect();
-            // NÃO há fallback HTTP automático (ntfy.sh removido): a descoberta
-            // principal é local-first/P2P — LAN (UDP/mDNS), MQTT announce
-            // (push), STUN/UPnP/NAT-PMP para endpoint público e hole punching.
-            // Trackers HTTP só existem se o usuário self-hostar via
-            // DISTORRENT_BOOTSTRAP_URL (opcional, nunca obrigatório).
             if trackers.is_empty() {
                 debug!(
                     "bootstrap: sem trackers HTTP — descoberta 100% P2P (LAN/mDNS/MQTT/hole-punch)"
@@ -8330,15 +6871,8 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     trackers.len()
                 );
             }
-            // 30s (era 5s): corta o tráfego para os brokers MQTT públicos
-            // (bom cidadão — evita rate-limit/ban). O endpoint fica retido no
-            // serviço por horas, então a descoberta direta continua funcionando;
-            // o 1º tick é imediato (anuncia no boot) e o relay cobre o resto.
             let mut cancel = engine_clone.cancel_tx.subscribe();
             let mut tick = interval(Duration::from_secs(30));
-            // Última publicação do nosso anúncio (epoch ms). O loop roda a cada
-            // 30s para o lookup dos amigos, mas republicar o NOSSO anúncio nesse
-            // ritmo seria abuso dos brokers públicos — ver ANNOUNCE_REPUBLISH_MS.
             let last_announce = StdMutex::new(0i64);
             loop {
                 if cancelled(&cancel) {
@@ -8348,10 +6882,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     _ = cancel.changed() => break,
                     _ = tick.tick() => {}
                 }
-                // PRIVACIDADE: announce/lookup só nos modos "normal"/"encrypted".
-                // Em "proxy"/"full" (Tor/SOCKS5) o IP NUNCA vai a serviço de
-                // terceiros — reqwest não passa pelo SOCKS5 do engine, então
-                // este loop vazaria o IP real mesmo em modo anônimo.
                 let privacy_mode = engine_clone
                     .store
                     .kv_get("privacy.mode")
@@ -8361,13 +6891,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
                 let fp = engine_clone.identity.fingerprint.clone();
                 let nickname = engine_clone.identity.nickname.clone();
-                // IP público via UPnP (gateway da casa) — com CACHE de 5min:
-                // search_gateway SSDP trava segundos a cada tick e atrasava o
-                // gatilho do relay. Cache estático (IP muda raro).
-                // NÃO há mais chamada a api.ipify.org/externos aqui: sob CGNAT o
-                // IP externo do roteador é inútil (inbound nunca chega — quem
-                // resolve é STUN + relay MQTT + hole punching); anunciar um IP
-                // inalcançável só gerava dials condenados (o famoso "0 peers").
                 let public_ip: Option<String> = {
                     static UPNP_CACHE: std::sync::OnceLock<StdMutex<(Option<String>, i64)>> =
                         std::sync::OnceLock::new();
@@ -8400,21 +6923,13 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         upnp_ip
                     }
                 };
-                // Kill-switch de teste (DISTORRENT_NO_ANNOUNCE): desliga announce/
-                // lookup de endpoint — eleição fica relay-only e determinística.
+                // Seção 41: announce_on
                 let announce_on = announce_discovery_enabled();
-                // Endpoint PÚBLICO a anunciar. Ordem de preferência:
-                // 1) STUN — mapeamento REAL visto pelo NAT (funciona sob CGNAT
-                //    mesmo sem UPnP/NAT-PMP; cache interno de ~60s);
-                // 2) UPnP/NAT-PMP (porta externa mapeada) ou ip público + porta interna.
-                // Sem nenhum dos dois: NÃO anuncia (comportamento legado intacto).
                 let ext_port = engine_clone.nat_external_port.load(Ordering::Relaxed);
                 let stun_addr = if !announce_on {
                     None
                 } else if ext_port == 0 {
                     let sa = crate::net::stun::stun_external_addr().await;
-                    // Diagnóstico global: STUN ok (tem binding NAT) ou não —
-                    // sem isso a UI não sabe se o direto era sequer possível.
                     engine_clone.diag_record_net(|d| {
                         d.stun_ok = Some(sa.is_some());
                         d.stun_addr = sa.map(|s| s.to_string());
@@ -8424,23 +6939,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 } else {
                     None
                 };
-                // Endpoint PÚBLICO a anunciar.
-                //
-                // REGRA (torrent/c.BitTorrent): só se anuncia um endpoint em que
-                // o TCP realmente pode chegar. O STUN é UDP — ele prova que
-                // existe IP público e um binding UDP, e NADA sobre o TCP. Por
-                // isso:
-                //  - ext_port != 0 (UPnP/NAT-PMP abriu o TCP de fato) → anuncia
-                //    a porta externa mapeada. É o caminho confiável.
-                //  - public_ip conhecido (ipify/HTTP) E sem NAT (bind 0.0.0.0
-                //    alcançável) → anuncia ip:porta_escuta.
-                //  - só STUN, sem porta externa comprovada → NÃO anuncia. Antes
-                //    anunciava `ip_stun:porta_interna`, e o par fazia dial nesse
-                //    endereço e recebia "Connection refused"/timeout em loop
-                //    (14+ tentativas por peer, até cair no relay). Pior que
-                //    anunciar nada: o tracker mentia sobre nossa alcançabilidade.
-                //    Sem anúncio, o relay/DHT/túnel continuam funcionando — são
-                //    rotas que não dependem de porta aberta.
                 let announced: Option<(String, u16)> = if ext_port != 0 {
                     let ip = public_ip.or_else(|| stun_addr.map(|s| s.ip().to_string()));
                     ip.map(|ip| (format!("{ip}:{ext_port}"), ext_port))
@@ -8453,9 +6951,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     d.announce_addr = announced.as_ref().map(|(a, _)| a.clone());
                     d.announce_ms = crate::identity::now_ms();
                     d.nat_source = announced.as_ref().map(|_| {
-                        // Só anunciamos com porta TCP comprovada (UPnP/NAT-PMP),
-                        // então a origem honesta é sempre upnp. ip público sem
-                        // NAT é o outro caso válido (LAN/internet direto).
                         if ext_port != 0 {
                             "upnp".to_string()
                         } else {
@@ -8463,11 +6958,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         }
                     });
                 });
-                // ANÚNCIO MQTT — PERIÓDICO e fora do gate de alcançabilidade.
-                // BUG REAL ("0 peers"): morava dentro de `if announced` e, sob
-                // CGNAT, nada era publicado nem no tópico. Agora sai sempre
-                // (addr nulo sem endpoint — pares caem no relay). Tópico não
-                // retido → republica a cada 5min para seguir descobrível.
                 if relay_allowed(&engine_clone) {
                     let agora = crate::identity::now_ms();
                     if agora - *last_announce.lock().unwrap_or_else(|e| e.into_inner())
@@ -8492,9 +6982,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     }
                 }
                 if let Some((addr, announced_port)) = announced {
-                    // Trackers HTTP self-hosted (opcionais) — não-bloqueante,
-                    // NUNCA no caminho crítico: falha de tracker não atrasa o
-                    // anúncio MQTT nem o hole punching.
                     if !trackers.is_empty() {
                         let payload = serde_json::json!({ "fp": fp, "addr": addr, "nickname": nickname, "port": announced_port });
                         let trackers_c = trackers.clone();
@@ -8520,13 +7007,10 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         });
                     }
                     debug!(%fp, %addr, stun = stun_addr.is_some(), "bootstrap announce");
-                    // guarda p/ Punch (hole punching precisa do próprio endpoint público)
                     *engine_clone
                         .public_addr
                         .lock()
                         .unwrap_or_else(|e| e.into_inner()) = Some(addr.clone());
-                    // A UI da mídia consome o endpoint NAT via evento (degrau
-                    // real: "upnp" = mapeamento local sem servidor).
                     let nat_source = if stun_addr.is_some() { "stun" } else { "upnp" };
                     let _ = engine_clone.events.send(EngineEvent::NatEndpoint {
                         addr: addr.clone(),
@@ -8535,10 +7019,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
                 if let Ok(pending) = engine_clone.store.list_friends(Some("pending_out")) {
                     for peer in pending {
-                        // DIRETA via anúncio multi-estrada (v4.3.6): endpoint
-                        // publicado pelo peer em qualquer perna (MQTT) →
-                        // dial direto de baixa latência. Relay continua em
-                        // paralelo; a eleição prefere a direta.
                         if announce_on && relay_allowed(&engine_clone) {
                             let ann_topic = crate::net::relay::announce_topic(&peer.fp);
                             let abackend = active_relay_backend(&engine_clone);
@@ -8547,17 +7027,9 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
                                         let f = v.get("fp").and_then(|x| x.as_str()).unwrap_or("");
                                         if f == peer.fp {
-                                            // LAN primeiro (mesma rede = direto garantido),
-                                            // depois o endpoint público. `addr` pode vir
-                                            // null (peer sob CGNAT, sem porta TCP pública):
-                                            // nesse caso o dial direto é impossível e quem
-                                            // resolve é o relay — não discamos nada.
                                             let lan = v.get("lan").and_then(|x| x.as_str());
                                             let pubip = v.get("addr").and_then(|x| x.as_str());
                                             for cand in [lan, pubip].into_iter().flatten() {
-                                                // `addr` explícito no JSON vira `null`, que
-                                                // `as_str()` já descarta; a checagem extra é
-                                                // para o caso de string "null" de serialização.
                                                 if cand.is_empty() || cand == "null" {
                                                     continue;
                                                 }
@@ -8579,9 +7051,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                                 }
                             }
                         }
-                        // RELAY PRIMEIRO (v4.3): sem porta aberta a direta falha — o
-                        // relay conecta na hora; se a direta funcionar, ela vence
-                        // na eleição. Só disca se não há tentativa em curso.
                         let has_link = engine_clone
                             .links
                             .lock()
@@ -8596,16 +7065,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                         tracker_lookup_and_dial(&engine_clone, &peer.fp, &trackers).await;
                     }
                 }
-                // RELAY para amigos aceitos offline (v4.3): outbox de DM e
-                // flush de amizade precisam do peer ONLINE — sem porta aberta
-                // só o relay alcança. Sem tentativa em curso → disca.
-                // UPGRADE AGRESSIVO relay→direta: mesmo COM sessão relay viva,
-                // tenta o endpoint direto em background a cada tick (o anúncio
-                // `distorrent_a_<fp>` pode ter chegado depois do relay). O dial
-                // direto não derruba o relay (anti-flap em set_link_state); se
-                // fechar, a eleição em register_and_run promove a direta.
-                // Não-bloqueante via LookupAnnounce (poll do anúncio numa task
-                // à parte — o tick de 5s não espera a rede).
                 if let Ok(friends) = engine_clone.store.list_friends(Some("accepted")) {
                     for peer in friends {
                         if peer.fp == engine_clone.identity.fingerprint {
@@ -8617,25 +7076,18 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                             match links.get(&peer.fp) {
                                 None => (false, false),
                                 Some(l) => {
+                                    // Seção 42: online
                                     let online = l.get_state() == PeerLinkState::Online;
                                     (true, online && !l.via_relay)
                                 }
                             }
                         };
-                        // Direta já online → nada a fazer. Relay online ou
-                        // offline → tenta direta em background (novo anúncio?).
-                        // OUTBOUND-FIRST: consulta o tracker SEMPRE (independe
-                        // do relay) — quem tem NAT só SAI; o dial de entrada vem
-                        // do lado alcançável. Sem isto, relay-off nunca rediscava
-                        // o endpoint anunciado de amigo aceito.
                         if !is_direct_online {
                             tracker_lookup_and_dial(&engine_clone, &peer.fp, &trackers).await;
                             engine_clone
                                 .cmd_tx
                                 .send(EngineCmd::LookupAnnounce(peer.fp.clone()))
                                 .ok();
-                            // DHT BitTorrent: rodízio de get_peers no infohash
-                            // do amigo (rendezvous descentralizado, sem relay).
                             engine_clone.dht_probe(&peer.fp);
                         }
                         if !has_link {
@@ -8649,10 +7101,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
             }
         });
     }
-
-    // REMOVIDO: poll legado de friend requests via ntfy.sh (15s). Era uma
-    // dependência externa lenta e o relay MQTT (push, ~RTT) já entrega os
-    // pedidos de amizade de forma confiável — o caminho MQTT é o principal.
 
     {
         let engine = engine.clone();
@@ -8668,31 +7116,21 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 };
                 match conn {
                     Ok((stream, peer)) => {
-                        // PRIVACIDADE (fail-closed): em proxy/full o listener
-                        // direto não aceita ninguém — o Hello é EM CLARO (fp,
-                        // nickname) e um port-scanner descobriria a presença
-                        // no IP real, quebrando o "esconder IP" do modo. Par
-                        // seguem chegando via relay (que neste modo só roda
-                        // por túnel SOCKS5 — ver `relay_allowed`).
                         if !direct_inbound_allowed(&engine) {
                             debug!("inbound direto recusado: modo anônimo (proxy/full)");
                             continue;
                         }
-                        // RATE LIMIT: cada accept era uma task de handshake
-                        // criptográfico sem freio — mil connects de um mesmo
-                        // host = mil tasks (DoS de CPU/RAM). Por IP E global.
                         if engine.netlimiter.allow_tcp_accept(peer.ip()) == Decision::Blocked {
                             debug!(%peer, "accept descartado: rate limit de TCP inbound");
-                            continue; // stream cai (drop) — o OS RST cuida do resto
+                            continue;
                         }
-                        // Concorrência: teto de handshakes simultâneos vivos.
                         let Some(hs_slot) = engine.netlimiter.try_handshake_slot() else {
                             debug!(%peer, "accept descartado: teto de handshakes concorrentes");
                             continue;
                         };
                         let engine = engine.clone();
                         tokio::spawn(async move {
-                            let _hs_slot = hs_slot; // libera no fim do handshake (Drop)
+                            let _hs_slot = hs_slot;
                             match crate::net::transport::handshake_with_fp(
                                 stream,
                                 engine.keypair.clone(),
@@ -8729,13 +7167,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         });
     }
 
-    // 2) Discovery LAN (opcional — off em testes/solo)
     let (disc_tx, mut disc_rx) = mpsc::unbounded_channel::<DiscoveredPeer>();
-    // Gate de privacidade COMPARTILHADO (discovery UDP + mDNS): false em
-    // proxy/full e a descoberta LAN inteira para NA FONTE — broadcaster não
-    // anuncia presença (fp+nickname na LAN), listener/mDNS descartam o que
-    // chega (nada vira dial direto, que vazaria o IP real). Lê o modo a cada
-    // chamada: trocar de modo em runtime vale sem reiniciar o app.
     let disc_allowed: Arc<dyn Fn() -> bool + Send + Sync> = {
         let engine = engine.clone();
         Arc::new(move || !matches!(engine.privacy_mode().as_str(), "proxy" | "full"))
@@ -8756,11 +7188,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         None
     };
 
-    // 2b) mDNS/DNS-SD na mesma LAN (igual torrent local): anuncia
-    // `_distorrent._tcp.local.` e resolve peers no mesmo canal do UDP.
-    // Mesmo flag do discovery UDP (`start_with_discovery(false)` desliga
-    // ambos). Falha de multicast (ex.: Android sem permissão) é só logada —
-    // nunca panica nem quebra o boot; o fallback é o UDP atual.
     #[cfg(not(target_os = "android"))]
     let _mdns = if discovery_enabled {
         match crate::net::mdns::MdnsDiscovery::spawn(
@@ -8780,37 +7207,24 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         None
     };
 
-    // 2.5) PEX gossip — Internet P2P sem central (v3.1)
     {
         let engine_pex = engine.clone();
         tokio::spawn(crate::net::dht::spawn_pex(engine_pex));
     }
 
-    // DHT MAINLINE BITTORRENT — descoberta descentralizada (BEP-5): o app
-    // anuncia o próprio endpoint no infohash da identidade e acha amigos via
-    // get_peers na rede BitTorrent pública. Sem servidor, sem relay obrigatório.
     {
         let engine_dht = engine.clone();
         tokio::spawn(crate::net::dht::spawn_bit_dht(engine_dht));
     }
 
-    // 2.6) Relay global — todo mundo na mesma rede, sem porta aberta (v4.3).
-    // Roda sempre (inclusive com discovery off): o tópico é o endereço.
     {
         let engine_relay = engine.clone();
         tokio::spawn(relay_manager_loop(engine_relay));
     }
 
-    // 2.6b) Prewarm do relay no boot: conecta (TCP+MQTT) e ASSINA o tópico
-    // próprio ANTES do 1º dial — o subscribe era lazy (só no 1º poll) e o 1º
-    // Hello caía no vazio (broker sem subscriber), custando +1 resend de 3s
-    // no primeiro contato. `poll()` no MqttRelay garante client+pump+
-    // subscribe (1ª vez); nas demais pernas é no-op barato. Roda em paralelo
-    // com listener/discovery (não atrasa o boot).
     {
         let engine_prewarm = engine.clone();
         tokio::spawn(async move {
-            // Kill-switch: sem relay, não pré-connecta/assina nada.
             if !relay_allowed(&engine_prewarm) {
                 return;
             }
@@ -8821,38 +7235,17 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
         });
     }
 
-    // 3) Loop principal: descobertas + flush periódico do outbox
+    // Seção 43: mut
     let mut flush_tick = interval(Duration::from_secs(5));
-    // Ticker de amizade: reenvia pedidos pendentes enquanto online (auto-cura
-    // se um frame de amizade se perdeu no relay). 5s = recupera rápido sem
-    // floodar (1 frame pequeno por peer pendente).
     let mut friend_tick = interval(Duration::from_secs(5));
-    // Contador do tick de amizade: o aceite só é reenviado a cada 3 tiques
-    // (15s) — o pedido pendente continua a cada 5s.
     let mut friend_retry_tick: u32 = 0;
-    // Manutenção de SERVIDORES: re-sincroniza estado e redispara joins
-    // pendentes. Roda no motor (não na UI), então continua valendo com a janela
-    // minimizada, o shell desmontado ou a tela de servidores fechada — que era
-    // exatamente a dependência escondida que o pareamento tinha.
     let mut community_tick = interval(Duration::from_secs(15));
-    // Heartbeat da presença a cada 30s. Ele renova o updated_at local e
-    // anuncia nosso estado aos peers, permitindo que amigos antigos sejam
-    // marcados offline sem depender de um pedido manual da UI.
     let mut presence_tick = interval(Duration::from_secs(30));
-    // Reconciliação de perfis. Intervalo em UM lugar só
-    // (`PROFILE_SYNC_INTERVAL_SECS`), rodando no motor — não num `setInterval`
-    // do React, que morre quando a interface é desmontada/suspensa.
-    // O primeiro tique do `interval` é imediato: isso cobre o boot.
     let mut profile_tick = interval(Duration::from_secs(PROFILE_SYNC_INTERVAL_SECS));
     loop {
         tokio::select! {
             Some(peer) = disc_rx.recv() => {
                 if peer.fp == engine.identity.fingerprint { continue; }
-                // PRIVACIDADE (defesa em profundidade): em proxy/full a
-                // descoberta LAN inteira fica OFF — o broadcaster/mDNS são
-                // gates na FONTE (discovery.rs/mdns.rs), mas mesmo um
-                // datagrama que chegue aqui (race na troca de modo, broadcast
-                // já em voo) NÃO pode virar dial DIRETO: vazaria o IP real.
                 if matches!(engine.privacy_mode().as_str(), "proxy" | "full") {
                     continue;
                 }
@@ -8866,10 +7259,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                     origin: "discovery".into(),
                 };
                 let _ = engine.store.upsert_peer(&record);
-                // DIRETA AGRESSIVA: mesmo com sessão relay viva, tenta a direta
-                // em background (eleição prefere direta; o dial paralelo não
-                // derruba o relay — ver set_link_state anti-flap). Sem isso,
-                // LAN com relay nunca upgradava (fresh==false bloqueava).
                 let should_dial_direct = {
                     match engine.links.lock().unwrap_or_else(|e| e.into_inner()).get(&peer.fp) {
                         None => true,
@@ -8886,21 +7275,8 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
             }
             _ = flush_tick.tick() => {
-                // Túnel que parou de dar prova é derrubado aqui. Sem esta
-                // varredura, um túnel meio-quebrado ficava "estabelecido" para
-                // sempre na memória e engolia o tráfego até reiniciar o app.
                 engine.tunnel_reap_stale();
-                // LINK MEIO-VIVO: Ping/Pong responde (a bolinha fica verde) mas
-                // nenhum `Ack` nosso volta. O outbox reenvia sempre pelo MESMO
-                // canal e o usuário vê "online" + relógio para sempre.
-                // Derrubar aqui é o que transforma "enviado, sem confirmação" em
-                // reconexão de verdade — mesmo caminho do `drop_link_if_dead`.
                 engine.reap_half_open_links();
-                // Reaper de DMs sem ACK: sessão relay agora sobrevive a perda
-                // (não morre mais por 1 frame perdido), então uma DM que se
-                // perdeu ficaria "sent" para sempre. A cada tick, mensagens
-                // 'sent'/'sending' mais velhas que 20s voltam a PENDING e são
-                // reenviadas pela sessão VIVA (dedup por id no receptor).
                 let cutoff = crate::identity::now_ms() - 20_000;
                 for fp in engine.online_peer_fps() {
                     if let Ok(ids) = engine.store.revert_stale_sent_to_pending(&fp, cutoff) {
@@ -8912,11 +7288,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
             }
             _ = friend_tick.tick() => {
-                // Auto-cura da amizade: reenvia o estado REAL do relacionamento
-                // a peers online (pedido pendente E aceite já dado). Cobre a
-                // perda do `FriendRequest`/`FriendAccept` no relay ou no 4G.
-                // O aceite é reenviado a cada 15s (3 tiques) para não gerar
-                // tráfego/eventos desnecessários; o pedido pendente, a cada 5s.
                 friend_retry_tick = friend_retry_tick.wrapping_add(1);
                 let reaceita = friend_retry_tick % 3 == 0;
                 for fp in engine.online_peer_fps() {
@@ -8924,34 +7295,10 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
             }
             _ = community_tick.tick() => {
-                // PAREAmento CONTÍNUO entre membros de servidor:
-                //  1) disca para todo membro conhecido que ainda não tem sessão
-                //     (antes só amigos eram discados — um servidor criado no PC
-                //     e usado no celular ficava sem rota entre os membros);
-                //  2) pede o estado atual (host/seeds) para recuperar canais e
-                //     roster depois de reiniciar;
-                //  3) reenvia o `JoinCommunity` que não foi confirmado.
                 engine.maintain_communities();
-                // 3b) PAREAmento de GRUPO: mesmo tratamento para membros de
-                //     conversa de grupo que não são amigos — sem isto eles nunca
-                //     eram discados e ficavam offline (ver `maintain_groups`).
                 engine.maintain_groups();
-                // 4) RE-ANUNCIA a presença de voz. `VoiceJoin` era enviado uma
-                //    vez só, para peers já `Online`; quem entrava no canal antes
-                //    do link fechar nunca era visto e não havia retry. Um frame
-                //    pequeno por canal a cada 15 s é idempotente no receptor
-                //    (`set_voice_state` é upsert) e conserta o roster
-                //    assimétrico sem tocar no protocolo.
                 engine.reannounce_voice_channels();
-                // 6) RE-ANUNCIA os ARQUIVOS que este nó tem. Sem isto quem
-                //    baixava um arquivo semeava só até fechar o app: o anúncio
-                //    nunca foi persistido e o download do outro lado morria
-                //    em "sem peers com o arquivo no swarm".
                 engine.reannounce_files();
-                // 5) Renova o anúncio das SALAS de chamada (grupo/DM): quem
-                //    está na conversa vê "chamada em andamento" e pode entrar,
-                //    sem depender de ter recebido o invite. Salas alheias sem
-                //    renovação vencem em ROOM_TTL_MS.
                 engine.room_tick_arc();
             }
             _ = presence_tick.tick() => {
@@ -8974,10 +7321,6 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                 }
             }
             _ = profile_tick.tick() => {
-                // "Meu perfil está atualizado aí?" — 1 frame pequeno por peer.
-                // O peer só devolve o perfil inteiro se a revisão dele for
-                // maior, então o tique sem mudança não transfere imagem
-                // nenhuma (é o critério do teste F).
                 engine.sync_profiles_with_peers();
             }
         }
@@ -8988,25 +7331,6 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
     while let Some(cmd) = rx.recv().await {
         match cmd {
             EngineCmd::ConnectTo(addr, expected_fp) => {
-                // Teto de dials outbound concorrentes: a vaga é adquirida
-                // DENTRO do laço, por TENTATIVA (ver `connect_and_maintain`).
-                //
-                // BUG REAL (o peer que "nunca conecta" mesmo com o outro lado
-                // online): a vaga do pool era adquirida AQUI e guardada por
-                // TODA a vida do laço — e o laço é ETERNO (reconecta para
-                // sempre). Cada destino descoberto (mDNS/LAN/anúncio/servidor,
-                // inclusive addr que muda de DHCP) segurava uma vaga para
-                // sempre; passadas 64 vagas (`dial_conc`), TODO `ConnectTo` e
-                // `ConnectRelay` novo caía no `continue` mudo abaixo. O
-                // sintoma era exatamente "um amigo conecta, o outro não
-                // conecta de jeito nenhum" — e só reiniciar o app resolvia.
-                //
-                // Agora o teto limita TENTATIVAS simultâneas (é o que gasta
-                // fd/CPU); laço dormindo em backoff não segura vaga.
-                //
-                // Dedup por destino: 1 laço direto por `fp@addr`. Sem isto, a
-                // descoberta (mDNS/bootstrap/announce) re-engatilhava N laços
-                // concorrentes para o mesmo peer (vazamento de tarefas + redial).
                 let key = format!("{}@{addr}", expected_fp.as_deref().unwrap_or(""));
                 let fresh = {
                     let mut set = engine
@@ -9015,7 +7339,7 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                         .unwrap_or_else(|e| e.into_inner());
                     if set.len() > 4096 {
                         set.clear();
-                    } // anti-crescimento (addr muda raro)
+                    }
                     set.insert(key)
                 };
                 if fresh {
@@ -9024,16 +7348,12 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                         connect_and_maintain(engine, ConnTarget::Addr(addr), expected_fp).await
                     });
                 }
-                // !fresh: laço vivo já existe para este destino.
             }
             EngineCmd::ConnectHost {
                 host,
                 port,
                 expected_fp,
             } => {
-                // Mesmo modelo do ConnectTo: a vaga é por tentativa, dentro do
-                // laço. Adquiri-la aqui (e segurá-la num laço eterno) esgotava
-                // o pool e matava todo dial novo com `continue` silencioso.
                 let key = format!("{}@{host}:{port}", expected_fp.as_deref().unwrap_or(""));
                 let fresh = {
                     let mut set = engine
@@ -9054,11 +7374,6 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 }
             }
             EngineCmd::ConnectRelay(fp) => {
-                // Idempotente: um maintain eterno por peer (bootstrap insiste a
-                // cada 5s; disconnect remove o link mas o maintain velho segue).
-                // A vaga de dial é por TENTATIVA (dentro do laço) — segurá-la
-                // aqui esgotava o pool de 64 e o peer seguinte nunca era
-                // discado pelo relay, sem erro nenhum na UI.
                 let fresh = engine
                     .relay_maintains
                     .lock()
@@ -9077,15 +7392,11 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 endpoint,
                 at_ms,
             } => {
+                // Seção 44: engine
                 let engine = engine.clone();
                 tokio::spawn(async move { punch_and_register(engine, fp, endpoint, at_ms).await });
             }
             EngineCmd::SendToPeer(fp, frame) => {
-                // Via de informação (Fase 2): com túnel pronto e peer só-via-
-                // relay, o frame interno viaja CIFRADO pela sessão do túnel
-                // (TunnelData → handle_tunnel_data → handle_frame), em vez de
-                // livre no corpo da sessão relay. Frames do PRÓPRIO túnel
-                // (TunnelOffer/Answer/Data) sempre vão crus (carrier).
                 if !matches!(
                     frame,
                     SecureFrame::TunnelOffer { .. }
@@ -9096,7 +7407,6 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     if engine.tunnel_send_frame(&fp, &frame) {
                         continue;
                     }
-                    // grande demais para o túnel? cai no caminho normal abaixo.
                 }
                 let link = engine
                     .links
@@ -9104,9 +7414,6 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                     .unwrap_or_else(|e| e.into_inner())
                     .get(&fp)
                     .cloned();
-                // Dados da DM capturados ANTES do envio: `tx.send` move o frame,
-                // e no caminho de falha precisamos do id/conv para devolver a
-                // mensagem ao outbox (sem isso a mensagem sumia em silêncio).
                 let msg_falhou = match &frame {
                     SecureFrame::Msg(env) => engine
                         .store
@@ -9114,14 +7421,12 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                         .ok()
                         .flatten()
                         .map(|c| (env.id.clone(), c.peer_fp, c.kind)),
+                    SecureFrame::ChannelMsg { env, .. } => {
+                        Some((env.id.clone(), fp.clone(), "channel".to_string()))
+                    }
                     _ => None,
                 };
                 let mut entregue = false;
-                // SINALIZAÇÃO DE CHAMADA SEM RETRY PRÓPRIO: o invite/offer só
-                // saem uma vez. Se o canal da sessão já estava fechado (writer
-                // morto, half-open ainda "Online"), o frame ia para o nada: o
-                // outro lado nunca tocava e quem ligou ficava em "Chamando…".
-                // Guarda cópia para devolver à fila e reenviar na sessão nova.
                 let reserva = if NetworkEngine::is_call_frame(&frame) {
                     Some(frame.clone())
                 } else {
@@ -9129,54 +7434,45 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                 };
                 if let Some(l) = link {
                     if let Some(tx) = &l.tx {
-                        // QoS: classifica e enfileira com prioridade — a writer
-                        // task drena em rajadas priorizadas (ver register_and_run).
                         entregue = tx.send((frame_class(&frame), frame)).is_ok();
                     }
                 }
-                // SUMIDOURO SILENCIOSO → estado honesto + redial.
-                //
-                // BUG REAL ("o contato aparece online mas não envia mensagem",
-                // com X vermelho em quase todas): antes o `.ok()` descartava o
-                // resultado de `tx.send`. Quando o canal da sessão já estava
-                // FECHADO (writer morreu, sessão half-open que ainda reporta
-                // `Online`), a mensagem era descartada sem erro e SEM o `Ack`
-                // esperado — e o remetente a marcava "sent" (o link dizia
-                // Online). Cada retentativa batia no mesmo canal morto até
-                // estourar o orçamento do outbox e virar `failed`.
-                //
-                // Agora: devolve para o outbox como `pending` (a UI mostra a
-                // verdade) e derruba o link morto para o maintain redialar. O
-                // receptor dedupa por id, então o reenvio é seguro.
                 if !entregue {
                     if let Some((msg_id, peer, kind)) = msg_falhou {
-                        if kind == "dm" || kind == "group" {
-                            let _ = engine.store.enqueue_outbox(&msg_id, &peer);
-                            let _ = engine.store.set_message_status(&msg_id, "pending");
-                            let _ = engine.events.send(EngineEvent::MessageStatus {
-                                msg_id,
-                                status: "pending".into(),
-                            });
+                        match kind.as_str() {
+                            "dm" => {
+                                let _ = engine.store.enqueue_outbox_kind(&msg_id, &peer, "dm");
+                                let _ = engine.store.set_message_status(&msg_id, "pending");
+                                let _ = engine.events.send(EngineEvent::MessageStatus {
+                                    msg_id,
+                                    status: "pending".into(),
+                                });
+                            }
+                            "channel" if !peer.is_empty() => {
+                                let _ = engine.store.enqueue_outbox_kind(&msg_id, &peer, "channel");
+                                let _ = engine.store.set_message_status(&msg_id, "pending");
+                                let _ = engine.events.send(EngineEvent::MessageStatus {
+                                    msg_id,
+                                    status: "pending".into(),
+                                });
+                            }
+                            _ => {
+                                let _ = engine.store.set_message_status(&msg_id, "pending");
+                                let _ = engine.events.send(EngineEvent::MessageStatus {
+                                    msg_id,
+                                    status: "pending".into(),
+                                });
+                            }
                         }
                     }
-                    // Canal morto com link "Online" = sessão half-open: derruba
-                    // para o maintain redialar em vez de ficar tentando nele.
                     drop_link_if_dead(&engine, &fp);
-                    // Sinalização de chamada enfileirada (cap + política de
-                    // descarte próprias) para sair assim que a sessão subir.
                     if let Some(f) = reserva {
                         engine.enqueue_call_frame(&fp, f);
                     }
                 }
             }
             EngineCmd::FlushOutbox(fp) => {
-                // Antes de mandar: desiste das que estouraram o orçamento, para
-                // a UI mostrar 'failed' em vez de a mensagem ficar 'enviando'
-                // para sempre (o laço infinito de retransmissão).
                 for id in engine.store.give_up_outbox(&fp).unwrap_or_default() {
-                    // Conta a desistência no diagnóstico do peer: se este número
-                    // cresce com o contato "online", o caminho existe mas ele
-                    // está RECUSANDO — e agora o painel diz o motivo.
                     engine.diag_update(&fp, |d| {
                         d.send_gave_up = d.send_gave_up.saturating_add(1);
                     });
@@ -9198,12 +7494,29 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                         ts: m.ts,
                         sig: m.sig.clone(),
                     };
+                    let frame = if engine.store.outbox_kind(&m.id) == "channel" {
+                        let community = engine
+                            .store
+                            .channel_community(&m.conv_id)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        if community.is_empty() {
+                            continue;
+                        }
+                        SecureFrame::ChannelMsg {
+                            community_id: community,
+                            channel_id: m.conv_id.clone(),
+                            env,
+                            bot_id: String::new(),
+                        }
+                    } else {
+                        SecureFrame::Msg(env)
+                    };
                     engine
                         .cmd_tx
-                        .send(EngineCmd::SendToPeer(fp.clone(), SecureFrame::Msg(env)))
+                        .send(EngineCmd::SendToPeer(fp.clone(), frame))
                         .ok();
-                    // Bump CONTA a tentativa e agenda o próximo com backoff —
-                    // sem isto o reenvio é a cada flush (5s) indefinidamente.
                     engine.store.bump_outbox(&m.id).ok();
                     engine.store.set_message_status(&m.id, "sending").ok();
                     let _ = engine.events.send(EngineEvent::MessageStatus {
@@ -9211,22 +7524,14 @@ async fn command_loop(engine: Arc<NetworkEngine>, mut rx: mpsc::UnboundedReceive
                         status: "sending".into(),
                     });
                 }
-                // após o flush de DM, grupos pendentes também saem
                 flush_group_to_peer(&engine, &fp);
-                // e as reações que ficaram presas no offline
                 engine.flush_pending_reacts(&fp);
             }
         }
     }
 }
 
-/// Grupos não têm outbox por peer: no flush, cada mensagem pendente do autor
-/// vai para o peer conectado SE ele for membro do grupo. Enquanto estiver
-/// 'sending' (sem ACK) é reenviada; o ACK do receptor marca 'delivered'.
-/// Antes das mensagens, reenvia o estado do grupo (GroupCreated) — quem ficou
-/// offline na criação recebe a conversa completa ao reconectar.
 fn flush_group_to_peer(engine: &Arc<NetworkEngine>, peer_fp: &str) {
-    // 1) resync do estado dos grupos em que o peer participa
     let me = engine.identity.fingerprint.clone();
     if let Ok(groups) = engine.store.group_convs_with_peer(peer_fp) {
         for (conv_id, title, members) in groups {
@@ -9243,21 +7548,21 @@ fn flush_group_to_peer(engine: &Arc<NetworkEngine>, peer_fp: &str) {
                 .ok();
         }
     }
-    // 2) mensagens pendentes do autor
+    // Seção 45: pending
     let pending = match engine.store.pending_group_messages() {
         Ok(p) => p,
         Err(_) => return,
     };
     for m in pending {
         if m.author_fp != me {
-            continue; // só o autor reenvia
+            continue;
         }
         let members = engine
             .store
             .list_group_members(&m.conv_id)
             .unwrap_or_default();
         if members.iter().all(|(fp, _)| fp != peer_fp) {
-            continue; // peer não pertence ao grupo
+            continue;
         }
         let env = MessageEnvelope {
             id: m.id.clone(),
@@ -9282,14 +7587,12 @@ fn flush_group_to_peer(engine: &Arc<NetworkEngine>, peer_fp: &str) {
     }
 }
 
-/// Alvo de conexão: IP:porta direto ou host:porta (domínio DNS / .onion).
 #[derive(Debug, Clone)]
 enum ConnTarget {
     Addr(SocketAddr),
     Host(String, u16),
 }
 
-/// DNS normal (modo sem proxy): resolve host e conecta na primeira resposta.
 async fn resolve_and_connect(host: &str, port: u16) -> Result<TcpStream> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
@@ -9306,14 +7609,6 @@ async fn resolve_and_connect(host: &str, port: u16) -> Result<TcpStream> {
     Err(last)
 }
 
-/// Conecta, mantém e reconecta com backoff exponencial (1s→15s). Loop eterno.
-///
-/// A VAGA DE DIAL é adquirida por iteração e liberada ANTES do `sleep` de
-/// backoff: o teto (`dial_conc`) existe para limitar sockets/tentativas
-/// SIMULTÂNEOS, não o número de peers que o app tenta alcançar. Antes a vaga
-/// era tomada no `command_loop` e ficava presa no laço eterno — 64 destinos
-/// esgotavam o pool e todo dial novo virava `continue` silencioso (o peer
-/// "nunca conecta" e só reiniciar o app resolvia).
 async fn connect_and_maintain(
     engine: Arc<NetworkEngine>,
     target: ConnTarget,
@@ -9325,8 +7620,6 @@ async fn connect_and_maintain(
         if cancelled(&cancel) {
             return;
         }
-        // Sem vaga agora: espera curta e tenta de novo. NUNCA desiste do peer
-        // (era o que acontecia no `continue` do command_loop).
         let dial_slot = match engine.netlimiter.try_dial_slot() {
             Some(g) => g,
             None => {
@@ -9339,7 +7632,6 @@ async fn connect_and_maintain(
         }
 
         let attempt = async {
-            // Proxy/Tor sério: se modo proxy (1 proxy) ou Tor 7 nós, roteia via SOCKS5 para esconder IP
             let privacy_mode = engine
                 .store
                 .kv_get("privacy.mode")
@@ -9361,14 +7653,6 @@ async fn connect_and_maintain(
                 match timeout(CONNECT_TIMEOUT, socks5_connect(&proxy_addr, &socks_target)).await {
                     Ok(Ok(s)) => s,
                     Ok(Err(e)) => {
-                        // FAIL-CLOSED (correção de vazamento): neste modo NUNCA
-                        // caímos para conexão direta. O fallback silencioso
-                        // entregava o IP REAL ao peer justamente quando o
-                        // usuário pediu anonimato e o proxy falhou — o pior
-                        // momento possível para "tentar direto". (.onion
-                        // sempre foi assim; agora TODO alvo é.)
-                        // O redial/backoff segue; o relay (aqui só via SOCKS5)
-                        // cobre a rota. Diagnóstico registra o motivo.
                         debug!(
                             proxy = %proxy_addr,
                             "proxy falhou ({e}) — SEM fallback direto (modo anônimo fail-closed)"
@@ -9412,8 +7696,6 @@ async fn connect_and_maintain(
                 backoff = Duration::from_secs(1);
                 let fp = hs.peer_fp.clone();
                 engine.diag_record_direct_ok(&fp);
-                // Tor voltou a funcionar (ou outro caminho fechou): zera a
-                // contagem de timeouts do fallback para o túnel.
                 {
                     let mut m = engine
                         .tor_timeouts
@@ -9433,8 +7715,6 @@ async fn connect_and_maintain(
                 )
                 .await;
                 if !registered {
-                    // perdemos a eleição de sessão (o par mantém outra) —
-                    // não mexe em estado; só espera e verifica de novo.
                     sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -9442,7 +7722,6 @@ async fn connect_and_maintain(
             }
             Err(e) => {
                 debug!(target = ?target, "conexão falhou: {e}");
-                // Diagnóstico honesto na UI: por que o direto não fecha?
                 if let Some(fp) = &expected_fp {
                     engine.diag_record_direct_err(
                         fp,
@@ -9452,14 +7731,11 @@ async fn connect_and_maintain(
                         },
                     );
                 }
-                // Direto falhou: alimenta a corrente de fallback (degrau 3).
                 if let Some(fp) = &expected_fp {
                     engine.note_dial_failure(fp);
                 }
-                // TOR com 3 TIMEOUTS SEGUIDOS → cai para o túnel virtual
-                // (handshake X25519 via relay, sem depender do Tor).
-                // Só conta timeout de verdade; outro erro não entra.
                 if let Some(fp) = &expected_fp {
+                    // Seção 46: mode
                     let mode = engine
                         .store
                         .kv_get("privacy.mode")
@@ -9500,32 +7776,13 @@ async fn connect_and_maintain(
                 }
             }
         }
-        // Libera a vaga ANTES de dormir: em backoff o laço não ocupa socket, e
-        // segurar a vaga aqui recriaria o esgotamento do pool.
         drop(dial_slot);
         sleep(backoff).await;
         backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
     }
 }
 
-// ---------------- relay: todo mundo na mesma rede, sem abrir porta ----------------
-//
-// Igual torrent na experiência (zero config), mas sem depender de UPnP/DHT:
-//
-// - Cada identidade TEM um endereço global: o tópico `distorrent_r_<fp>`.
-//   Quem sabe o fingerprint alcança — sem IP, sem porta, sem NAT traversal.
-// - O handshake autenticado (ed25519 + transcript) e a sessão ChaCha20Poly1305
-//   rodam POR CIMA do relay, byte a byte iguais ao TCP. O relay só vê bytes.
-// - Direta sempre vence relay (eleição em register_and_run): o relay é rampa
-//   de acesso, não substituto do P2P.
-// - Privacidade: em modo proxy/full (Tor/SOCKS5) o relay só é permitido se
-//   rotear por túnel SOCKS5 (ver `refresh_relay_for_privacy`).
-//   Caso contrário fica DESLIGADO — reqwest direto vazaria o IP real.
-
-/// Relay permitido agora? Em modos anônimos, somente com backend via SOCKS5.
 fn relay_allowed(engine: &Arc<NetworkEngine>) -> bool {
-    // Kill-switch explícito (DISTORRENT_NO_RELAY / set_relay_disabled): desliga o
-    // relay em QUALQUER backend/modo. A direta continua funcionando.
     if engine.relay_disabled.load(Ordering::Relaxed) {
         return false;
     }
@@ -9535,30 +7792,12 @@ fn relay_allowed(engine: &Arc<NetworkEngine>) -> bool {
     }
 }
 
-/// Backend de relay em uso AGORA.
-///
-/// ORDEM (corrigida): relay CONFIGURADO (MQTT público / injetado por teste)
-/// primeiro; o peer-relay só entra quando o relay público não está disponível
-/// neste modo (kill-switch, `proxy`/`full` sem túnel SOCKS5) ou quando não há
-/// backend nenhum.
-///
-/// BUG REAL (o "segundo amigo não conecta de jeito nenhum"): antes o peer-relay
-/// tinha PRECEDÊNCIA. Assim que você tinha UM amigo conectado direto, ele era
-/// eleito intermediário e TODO o relay — inclusive o anúncio de presença —
-/// passava a ir para um broker em MEMÓRIA dele. O outro amigo só recebia se
-/// elegesse o MESMO intermediário (a eleição é "menor fp entre os peers
-/// DIRETOS de cada lado", e os dois lados têm conjuntos diferentes). Resultado:
-/// os Hellos eram guardados na memória do amigo A, o amigo C consultava o MQTT
-/// público e nunca via nada — 0 peers, sem erro na UI. O relay público é o
-/// ponto de encontro COMPARTILHADO; o peer-relay é a última alternativa, não
-/// o caminho preferido.
 fn active_relay_backend(engine: &Arc<NetworkEngine>) -> Arc<dyn RelayBackend> {
     let configured = engine
         .relay_backend
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    // Relay público utilizável neste modo → ele é o rendezvous comum.
     if relay_allowed(engine) {
         return configured;
     }
@@ -9587,8 +7826,6 @@ fn is_online(engine: &Arc<NetworkEngine>, fp: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// true se o frame length-prefixed é Hello/HelloAck/HelloOk em claro (stray
-/// de handshake). Sessão cifrada nunca produz isso — só handshake.
 fn is_relay_handshake_frame(frame: &[u8]) -> bool {
     if frame.len() < 4 {
         return false;
@@ -9605,8 +7842,6 @@ fn is_relay_handshake_frame(frame: &[u8]) -> bool {
     )
 }
 
-/// Extrai Hello completo (fp+eph+nonce) para dedupar retransmissão (mesmo
-/// eph) vs redial novo (eph distinto). Só o primeiro frame do dial é claro.
 fn parse_relay_hello_full(frame: &[u8]) -> Option<crate::protocol::Hello> {
     if frame.len() < 4 {
         return None;
@@ -9621,7 +7856,6 @@ fn parse_relay_hello_full(frame: &[u8]) -> Option<crate::protocol::Hello> {
     }
 }
 
-/// Extrai o fp de um frame de Hello (só o primeiro frame de um dial é claro).
 fn parse_relay_hello(frame: &[u8]) -> Option<String> {
     if frame.len() < 4 {
         return None;
@@ -9636,15 +7870,6 @@ fn parse_relay_hello(frame: &[u8]) -> Option<String> {
     }
 }
 
-/// Prepara um RelayStream de SAÍDA para o peer (post loop + registro).
-/// Retorna None se já há handshake vivo para o peer (dial ou respondente em
-/// curso) — o maintain dorme e tenta depois, em vez de abrir 2 handshakes com
-/// eph distintos (transcripts diferentes confundem o Ack/HelloOk e viram
-/// half-open). Entrada obsoleta (receiver morto) é limpa e o dial prossegue.
-///
-/// Devolve também o sender da entrada criada: quem chama PRECISA liberá-la
-/// quando o handshake terminar (`liberar_entrada_relay`). Sem isso a trava fica
-/// para sempre e o peer nunca mais é discado — o "CONECTANDO eterno".
 fn relay_dial_stream(
     engine: &Arc<NetworkEngine>,
     peer_fp: &str,
@@ -9653,9 +7878,9 @@ fn relay_dial_stream(
         let mut map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = map.get(peer_fp) {
             if !tx.is_closed() {
-                return None; // handshake em curso — não duplica
+                return None;
             }
-            map.remove(peer_fp); // obsoleta — limpa e prossegue
+            map.remove(peer_fp);
         }
     }
     let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -9675,17 +7900,7 @@ fn relay_dial_stream(
     Some((RelayStream::new(in_rx, out_tx), in_tx))
 }
 
-/// Remove a entrada de `relay_in` do peer — mas SÓ se ainda for a nossa.
-///
-/// `relay_in` acumula duas responsabilidades: ponta de entrada do handshake e
-/// trava anti-duplicação do dial. A entrada criada pelo dial precisa ser
-/// liberada quando a sessão termina; caso contrário `relay_dial_stream` vê
-/// `!tx.is_closed()` para sempre e devolve `None` em todo ciclo, deixando o peer
-/// preso em CONECTANDO até o app reiniciar.
-///
-/// A comparação por canal é obrigatória: um RESPONDENTE pode ter substituído a
-/// entrada (mesmo peer, sentido inverso). Nesse caso o canal não é o nosso e
-/// removê-lo mataria a sessão dele.
+// Seção 47: liberar_entrada_relay
 fn liberar_entrada_relay(
     engine: &Arc<NetworkEngine>,
     fp: &str,
@@ -9699,14 +7914,8 @@ fn liberar_entrada_relay(
     }
 }
 
-/// Disca via relay com maintain+backoff (espelho do connect_and_maintain).
-/// Usa `handshake_stream_relay` (Hello retransmitido a cada 5s, leitura 30s)
-/// — 1 Hello perdido não mata a tentativa. Backoff com jitter 0-1s para dois
-/// lados não rediscarem em lockstep (evita Hello cruzado sistemático).
 async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
     let cancel = engine.cancel_tx.subscribe();
-    // Backoff inicial curto (1s) e teto baixo (10s): no 4G a sessão cai com
-    // frequência e o usuário sente cada segundo. Jitter evita redial em lockstep.
     let mut backoff = Duration::from_secs(1);
     loop {
         if cancelled(&cancel) {
@@ -9720,14 +7929,11 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
             .map(|l| l.get_state() == PeerLinkState::Online)
             .unwrap_or(false);
         if online {
-            sleep(Duration::from_secs(4)).await; // vigia curto: detecta queda rápido
+            sleep(Duration::from_secs(4)).await;
             continue;
         }
         engine.refresh_peer_relay();
         if relay_allowed(&engine) || engine.peer_relay_fp().is_some() {
-            // Vaga de dial POR TENTATIVA (ver `connect_and_maintain`): segurar
-            // no laço eterno esgotava o pool e o peer seguinte nunca era
-            // discado — "um amigo conecta, o outro nunca".
             let dial_slot = match engine.netlimiter.try_dial_slot() {
                 Some(g) => g,
                 None => {
@@ -9737,7 +7943,6 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
             };
             set_link_state(&engine, &fp, PeerLinkState::Connecting);
             debug!(%fp, "relay: discando (sem porta aberta)");
-            // Métrica de primeiro contato: t0 do dial até o online.
             let dial_t0 = std::time::Instant::now();
             let Some((stream, my_in_tx)) = relay_dial_stream(&engine, &fp) else {
                 debug!(%fp, "relay: handshake já em curso — aguarda");
@@ -9773,14 +7978,6 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                         hs.peer_proto_v,
                     )
                     .await;
-                    // A SESSÃO TERMINOU. `relay_dial_stream` usa `relay_in` como
-                    // trava de "handshake em curso": enquanto o sender daquela
-                    // entrada viver, todo dial novo devolve None e o maintain
-                    // gira em backoff para sempre — a UI fica em CONECTANDO e só
-                    // sai disso quando o app reinicia (reiniciar zera o mapa).
-                    // Era o sintoma relatado. Liberar a entrada aqui é o que
-                    // permite o próximo ciclo (inclusive a reconexão depois de
-                    // tempo parado) funcionar sem reiniciar.
                     liberar_entrada_relay(&engine, &fp, &my_in_tx);
                     set_link_state(&engine, &fp, PeerLinkState::Reconnecting);
                 }
@@ -9797,9 +7994,6 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                     debug!(%fp, "relay dial falhou ({e}) — tenta de novo no backoff");
                     engine.diag_record_relay_err(&fp, &format!("relay handshake: {e}"));
                     engine.note_dial_failure(&fp);
-                    // Mesmo caso do sucesso: handshake que falhou também deixa a
-                    // ponta de entrada registrada. Sem liberar, o peer nunca mais
-                    // é discado nesta execução.
                     liberar_entrada_relay(&engine, &fp, &my_in_tx);
                 }
                 Err(_) => {
@@ -9812,18 +8006,12 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                     liberar_entrada_relay(&engine, &fp, &my_in_tx);
                 }
             }
-            // Vaga de dial liberada antes do backoff (ver `connect_and_maintain`):
-            // segurá-la durante o sono recriaria o esgotamento do pool.
             drop(dial_slot);
         } else {
-            // Nem relay utilizável nem intermediário: degrau 2 esgotado —
-            // alimenta a corrente de fallback (degrau 3).
             engine
                 .diag_record_relay_err(&fp, "relay desligado neste modo (kill-switch/privacidade)");
             engine.note_dial_failure(&fp);
         }
-        // Jitter 0-1000ms: quebra sincronia com o peer (ambos em backoff
-        // idêntico 1s→2s→4s→8s rediscariam juntos para sempre).
         let jitter_ms = {
             use rand::Rng;
             rand::thread_rng().gen_range(0..1000)
@@ -9833,25 +8021,18 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
     }
 }
 
-/// Atende UM Hello chegado pelo relay (handshake respondente), FORÇANDO
-/// substituição mesmo com sessão/handshake vivos (redial novo com peer ONLINE:
-/// a sessão velha half-open será substituída via eleição em register_and_run).
 fn spawn_relay_responder_force(engine: Arc<NetworkEngine>, from: String, first_frame: Vec<u8>) {
-    // Mata a sessão velha ANTES do novo handshake: os Pings dela (ciphertext)
-    // cairiam no inbound do respondente novo (que espera HelloOk em claro) e
-    // matariam o handshake antes de nascer. register_and_run já faria a
-    // substituição DEPOIS, mas o estrago ocorre DURANTE.
     {
         let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(old) = links.remove(&from) {
-            old.drop_notify.notify_one(); // permit: a queda nunca se perde
+            old.drop_notify.notify_one();
         }
     }
     engine.emit_state();
     let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     {
         let mut map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
-        map.insert(from.clone(), in_tx.clone()); // sobrescreve a sessão velha
+        map.insert(from.clone(), in_tx.clone());
     }
     if in_tx.send(first_frame).is_err() {
         return;
@@ -9899,9 +8080,8 @@ fn spawn_relay_responder_force(engine: Arc<NetworkEngine>, from: String, first_f
     });
 }
 
-/// Atende UM Hello chegado pelo relay (handshake respondente).
+// Seção 48: spawn_relay_responder
 fn spawn_relay_responder(engine: Arc<NetworkEngine>, from: String, first_frame: Vec<u8>) {
-    // direta online? não gasta handshake à toa
     let online = engine
         .links
         .lock()
@@ -9917,9 +8097,9 @@ fn spawn_relay_responder(engine: Arc<NetworkEngine>, from: String, first_frame: 
         let mut map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = map.get(&from) {
             if !tx.is_closed() {
-                return; // outro respondente/dial já cuidando
+                return;
             }
-            map.remove(&from); // obsoleto — assume
+            map.remove(&from);
         }
         map.insert(from.clone(), in_tx.clone());
     }
@@ -9971,38 +8151,15 @@ fn spawn_relay_responder(engine: Arc<NetworkEngine>, from: String, first_frame: 
                 debug!(%from, "relay respondente falhou/timeout");
             }
         }
-        // sessão morta ou handshake falho: a entrada cai quando o manager
-        // observar send falho — aqui só garante que ENTRADA VELHA não trave
-        // redial futuro se o stream morreu sem frames pendentes.
     });
 }
 
-/// Poller do relay: remonta frames do próprio tópico e roteia para a sessão
-/// do remetente; Hello sem sessão vira handshake respondente.
-///
-/// Poll com JITTER 1000-1500ms (não `interval` fixo): dois peers com loop
-/// em fase travariam em Hello cruzado sistemático (mesma fase de poll + mesmo
-/// backoff de dial = tentativa simultânea eterna). O jitter dessincroniza.
-/// 1000-1500ms (era 2000-2800ms): cada voo do handshake custa ~1 poll, então
-/// o caminho feliz cai de ~7s para ~3.5s de poll; pernas com push (MQTT)
-/// acordam via wake em ~RTT de todo jeito.
-/// Strays pós-handshake (Hello/Ack/Ok duplicados por retransmissão) com peer
-/// já ONLINE são descartados aqui — senão cairiam no inbound da sessão como
-/// ciphertext inválido e derrubariam um túnel saudável.
 async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
     let mut reasm = Reassembler::new();
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    // Último Hello por peer (eph+nonce): distingue retransmissão do MESMO
-    // Hello (mesmo eph — dial reenvia a cada 5s) de redial NOVO (eph distinto,
-    // ex.: após morte de sessão por perda). Duplicata com peer ONLINE é stray
-    // (descarta); redial novo com peer ONLINE força respondente novo (substitui
-    // a sessão half-open quebrada sem esperar o Ping timeout de 60s).
     let mut last_hello: std::collections::HashMap<String, ([u8; 32], [u8; 16])> =
         std::collections::HashMap::new();
-    // Primeira volta imediata (sem esperar tick); depois dorme com jitter.
     let mut first = true;
-    // Push das pernas MQTT: cada wake vira uma rodada de poll imediata
-    // (recebimento em ~RTT em vez de até 2.8s do tick).
     let (wake_tx, mut wake_rx) = mpsc::unbounded_channel::<()>();
     {
         let backend = active_relay_backend(&engine);
@@ -10024,18 +8181,10 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             break;
         }
         if !first {
-            // Intervalo adaptativo (latência mínima sem abusar da infra):
-            // pernas com push (MQTT, inclusive via túnel SOCKS5) mantêm o
-            // tick original — o wake entrega em ~RTT e o tick é só fallback;
-            // pernas sem push usam 400ms, cortando o pior caso de ~1,5s para
-            // ~0,7s no recebimento.
             let has_push = {
                 let backend = active_relay_backend(&engine);
                 !backend.wakes().is_empty()
             };
-            // Com push (MQTT) o wake entrega em ~RTT; sem push,
-            // 0,8–1,2s — bom equilíbrio entre latência e não
-            // sobrecarregar o serviço público (evita rate-limit/ban).
             let (base_ms, jitter_max) = if has_push {
                 (1000u64, 500u64)
             } else {
@@ -10048,15 +8197,11 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             tokio::select! {
                 _ = sleep(Duration::from_millis(base_ms + jitter_ms)) => {}
                 _ = wake_rx.recv() => {
-                    // drena rajadas: uma rodada cobre tudo que chegou
                     while wake_rx.try_recv().is_ok() {}
                 }
             }
         }
         first = false;
-        // Atualiza o intermediário peer-relay (menor fp direto online) antes
-        // de decidir a rodada. O peer-relay funciona SEM broker público, então
-        // a rodada acontece se o relay público está ligado OU há intermediário.
         engine.refresh_peer_relay();
         if !relay_allowed(&engine) && engine.peer_relay_fp().is_none() {
             continue;
@@ -10071,7 +8216,6 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             }
         };
         for raw in msgs {
-            // dedupe barato (poll pode repetir): hash do conteúdo, janela 1024
             let h = {
                 use std::hash::{Hash, Hasher};
                 let mut s = std::collections::hash_map::DefaultHasher::new();
@@ -10087,10 +8231,8 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             let Some((from_raw, frame)) = reasm.feed(&my_fp, &raw) else {
                 continue;
             };
-            // (F3) Envelope opaco do peer-relay não traz identidade. Deriva o
-            // remetente do Hello em claro; frames de sessão sem identidade são
-            // difundidos aos streams de relay (o AEAD só autentica no dono).
             let hello = parse_relay_hello_full(&frame);
+            // Seção 49: from
             let from = if !from_raw.is_empty() {
                 from_raw
             } else if let Some(h) = &hello {
@@ -10101,57 +8243,37 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             if from == my_fp {
                 continue;
             }
-            // Hello? Decide duplicata vs redial ANTES de rotear.
             if let Some(hello) = &hello {
                 if !from.is_empty() && hello.fp != from {
-                    continue; // envelope forjado (from != Hello.fp) — lixo
+                    continue;
                 }
                 let key = (hello.eph_pub, hello.nonce);
                 let dup = last_hello.get(&from) == Some(&key);
                 if dup {
-                    // Retransmissão do MESMO Hello: com peer ONLINE é stray
-                    // pós-handshake (descarta — a sessão ignora de todo jeito);
-                    // sem sessão/handshake em curso, entrega ao handshake vivo
-                    // (ele reenvia o MESMO Ack).
                     if is_online(&engine, &from) {
                         continue;
                     }
                 } else {
-                    // Hello NOVO (primeiro ou redial com eph distinto).
                     last_hello.insert(from.clone(), key);
                     if last_hello.len() > 512 {
                         last_hello.clear();
                     }
-                    // RATE LIMIT: cada Hello novo (eph fresco) nasceria uma
-                    // task de handshake viva — o dedup acima só barra
-                    // REPETIÇÃO do mesmo Hello, não a fábrica de novos.
                     if engine.netlimiter.allow_relay_hello(&from) == Decision::Blocked {
                         debug!(%from, "relay: Hello descartado — rate limit por peer");
                         continue;
                     }
                     if is_online(&engine, &from) {
-                        // Redial com sessão (half-open?) viva: força respondente
-                        // novo que SUBSTITUI via eleição (sem esperar 120s).
                         debug!(%from, "relay: redial novo com sessão viva — novo respondente");
                         spawn_relay_responder_force(engine.clone(), from.clone(), frame.clone());
                         continue;
                     }
-                    // Sem sessão: cai no fluxo abaixo (roteia se handshake vivo,
-                    // senão spawna respondente).
                 }
             } else if !from.is_empty()
                 && is_online(&engine, &from)
                 && is_relay_handshake_frame(&frame)
             {
-                // Ack/Ok duplicado (HelloOk 3x, Ack reenviado) com peer ONLINE:
-                // stray — descarta sem matar a sessão (a SessionReader também
-                // ignora, aqui é a primeira barreira).
                 continue;
             }
-            // (F3) Opaco sem identidade (frame de sessão peer-relay): difunde
-            // a todos os streams de relay. Cada SessionReader tenta decifrar
-            // dentro da janela de nonces; só o peer dono autentica o AEAD e os
-            // demais apenas descartam (sem matar a sessão).
             if from.is_empty() {
                 let map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
                 for tx in map.values() {
@@ -10159,14 +8281,13 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
                 }
                 continue;
             }
-            // sessão relay existente? entrega
             let routed = {
                 let mut map = engine.relay_in.lock().unwrap_or_else(|e| e.into_inner());
                 match map.get(&from) {
                     Some(tx) => match tx.send(frame.clone()) {
                         Ok(()) => true,
                         Err(_) => {
-                            map.remove(&from); // stream morto — cai para Hello abaixo
+                            map.remove(&from);
                             false
                         }
                     },
@@ -10176,11 +8297,8 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
             if routed {
                 continue;
             }
-            // sem sessão: só Hello inicia conversa (ciphertext sem dono é lixo)
             if let Some(hello_fp) = parse_relay_hello(&frame) {
                 if hello_fp == from {
-                    // RATE LIMIT (mesma regra do fluxo de cima): Hello novo
-                    // além da taxa = fábrica de respondentes, não dial legítimo.
                     if engine.netlimiter.allow_relay_hello(&from) == Decision::Blocked {
                         debug!(%from, "relay: Hello (sem sessão) descartado — rate limit");
                         continue;
@@ -10193,18 +8311,6 @@ async fn relay_manager_loop(engine: Arc<NetworkEngine>) {
     }
 }
 
-/// A sessão NOVA deve substituir a que já está `Online`?
-///
-/// Regras (nesta ordem):
-/// 1. **Direta vence relay** — em qualquer direção, sem exceção.
-/// 2. **Mesma rota = não troca.** Dial repetido nosso (maintain + discovery +
-///    relay) não pode derrubar uma sessão saudável: cada troca aborta a writer
-///    e descarta frames em voo (mensagem e `Ack` sumiam e voltavam ao relógio).
-///    Quem precisa refazer a sessão a REMOVE antes (`drop_link_if_dead`,
-///    `reap_half_open_links`) — então, se ela está Online aqui, é a boa.
-/// 3. **Dial cruzado** (uma ponta iniciou, a outra recebeu): vale a eleição por
-///    fingerprint, e as duas pontas chegam à MESMA resposta — cada uma fica com
-///    a sessão cuja direção o fp menor prefere.
 fn nova_sessao_substitui(
     atual_via_relay: bool,
     atual_initiator: bool,
@@ -10212,25 +8318,15 @@ fn nova_sessao_substitui(
     novo_initiator: bool,
     prefiro_outbound: bool,
 ) -> bool {
-    // 1. mesmo transporte?
     if atual_via_relay == novo_via_relay {
-        // mesmíssimo caminho e mesma direção → duplicata.
         if atual_initiator == novo_initiator {
             return false;
         }
-        // Dial cruzado: fica a sessão na direção que o fp preferido escolheu.
         return novo_initiator == prefiro_outbound;
     }
-    // 2. transporte diferente: a DIRETA ganha; relay nunca derruba direta.
     !novo_via_relay
 }
 
-/// Sessão online de um peer: writer task + reader loop com heartbeat/timeito.
-///
-/// Eleição de sessão (dial simultâneo é comum: discovery + manual + inbound):
-/// o peer com fingerprint MENOR mantém a sessão que ELE iniciou (outbound);
-/// o maior mantém a inbound. Direta SEMPRE vence relay (relay é fallback).
-/// Retorna `true` se esta sessão foi a registrada, `false` se foi descartada.
 async fn register_and_run(
     engine: Arc<NetworkEngine>,
     session: Session,
@@ -10242,15 +8338,8 @@ async fn register_and_run(
     peer_proto_v: u32,
 ) -> bool {
     let my_fp = engine.identity.fingerprint.clone();
-    // Menor fingerprint prefere a sessão que ELE iniciou (`outbound`); o maior
-    // prefere a recebida. Só desempata o DIAL CRUZADO — ver
-    // `nova_sessao_substitui`.
     let prefiro_outbound = my_fp.as_str() < peer_fp;
 
-    // TETO GLOBAL DE SESSÕES: sem isto, um swarm de peers (ou um atacante com
-    // N identidades) multiplicava sockets/tasks/fds sem limite central — cada
-    // sessão viva custa reader+writer+cripto por frame. Acima do teto, a
-    // sessão nova é recusada (o par rediala quando houver vaga).
     {
         let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
         let online = links
@@ -10287,7 +8376,6 @@ async fn register_and_run(
         }
     }
 
-    // peer autenticado pelo handshake — persiste
     let _ = engine.store.upsert_peer(&PeerRecord {
         fp: peer_fp.to_string(),
         pubkey_hex: peer_pubkey.to_string(),
@@ -10305,6 +8393,7 @@ async fn register_and_run(
         via_relay,
         initiator,
     });
+    // Seção 50: replaced
     let replaced = {
         let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
         links
@@ -10312,13 +8401,10 @@ async fn register_and_run(
             .filter(|old| old.get_state() == PeerLinkState::Online)
     };
     if let Some(old) = replaced {
-        old.drop_notify.notify_one(); // encerra a sessão antiga (substituída pela preferida)
+        old.drop_notify.notify_one();
     }
     info!(peer_fp, %peer_nick, via_relay, "peer ONLINE");
-    // Sessão online: a corrente se recompôs — zera falhas do fallback automático.
     engine.reset_dial_failures(peer_fp);
-    // Guarda o proto do peer (gate dos frames do túnel: Tunnel* exige >= 2).
-    // MAX = nunca rebaixa por flapping de sessão (peer novo não vira legado).
     {
         let mut map = engine.peer_protos.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(peer_fp.to_string())
@@ -10336,15 +8422,6 @@ async fn register_and_run(
     });
     engine.emit_state();
 
-    // Reconciliação de perfil na reconexão: um peer que ficou offline enquanto
-    // editávamos o perfil nunca recebeu o `ProfileSet`. Perguntar a revisão
-    // agora custa um frame e resolve o caso "B abre o app depois de A trocar a
-    // foto" sem esperar o tique de 10 minutos.
-    //
-    // O `known_rev` é a revisão DESTE peer que temos em disco (não a nossa!):
-    // o receptor compara com a dele e só responde se tiver algo mais novo.
-    // Mandar a nossa fazia ele achar que já estávamos em dia e nunca enviar —
-    // era o perfil/foto que não chegava.
     engine
         .cmd_tx
         .send(EngineCmd::SendToPeer(
@@ -10359,42 +8436,13 @@ async fn register_and_run(
         ))
         .ok();
 
-    // ARQUIVOS: manda o que EU tenho para quem acabou de subir. O anúncio
-    // original é enviado uma vez, para os peers online naquele instante; sem
-    // este flush quem entra depois nunca sabe que o arquivo existe aqui e o
-    // download morre em "sem peers com o arquivo no swarm".
     engine.flush_files_to(peer_fp);
 
-    // HOLE PUNCH (estilo torrent/Radmin): sessão relay viva + peer com
-    // proto_v>=1 → pede furo TCP simultâneo para meu endpoint público. Não
-    // é só 1x: um loop com backoff curto REENVIA o Punch enquanto a sessão
-    // for relay (o TCP simultaneous open converge mesmo com perda/timing
-    // ruim) e para sozinho quando a direta vence a eleição. Nunca envia a
-    // peer legado (proto 0).
     if via_relay && peer_proto_v >= 1 && engine.punch_enabled() {
         spawn_punch_upgrade(engine.clone(), peer_fp.to_string());
     }
 
-    // Flush IMEDIATO (era 5s de espera): frames de sessão que chegarem ao
-    // respondente antes do HelloOk NÃO são mais descartados — o handshake
-    // relay os guarda no stash e os replaya na sessão (ReplayRead no
-    // transport), então postar Msg/Ping logo após o HelloOk não dessincroniza
-    // o nonce ChaCha. Ganho medido: -5s no primeiro contato (MemRelay:
-    // RequestIn 9.6s → ~4s). Sem spawn: `cmd_tx` é unbounded (nunca bloqueia)
-    // e `frame_tx` bufferiza até a writer task nascer logo abaixo.
     {
-        // Só flusha se ESTA sessão ainda é a vigente (evita ressuscitar
-        // outbox numa sessão velha já substituída — aqui acabou de registrar,
-        // então é sempre a vigente).
-        // FLUSH IMEDIATO (sem spawn/tick): outbox + amizade + joins + CHAMADAS.
-        // CallOffer/Answer/Ice enfileirados offline (pending_calls) saem agora,
-        // na ordem, com latência de ~RTT — sem isso o invite pré-online se
-        // perdia e o ICE inicial atrasava a chamada sobre relay.
-        //
-        // Antes do flush: varredor anti-buraco-negro — "sent" velho sem ACK
-        // (ex.: saiu pelo relay milissegundos antes do peer upgradear para
-        // direta, caindo no receiver morto dele) volta a pending e é reenviado
-        // AGORA pela sessão nova. Corte 20s (relay RTT ~2s); receptor dedupa.
         {
             let cutoff = crate::identity::now_ms() - 20_000;
             if let Ok(ids) = engine.store.revert_stale_sent_to_pending(peer_fp, cutoff) {
@@ -10414,30 +8462,12 @@ async fn register_and_run(
         engine.flush_joins(peer_fp);
         engine.flush_pending_calls(peer_fp);
         engine.flush_pending_reacts(peer_fp);
-        // VOZ: a sessão acabou de ficar Online. Sem este flush, quem entrou no
-        // canal antes do link subir nunca era informado (o `VoiceJoin` original
-        // virou no-op silencioso) — o par aparecia conectado e não se ouvia.
         engine.flush_voice_state_to(peer_fp);
-        // SERVIDORES: empurra canais/cargos/tags/bots AGORA para quem acabou de
-        // subir. Antes o estado só ia quando o dono mexia nele e o peer já
-        // estava Online: a tag criada enquanto o celular dormia só aparecia no
-        // sync de até 45 s (ou nunca, se a tela ficasse parada).
         engine.flush_community_state_to(peer_fp);
-        // SALAS: manda para o peer recém-online as salas vivas em que ele
-        // participa (grupo ou DM). Sem isto ele só veria a chamada no próximo
-        // tique de 15 s — e quem abriu o app durante a chamada não entrava.
         engine.flush_rooms_to(peer_fp);
-        // PRESENÇA: anuncia o status atual para a sessão que acabou de subir.
-        // Sem isto o peer novo via "offline" por até 30 s (até o próximo tick),
-        // e com o TTL antigo isso virava flicker constante na lista de amigos.
         engine.announce_presence();
     }
 
-    // writer task: drena comandos → cifra e envia. QoS em duas etapas:
-    //   1) drena o canal para filas por classe (4 classes, FIFO dentro de cada)
-    //   2) monta um lote ponderado (realtime primeiro, com cotas por classe
-    //      para evitar inanição do bulk) e envia em UMA escrita TCP
-    //    → menos syscalls (batching) e voz/sinalização nunca atrás de arquivo.
     let (mut reader, mut writer_session) = session.split();
     let writer: JoinHandle<()> = tokio::spawn(async move {
         let mut queues: [VecDeque<SecureFrame>; 4] = [
@@ -10446,8 +8476,6 @@ async fn register_and_run(
             VecDeque::new(),
             VecDeque::new(),
         ];
-        // cota por classe no lote: realtime jamais monopoliza; bulk sempre
-        // anda quando presente. Bulk tem teto menor por ser pesado (1MiB/frame).
         const BATCH_CAP: usize = 16;
         const CLASS_CAP: [usize; 4] = [8, 4, 12, 4];
         loop {
@@ -10457,7 +8485,6 @@ async fn register_and_run(
                     None => break,
                 }
             }
-            // drena o que já chegou (sem bloquear) — agrupa rajadas em 1 write
             while let Ok((p, f)) = frame_rx.try_recv() {
                 queues[(p as usize).min(3)].push_back(f);
             }
@@ -10472,9 +8499,8 @@ async fn register_and_run(
                 }
             }
             if batch.is_empty() {
-                continue; // só drenagem de estado (não deve ocorrer)
+                continue;
             }
-            // métricas por classe com o tamanho REAL do wire (send_batch reporta)
             let mut frames: Vec<SecureFrame> = Vec::with_capacity(batch.len());
             let mut classes: Vec<u8> = Vec::with_capacity(batch.len());
             for (c, f) in batch {
@@ -10493,12 +8519,6 @@ async fn register_and_run(
         }
     });
 
-    // heartbeat ADAPTATIVO: começa no intervalo base; a cada intervalo sem
-    // RECEBER nada, dobra (degraus) até o teto. Qualquer frame recebido
-    // reseta ao base. Ocioso = menos pings = menos rádio/acordos (mobile).
-    // Teto direto = 30s (pinhole NAT: requisito documentado — Ping <= ~30s
-    // mantém mapeamento vivo); relay = 120s (não há pinhole TCP próprio).
-    // Timeout escala com o intervalo atual: timeout = max(base_timeout, 2.5x intervalo).
     let (base_interval, base_timeout, steps) = if via_relay {
         (
             RELAY_PING_INTERVAL,
@@ -10525,7 +8545,6 @@ async fn register_and_run(
     let mut idle_step = 0usize;
     let mut ping_at = tokio::time::Instant::now() + base_interval;
 
-    // reader: decifra/valida
     let read_result = loop {
         let cur_interval = steps[idle_step.min(steps.len() - 1)];
         let cur_timeout = std::cmp::max(base_timeout, cur_interval.mul_f64(2.5));
@@ -10535,22 +8554,17 @@ async fn register_and_run(
                     Err(_) => break Err(DistorrentError::Protocol(format!("ping timeout ({:?} sem frames)", cur_timeout))),
                     Ok(Err(e)) => break Err(e),
                     Ok(Ok((frame, wire))) => {
-                        idle_step = 0; // atividade: heartbeat volta ao mínimo
+                        idle_step = 0;
                         ping_at = tokio::time::Instant::now() + base_interval;
                         crate::metrics::metrics().frame_rx(
                             crate::metrics::FrameClass::by_index(frame_class(&frame)),
                             wire as u64,
                         );
-                        // RATE LIMIT por sessão (frames E bytes — um não
-                        // substitui o outro): rajada legítima só perde frames
-                        // (throttle, o protocolo reenvia); flooding na casa do
-                        // abuso encerra a sessão (Kill) — antes disto um peer
-                        // autenticado podia inundar 1 MiB/frame a taxa livre.
                         match engine.netlimiter.allow_frame_in(peer_fp, wire as u64) {
                             FrameVerdict::Allow => {}
                             FrameVerdict::Drop(reason) => {
                                 debug!("frame de {peer_fp} descartado: {reason}");
-                                continue; // volta ao select — sessão preservada
+                                continue;
                             }
                             FrameVerdict::Kill(reason) => {
                                 warn!(peer_fp, "sessão encerrada por limite: {reason}");
@@ -10558,16 +8572,7 @@ async fn register_and_run(
                             }
                         }
                         if let Err(e) = handle_frame(&engine, peer_fp, peer_pubkey, peer_nick, frame).await {
-                            // WARN, não debug: esta linha é a ÚNICA evidência de
-                            // "estou online mas não chega mensagem". Com `info`
-                            // no filtro padrão ela era invisível, e rejeições
-                            // como "conv_id não corresponde à DM deste peer" ou
-                            // "mensagem repetida descartada" não deixavam
-                            // rastro nenhum no arquivo de log.
-                            //
-                            // Além do log, o motivo fica no diagnóstico do peer
-                            // para o painel mostrar ("por que não chega") em vez
-                            // de só "conectado".
+                            // Seção 51: motivo
                             let motivo = e.to_string();
                             warn!(peer_fp, "frame rejeitado: {motivo}");
                             engine.diag_update(peer_fp, |d| {
@@ -10579,8 +8584,6 @@ async fn register_and_run(
                 }
             }
             _ = tokio::time::sleep_until(ping_at) => {
-                // Em chamada ativa o heartbeat fica no intervalo base: sessão
-                // meia-aberta morre em ~25s, não em até 5min no degrau máximo.
                 if engine.store.peer_in_active_call(peer_fp) {
                     idle_step = 0;
                 } else {
@@ -10596,7 +8599,6 @@ async fn register_and_run(
     };
 
     writer.abort();
-    // só remove o link se ainda for ESTE (a eleição pode ter registrado outro)
     let removed = {
         let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
         match links.get(peer_fp) {
@@ -10605,33 +8607,11 @@ async fn register_and_run(
         }
     };
     if removed {
-        // Higiene do rate limiter: os buckets por peer morrem com a sessão
-        // (churn de peers não acumula mapa morto — o prune é só rede de seg.).
         engine.netlimiter.forget_peer(peer_fp);
-        // RECONEXÃO VISÍVEL: remover o link fazia `peer_state` devolver
-        // `Disconnected` (o `unwrap_or`) até a PRÓXIMA sessão registrar. Ou seja,
-        // durante toda a tentativa de reconexão — que pode durar minutos com
-        // backoff — a pessoa aparecia OFFLINE na UI e voltava "do nada" quando o
-        // dial acertava. Era o "fica offline e não conecta" / "só volta sozinho
-        // depois de um tempo". Se é alguém que devemos continuar tentando
-        // (amigo, membro de servidor ou de grupo), o estado honesto é
-        // `Reconnecting`.
         if engine.should_keep_dialing(peer_fp) {
             set_link_state(&engine, peer_fp, PeerLinkState::Reconnecting);
         }
-        // TÚNEL MORRE COM O LINK.
-        //
-        // BUG REAL ("uma mensagem funciona, depois para e só religando
-        // resolve"): `tunnel_sessions` é mapa em MEMÓRIA e nunca era limpo aqui.
-        // A sessão de túnel sobrevivia à queda do link e, na sessão nova, ainda
-        // era considerada pronta — com uma chave que o outro lado já tinha
-        // descartado. Como `tunnel_should_carry` então passava a mandar tudo por
-        // ela, mensagens/ACK/Ack eram cifrados para uma chave morta e
-        // descartados em silêncio no destino; o link seguia `Online` porque o
-        // Ping viaja fora do túnel. Resultado: emudece até reiniciar o app.
-        // Derrubar aqui garante que a próxima sessão renegocie do zero.
         engine.tunnel_drop(peer_fp, "link caiu");
-        // não confirmadas → PENDING again (outbox)
         if let Ok(ids) = engine.store.revert_unacked_to_pending(peer_fp) {
             for id in ids {
                 let _ = engine.events.send(EngineEvent::MessageStatus {
@@ -10640,8 +8620,6 @@ async fn register_and_run(
                 });
             }
         }
-        // grupos: mensagens out não confirmadas voltam a PENDING (flush de
-        // grupo reenvia ao reconectar)
         if let Ok(ids) = engine.store.revert_unacked_groups_to_pending() {
             for id in ids {
                 let _ = engine.events.send(EngineEvent::MessageStatus {
@@ -10662,27 +8640,17 @@ async fn register_and_run(
         let _ = engine.events.send(EngineEvent::PeerOffline {
             fp: peer_fp.to_string(),
         });
-        // Presença de voz: o peer que caiu não manda `VoiceLeave` (processo
-        // morto, crash, rede caiu). Sem esta limpeza ele ficava "na voz" para
-        // sempre no nosso banco e o tile ficava sem mídia para sempre.
         engine.drop_voice_presence_of(peer_fp);
         engine.emit_state();
     }
     true
 }
 
-/// Lookup único de endpoint (direta imediata, sem esperar o tick de 5s).
-/// Usado no pedido/aceite: se o peer já anunciou, a direta sai na hora e
-/// vence o relay na eleição.
 fn announce_lookup_once(engine: Arc<NetworkEngine>, peer_fp: String) {
     tokio::spawn(async move {
-        // Kill-switch: sem relay, nada a consultar no backend (a descoberta
-        // direta segue pelo tracker self-hosted via reqwest, independente dele).
         if !relay_allowed(&engine) {
             return;
         }
-        // Kill-switch de teste: DISTORRENT_NO_ANNOUNCE desliga a descoberta direta
-        // via anúncio (testes relay-only precisam da eleição determinística).
         if !announce_discovery_enabled() {
             return;
         }
@@ -10693,9 +8661,6 @@ fn announce_lookup_once(engine: Arc<NetworkEngine>, peer_fp: String) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
                     let f = v.get("fp").and_then(|x| x.as_str()).unwrap_or("");
                     if f == peer_fp {
-                        // LAN primeiro (mesma rede = direto garantido), depois público.
-                        // `addr` pode ser null (peer sob CGNAT): nesse caso não há
-                        // dial direto possível e o relay resolve — não discamos.
                         let lan = v.get("lan").and_then(|x| x.as_str());
                         let pubip = v.get("addr").and_then(|x| x.as_str());
                         for cand in [lan, pubip].into_iter().flatten() {
@@ -10712,9 +8677,6 @@ fn announce_lookup_once(engine: Arc<NetworkEngine>, peer_fp: String) {
                                 return;
                             }
                         }
-                        // Anúncio VISTO mas sem endpoint direto utilizável: o
-                        // peer está vivo e descobrível, só não é alcançável
-                        // direto. Registrar evita a UI dizer "nunca anunciou".
                         engine.diag_record_announce_seen(&peer_fp);
                     }
                 }
@@ -10723,20 +8685,10 @@ fn announce_lookup_once(engine: Arc<NetworkEngine>, peer_fp: String) {
     });
 }
 
-/// Upgrade relay→direta AGRESSIVO e REPETIDO: enquanto a sessão com
-/// `peer_fp` estiver ONLINE via relay, reenvia `SecureFrame::Punch` (com
-/// folga no `at_ms`) em backoff curto, para que AMBOS os lados furem o NAT
-/// repetidamente até o TCP simultaneous open pegar. Encerra sozinho quando
-/// a direta vence a eleição (link deixa de ser `via_relay`) ou a sessão cai
-/// (o próximo `register_and_run` relança). Uma task por peer.
 fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
-    // Kill-flag: desligado, nem cria o loop.
     if !engine.punch_enabled() {
         return;
     }
-    // PRIVACIDADE: em proxy/full o furo é TCP/UDP DIRETO ao peer — vazaria o
-    // IP real e publicaria nosso endpoint público. A sessão relay (proxada)
-    // é a única rota anônima; upgrade direto é para os modos normais.
     if !punch_allowed_by_privacy(&engine) {
         debug!(%peer_fp, "punch upgrade suspenso: modo anônimo (proxy/full)");
         return;
@@ -10754,16 +8706,12 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
         *g
     };
     tokio::spawn(async move {
-        // Backoff curto e teto baixo (2s→3s→…→8s + jitter): o furo tem
-        // janela de tempo; esperar demais deixa a sessão presa no relay.
         let mut backoff = Duration::from_secs(2);
         let cancel = engine.cancel_tx.subscribe();
         loop {
             if cancelled(&cancel) {
                 break;
             }
-            // Um loop mais novo assumiu este peer (re-registro relay→relay)?
-            // O velho sai — sem isto os loops empilhavam a cada substituição.
             let cur_gen = *engine
                 .punch_upgrades
                 .lock()
@@ -10773,7 +8721,6 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
             if cur_gen != generation {
                 break;
             }
-            // Parou? direta venceu (não é mais via_relay) ou sessão caiu.
             let (online, via_relay) = {
                 let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
                 match links.get(&peer_fp) {
@@ -10784,24 +8731,14 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
             if !online || !via_relay {
                 break;
             }
-            // Kill-flag pode ter ligado/desligado em runtime.
             if !engine.punch_enabled() {
                 break;
             }
-            // Modo anônimo pode ter sido ligado DEPOIS do spawn (troca de
-            // modo em runtime): o loop vivo também precisa respeitar.
             if !punch_allowed_by_privacy(&engine) {
                 debug!(%peer_fp, "punch upgrade encerrado: modo anônimo em runtime");
                 break;
             }
-            // Endpoint público próprio. Normalmente o tick de announce já
-            // preencheu `public_addr` (UPnP ou STUN). Se ainda não houver e o
-            // modo de privacidade permitir, consulta STUN na hora (cacheado)
-            // — sob CGNAT sem UPnP é a única forma de publicar nossa porta
-            // externa REAL para o peer furar.
-            // IMPORTANTE: solta o guard do `public_addr` ANTES do await —
-            // MutexGuard (std) não é `Send` e não pode cruzar o ponto de
-            // suspensão da task.
+            // Seção 52: current_endpoint
             let current_endpoint = engine
                 .public_addr
                 .lock()
@@ -10831,8 +8768,6 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
             use rand::RngCore;
             let mut nonce = [0u8; 16];
             RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
-            // Folga de ~1,5s: dá tempo do peer armar o listener do furo
-            // mesmo com relógios/CPU diferentes (receptor clampa [0,10s]).
             let at_ms = (crate::identity::now_ms().max(0) as u64).saturating_add(1500);
             engine
                 .cmd_tx
@@ -10852,8 +8787,6 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
             sleep(backoff + Duration::from_millis(jitter_ms)).await;
             backoff = (backoff + Duration::from_secs(1)).min(Duration::from_secs(8));
         }
-        // Só remove se ainda for a MINHA geração: se um novo registro já
-        // criou outro loop (geração maior), não rouba a chave dele.
         let mut map = engine
             .punch_upgrades
             .lock()
@@ -10864,15 +8797,6 @@ fn spawn_punch_upgrade(engine: Arc<NetworkEngine>, peer_fp: String) {
     });
 }
 
-/// Furo TCP simultâneo coordenado (hole punching estilo torrent/Radmin):
-/// disca A PARTIR da porta de escuta local para o endpoint público do peer.
-/// Se ambos furarem juntos, NATs full-cone/restricted deixam passar e a
-/// direta nasce sem servidor no caminho (eleição prefere direta). Se o NAT
-/// não colaborar (simétrico), falha rápido e o relay segue.
-///
-/// AGRESSIVO: em vez de 1 dial, dispara `PUNCH_PARALLEL` tentativas em
-/// paralelo com stagger curto (o 1º SYN às vezes se perde). Cada
-/// tentativa bem-sucedida registra a sessão; a eleição descarta duplicadas.
 async fn punch_and_register(
     engine: Arc<NetworkEngine>,
     want_fp: String,
@@ -10882,9 +8806,6 @@ async fn punch_and_register(
     if !engine.punch_enabled() {
         return;
     }
-    // PRIVACIDADE (defesa em profundidade): o PunchDial pode ter sido
-    // enfileirado ANTES da troca de modo — não executa furo direto em
-    // modo anônimo, mesmo com o frame já na mão.
     if !punch_allowed_by_privacy(&engine) {
         debug!(%want_fp, "punch dial ignorado: modo anônimo (proxy/full)");
         return;
@@ -10892,28 +8813,20 @@ async fn punch_and_register(
     let Ok(remote) = endpoint.parse::<SocketAddr>() else {
         return;
     };
-    // espera o instante combinado (tolerância ±10s de relógio entre peers)
     let now = crate::identity::now_ms();
     let wait = (at_ms as i64 - now).clamp(0, 10_000) as u64;
     sleep(Duration::from_millis(wait)).await;
-    // direta já nasceu por outro caminho? não gasta furo à toa
     if engine.peer_state(&want_fp) == NetworkState::Connected && !engine.is_peer_via_relay(&want_fp)
     {
         return;
     }
-    // Furo UDP best-effort JUNTO do TCP (µTP/STUN-like): em paralelo, não
-    // atrasa os dials TCP; pinhole UDP pode ajudar NATs endpoint-independent.
     tokio::spawn(crate::net::transport::udp_punch_probe(remote));
     const PUNCH_PARALLEL: usize = 3;
-    // Reenvio com backoff DENTRO de um mesmo Punch (2 rodadas de 3 dials com
-    // stagger): o 1º SYN às vezes se perde; o loop externo de `Punch` reenvia
-    // a coordenação, mas 2 rodadas locais convergem mais rápido.
     const PUNCH_ROUNDS: usize = 2;
     for round in 0..PUNCH_ROUNDS {
         if !engine.punch_enabled() {
             return;
         }
-        // outra tentativa/caminho já fechou direta → para
         if engine.peer_state(&want_fp) == NetworkState::Connected
             && !engine.is_peer_via_relay(&want_fp)
         {
@@ -10939,10 +8852,7 @@ async fn punch_and_register(
     }
 }
 
-/// UMA tentativa de furo: dial a partir da porta de escuta, handshake e
-/// registra se o fp conferir. Devolve true se uma direta foi registrada.
 async fn punch_once(engine: &Arc<NetworkEngine>, want_fp: &str, remote: SocketAddr) -> bool {
-    // direta já nasceu por outra tentativa/outro caminho?
     if engine.peer_state(want_fp) == NetworkState::Connected && !engine.is_peer_via_relay(want_fp) {
         return false;
     }
@@ -10986,16 +8896,11 @@ async fn punch_once(engine: &Arc<NetworkEngine>, want_fp: &str, remote: SocketAd
     }
 }
 
-/// Limita tamanho de string vinda de peer (anti-DoS de storage; safe em
-/// boundary UTF-8 — nunca panica no meio de um codepoint).
-/// Sanitiza strings de exibição vindas da rede (nicknames, tópicos):
-/// corta, remove controles/invisíveis e colapsa espaços — anti-injeção.
-/// Nunca recebe segredos/mensagens (só metadados de exibição).
+// Seção 53: cap_str
 fn cap_str(s: &str, max: usize) -> String {
     crate::names::sanitize_text(s, max)
 }
 
-/// Base64 de mídia: só o alfabeto válido e teto de tamanho (anti-abuso).
 fn cap_b64(s: &str, max: usize) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
@@ -11003,8 +8908,6 @@ fn cap_b64(s: &str, max: usize) -> String {
         .collect()
 }
 
-/// Cor de destaque: só `#rrggbb`. O valor CRU ia no frame enquanto o store
-/// gravava o validado — os dois lados podiam discordar sobre o mesmo perfil.
 fn normalize_accent(accent: &str) -> String {
     if accent.starts_with('#')
         && accent.len() == 7
@@ -11016,7 +8919,6 @@ fn normalize_accent(accent: &str) -> String {
     }
 }
 
-/// `ProfileSet` a partir do que está PERSISTIDO (nunca do patch da UI).
 fn profile_frame(p: &crate::social::ProfileView) -> SecureFrame {
     SecureFrame::ProfileSet {
         display_name: p.display_name.clone(),
@@ -11029,42 +8931,18 @@ fn profile_frame(p: &crate::social::ProfileView) -> SecureFrame {
     }
 }
 
-/// Intervalo da reconciliação de perfis. ÚNICO lugar: o boot, a reconexão e o
-/// tique periódico leem daqui (nada de temporizador espalhado na UI).
-pub const PROFILE_SYNC_INTERVAL_SECS: u64 = 600; // 10 minutos
+pub const PROFILE_SYNC_INTERVAL_SECS: u64 = 600;
 
-/// Teto do `avatar_b64`/`banner_b64` para o `ProfileSet` caber no PIOR
-/// transporte real, não no melhor.
-///
-/// Dois limites encadeados faziam a foto nunca chegar:
-///  1. `MAX_FRAME` da sessão = 1 MiB. O teto antigo (700 KB + 1,4 MB) gerava um
-///     `ProfileSet` de ~2,1 MB: o receptor derrubava a SESSÃO inteira.
-///  2. `peer_relay::MAX_TOPIC_BYTES` = 384 KiB por tópico. Sob CGNAT (o caso
-///     comum) o perfil viaja fatiado em pedaços de 3 KB e os pedaços mais
-///     antigos são EVICTADOS antes de o par ler — o perfil chegava truncado e
-///     era descartado.
-///
-/// Como 384 KiB é o mais apertado, o frame inteiro precisa ficar bem abaixo
-/// dele. ~190 KB de frame ⇒ ~250 KB de base64 ⇒ ~85 pedaços, com folga nos dois
-/// limites. A compressão do frontend (shared/avatar.ts) mira os mesmos números.
-const PROFILE_IMG_B64_MAX: usize = 80_000; // avatar ~60 KB de imagem
-const PROFILE_BANNER_B64_MAX: usize = 110_000; // capa ~82 KB de imagem
+const PROFILE_IMG_B64_MAX: usize = 80_000;
+const PROFILE_BANNER_B64_MAX: usize = 110_000;
 
-/// Maior imagem (em bytes decodificados) que o frame de perfil comporta.
 pub const PROFILE_IMAGE_MAX_BYTES: usize = PROFILE_IMG_B64_MAX * 3 / 4;
 pub const PROFILE_BANNER_MAX_BYTES: usize = PROFILE_BANNER_B64_MAX * 3 / 4;
 
-/// Intervalo de republicação do anúncio no MQTT (tópico não retido — sem
-/// republicar, quem entra depois nunca nos descobre). 60s: barato p/ brokers.
 const ANNOUNCE_REPUBLISH_MS: i64 = 60 * 1000;
 
-/// Teto do `FileAnnounce` — espelha os tetos da casca/frontend. 50 GB: o teto
-/// existe para o anúncio não prometer o impossível (download é por bloco).
 pub const MAX_ANNOUNCED_FILE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
-/// Tamanho máximo de UM bloco aceito do fio. O bloco canônico é 256 KB; a folga
-/// cobre base64 e versões futuras, mas impede que um frame de ~1 MiB (o teto do
-/// transporte) chegue com lixo colado no fim do bloco.
 const MAX_CHUNK_BYTES: usize = 512 * 1024;
 
 const MAX_REACTION_ID_CHARS: usize = 128;
@@ -11108,9 +8986,6 @@ fn reaction_storage_error(error: String) -> DistorrentError {
     )))
 }
 
-/// Aplica uma reação recebida. O peer autenticado determina o reator; campo
-/// `reactor_fp` do payload nunca tem autoridade. Duplicatas são no-op antes
-/// de consumir o bucket, e o lock serializa dedupe+persistência no mesmo nó.
 fn receive_reaction(
     engine: &Arc<NetworkEngine>,
     peer_fp: &str,
@@ -11128,7 +9003,6 @@ fn receive_reaction(
         return Ok(());
     }
 
-    // Autorização: o peer precisa compartilhar a conversa (DM, grupo ou canal).
     let shared = engine
         .store
         .get_conversation(conv_id)
@@ -11153,9 +9027,6 @@ fn receive_reaction(
         ));
     }
 
-    // Exigir a mensagem no mesmo conversation_id evita gravar reações órfãs
-    // com IDs inventados. Se frames de participantes diferentes chegarem fora
-    // de ordem, a reação é descartada e pode ser enviada de novo após a sync.
     let message_matches = engine
         .store
         .message_by_id_raw(msg_id)?
@@ -11166,8 +9037,6 @@ fn receive_reaction(
         return Ok(());
     }
 
-    // Serializa consulta, rate limit e escrita: duas cópias simultâneas do
-    // mesmo estado não podem gerar dois eventos de UI/retransmissões.
     let mut limiter = engine
         .reaction_limiter
         .lock()
@@ -11181,8 +9050,6 @@ fn receive_reaction(
         .map(|r| r.reactors.iter().any(|fp| fp == peer_fp))
         .unwrap_or(false);
 
-    // React é uma operação de estado. A mesma adição/remoção reenviada por
-    // retry não muda SQLite nem volta a ser retransmitida como evento novo.
     if already_applied == add_from_peer {
         return Ok(());
     }
@@ -11210,6 +9077,7 @@ fn receive_reaction(
         return Ok(());
     }
 
+    // Seção 54: applied
     let applied = engine
         .store
         .reaction_apply(msg_id, conv_id, emoji, peer_fp, add_from_peer)
@@ -11223,7 +9091,6 @@ fn receive_reaction(
         add: applied,
         reactor_fp: peer_fp.to_string(),
     });
-    // Ecoa somente mudanças aceitas para os demais membros da conversa.
     for fp in engine.social_peers_of(conv_id) {
         if fp != peer_fp {
             engine
@@ -11244,7 +9111,6 @@ fn receive_reaction(
     Ok(())
 }
 
-/// Normaliza presença (allowlist — nunca string arbitrária do peer).
 fn normalize_presence(s: &str) -> &'static str {
     match s {
         "online" => "online",
@@ -11256,8 +9122,6 @@ fn normalize_presence(s: &str) -> &'static str {
 }
 
 impl NetworkEngine {
-    /// O peer pode moderar esta comunidade? (dono, moderador listado ou cargo
-    /// com a permissão). Usado por ban/timeout/delete.
     pub fn is_moderator(&self, community_id: &str, fp: &str) -> bool {
         let Ok(Some(comm)) = self.store.get_community(community_id) else {
             return false;
@@ -11291,16 +9155,10 @@ impl NetworkEngine {
             .unwrap_or(false)
     }
 
-    /// A comunidade dona deste `conv_id`, se ele for um canal de servidor.
-    /// Para DM/grupo não existe comunidade — é o que separa os dois mundos de
-    /// autorização (moderador de canal vs.participant de conversa).
     pub fn community_of_conv(&self, conv_id: &str) -> Option<String> {
         self.store.channel_community(conv_id).ok().flatten()
     }
 
-    /// Peers que compartilham a conversa — destino das difusões sociais. Três
-    /// formatos de `conv_id` (DM/grupo/canal) precisam resolver; sem o caso canal,
-    /// reação em servidor nunca chegava a ninguém.
     pub fn social_peers_of(&self, conv_id: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let me = &self.identity.fingerprint;
@@ -11316,8 +9174,6 @@ impl NetworkEngine {
                 }
             }
         }
-        // canal de comunidade: difunde para os membros (o host é o relay, mas
-        // um membro conectado direto também precisa receber).
         if let Some(cid) = self.community_of_conv(conv_id) {
             if let Ok(members) = self.store.list_members(&cid) {
                 for (fp, _, _) in members {
@@ -11330,8 +9186,6 @@ impl NetworkEngine {
         out
     }
 
-    /// O peer tem alguma autoridade sobre este `conv_id`? Autor da conversa é
-    /// moderator de DM/grupo; em canal, vale o moderador da COMUNIDADE.
     pub fn can_moderate_conv(&self, conv_id: &str, fp: &str) -> bool {
         match self.community_of_conv(conv_id) {
             Some(cid) => self.is_moderator(&cid, fp),
@@ -11339,8 +9193,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Envia um frame da camada social para TODOS os membros online da
-    /// comunidade (dono → membros). É o canal de autoridade do servidor.
     pub fn broadcast_social(&self, community_id: &str, frame: SecureFrame) {
         let Ok(members) = self.store.list_members(community_id) else {
             return;
@@ -11357,14 +9209,12 @@ impl NetworkEngine {
         }
     }
 
-    /// Publica a NOSSA presença para todos os peers conectados (após mudança
-    /// de status ou quando um peer novo entra).
     pub fn announce_presence(&self) {
         let Ok(p) = self.store.presence_get(&self.identity.fingerprint) else {
             return;
         };
         if p.status == "invisible" {
-            return; // invisível = não sinaliza nada
+            return;
         }
         let frame = SecureFrame::PresenceSet {
             status: p.status,
@@ -11395,11 +9245,11 @@ fn handle_tunnel_offer(
     if !engine.tunnel_enabled() || engine.tunnel_established(peer_fp) {
         return;
     }
+    // Seção 55: let
     let (eph, nonce) = match NetworkEngine::parse_tunnel_hs(eph_hex, nonce_hex) {
         Some(v) => v,
         None => return,
     };
-    // Transcript da oferta: zeros no lado respondente (resposta futura).
     let transcript = tunnel_transcript(
         peer_fp,
         &eph,
@@ -11480,7 +9330,7 @@ fn handle_tunnel_answer(
             {
                 p
             }
-            _ => return, // resposta órfã/tardia ou para outra oferta
+            _ => return,
         }
     };
     let my_fp = engine.identity.fingerprint.clone();
@@ -11539,7 +9389,7 @@ fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct
             &ct,
         ) {
             Ok(v) => v,
-            Err(_) => return, // replay/forjado — descarta em silêncio
+            Err(_) => return,
         }
     };
     let payload = match decode_envelope(&pt) {
@@ -11550,6 +9400,7 @@ fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct
             total,
             chunk,
         } => {
+            // Seção 56: full
             let full = {
                 let mut reasm = engine
                     .tunnel_reasm
@@ -11559,12 +9410,11 @@ fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct
             };
             match full {
                 Some(v) => v,
-                None => return, // ainda remontando
+                None => return,
             }
         }
         TunMsg::Invalid => return,
     };
-    // ping/pong da Fase 1: prefixo no payload (mesma semântica, com RTT).
     if let Some(id_s) = payload
         .strip_prefix(b"ping:")
         .and_then(|r| std::str::from_utf8(r).ok())
@@ -11622,7 +9472,6 @@ fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct
         }
         return;
     }
-    // Fase 2: payload = SecureFrame JSON — despacha pelo dispatch normal.
     let frame: SecureFrame = match serde_json::from_slice(&payload) {
         Ok(f) => f,
         Err(_) => return,
@@ -11647,8 +9496,6 @@ fn handle_tunnel_data(engine: &Arc<NetworkEngine>, peer_fp: &str, nonce: u64, ct
     engine.tunnel_housekeep(peer_fp);
 }
 
-/// SDP no fio pode vir cru (camada nativa/Rust) ou `{"type":..,"sdp":..}`
-/// (navegador). O webrtc-rs só entende o cru — desembrulha quando precisa.
 #[cfg(target_os = "linux")]
 fn unwrap_wire_sdp(sdp: &str) -> String {
     let t = sdp.trim_start();
@@ -11664,10 +9511,6 @@ fn unwrap_wire_sdp(sdp: &str) -> String {
     sdp.to_string()
 }
 
-/// Desembrulha o candidato ICE vindo do NAVEGADOR. BUG CORRIGIDO (chamada
-/// mista Linux↔Windows caía sozinha): o JSON inteiro ia como `candidate` ao
-/// webrtc-rs (exige ≥ 8 tokens) e o erro era engolido — lado nativo nunca
-/// aprendia os candidatos do browser. Devolve `(candidate, mid)`.
 #[cfg(target_os = "linux")]
 fn unwrap_wire_candidate(raw: &str, frame_mid: &str) -> (String, String) {
     let t = raw.trim();
@@ -11682,8 +9525,6 @@ fn unwrap_wire_candidate(raw: &str, frame_mid: &str) -> (String, String) {
         .and_then(|x| x.as_str())
         .unwrap_or_default()
         .to_string();
-    // `sdpMid` e `sdpMLineIndex` existem no RTCIceCandidate; aceitamos os dois
-    // nomes de campo que aparecem no fio.
     let mid = v
         .get("sdpMid")
         .and_then(|x| x.as_str())
@@ -11695,8 +9536,6 @@ fn unwrap_wire_candidate(raw: &str, frame_mid: &str) -> (String, String) {
                 .map(|n| n.to_string())
         })
         .unwrap_or_else(|| frame_mid.to_string());
-    // Candidato vazio no JSON = fim do gathering; devolvemos vazio para o
-    // `add_ice_candidate` tratar como end-of-candidates, não como lixo.
     (cand, mid)
 }
 
@@ -11707,14 +9546,9 @@ async fn handle_frame(
     peer_nick: &str,
     frame: SecureFrame,
 ) -> Result<()> {
-    // PROVA DE VIDA: qualquer frame decifrado deste peer renova o relógio.
-    // É isto que impede "online" eterno depois que o outro processo morreu.
     engine.diag_update(peer_fp, |d| {
         d.last_rx_ms = crate::identity::now_ms();
     });
-    // SALA DE CHAMADA: tratada antes do gate de amizade porque o anúncio é
-    // para MEMBROS da conversa (grupo pode não ter amizade). A validação de
-    // "é membro desta conversa" acontece dentro de `room_receive`.
     if let SecureFrame::CallRoom {
         call_id,
         conv_id,
@@ -11727,8 +9561,6 @@ async fn handle_frame(
         engine.room_receive(peer_fp, call_id, conv_id, kind, state, participants.clone());
         return Ok(());
     }
-    // GATE: sinalização de chamada 1:1 só de AMIGO ACEITO — sem isso qualquer
-    // peer conectado podia te LIGAR e injetar SDP/ICE (spam/abuso).
     if matches!(
         frame,
         SecureFrame::CallInvite { .. }
@@ -11742,13 +9574,12 @@ async fn handle_frame(
             | SecureFrame::ScreenShareOffer { .. }
             | SecureFrame::ScreenShareAnswer { .. }
     ) {
-        // RATE LIMIT de sinalização: trickle ICE legítimo é dezenas/s, não
-        // centenas — acima disso é flood na fila realtime (voz).
         if engine.netlimiter.allow_call_signal(peer_fp) == Decision::Blocked {
             return Err(DistorrentError::Protocol(
                 "sinalização de chamada descartada (rate limit)".into(),
             ));
         }
+        // Seção 57: is_friend
         let is_friend = engine
             .store
             .get_friend(peer_fp)
@@ -11756,9 +9587,6 @@ async fn handle_frame(
             .flatten()
             .map(|(_, s)| s == "accepted")
             .unwrap_or(false);
-        // Chamada em GRUPO/canal: peer não-amigo do mesmo grupo/comunidade
-        // é aceito; também quando o call_id é de chamada em que EU estou
-        // (grupo pode não ter sincronizado ainda).
         let shares_chamada = call_id_do_frame(&frame)
             .map(|cid| engine.store.is_in_call(&cid, &engine.identity.fingerprint))
             .unwrap_or(false);
@@ -11777,8 +9605,6 @@ async fn handle_frame(
             })
             .unwrap_or(false);
         if !is_friend && !shares_group && !shares_comm {
-            // Silêncio aqui deixava o chamador em "Chamando…" até o watchdog
-            // de 45s. Um CallReject honesto encerra na hora do lado de lá.
             if let SecureFrame::CallInvite { call_id, .. } = &frame {
                 let _ = engine.queue_or_send_call_frame(
                     peer_fp,
@@ -11795,11 +9621,9 @@ async fn handle_frame(
     }
     match frame {
         SecureFrame::Msg(env) => {
-            // bloqueados não conversam — rejeitado no core, não na UI
             if engine.is_blocked(peer_fp) {
                 return Err(DistorrentError::Protocol("peer bloqueado".into()));
             }
-            // identidade vinculada: autor DEVE ser o peer da conexão
             if env.author_fp != peer_fp {
                 return Err(DistorrentError::Protocol(
                     "author != peer da conexão".into(),
@@ -11810,11 +9634,6 @@ async fn handle_frame(
                     "assinatura da mensagem inválida".into(),
                 ));
             }
-            // RETRANSMISSÃO = a MESMA mensagem de novo: precisa ser IDEMPOTENTE.
-            // BUG ("recebo a mesma mensagem infinitas vezes"): retransmissão
-            // caía no spam_gate ANTES do Ack — remetente reenviava para sempre
-            // e MessageNew era emitido de novo a cada tentativa. Aqui o id é
-            // a chave: já existe → confirma, não penaliza, não emite.
             if engine.store.message_by_id(&env.id)?.is_some() {
                 engine
                     .cmd_tx
@@ -11825,9 +9644,7 @@ async fn handle_frame(
                     .ok();
                 return Ok(());
             }
-            // anti-spam P2P (flood/duplicada/link) — depois da assinatura
             engine.spam_gate(peer_fp, &env.body)?;
-            // grupo: autor precisa ser membro do grupo local; DM: conv_id determinístico
             let conv_kind = engine.store.get_conversation(&env.conv_id)?.map(|c| c.kind);
             if conv_kind.as_deref() == Some("group") {
                 let is_member = engine
@@ -11872,12 +9689,8 @@ async fn handle_frame(
                     .flatten()
                     .map(|(_, s)| s == "accepted")
                     .unwrap_or(false)
-                // GRUPO APAGADO POR MIM: mensagem nova não pode ressuscitar a
-                // conversa (era o "apago e depois de um tempo ele reaparece").
                 && !crate::group_trash::is_dismissed(&engine.store, &env.conv_id)
             {
-                // lazy-join HONESTO: grupo desconhecido de AMIGO aceito — cria
-                // com o autor como único membro; GroupCreated corrige o roster.
                 engine.store.upsert_group_state(
                     &env.conv_id,
                     "Grupo",
@@ -11908,8 +9721,6 @@ async fn handle_frame(
                     ))
                     .ok();
             } else {
-                // GATE v4.3: DM de estranho é rejeitada no core (mesmo
-                // conectado); grupos exigem membresia, comunidades exigem convite.
                 let is_friend = engine
                     .store
                     .get_friend(peer_fp)
@@ -11922,6 +9733,7 @@ async fn handle_frame(
                         "DM apenas de amigo aceito".into(),
                     ));
                 }
+                // Seção 58: conv
                 let conv = engine.open_dm(peer_fp, peer_nick)?;
                 if env.conv_id != conv.id {
                     return Err(DistorrentError::Protocol(
@@ -11955,16 +9767,11 @@ async fn handle_frame(
             }
         }
         SecureFrame::Ack { msg_id } => {
-            // PROVA DE DADOS: só o Ack confirma que o caminho de volta carrega
-            // DADO nosso, não só Ping. Ver `PeerDiagInfo::last_ack_ms`.
             engine.diag_update(peer_fp, |d| {
                 d.last_ack_ms = crate::identity::now_ms();
             });
             if let Some(m) = engine.store.message_by_id(&msg_id)? {
                 if m.direction == "out" {
-                    // GATE: só o destinatário confirma (DM ⇒ peer da conversa;
-                    // grupo ⇒ membro) — sem isso peer qualquer falsificava
-                    // "delivered" de mensagens de terceiros.
                     let ack_ok = match engine
                         .store
                         .get_conversation(&m.conv_id)?
@@ -11984,7 +9791,6 @@ async fn handle_frame(
                         ));
                     }
                     engine.store.set_message_status(&msg_id, "delivered")?;
-                    // grupo não usa outbox por peer — nada a remover da fila
                     let is_group = engine
                         .store
                         .get_conversation(&m.conv_id)?
@@ -12001,11 +9807,6 @@ async fn handle_frame(
             }
         }
         SecureFrame::Read { conv_id, up_to_ts } => {
-            // Visto azul: o outro lado leu as mensagens DELE recebidas até
-            // `up_to_ts`. Mesmo gate do Ack (DM ⇒ peer da conversa; grupo ⇒
-            // membro) — sem isso peer qualquer forjava "visto".
-            // Prova de dados (ver `PeerDiagInfo::last_ack_ms`): um `Read` só
-            // existe se as NOSSAS mensagens chegaram lá.
             engine.diag_update(peer_fp, |d| {
                 d.last_ack_ms = crate::identity::now_ms();
             });
@@ -12027,9 +9828,6 @@ async fn handle_frame(
                     "Read de peer não autorizado".into(),
                 ));
             }
-            // Marca SÓ as minhas mensagens de saída antigas o bastante — a
-            // dele não tem visto (direção "in"); `read` nunca rebaixa:
-            // maior na hierarquia (pending<sending<sent<delivered<read).
             let ids = engine.store.mark_read_outgoing(&conv_id, up_to_ts)?;
             for msg_id in ids {
                 let _ = engine.events.send(EngineEvent::MessageStatus {
@@ -12048,7 +9846,6 @@ async fn handle_frame(
                 .ok();
         }
         SecureFrame::Pong { ts } => {
-            // RTT real (EMA no registry); amostras acima do timeout são lixo.
             let now = crate::identity::now_ms();
             if now >= ts {
                 let rtt = (now - ts) as u64;
@@ -12058,14 +9855,13 @@ async fn handle_frame(
             }
         }
         SecureFrame::FriendRequest { nickname } => {
-            // RATE LIMIT: 1x por sessão na prática — repetição rápida é spam.
             if engine.netlimiter.allow_friend_request(peer_fp) == Decision::Blocked {
                 return Err(DistorrentError::Protocol(
                     "friend request descartado (rate limit)".into(),
                 ));
             }
             if engine.is_blocked(peer_fp) {
-                return Ok(()); // silenciosamente ignora bloqueados
+                return Ok(());
             }
             let nick = cap_str(&nickname, 64);
             let existing = engine
@@ -12075,8 +9871,6 @@ async fn handle_frame(
                 .flatten()
                 .map(|(_, s)| s);
             match existing.as_deref() {
-                // JÁ amigos: retry (aceite perdido) → reenvia; NÃO rebaixa para
-                // pending_in (isso "desfaria" a amizade).
                 Some("accepted") => {
                     engine
                         .cmd_tx
@@ -12088,11 +9882,6 @@ async fn handle_frame(
                         ))
                         .ok();
                 }
-                // Pedido CRUZADO (os dois se adicionaram): aceita na hora.
-                // `pending_in` também cai aqui quando o OUTRO lado já é
-                // `accepted`: pode ser o mesmo usuário em outra máquina
-                // (aceitou no celular e o PC não viu) ou um retry de aceite
-                // que se perdeu. Recusar deixava a amizade só num aparelho.
                 Some("pending_out") | Some("pending_in") => {
                     engine.store.set_friend(peer_fp, &nick, "accepted")?;
                     engine
@@ -12104,6 +9893,7 @@ async fn handle_frame(
                             },
                         ))
                         .ok();
+                    // Seção 59: _
                     let _ = engine.events.send(EngineEvent::FriendAccepted {
                         fp: peer_fp.into(),
                         nickname,
@@ -12119,9 +9909,6 @@ async fn handle_frame(
             }
         }
         SecureFrame::FriendAccept { nickname } => {
-            // GATE: só vale como resposta a pedido NOSSO pendente — sem isso
-            // qualquer peer se insere como "amigo aceito" ("accepted" também
-            // passa: reenvio legítimo do flush).
             let status = engine
                 .store
                 .get_friend(peer_fp)
@@ -12157,8 +9944,6 @@ async fn handle_frame(
             community_id,
             token,
         } => {
-            // Dono OU membros conhecidos aceitam o join (seed com dono offline).
-            // Assim o servidor continua tendo seed.
             let comm = engine
                 .store
                 .get_community(&community_id)?
@@ -12212,10 +9997,7 @@ async fn handle_frame(
             engine
                 .store
                 .upsert_member(&community_id, peer_fp, peer_nick, "member")?;
-            // Convite usado: some da fila persistida e do backoff. Sem isto o
-            // pedido ficava eterno na tabela `kv` e era reenviado a cada boot.
             engine.clear_pending_join(&community_id);
-            // resposta direta ao joiner + sincroniza os demais membros online
             let frame = engine.community_state_payload(&community_id, Some(peer_fp))?;
             engine
                 .cmd_tx
@@ -12236,8 +10018,6 @@ async fn handle_frame(
             category,
             icon,
         } => {
-            // Estado pode vir do dono ou de seed membro conhecido (servidor
-            // segue disponível com o dono offline, sem aceitar estranho).
             let allowed = match engine
                 .store
                 .get_community(&community_id)?
@@ -12261,15 +10041,13 @@ async fn handle_frame(
                     }
                 }
                 None => {
-                    // Handshake autentica identidade, mas o token precisa provar
-                    // que o host emitiu o convite (host malicioso mandaria o
-                    // sync antes do JoinCommunity enfileirado).
                     let pending = engine
                         .pending_joins
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .get(&community_id)
                         .cloned();
+                    // Seção 60: Some
                     let Some(token) = pending else {
                         return Err(DistorrentError::Protocol(
                             "CommunityState sem convite pendente".into(),
@@ -12304,8 +10082,6 @@ async fn handle_frame(
                     "CommunityState fora do host".into(),
                 ));
             }
-            // sync completo em uma transação: canais (removidos no host somem
-            // aqui), cargos, bots, assignments e membros + meta do wizard (v6)
             engine.store.community_full_sync(
                 &community_id,
                 &name,
@@ -12317,17 +10093,12 @@ async fn handle_frame(
                 &members,
                 &(description, category, icon),
             )?;
-            // Confirmação real da associação: limpa o convite persistido e o
-            // backoff. A partir daqui a comunidade vive no SQLite e sobrevive
-            // a reinício sem precisar do token.
             engine.clear_pending_join(&community_id);
             let _ = engine
                 .events
                 .send(EngineEvent::CommunityJoined { community_id, name });
         }
         SecureFrame::CommunityKicked { community_id } => {
-            // frame só chega por sessão autenticada; checamos que veio do dono
-            // e aproveitamos o nome para a mensagem de erro (antes de apagar)
             let (is_host, name) = engine
                 .store
                 .get_community(&community_id)?
@@ -12352,7 +10123,6 @@ async fn handle_frame(
             title,
             members,
         } => {
-            // quem envia é o dono do grupo: precisa constar na lista dele mesmo
             if !members.iter().any(|(fp, _)| fp == peer_fp) {
                 return Err(DistorrentError::Protocol(
                     "GroupCreated sem o criador na lista".into(),
@@ -12363,15 +10133,10 @@ async fn handle_frame(
                     "GroupCreated com roster acima do limite".into(),
                 ));
             }
-            // GRUPO APAGADO POR MIM: não recria. Mas se o criador me readicionou
-            // de propósito (eu estava FORA da lista que ele mandou e agora estou
-            // dentro), é reentrada legítima: limpa o bloqueio e volta.
             let eu = &engine.identity.fingerprint;
             let me_incluiu = members.iter().any(|(fp, _)| fp == eu);
             if crate::group_trash::is_dismissed(&engine.store, &conv_id) {
                 if !me_incluiu {
-                    // Convite de grupo que apaguei e que não me inclui: ignora
-                    // em silêncio (o criador pode estar reenviando o roster).
                     return Ok(());
                 }
                 let _ = crate::group_trash::restore(&engine.store, &conv_id);
@@ -12388,7 +10153,6 @@ async fn handle_frame(
             fp,
             nickname,
         } => {
-            // remetente precisa já ser membro do grupo local
             let known = engine
                 .store
                 .list_group_members(&conv_id)?
@@ -12406,8 +10170,6 @@ async fn handle_frame(
             });
         }
         SecureFrame::GroupDeleted { conv_id } => {
-            // Só o CRIADOR encerra o grupo: o peer precisa ser o primeiro da
-            // lista (mesma autoridade usada no `GroupCreated`).
             let criador = engine
                 .store
                 .list_group_members(&conv_id)?
@@ -12436,9 +10198,7 @@ async fn handle_frame(
                 .get_community(&community_id)?
                 .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
             let is_host = comm.2 == engine.identity.fingerprint;
-            // v6 GATE: mensagem "de bot" só vale vinda do HOST (quem executa
-            // o bot) e o bot precisa existir — sem isto, um membro qualquer
-            // falsifica posts de terceiros.
+            // Seção 61: bot_id
             let bot_id = if bot_id.trim().is_empty() {
                 String::new()
             } else {
@@ -12458,7 +10218,6 @@ async fn handle_frame(
                 bot_id.trim().to_string()
             };
             if is_host {
-                // HOST: autor membro + canal existente + assinatura + vínculo à conexão
                 if engine
                     .store
                     .member_role(&community_id, &env.author_fp)
@@ -12474,7 +10233,6 @@ async fn handle_frame(
                 {
                     return Err(DistorrentError::Protocol("canal inexistente".into()));
                 }
-                // o envelope é assinado sobre conv_id — tem que ser o canal alvo
                 if env.conv_id != channel_id {
                     return Err(DistorrentError::Protocol("env.conv_id != canal".into()));
                 }
@@ -12486,16 +10244,9 @@ async fn handle_frame(
                         "author != peer da conexão".into(),
                     ));
                 }
-                // anti-spam + regras do servidor (shadow-ban, palavras, domínios)
                 engine.spam_gate(peer_fp, &env.body)?;
                 engine.server_rules_gate(&community_id, &env.author_fp, &env.body)?;
-                // ban/timeout/slowmode aplicados AO AUTOR — o portão do cliente
-                // não protege o host.
                 engine.gate_speech_for(&community_id, &channel_id, &env.author_fp)?;
-                // IDEMPOTENTE: retransmissão do MESMO frame (relay poll, túnel +
-                // sessão, `host_relay` de novo) não pode reemitir `MessageNew`.
-                // A linha já é única (`INSERT OR IGNORE`), mas o evento repetido
-                // duplicava a notificação nativa, que não dedupa por id.
                 if engine.store.message_by_id(&env.id)?.is_some() {
                     engine.host_relay(&community_id, &channel_id, &env, &bot_id)?;
                     return Ok(());
@@ -12525,15 +10276,12 @@ async fn handle_frame(
                 let _ = engine.events.send(EngineEvent::MessageNew(stored));
                 engine.host_relay(&community_id, &channel_id, &env, &bot_id)?;
             } else {
-                // MEMBRO: só aceita relayado PELO HOST
                 if peer_fp != comm.2 {
                     return Err(DistorrentError::Protocol("ChannelMsg fora do host".into()));
                 }
-                // o envelope assinado cobre conv_id — tem que ser o canal alvo
                 if env.conv_id != channel_id {
                     return Err(DistorrentError::Protocol("env.conv_id != canal".into()));
                 }
-                // autor precisa constar no roster local (sincronizado pelo host)
                 if engine
                     .store
                     .member_role(&community_id, &env.author_fp)
@@ -12541,19 +10289,12 @@ async fn handle_frame(
                 {
                     return Err(DistorrentError::Protocol("autor não é membro".into()));
                 }
-                // Assinatura: pubkey da SESSÃO é do HOST — mensagem de membro
-                // valida com a pubkey do AUTOR (peerbook); sem ela, o relay do
-                // host (sessão autenticada + roster) é a autoridade. NUNCA
-                // valida com a chave errada.
                 let sig_ok = if env.author_fp == peer_fp {
                     env.verify_with_pubkey(peer_pubkey)
                 } else {
                     match engine.store.get_peer(&env.author_fp)?.map(|p| p.pubkey_hex) {
                         Some(author_pub) => env.verify_with_pubkey(&author_pub),
                         None => {
-                            // Autor desconhecido localmente — aceita via confiança no
-                            // relay do host (sessão autenticada + roster validado).
-                            // Log de segurança para auditoria.
                             tracing::warn!(
                                 channel_msg_no_author_key = %env.author_fp,
                                 env_id = %env.id,
@@ -12566,9 +10307,6 @@ async fn handle_frame(
                 if !sig_ok {
                     return Err(DistorrentError::Protocol("assinatura inválida".into()));
                 }
-                // IDEMPOTENTE (membro): o host pode relayar o mesmo frame duas
-                // vezes (retransmissão/dupla sessão). Sem o guarda, `MessageNew`
-                // saía de novo e a notificação nativa duplicava.
                 if engine.store.message_by_id(&env.id)?.is_some() {
                     return Ok(());
                 }
@@ -12599,8 +10337,6 @@ async fn handle_frame(
         }
         SecureFrame::ChannelAck { env_id } => {
             if engine.store.message_by_id(&env_id)?.map(|m| m.direction) == Some("out".into()) {
-                // GATE: quem confirma é o HOST da comunidade dona do canal —
-                // um peer qualquer não pode falsificar entrega de canal alheio.
                 let ack_ok = engine
                     .store
                     .message_by_id(&env_id)?
@@ -12614,6 +10350,7 @@ async fn handle_frame(
                 }
                 engine.store.set_message_status(&env_id, "delivered")?;
                 engine.store.dequeue_outbox(&env_id)?;
+                // Seção 62: _
                 let _ = engine.events.send(EngineEvent::MessageStatus {
                     msg_id: env_id,
                     status: "delivered".into(),
@@ -12625,9 +10362,6 @@ async fn handle_frame(
             kind,
             target_fp: _,
         } => {
-            // DEDUP DO CONVITE REENVIADO: quem liga repete o invite enquanto a
-            // chamada não conecta (frame perdido = ninguém toca). Sem esta
-            // trava, o ring reiniciava a cada reenvio e o aviso piscava.
             if engine.ring_is_new(&call_id, peer_fp) {
                 let _ = engine.events.send(EngineEvent::CallIncoming {
                     call_id: call_id.clone(),
@@ -12635,10 +10369,6 @@ async fn handle_frame(
                     kind,
                 });
             }
-            // CONFIRMAÇÃO DE TOQUE: responde que o convite chegou e o aparelho
-            // está tocando AGORA. Idempotente (o chamador só usa como "chegou"),
-            // então o reenvio do invite não gera problema. Sem isto o chamador
-            // ficava em "Chamando…" mesmo quando nada chegou do outro lado.
             engine.queue_or_send_call_frame(
                 peer_fp,
                 SecureFrame::CallRinging {
@@ -12647,8 +10377,6 @@ async fn handle_frame(
             );
         }
         SecureFrame::CallRinging { call_id } => {
-            // GATE: só vale para chamada que EU criei — peer qualquer não pode
-            // fingir que atendeu/tocou uma chamada de terceiros.
             if engine.store.get_call_host(&call_id)?.as_deref()
                 != Some(engine.identity.fingerprint.as_str())
             {
@@ -12663,8 +10391,6 @@ async fn handle_frame(
             });
         }
         SecureFrame::CallAccept { call_id } => {
-            // GATE: aceite só vale para chamada que EU criei (sou o host dela) —
-            // evita que peer qualquer se insira em chamadas de terceiros.
             if engine.store.get_call_host(&call_id)?.as_deref()
                 != Some(engine.identity.fingerprint.as_str())
             {
@@ -12687,10 +10413,6 @@ async fn handle_frame(
         }
         SecureFrame::CallEnd { call_id } => {
             engine.store.leave_call(&call_id, peer_fp)?;
-            // SOZINHO na chamada? Ela acabou para mim também. Registro fantasma
-            // do par fazia a chamada seguinte nascer achando que havia uma em
-            // andamento ("reiniciar o app para chamar"). Em grupo, remove só
-            // o par — derrubar a chamada inteira matava a de quem fica.
             let sozinho = engine
                 .store
                 .call_participants(&call_id)
@@ -12703,39 +10425,24 @@ async fn handle_frame(
                 engine.store.end_call(&call_id)?;
             }
             #[cfg(target_os = "linux")]
-            // Só a sessão NATIVA daquele par cai — as demais da chamada
-            // (grupo/mesh) continuam de pé. `voice_hangup` derrubava todas.
             if engine.voice_is_native(&call_id, peer_fp) {
                 engine.voice_hangup_peer(&call_id, peer_fp);
                 engine.voice_forget_peer(&call_id, peer_fp);
             }
             #[cfg(target_os = "linux")]
             engine.forget_held_call(&call_id);
-            // O evento sempre traz `from_fp` = quem desligou (frontend distingue
-            // "eu saí" de "um participante saiu" — CallEnd de UM par não pode
-            // encerrar a chamada dos outros).
             let _ = engine.events.send(EngineEvent::CallEnded {
                 call_id,
                 from_fp: peer_fp.into(),
             });
         }
         SecureFrame::CallOffer { call_id, sdp } => {
-            // PONTO DE INTERCEPTAÇÃO DA VOZ NATIVA: par registrado como nativo
-            // é respondido aqui e o EngineEvent NÃO é emitido (duas RTP na
-            // mesma chamada = eco + 2x banda). Sem registro, comportamento de
-            // sempre byte a byte — preserva Windows/Android/macOS.
             #[cfg(target_os = "linux")]
             {
-                // CANAL DE VOZ: membro da comunidade ofertando canal em que
-                // ESTE nó está = sessão nativa legítima (receptor registra aqui;
-                // oferta estranha nunca ganha sessão nativa).
                 if !engine.voice_is_native(&call_id, peer_fp) && engine.native_voice_available() {
                     engine.auto_register_voice_channel(&call_id, peer_fp);
                 }
                 if !engine.voice_is_native(&call_id, peer_fp) && engine.native_voice_available() {
-                    // SÓ retém se a offer foi retida de fato; para `voice-*`
-                    // (canal) segue para o JS — antes parava aqui e a offer
-                    // desaparecia, canal sem mídia e sem erro.
                     if engine.hold_call_offer(&call_id, peer_fp, &sdp) {
                         return Ok(());
                     }
@@ -12789,10 +10496,6 @@ async fn handle_frame(
             });
         }
         SecureFrame::CallAddParticipant { call_id, fp, kind } => {
-            // MÍDIA NATIVA: o aviso de roster de quem ENTROU numa chamada já no
-            // ar é o único sinal que o host recebe (não há ring nem aceite).
-            // Sem registrar o par aqui, a offer nativa não nasce e a sala fica
-            // muda naquele nó, com o `CallAddParticipant` "funcionando".
             #[cfg(target_os = "linux")]
             {
                 let ja_na_chamada = engine.voice_is_native(&call_id, peer_fp);
@@ -12800,13 +10503,12 @@ async fn handle_frame(
                     engine.native_pair_begin(&call_id, peer_fp);
                 }
             }
+            // Seção 63: _
             let _ = engine.events.send(EngineEvent::CallParticipantAdded {
                 call_id: call_id.clone(),
                 fp,
                 kind: kind.clone(),
             });
-            // v6: kind não-vazio = este frame é o RING do convidado —
-            // emite CallIncoming (UI toca o telefone) além do badge de roster.
             if !kind.is_empty() {
                 let _ = engine.events.send(EngineEvent::CallIncoming {
                     call_id,
@@ -12819,8 +10521,6 @@ async fn handle_frame(
             community_id,
             channel_id,
         } => {
-            // GATE: só membros da comunidade mexem no voice state (senão peer
-            // qualquer injeta usuários fantasma em qualquer canal).
             if engine.store.member_role(&community_id, peer_fp).is_none() {
                 return Err(DistorrentError::Protocol(
                     "não é membro da comunidade".into(),
@@ -12831,17 +10531,8 @@ async fn handle_frame(
                 .set_voice_state(&community_id, &channel_id, peer_fp, false, false)?;
             #[cfg(target_os = "linux")]
             {
-                // Quem RECEBE o join abre a mídia quando é o lado de fingerprint
-                // MAIOR (regra de `voice_mesh_maybe_offer`) — antes a mesh só
-                // nascia de quem entrou vendo os outros, e entradas juntas
-                // deixavam o canal mudo para sempre.
                 engine.voice_mesh_maybe_offer(&community_id, &channel_id, peer_fp);
             }
-            // ANÚNCIO REVERSO — TODAS AS PLATAFORMAS. BUG CORRIGIDO ("conectados
-            // mas não se veem"): quem entra depois de mim nunca sabia que eu
-            // estou lá (só Linux tapava, via cfg). Se EU estou no canal e sou
-            // o lado de fp MENOR, respondo com meu `VoiceState` (regra
-            // determinística de quem oferece — evita glare).
             if engine.identity.fingerprint.as_str() < peer_fp {
                 let estou_no_canal = engine
                     .store
@@ -12852,8 +10543,6 @@ async fn handle_frame(
                     })
                     .unwrap_or(false);
                 if estou_no_canal {
-                    // Mudo/ensurdecido REAIS: anunciar `false,false` fixo fazia
-                    // o par mostrar "mudo" errado logo depois de um rejoin.
                     let (muted, deafened) = engine
                         .store
                         .my_voice_states(&engine.identity.fingerprint)
@@ -12896,8 +10585,6 @@ async fn handle_frame(
                 .leave_voice(&community_id, &channel_id, peer_fp)?;
             #[cfg(target_os = "linux")]
             {
-                // Sessão nativa DO CANAL deste par cai (demais do mesh continuam) —
-                // sem isso o core seguia enviando RTP para quem saiu.
                 let call_id = format!("voice-{}-{}", community_id, channel_id);
                 if engine.voice_is_native(&call_id, peer_fp) {
                     engine.voice_hangup_peer(&call_id, peer_fp);
@@ -12926,8 +10613,6 @@ async fn handle_frame(
                 .store
                 .set_voice_state(&community_id, &channel_id, peer_fp, muted, deafened)?;
             #[cfg(target_os = "linux")]
-            // Este frame é o anúncio do lado menor ao receber um VoiceJoin: o
-            // joiner passa a me enxergar e a mesh nativa completa. Idempotente.
             engine.voice_mesh_maybe_offer(&community_id, &channel_id, peer_fp);
             let _ = engine.events.send(EngineEvent::VoiceStateChanged {
                 community_id,
@@ -12937,9 +10622,7 @@ async fn handle_frame(
                 deafened,
             });
         }
-        SecureFrame::CallRoom { .. } => {
-            // Tratado antes do gate de amizade (ver topo de `handle_frame`).
-        }
+        SecureFrame::CallRoom { .. } => {}
         SecureFrame::FileAnnounce {
             file_id,
             name,
@@ -12948,8 +10631,6 @@ async fn handle_frame(
             hash,
             chunk_hashes,
         } => {
-            // Limites anti-DoS: strings curtas e contagem de chunks sanável —
-            // a UI itera `chunks` (Array.from) e o hash vira chave no kv.
             if file_id.len() > 128 || name.len() > 255 || hash.len() > 128 {
                 return Err(DistorrentError::Protocol(
                     "FileAnnounce com campos gigantes".into(),
@@ -12960,8 +10641,6 @@ async fn handle_frame(
                     "FileAnnounce com chunks excessivos".into(),
                 ));
             }
-            // Coerência anunciada × real: um peer malicioso não passa pelo
-            // `validateAnnounce` do outro lado (core sofre a consequência).
             const CHUNK_BYTES: u64 = 256 * 1024;
             let expected_chunks = std::cmp::max(1, size.div_ceil(CHUNK_BYTES));
             if chunks as u64 != expected_chunks && size > 0 {
@@ -12974,8 +10653,6 @@ async fn handle_frame(
                     "FileAnnounce com tamanho acima do teto".into(),
                 ));
             }
-            // `chunk_hashes`: cardinalidade errada permitiria escolher QUAIS
-            // chunks ficam sem validar.
             if let Some(hs) = &chunk_hashes {
                 if hs.len() != chunks as usize {
                     return Err(DistorrentError::Protocol(
@@ -12988,6 +10665,7 @@ async fn handle_frame(
                     ));
                 }
             }
+            // Seção 64: name
             let name = cap_str(&name, 255);
             let _ = engine.store.announce_file(
                 &file_id,
@@ -12997,7 +10675,6 @@ async fn handle_frame(
                 &hash,
                 peer_fp,
             );
-            // persiste chunk_hashes para verificação se vier (compat: None = legado sem verificação)
             if let Some(hs) = &chunk_hashes {
                 let hs_json = serde_json::to_string(hs).unwrap_or_else(|_| "[]".into());
                 let _ = engine
@@ -13015,8 +10692,6 @@ async fn handle_frame(
             });
         }
         SecureFrame::FileChunkRequest { file_id, index } => {
-            // RATE LIMIT: cada pedido vira leitura de disco + frame de 256 KB
-            // — flood é DoS de IO/banda.
             if engine.netlimiter.allow_chunk_request(peer_fp) == Decision::Blocked {
                 return Err(DistorrentError::Protocol(
                     "chunk request descartado (rate limit)".into(),
@@ -13033,9 +10708,6 @@ async fn handle_frame(
             index,
             data_b64,
         } => {
-            // Teto por bloco: lixo de 900 KB num bloco de 256 KB deixava o
-            // arquivo com tamanho errado (hash só acusaria no fim).
-            // base64 infla ~4/3: 384 KB de bloco ≈ 512 KB de string.
             if data_b64.len() > MAX_CHUNK_BYTES * 4 / 3 + 8 {
                 return Err(DistorrentError::Protocol(
                     "FileChunkData acima do tamanho de bloco".into(),
@@ -13056,7 +10728,7 @@ async fn handle_frame(
         SecureFrame::FileHave {
             file_id: _,
             indices: _,
-        } => { /* swarm have — UI usa */ }
+        } => {}
         SecureFrame::ScreenShareOffer { call_id, sdp } => {
             let _ = engine.events.send(EngineEvent::ScreenShareOfferEv {
                 call_id,
@@ -13072,9 +10744,6 @@ async fn handle_frame(
             });
         }
         SecureFrame::PeerExchange { peers } => {
-            // PEX: peer confiável compartilha peers conhecidos; conecta nos que
-            // faltam E nos que estão só via relay (upgrade agressivo, direta
-            // em background sem derrubar o relay).
             for p in peers {
                 if p.fp == engine.identity.fingerprint {
                     continue;
@@ -13089,8 +10758,7 @@ async fn handle_frame(
                 let via_relay = online && engine.is_peer_via_relay(&p.fp);
                 if online && !via_relay {
                     continue;
-                } // direta online → nada a fazer
-                  // relay vivo (via_relay) → NÃO pula: tenta direta em background
+                }
                 if !online
                     && engine.peer_state(&p.fp) != crate::net::engine::NetworkState::Disconnected
                 {
@@ -13107,23 +10775,14 @@ async fn handle_frame(
                 }
             }
         }
-        // ---------- peer-relay: intermediário (v0) ----------
-        // Guarda corpo OPACO (ciphertext A↔B) em broker em memória por tópico.
-        // NUNCA persiste/cria amizade/emite evento. Anônimo: não atua.
         SecureFrame::PeerRelayPut { topic, body } => {
             if engine.peer_relay_serving_enabled() {
-                // (F1) `put` é livre (qualquer peer publica no tópico de quem
-                // lê); o ACL de drenagem fica no `get`.
                 let _ = crate::net::peer_relay::put(peer_fp, &topic, &body);
             }
         }
-        // Drena o tópico e responde com `PeerRelayData` (correlaciona por
-        // req_id). Lista vazia fecha o poll do peer na hora, sem timeout.
         SecureFrame::PeerRelayGet { req_id, topic } => {
             if engine.peer_relay_serving_enabled() {
-                // (F1) Só o dono do tópico (peer_fp autenticado) drena.
                 let bodies = crate::net::peer_relay::get(peer_fp, &topic, req_id);
-                // (F6) Garante que o `PeerRelayData` serializado caiba em MAX_FRAME.
                 let bodies = crate::net::peer_relay::fit_relay_data(bodies);
                 engine
                     .cmd_tx
@@ -13134,26 +10793,17 @@ async fn handle_frame(
                     .ok();
             }
         }
-        // Sou quem PEDIU: entrego ao backend peer-relay pendente (oneshot).
         SecureFrame::PeerRelayData { req_id, bodies } => {
-            // (F2) Só aceita a resposta do INTERMEDIÁRIO ELETADO; um peer
-            // qualquer que adivinhe/roube um req_id não entrega nada.
             if engine.peer_relay_fp().as_deref() != Some(peer_fp) {
                 debug!(%peer_fp, "peer-relay: PeerRelayData ignorado (não é o intermediário)");
                 return Ok(());
             }
-            // A entrega vai SEMPRE para o backend do intermediário eleito —
-            // não para o `active_relay_backend`, que pode ser o relay público
-            // (preferido para post/poll desde a correção do rendezvous).
             let backend = engine.peer_relay_backend_for(peer_fp);
             if !backend.deliver(req_id, bodies) {
                 debug!("peer-relay: PeerRelayData órfão (req_id={req_id})");
             }
         }
         SecureFrame::Bye => return Err(DistorrentError::Protocol("peer encerrou (Bye)".into())),
-        // ================= camada social v3 =================
-        // Autenticado pela sessão AEAD; ainda assim revalida AUTOR/PERMISSÃO
-        // no core (a UI não decide nada).
         SecureFrame::React {
             conv_id,
             msg_id,
@@ -13179,9 +10829,7 @@ async fn handle_frame(
             if engine.is_blocked(peer_fp) {
                 return Ok(());
             }
-            // A citação precisa EXISTIR, estar na MESMA conversa e ser do autor
-            // — sem isso peer citava mensagem alheia (vazamento) ou fixava id
-            // órfão que a UI nunca resolvia.
+            // Seção 65: Some
             let Some(mine) = engine.store.message_by_id(&msg_id).ok().flatten() else {
                 return Err(DistorrentError::Protocol(
                     "citação de mensagem inexistente".into(),
@@ -13238,7 +10886,6 @@ async fn handle_frame(
             if orig.conv_id != conv_id {
                 return Err(DistorrentError::Protocol("conversa divergente".into()));
             }
-            // SÓ O AUTOR edita (como no Discord).
             if orig.author_fp != peer_fp {
                 return Err(DistorrentError::Protocol("só o autor edita".into()));
             }
@@ -13306,8 +10953,6 @@ async fn handle_frame(
             msg_id,
             pinned,
         } => {
-            // Fixar é ato de MODERAÇÃO — sem o gate, peer qualquer trancaava
-            // canal de terceiros.
             if !engine.can_moderate_conv(&conv_id, peer_fp) {
                 return Err(DistorrentError::Protocol("sem permissão para fixar".into()));
             }
@@ -13349,16 +10994,11 @@ async fn handle_frame(
             env,
             from_label,
         } => {
-            // Encaminhamento = o peer re-assina o conteúdo e entrega. O
-            // receptor valida a assinatura dele e mostra a origem.
             if env.author_fp != peer_fp || !env.verify_with_pubkey(peer_pubkey) {
                 return Err(DistorrentError::Protocol("encaminhamento inválido".into()));
             }
+            // Seção 66: label
             let label = cap_str(&from_label, 120);
-            // IDEMPOTENTE: o encaminhamento pode chegar duas vezes (retransmissão
-            // de canal, relay + sessão direta). Sem este guarda o `INSERT OR
-            // IGNORE` não duplica a LINHA, mas o `MessageNew` era reemitido e a
-            // notificação nativa (que não dedupa por id) aparecia repetida.
             if engine.store.message_by_id(&env.id)?.is_some() {
                 return Ok(());
             }
@@ -13393,7 +11033,6 @@ async fn handle_frame(
             });
         }
         SecureFrame::PresencePing => {
-            // Responde com a NOSSA presença (antes ecoava a do remetente).
             let p = engine
                 .store
                 .presence_get_live(&engine.identity.fingerprint)
@@ -13419,8 +11058,6 @@ async fn handle_frame(
             if engine.is_blocked(peer_fp) {
                 return Ok(());
             }
-            // Sanidade: só para conversa que o peer participa (senão peer
-            // qualquer "digita" em DM alheia).
             if !engine
                 .social_peers_of(&conv_id)
                 .iter()
@@ -13428,7 +11065,6 @@ async fn handle_frame(
             {
                 return Ok(());
             }
-            // Relógio adiantado não pode deixar "digitando" eterno: teto 15s.
             let now = crate::identity::now_ms();
             let until = until_ms.clamp(now, now + 15_000);
             for fp in engine.social_peers_of(&conv_id) {
@@ -13485,8 +11121,6 @@ async fn handle_frame(
             let bn = cap_b64(&banner_b64, PROFILE_BANNER_B64_MAX);
             let ac = normalize_accent(&accent);
 
-            // `content_hash` recalculado dos bytes gravados: campo adulterado
-            // não "carimba" hash que não corresponde ao conteúdo.
             let calculado = crate::social::profile_content_hash(&dn, &ab, &av, &bn, &ac);
             if !content_hash.is_empty() && content_hash != calculado {
                 return Err(DistorrentError::Protocol(
@@ -13494,7 +11128,6 @@ async fn handle_frame(
                 ));
             }
 
-            // Revisão maior vence; `rev` negativo é inválido (só autor incrementa).
             if rev < 0 {
                 return Err(DistorrentError::Protocol(
                     "ProfileSet com rev negativo".into(),
@@ -13504,10 +11137,8 @@ async fn handle_frame(
                 .store
                 .profile_apply_remote(peer_fp, &dn, &ab, &av, &bn, &ac, rev)?;
             if !applied {
-                // Nada mudou/versão velha: não regrava, não emite (caso comum).
                 return Ok(());
             }
-            // display name vira o nome de exibição da amizade
             if !dn.is_empty() {
                 let _ = engine.store.set_friend(peer_fp, &dn, "accepted");
             }
@@ -13517,12 +11148,11 @@ async fn handle_frame(
                 profile: p,
             });
         }
-        // Reconciliação: responde com o perfil COMPLETO só se tivermos revisão
-        // mais nova — senão cada tique de 10 min retransmitiria avatar/capa.
         SecureFrame::ProfileQuery { known_rev } => {
             if engine.is_blocked(peer_fp) {
                 return Ok(());
             }
+            // Seção 67: me
             let me = engine.identity.fingerprint.clone();
             let Ok(p) = engine.store.profile_get(&me) else {
                 return Ok(());
@@ -13594,8 +11224,6 @@ async fn handle_frame(
             if engine.store.member_role(&community_id, peer_fp).is_none() {
                 return Err(DistorrentError::Protocol("thread só para membro".into()));
             }
-            // IDEMPOTENTE: retransmissão do mesmo frame reemitia `MessageNew`
-            // (notificação nativa repetida). A linha já é única por id.
             if engine.store.message_by_id(&env.id)?.is_some() {
                 return Ok(());
             }
@@ -13624,7 +11252,6 @@ async fn handle_frame(
             until_ms,
             reason,
         } => {
-            // Quem aplica é o DONO do servidor (autoridade = dono).
             let is_owner = engine
                 .store
                 .get_community(&community_id)
@@ -13642,7 +11269,6 @@ async fn handle_frame(
                 peer_fp,
                 until_ms,
             );
-            // tira o membro localmente (a comunidade já não é acessível)
             let _ = engine.store.remove_member(&community_id, &target_fp);
             let _ = engine.events.send(EngineEvent::ModerationApplied {
                 community_id: community_id.clone(),
@@ -13679,6 +11305,7 @@ async fn handle_frame(
                 &cap_str(&reason, 300),
                 peer_fp,
             );
+            // Seção 68: _
             let _ = engine.events.send(EngineEvent::ModerationApplied {
                 community_id: community_id.clone(),
                 target_fp: target_fp.clone(),
@@ -13832,6 +11459,7 @@ async fn handle_frame(
             ev.name = cap_str(&ev.name, 100);
             ev.location = cap_str(&ev.location, 120);
             ev.description = cap_str(&ev.description, 500);
+            // Seção 69: _
             let _ = engine.store.event_upsert(&ev);
             let _ = engine.events.send(EngineEvent::EventUpdated {
                 community_id: community_id.clone(),
@@ -13889,31 +11517,22 @@ async fn handle_frame(
             at_ms,
             nonce: _,
         } => {
-            // Kill-flag: sem furo, não diala; o listener segue aceitando um
-            // dial inbound normal do peer (então não fechamos a porta).
             if !engine.punch_enabled() {
                 return Ok(());
             }
-            // Hole punching: peer autenticado pede furo TCP simultâneo para o
-            // endpoint público dele; furamos a partir da NOSSA porta de escuta
-            // (NAT vê saída e abre volta). Handshake valida o fp depois.
             let Ok(remote) = endpoint.parse::<SocketAddr>() else {
                 debug!("punch com endpoint inválido — ignora");
                 return Ok(());
             };
-            // Loopback permitido (testes + mesmo host); handshake valida o fp.
             if remote.ip().is_unspecified() || remote.port() == 0 {
                 debug!("punch para endereço inválido — ignora");
                 return Ok(());
             }
-            // já tem direta? não gasta furo à toa
             if engine.peer_state(peer_fp) == NetworkState::Connected
                 && !engine.is_peer_via_relay(peer_fp)
             {
                 return Ok(());
             }
-            // Rate-limit anti-amplificação: peer não força 3 dials dezenas de
-            // vezes por segundo para alvo arbitrário; 1 Punch/s basta.
             {
                 let now = crate::identity::now_ms();
                 let mut map = engine.punch_rate.lock().unwrap_or_else(|e| e.into_inner());
@@ -13927,8 +11546,6 @@ async fn handle_frame(
                 }
                 map.insert(peer_fp.to_string(), now);
             }
-            // delega ao command_loop (PunchDial): fura a partir da NOSSA
-            // porta de escuta no instante combinado; handshake valida o fp.
             engine
                 .cmd_tx
                 .send(EngineCmd::PunchDial {
@@ -13964,9 +11581,6 @@ async fn handle_frame(
         SecureFrame::TunnelData { nonce, ct_b64 } => {
             handle_tunnel_data(engine, peer_fp, nonce, &ct_b64);
         }
-        // Um membro pediu o estado do servidor (reinício/reconexão).
-        // AUTORIZAÇÃO: só membro do roster (ou dono) — sem isso peer qualquer
-        // leria a estrutura de servidor que não participa.
         SecureFrame::CommunitySyncRequest { community_id } => {
             let is_member = engine.store.member_role(&community_id, peer_fp).is_some();
             let is_owner = engine
@@ -13981,7 +11595,6 @@ async fn handle_frame(
                     "CommunitySyncRequest de quem não é membro".into(),
                 ));
             }
-            // O payload é POR MEMBRO (tokens mascarados para quem não é dono).
             if let Ok(frame) = engine.community_state_payload(&community_id, Some(peer_fp)) {
                 engine
                     .cmd_tx
@@ -13993,9 +11606,6 @@ async fn handle_frame(
     Ok(())
 }
 
-/// Portas já ligadas por engines DESTE processo. SO_REUSEPORT entre processos
-/// é desejado, mas DENTRO do processo dois listeners na mesma porta era flake
-/// garantido (dial caía no listener errado). Um engine por porta.
 static PROCESS_PORTS: std::sync::OnceLock<StdMutex<std::collections::HashSet<u16>>> =
     std::sync::OnceLock::new();
 
@@ -14003,24 +11613,21 @@ fn process_ports() -> &'static StdMutex<std::collections::HashSet<u16>> {
     PROCESS_PORTS.get_or_init(|| StdMutex::new(std::collections::HashSet::new()))
 }
 
-/// True quando o engine foi desligado (loop deve parar).
+// Seção 70: cancelled
 fn cancelled(cancel: &tokio::sync::watch::Receiver<bool>) -> bool {
     *cancel.borrow()
 }
 
 impl NetworkEngine {
-    /// Recebedor do sinal de cancelamento (loops fora deste módulo).
     pub(crate) fn cancel_subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
         self.cancel_tx.subscribe()
     }
 
-    /// True quando o engine foi desligado.
     pub(crate) fn is_cancelled(&self, cancel: &tokio::sync::watch::Receiver<bool>) -> bool {
         *cancel.borrow()
     }
 }
 
-/// Erro curto e legível para a UI/diagnóstico (sem paths enormes).
 fn short_diag_err(s: &str) -> String {
     let mut t = s.trim().replace('\n', " ");
     if let Some(rest) = t.strip_prefix("os error ") {
@@ -14032,9 +11639,6 @@ fn short_diag_err(s: &str) -> String {
     t
 }
 
-/// Derruba um link cujo canal de escrita está MORTO (sessão half-open:
-/// estado "conectado", mensagens sumindo). Só remove com `tx` de fato fechado
-/// — falha por buffer não derruba sessão saudável.
 fn drop_link_if_dead(engine: &Arc<NetworkEngine>, fp: &str) {
     let morto = {
         let links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
@@ -14058,8 +11662,6 @@ fn drop_link_if_dead(engine: &Arc<NetworkEngine>, fp: &str) {
     engine.emit_state();
 }
 
-/// `call_id` de um frame de sinalização — o gate precisa saber a que chamada
-/// o frame pertence (em grupo, a sinalização pode ser legítima sem amizade).
 fn call_id_do_frame(frame: &SecureFrame) -> Option<String> {
     match frame {
         SecureFrame::CallInvite { call_id, .. }
@@ -14081,8 +11683,6 @@ fn set_link_state(engine: &Arc<NetworkEngine>, fp: &str, state: PeerLinkState) {
     }
     {
         let mut links = engine.links.lock().unwrap_or_else(|e| e.into_inner());
-        // ANTI-FLAP (direta agressiva): dial direto em background NÃO derruba
-        // sessão Online — só a eleição em `register_and_run` troca de sessão.
         if let Some(existing) = links.get(fp) {
             if existing.get_state() == PeerLinkState::Online
                 && (state == PeerLinkState::Connecting || state == PeerLinkState::Reconnecting)
@@ -14096,8 +11696,6 @@ fn set_link_state(engine: &Arc<NetworkEngine>, fp: &str, state: PeerLinkState) {
                 tx: None,
                 drop_notify: Notify::new(),
                 via_relay: false,
-                // Placeholder: sem sessão ainda; a direção real entra em
-                // `register_and_run`.
                 initiator: false,
             })
         });
@@ -14135,8 +11733,6 @@ mod tests {
             )
             .unwrap();
         let mut events = e.subscribe();
-        // Captura a fila do motor sem iniciar rede real; assim o teste prova
-        // que frames aceitos ecoam e frames barrados não entram na fila.
         let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
 
         let msg_ids: Vec<String> = (0..6)
@@ -14162,8 +11758,6 @@ mod tests {
                     msg_id: msg_id.clone(),
                     emoji: "🔥".into(),
                     add: true,
-                    // Campo declarado é adulterado de propósito: somente a
-                    // identidade da sessão pode virar `reactor_fp` persistido.
                     reactor_fp: "vitima-falsificada".into(),
                 },
             )
@@ -14171,8 +11765,6 @@ mod tests {
             .unwrap();
         }
 
-        // Repetir exatamente o último estado é deduplicado e não consome
-        // outro evento nem outro envio para os membros do grupo.
         handle_frame(
             &e,
             peer,
@@ -14189,8 +11781,6 @@ mod tests {
         .await
         .unwrap();
 
-        // Mesmo uma identidade autorizada não pode criar estado órfão para
-        // um id que nunca foi persistido nesta conversa.
         handle_frame(
             &e,
             peer,
@@ -14207,7 +11797,6 @@ mod tests {
         .await
         .unwrap();
 
-        // A 6ª mudança no burst é descartada sem encerrar a sessão.
         handle_frame(
             &e,
             peer,
@@ -14224,6 +11813,7 @@ mod tests {
         .await
         .unwrap();
 
+        // Seção 71: stored
         let stored = e.store.reactions_for_msg(&msg_ids[0]).unwrap();
         assert_eq!(stored[0].reactors, vec![peer.to_string()]);
         assert!(e
@@ -14253,8 +11843,6 @@ mod tests {
     #[test]
     fn relay_kill_switch_desliga_e_religa() {
         let (e, _d) = mk_engine("KillSwitch");
-        // Relay DEFAULT LIGADO (fail-open): era o bug do "0 peers" — opt-in
-        // silencioso que ninguém setava. Desliga explicitamente.
         assert!(
             !e.relay_is_disabled(),
             "relay deve vir LIGADO por padrao (fallback CGNAT)"
@@ -14266,8 +11854,6 @@ mod tests {
         assert!(relay_allowed(&e), "flag desligada religa o relay");
     }
 
-    /// Regra PURA do novo default: `DISTORRENT_RELAY` ausente ⇒ LIGADO;
-    /// `DISTORRENT_RELAY=0/false/no/off` ⇒ desligado (opt-out explícito).
     #[test]
     fn relay_default_fail_open() {
         assert!(env_relay_enabled(), "sem DISTORRENT_RELAY: relay LIGADO");
@@ -14287,9 +11873,7 @@ mod tests {
     fn backend_injetado_nao_desliga_sozinho() {
         let (e, _d) = mk_engine("Injected");
         e.set_relay_backend(Arc::new(MemRelay::new()));
-        // Backend custom nao desliga o relay por si so (testes dependem disso).
         assert!(relay_allowed(&e));
-        // So o kill-switch explicito desliga, mesmo com backend injetado.
         e.set_relay_disabled(true);
         assert!(!relay_allowed(&e));
     }
@@ -14297,7 +11881,6 @@ mod tests {
     #[test]
     fn punch_kill_switch_liga_e_desliga() {
         let (e, _d) = mk_engine("PunchSwitch");
-        // Default: furo ligado (opt-out só via DISTORRENT_PUNCH=0).
         assert!(e.punch_enabled());
         e.set_punch_enabled(false);
         assert!(
@@ -14323,24 +11906,17 @@ mod tests {
 
     #[test]
     fn keepalive_direto_dentro_de_30s() {
-        // Requisito: em sessão direta idle, Ping <= ~30s mantém o pinhole vivo.
         assert!(PING_INTERVAL <= Duration::from_secs(30));
         assert!(NAT_RENEW_INTERVAL < Duration::from_secs(3600));
     }
 
-    /// Intermediário peer-relay: Put guarda ciphertext; Get drena e responde
-    /// com PeerRelayData correlacionado por req_id. Nenhum evento de UI.
     #[tokio::test]
     async fn peer_relay_intermediario_put_get_data() {
         let (relay, _d) = mk_engine("PeerRelayC");
-        // (F7) peer-relay é opt-in.
         relay.set_peer_relay_enabled(true);
-        // command_loop precisa rodar p/ o handle_frame entregar via cmd_tx.
         relay.start_with_discovery(false).unwrap();
-        // (F1) tópico precisa ser do DONO (peerB) p/ o get ser autorizado.
         let topic = "distorrent_r_peerB";
 
-        // Link ONLINE DIRETO simulado p/ o peer B (captura o que C devolve).
         let (tx_b, mut rx_b) = mpsc::unbounded_channel::<(u8, SecureFrame)>();
         relay.links.lock().unwrap().insert(
             "peerB".into(),
@@ -14353,7 +11929,6 @@ mod tests {
             }),
         );
 
-        // A deposita ciphertext no tópico do B (via intermediário C).
         handle_frame(
             &relay,
             "peerA",
@@ -14367,7 +11942,6 @@ mod tests {
         .await
         .unwrap();
 
-        // B consulta: C responde PeerRelayData com o conteúdo.
         handle_frame(
             &relay,
             "peerB",
@@ -14387,7 +11961,6 @@ mod tests {
                     resp = Some(bodies);
                     break;
                 }
-                // PeerRelayGet do manager peer-relay (mesmo link fake) — ignora.
                 Ok(_) => continue,
                 Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
             }
@@ -14397,7 +11970,6 @@ mod tests {
             vec!["CIFRADO".to_string()]
         );
 
-        // Segundo Get: tópico drenado → lista vazia (fecha o poll sem timeout).
         handle_frame(
             &relay,
             "peerB",
@@ -14410,6 +11982,7 @@ mod tests {
         )
         .await
         .unwrap();
+        // Seção 72: mut
         let mut resp2 = None;
         for _ in 0..200 {
             match rx_b.try_recv() {
@@ -14425,15 +11998,12 @@ mod tests {
         relay.shutdown();
     }
 
-    /// PeerRelayBackend: `post` vira `PeerRelayPut` no intermediário e `poll`
-    /// vira `PeerRelayGet` + espera `PeerRelayData` (oneshot por req_id).
     #[tokio::test]
     async fn peer_relay_backend_post_e_deliver() {
         let (a, _d) = mk_engine("PeerRelayClient");
         a.set_relay_backend(Arc::new(MemRelay::new()));
         a.start_with_discovery(false).unwrap();
 
-        // Link DIRETO Online fake p/ o intermediário C.
         let (tx_c, mut rx_c) = mpsc::unbounded_channel::<(u8, SecureFrame)>();
         a.links.lock().unwrap().insert(
             "relayC".into(),
@@ -14464,7 +12034,6 @@ mod tests {
             other => panic!("frame inesperado: {other:?}"),
         }
 
-        // poll registra oneshot e envia PeerRelayGet; deliver resolve.
         let b2 = backend.clone();
         let handle = tokio::spawn(async move { b2.poll("distorrent_r_meu").await });
         let mut req_id = None;
@@ -14487,8 +12056,6 @@ mod tests {
         a.shutdown();
     }
 
-    /// Seleção do intermediário: direto online em normal/encrypted; DESLIGADO
-    /// em proxy/full e sob kill-switch explícito.
     #[test]
     fn peer_relay_selecao_respeita_privacidade_e_kill_switch() {
         let (e, _d) = mk_engine("PeerRelaySelect");
@@ -14504,13 +12071,10 @@ mod tests {
             }),
         );
 
-        // (F7) peer-relay é opt-in; habilita explicitamente p/ testar a eleição.
         e.set_peer_relay_enabled(true);
-        // normal/encrypted (default) → seleciona o peer direto.
         e.refresh_peer_relay();
         assert_eq!(e.peer_relay_fp().as_deref(), Some("peerC"));
 
-        // proxy/full → NÃO usa peer-relay (o intermediário veria o IP real).
         e.privacy_set_mode("proxy").unwrap();
         e.refresh_peer_relay();
         assert_eq!(e.peer_relay_fp(), None, "proxy nao usa peer-relay");
@@ -14519,7 +12083,6 @@ mod tests {
         e.refresh_peer_relay();
         assert_eq!(e.peer_relay_fp().as_deref(), Some("peerC"));
 
-        // kill-switch explícito desliga o peer-relay; religar volta.
         e.set_relay_disabled(true);
         e.refresh_peer_relay();
         assert_eq!(e.peer_relay_fp(), None, "kill-switch desliga peer-relay");
@@ -14528,8 +12091,6 @@ mod tests {
         assert_eq!(e.peer_relay_fp().as_deref(), Some("peerC"));
     }
 
-    /// (F2) `PeerRelayData` de um peer que NÃO é o intermediário é ignorado
-    /// (mesmo com o `req_id` correto).
     #[tokio::test]
     async fn peer_relay_data_so_do_intermediario() {
         let (e, _d) = mk_engine("DataGuard");
@@ -14550,13 +12111,11 @@ mod tests {
         e.start_with_discovery(false).unwrap();
 
         let backend = e.peer_relay_backend_for("mid");
-        // Registra um pedido pendente e descobre o req_id real.
         let fut = backend.poll("distorrent_r_mid");
         let ids = backend.pending_req_ids();
         assert_eq!(ids.len(), 1, "deveria haver 1 pedido pendente");
         let req_id = ids[0];
 
-        // Atacante tenta entregar o req_id — deve ser ignorado.
         handle_frame(
             &e,
             "atacante",
@@ -14571,7 +12130,6 @@ mod tests {
         .unwrap();
         assert_eq!(backend.pending_len(), 1, "não-intermediário não entrega");
 
-        // O intermediário eleito entrega de verdade.
         handle_frame(
             &e,
             "mid",
@@ -14588,8 +12146,8 @@ mod tests {
         assert_eq!(fut.await.unwrap(), vec!["ok".to_string()]);
     }
 
-    /// (F4) Peer bloqueado nunca é eleito intermediário.
     #[test]
+    // Seção 73: peer_relay_nao_elege_bloqueado
     fn peer_relay_nao_elege_bloqueado() {
         let (e, _d) = mk_engine("BlockElect");
         e.set_peer_relay_enabled(true);
@@ -14613,8 +12171,6 @@ mod tests {
         );
     }
 
-    /// Contrato do wire TS: NatEndpoint serializa como `nat_endpoint` (sem
-    /// sufixo Ev — o alias do tauri.ts não precisa de entrada).
     #[test]
     fn nat_endpoint_serializa_sem_sufixo_ev() {
         let ev = EngineEvent::NatEndpoint {
@@ -14630,25 +12186,19 @@ mod tests {
         assert_eq!(v.get("source").and_then(|s| s.as_str()), Some("upnp"));
     }
 
-    /// BUG2: DHT nunca anuncia a TCP interna — só externa confirmada ou nada.
     #[test]
     fn dht_announce_port_so_externa_confirmada() {
         let (e, _d) = mk_engine("DhtPort");
-        // Sem STUN/UPnP: nada para anunciar (não a porta interna!).
         assert_eq!(e.dht_announce_port(), None);
-        // UPnP/NAT-PMP mapeou 45678: anuncia ela, não a interna.
         e.nat_external_port.store(45678, Ordering::Relaxed);
         assert_eq!(e.dht_announce_port(), Some(45678));
         assert_ne!(e.dht_announce_port(), Some(e.listen_port()));
-        // Cache STUN (public_addr) tem precedência.
         e.set_public_addr("203.0.113.7:51234".to_string());
         assert_eq!(e.dht_announce_port(), Some(51234));
-        // public_addr malformado cai de volta para a externa mapeada.
         e.set_public_addr("lixo".to_string());
         assert_eq!(e.dht_announce_port(), Some(45678));
     }
 
-    /// BUG8: peer_diag limitado a 512, mantendo os tocados por último.
     #[test]
     fn peer_diag_bound_512_mantem_recentes() {
         let (e, _d) = mk_engine("DiagBound");
@@ -14663,11 +12213,6 @@ mod tests {
         assert!(map.contains_key("fp0599"), "mais recente fica");
         assert!(!map.contains_key("fp0000"), "mais antigo sai");
     }
-
-    // ------------------------------------------------------------ voz nativa
-    //
-    // A REGRA DE COEXISTÊNCIA: sem sessão nativa registrada, a sinalização
-    // continua indo para o JS — é isso que mantém os outros navegadores.
 
     #[cfg(target_os = "linux")]
     const PEER: &str = "peer-web";
@@ -14684,8 +12229,6 @@ mod tests {
         rx.try_recv().ok().map(|e| format!("{e:?}"))
     }
 
-    /// Offer sem registro: com mídia nativa VIVA é RETIDA (WebKitGTK não tem
-    /// RTCPeerConnection); sem mídia (outras plataformas) o evento sai como sempre.
     #[test]
     #[cfg(target_os = "linux")]
     fn call_offer_sem_sessao_nativa_vai_para_o_js() {
@@ -14705,7 +12248,6 @@ mod tests {
             "par não registrado não pode virar sessão nativa"
         );
         if e.native_voice_available() {
-            // Nova semântica (Linux com mídia): retida, sem evento.
             assert!(
                 proximo_evento(&mut rx).is_none(),
                 "offer pré-aceite retida não pode vazar para o JS"
@@ -14718,7 +12260,6 @@ mod tests {
             );
             e.voice_hangup(call_id);
         } else {
-            // Caminho do navegador (Windows/Android/macOS): evento como sempre.
             let ev = proximo_evento(&mut rx).expect("deve haver evento para o JS");
             assert!(
                 ev.contains("CallOfferEv"),
@@ -14744,14 +12285,10 @@ mod tests {
         }
     }
 
-    /// COM sessão nativa: o `CallOffer` é absorvido e NENHUM evento de
-    /// `CallOfferEv` é emitido (duas RTP na mesma chamada = eco + 2x banda).
     #[test]
     #[cfg(target_os = "linux")]
     fn call_offer_com_sessao_nativa_nao_vai_para_o_js() {
         let (e, _d) = engine_com_amigo("CoexistNative");
-        // Sem mídia nativa não há o que absorver — e aí o caminho é o de
-        // cima, que é justamente o que este arquivo quer proteger.
         let Some(v) = e.voice_media() else {
             return;
         };
@@ -14760,7 +12297,6 @@ mod tests {
         e.voice_register(call_id, PEER);
         assert!(e.voice_is_native(call_id, PEER), "registro falhou");
 
-        // Offer REAL, gerado pela mesma API que o par chamador usaria.
         let oferta = v.create_offer("outra-call", "peer-fantasma").unwrap();
         let r = block_on(handle_frame(
             &e,
@@ -14778,8 +12314,7 @@ mod tests {
         e.voice_hangup(call_id);
     }
 
-    /// O inverso do fallback: mídia nativa RECUSANDO o SDP devolve a
-    /// sinalização ao navegador em vez de virar chamada muda.
+    // Seção 74: test
     #[test]
     #[cfg(target_os = "linux")]
     fn offer_invalido_na_regressa_para_o_navegador() {
@@ -14800,20 +12335,13 @@ mod tests {
         assert!(r.is_ok(), "frame rejeitado: {r:?}");
         let ev = proximo_evento(&mut rx).expect("SDP recusado tem de voltar ao JS");
         assert!(ev.contains("CallOfferEv"), "veio: {ev}");
-        // (A ausência de assinatura de microfone pendurada é verificada em
-        // `media_voice_contract.rs`: o hub de áudio é um singleton do
-        // processo, então a contagem aqui seria corrida com os outros testes.)
         e.voice_hangup(call_id);
     }
 
-    /// O par é o mesmo, mas em OUTRA chamada: o registro é por
-    /// (call_id, peer_fp), então não há vazamento entre chamadas.
     #[test]
     #[cfg(target_os = "linux")]
     fn registro_por_call_nao_vaza_para_outra() {
         let (e, _d) = engine_com_amigo("CoexistScope");
-        // Sem mídia nativa (outra plataforma, ou DISTORRENT_NO_NATIVE_VOICE=1) não
-        // existe registro nenhum — o cenário testado é impossível aí.
         if !e.voice_register("call-a", PEER) {
             return;
         }
@@ -14833,15 +12361,11 @@ mod tests {
         );
     }
 
-    /// `call_invite` só marca o par como nativo se a mídia existir. Sem mídia
-    /// (build sem a camada, outra plataforma, `DISTORRENT_NO_NATIVE_VOICE=1`) o
-    /// registro é recusado e nada do resto muda.
     #[test]
     #[cfg(target_os = "linux")]
     fn sem_midia_nativa_nada_e_registrado() {
         let (e, _d) = mk_engine("SemMidia");
         if e.voice_media().is_some() {
-            // Ambiente com áudio: o registro é aceito, como deve ser.
             assert!(e.voice_register("c", "p"));
         } else {
             assert!(
@@ -14852,7 +12376,6 @@ mod tests {
         }
     }
 
-    /// (F7) Regra pura do intermediário por peer (sem depender do env do processo).
     #[test]
     fn peer_relay_optin_value_parsing() {
         assert!(
@@ -14876,15 +12399,6 @@ mod tests {
         );
     }
 
-    // ---------------- PERFIL: sincronização entre peers ----------------
-    //
-    // Estes testes usam `handle_frame` (o MESMO ponto de entrada dos frames
-    // vindos da rede), não o store direto. É o que prova que a reconciliacão
-    // passa por validação de remetente, aplica a revisão certa e só emite
-    // evento quando algo mudou de verdade.
-
-    /// `block_on` local: o helper do módulo é `#[cfg(target_os = "linux")]` e
-    /// estas garantias de perfil valem em todas as plataformas.
     fn perfil_block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -14958,6 +12472,7 @@ mod tests {
         assert_eq!(p.rev, 2);
     }
 
+    // Seção 75: test
     #[test]
     fn profile_set_com_hash_divergente_e_rejeitado() {
         let (e, _d) = mk_engine("perfil-hash");
@@ -14974,7 +12489,6 @@ mod tests {
                 banner_b64: String::new(),
                 accent: String::new(),
                 rev: 1,
-                // hash de outro conteúdo: peer tentando carimbar versão
                 content_hash: "0".repeat(32),
             },
         ));
@@ -15014,9 +12528,6 @@ mod tests {
         );
     }
 
-    /// O `ProfileSet` no PIOR caso (avatar e capa no teto) precisa caber no
-    /// frame da sessão (1 MiB) E no orçamento do relay por tópico (384 KiB) —
-    /// era aqui que a foto se perdia sem erro visível.
     #[test]
     fn profile_set_no_teto_cabe_no_frame_e_no_relay() {
         let (e, _d) = mk_engine("perfil-frame");
@@ -15040,14 +12551,12 @@ mod tests {
             json.len(),
             crate::net::transport::MAX_FRAME,
         );
-        // Folga para o relay fatiar sem evicção no caminho.
         assert!(
             json.len() < crate::net::peer_relay::MAX_TOPIC_BYTES,
             "ProfileSet de {} bytes passa do orçamento por tópico do relay ({})",
             json.len(),
             crate::net::peer_relay::MAX_TOPIC_BYTES,
         );
-        // E o conteúdo realmente persistido não foi cortado.
         assert_eq!(p.avatar_b64.len(), PROFILE_IMG_B64_MAX);
         assert_eq!(p.banner_b64.len(), PROFILE_BANNER_B64_MAX);
     }
@@ -15061,8 +12570,6 @@ mod tests {
         assert!(minha_rev >= 1);
 
         let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
-        // Peer pergunta com a NOSSA revisão: nada a enviar (evita retransmitir
-        // avatar/capa a cada tique de 10 min).
         let _ = perfil_block_on(handle_frame(
             &e,
             "peer-query",
@@ -15077,7 +12584,6 @@ mod tests {
             "sem mudança não pode haver ProfileSet na fila"
         );
 
-        // Peer atrasado: recebe o perfil completo.
         let _ = perfil_block_on(handle_frame(
             &e,
             "peer-query",
@@ -15094,21 +12600,12 @@ mod tests {
         assert!(enviou, "peer desatualizado precisa receber o ProfileSet");
     }
 
-    /// O `ProfileQuery` que NÓS mandamos precisa levar a revisão DO OUTRO.
-    ///
-    /// BUG REAL: `sync_profiles_with_peers` mandava `profile_get(&me).rev` — a
-    /// nossa revisão. O receptor compara com a dele e, se a nossa for >= à dele,
-    /// não responde NADA. Quem tinha revisão maior nunca recebia o perfil de
-    /// quem tinha revisão menor (foto e "sobre" não chegavam).
     #[test]
     fn profile_query_leva_a_revisao_do_peer_e_nao_a_minha() {
         let (e, _d) = mk_engine("perfil-known-rev");
         let me = e.identity.fingerprint.clone();
         let peer = "peer-alvo".to_string();
 
-        // Meu perfil: rev 3. Perfil do peer que já temos em disco: rev 1.
-        // Cada edição muda o conteúdo — `profile_set_local` é idempotente e
-        // conteúdo igual não cria revisão nova.
         for i in 0..3 {
             let _ =
                 e.store
@@ -15120,7 +12617,6 @@ mod tests {
         assert_eq!(e.store.profile_get(&me).unwrap().rev, 3);
         assert_eq!(e.store.profile_get(&peer).unwrap().rev, 1);
 
-        // Link "online" fake só para o peer entrar na lista de alvos.
         let (tx, _rx) = mpsc::unbounded_channel::<(u8, SecureFrame)>();
         e.links.lock().unwrap().insert(
             peer.clone(),
@@ -15151,6 +12647,7 @@ mod tests {
         );
     }
 
+    // Seção 76: test
     #[test]
     fn social_profile_set_local_emite_evento_e_incrementa_revisao() {
         let (e, _d) = mk_engine("perfil-local");
@@ -15166,14 +12663,10 @@ mod tests {
             ev.contains("ProfileChanged"),
             "o próprio usuário precisa ser notificado (causa do avatar velho): {ev}"
         );
-        // Salvar de novo o mesmo conteúdo não cria revisão nova.
         let p2 = e.social_profile_set("Eu Mesmo", "bio", "", "", "").unwrap();
         assert_eq!(p2.rev, 1);
     }
 
-    /// A FOTO viaja no `ProfileSet` e chega ao outro lado idêntica — o caminho
-    /// relatado como "a imagem de perfil não está pegando"; quebra se cap_b64,
-    /// hash ou apply remoto perderem algo.
     #[tokio::test]
     async fn foto_do_perfil_chega_inteira_no_outro_lado() {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -15182,8 +12675,6 @@ mod tests {
         let (b, _db) = mk_engine("perfil-foto-b");
         let fp_a = a.identity.fingerprint.clone();
 
-        // JPEG mínimo válido o suficiente para o teste (o conteúdo é opaco aqui;
-        // o que importa é o base64 sobreviver ao frame e ao cap).
         let bytes: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
         let avatar = B64.encode(&bytes);
         assert!(
@@ -15199,7 +12690,6 @@ mod tests {
             "o store precisa devolver a foto inteira"
         );
 
-        // O frame que o motor manda tem exatamente essa foto.
         match profile_frame(&p) {
             SecureFrame::ProfileSet {
                 avatar_b64,
@@ -15221,7 +12711,6 @@ mod tests {
             other => panic!("frame inesperado: {other:?}"),
         }
 
-        // O receptor aplica e guarda a MESMA foto.
         handle_frame(&b, &fp_a, "pubkey", "Eu Mesmo", profile_frame(&p))
             .await
             .unwrap();
@@ -15230,27 +12719,20 @@ mod tests {
         assert_eq!(recebido.display_name, "Eu Mesmo");
     }
 
-    /// Repetir a MESMA mensagem ("sim", "kkk") não é spam — a regra antiga
-    /// descartava e virava X vermelho. Só repetição EM MASSA é bloqueada.
     #[test]
     fn repeticao_normal_nao_e_spam_mas_massa_e() {
         let (e, _d) = mk_engine("spam-dup");
         let peer = "peer-spam";
-        // 5 cópias idênticas: conversa humana normal ("sim", "sim", ...).
         for _ in 0..5 {
             assert!(
                 e.spam_gate(peer, "sim").is_ok(),
                 "repetir a mesma palavra numa conversa não pode virar erro"
             );
         }
-        // A 6ª estoura o teto de repetição em massa.
         assert!(e.spam_gate(peer, "sim").is_err(), "massa de cópias é spam");
-        // Conteúdo diferente continua passando.
         assert!(e.spam_gate(peer, "outra coisa").is_ok());
     }
 
-    /// Amigo aceito tem teto de flood folgado: 12 mensagens curtas em sequência
-    /// (o padrão de uma conversa de verdade) NÃO são descartadas.
     #[test]
     fn conversa_rapida_com_amigo_nao_dispara_flood() {
         let (e, _d) = mk_engine("spam-flood");
@@ -15262,7 +12744,6 @@ mod tests {
                 "mensagem {i} de uma conversa normal foi bloqueada como flood"
             );
         }
-        // Estranho (sem amizade) mantém o teto apertado.
         let estranho = "peer-estranho";
         let mut bloqueou = false;
         for i in 0..20 {
@@ -15277,8 +12758,6 @@ mod tests {
         );
     }
 
-    /// O CHAMADOR entra em `call_participants` no invite — sem isso o gate de
-    /// grupo recusava a sinalização de volta ("o grupo só fica com o criador").
     #[test]
     fn call_invite_registra_o_chamador_como_participante() {
         let (e, _d) = mk_engine("call-invite-parte");
@@ -15291,7 +12770,6 @@ mod tests {
         assert!(e.store.call_participants(&call_id).unwrap().contains(&me));
     }
 
-    /// `is_in_call` distingue chamadas e participantes (base do gate).
     #[test]
     fn is_in_call_so_vale_para_a_chamada_e_o_participante_certos() {
         let (e, _d) = mk_engine("is-in-call");
@@ -15310,12 +12788,9 @@ mod tests {
 }
 
 #[cfg(test)]
-/// Regressão do "CONECTANDO eterno": a entrada de `relay_in` (trava anti-
-/// duplicação) nunca era removida no fim da sessão e todo dial devolvia None.
 mod relay_lock_tests {
     use super::*;
 
-    /// Engine isolado — o `mk_engine` do outro módulo de testes é privado.
     fn mk(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
@@ -15324,11 +12799,6 @@ mod relay_lock_tests {
         (e, dir)
     }
 
-    /// A entrada criada pelo dial é REMOVIDA quando o handshake termina.
-    ///
-    /// Sem essa remoção a trava de `relay_dial_stream` ficava eterna: o mapa
-    /// seguia com o sender vivo e todo dial novo devolvia `None`, deixando o
-    /// peer em CONECTANDO até o app reiniciar. É o bug de campo relatado.
     #[tokio::test]
     async fn liberar_entrada_relay_remove_a_entrada() {
         let (engine, _dir) = mk("relay-lock");
@@ -15349,8 +12819,7 @@ mod relay_lock_tests {
         );
     }
 
-    /// Liberar com um sender que NAO e o dono da entrada nao pode remove-la:
-    /// um respondente substitui a entrada, e apagar mataria a sessao dele.
+    // Seção 77: tokio
     #[tokio::test]
     async fn liberar_nao_remove_entrada_de_outro_dono() {
         let (engine, _dir) = mk("relay-lock2");
@@ -15397,7 +12866,6 @@ mod call_queue_tests {
         matches!(f, SecureFrame::CallIce { .. })
     }
 
-    /// Engine isolado (o `mk_engine` dos outros modulos de teste e' privado).
     fn mk(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
@@ -15406,9 +12874,6 @@ mod call_queue_tests {
         (e, dir)
     }
 
-    /// O chamador reenvia o CONVITE enquanto a chamada nao conecta. O ring so
-    /// pode acender uma vez por (call_id, peer): senao o aviso piscava e o
-    /// overlay empilhava a cada reenvio de 6s.
     #[test]
     fn invite_reenviado_nao_reacende_o_ring() {
         let (e, _d) = mk("ring-dedup");
@@ -15427,8 +12892,6 @@ mod call_queue_tests {
         );
     }
 
-    /// Sinalizacao de chamada enfileirada para o peer offline sai no flush,
-    /// sem depender de sessao viva (era o "convite perdido" do 4G/relay).
     #[test]
     fn call_frame_enfileirado_sobrevive_sem_link() {
         let (e, _d) = mk("call-queue-offline");
@@ -15449,14 +12912,9 @@ mod call_queue_tests {
         );
     }
 
-    /// Presença de voz é do CANAL, não do transporte: `PeerOffline` dispara a
-    /// cada re-eleição de relay/troca de rede. Apagar a linha nessa hora fazia
-    /// o participante sumir do canal e voltar ~15s depois (o "aparece e
-    /// desaparece"). Só some quando a linha realmente não existe mais.
     #[test]
     fn peer_offline_nao_apaga_presenca_de_quem_nao_esta_no_canal() {
         let (e, _d) = mk("voice-presence");
-        // Sem linha de voz: nada a apagar, nada a anunciar.
         assert!(e
             .store
             .peer_voice_states("peer-sem-voz")
@@ -15470,8 +12928,6 @@ mod call_queue_tests {
             .is_empty());
     }
 
-    /// A limpeza por CANAL remove só aquele canal (antes apagava o fp inteiro,
-    /// derrubando a presença legítima dele em outro servidor).
     #[test]
     fn limpeza_de_presenca_e_por_canal() {
         let (e, _d) = mk("voice-presence-2");
@@ -15490,8 +12946,6 @@ mod call_queue_tests {
         assert_eq!(restou[0], ("c2".to_string(), "canal-b".to_string()));
     }
 
-    /// BUG do "as vezes nao pega": a fila descartava o frame MAIS ANTIGO —
-    /// que era justamente o `CallOffer`/candidatos (chamada muda).
     #[test]
     fn descarte_nunca_derruba_offer_nem_answer() {
         let mut q: Vec<SecureFrame> = vec![offer(0), ice(0), answer(0), ice(1), ice(2), ice(3)];
@@ -15508,7 +12962,6 @@ mod call_queue_tests {
         );
     }
 
-    /// O que DEVE sair e o CallIce mais velho (reenviavel pelo chamador).
     #[test]
     fn descarte_prioriza_descartar_ice_mais_velho() {
         let mut q: Vec<SecureFrame> = vec![offer(0), ice(0), ice(1), ice(2)];
@@ -15520,7 +12973,6 @@ mod call_queue_tests {
         assert!(q.iter().any(NetworkEngine::is_offer_frame));
     }
 
-    /// Fila so de ICE / fila vazia: descarta o mais velho, sem panico.
     #[test]
     fn descarte_so_com_ice_nao_entra_em_panico() {
         let mut q: Vec<SecureFrame> = vec![ice(0), ice(1)];
@@ -15532,8 +12984,7 @@ mod call_queue_tests {
         assert!(empty.is_empty());
     }
 
-    /// Stream real de uma chamada atras de CGNAT: o link P2P demora, a
-    /// sinalizacao inteira se acumula, e nada essencial pode se perder.
+    // Seção 78: test
     #[test]
     fn fila_aclada_so_derruba_candidatos() {
         let mut q: Vec<SecureFrame> = vec![offer(0)];
@@ -15551,7 +13002,6 @@ mod call_queue_tests {
         );
     }
 
-    /// No teto e sem ICE, o descarte nunca sacrifica o par offer+answer.
     #[test]
     fn par_offer_answer_e_intocavel() {
         let mut q: Vec<SecureFrame> = vec![offer(0), answer(0)];

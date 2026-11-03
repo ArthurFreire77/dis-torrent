@@ -1,6 +1,3 @@
-// Implementação NATIVA: Tauri 2 → distorrent-core (Rust).
-// Toda operação sensível é validada no core — a UI apenas reflete estado real.
-
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { isAndroidRuntime } from '../shared/runtime.ts'
@@ -54,7 +51,6 @@ export const tauriServices: DisTorrentServices = {
 
   vaultUnlock: (password) => invoke<Identity>('vault_unlock', { password }),
 
-  // Endereços locais — o IP de LAN vem do Rust (o JS não tem como descobrir).
   localAddresses: (port) => invoke<import('./models').LocalAddresses>('local_addresses', { port: port ?? null }),
 
   identityRename: (nickname) => invoke<Identity>('identity_rename', { nickname }),
@@ -66,7 +62,6 @@ export const tauriServices: DisTorrentServices = {
   netDiag: () => invoke<import('./models').NetDiag>('net_diag'),
   webrtcReport: (info: string) => invoke('webrtc_report', { info }),
 
-  // Atualização automática. A checagem é best-effort: quem chama trata o erro.
   updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check'),
   updateDownload: (url, name, digest) =>
     invoke<string>('update_download', { url, name, digest }),
@@ -160,18 +155,13 @@ export const tauriServices: DisTorrentServices = {
     return invoke<StoredMessage>('message_send', { convId: convId.trim(), body })
   },
 
-  // Reenvio do botão "Reenviar": manda o MESMO id (o core reconstrói o
-  // envelope da linha gravada). Usar `messageSend` aqui criava um id novo e,
-  // depois de reabrir a conversa, as duas linhas apareciam com o mesmo texto.
   messageResend: (msgId) => {
     if (!msgId || msgId.trim() === '') throw new Error('mensagem inválida')
     return invoke<StoredMessage>('message_resend', { msgId: msgId.trim() })
   },
 
   sendTyping: async (convId) => {
-    // Core ainda não tem frame Typing — best-effort: tenta invoke, ignora se não existir.
-    // Quando o relay suportar, o peer recebe; local nunca ecoa para si.
-    try { await invoke<void>('send_typing', { convId }) } catch { /* sem suporte no core — ok */ }
+    try { await invoke<void>('send_typing', { convId }) } catch {  }
   },
 
   subscribe: (cb) => {
@@ -198,7 +188,6 @@ export const tauriServices: DisTorrentServices = {
   accountSwitch: (fingerprint: string) => invoke<Identity>('account_switch', { fingerprint }),
   accountRemoveImported: (fingerprint: string) => invoke<void>('account_remove_imported', { fingerprint }),
 
-  // Canais — invoke direto no backend real; Rust retorna ChannelMetaRow, extrai id
   channelCreate: async (cid, name, opts) => {
     const row = await invoke<{ id: string }>('channel_create', { communityId: cid, name, topic: opts?.topic ?? null, category: opts?.category ?? null, kind: opts?.kind ?? null })
     return typeof row === 'string' ? row : (row as any).id ?? String(row)
@@ -214,7 +203,6 @@ export const tauriServices: DisTorrentServices = {
   channelList: (cid) =>
     invoke<ChannelMeta[]>('channel_list', { communityId: cid }),
 
-  // Cargos — Rust retorna RoleRow, extrai id
   roleCreate: async (cid, data) => {
     const row = await invoke<{ id: string }>('role_create', { communityId: cid, name: data.name, color: data.color, permissions: data.permissions, hoist: data.hoist, mentionable: data.mentionable })
     return typeof row === 'string' ? row : (row as any).id ?? String(row)
@@ -234,7 +222,6 @@ export const tauriServices: DisTorrentServices = {
   memberKick: (cid, fp) =>
     invoke<void>('member_kick', { communityId: cid, fp }),
 
-  // Bots — Rust retorna BotRow, extrai id
   botCreate: async (cid, data) => {
     const row = await invoke<{ id: string }>('bot_create', { communityId: cid, name: data.name, avatar: data.avatar ?? null, roleId: data.roleId ?? null })
     return typeof row === 'string' ? row : (row as any).id ?? String(row)
@@ -249,10 +236,6 @@ export const tauriServices: DisTorrentServices = {
     invoke<StoredMessage>('bot_post_message', { communityId: cid, channelId, botId, body }),
   botRegenToken: (cid, botId) =>
     invoke<string>('bot_regen_token', { communityId: cid, botId }),
-  // HTTP p/ bots — reqwest no shell (sem CORS do WebView), timeout e cap no Rust.
-  // O Rust devolve {status, body_b64, body_text, truncated
-// texto UTF-8 já vem
-  // decodificado (caso comum: JSON de API), binário cai no atob do body_b64.
   httpFetch: async (url, method, headers, body, timeoutMs) => {
     const r = await invoke<{ status: number; body_b64: string; body_text: string | null; truncated: boolean }>('http_fetch', {
       url, method,
@@ -260,6 +243,7 @@ export const tauriServices: DisTorrentServices = {
       body: body ?? null,
       timeoutMs,
     })
+    // Seção 1: out
     let out: string
     if (typeof r.body_text === 'string') out = r.body_text
     else {
@@ -268,7 +252,6 @@ export const tauriServices: DisTorrentServices = {
     return { status: r.status, body: out }
   },
 
-  // Grupos DM + chamadas + voz + arquivos
   createGroup: (title, members) => invoke<Conversation>('create_group', { title, members }),
   groupMembers: (cid) => invoke<[string, string][]>('group_members', { convId: cid }),
   groupPairNow: (cid) => invoke<void>('group_pair_now', { convId: cid }),
@@ -277,24 +260,17 @@ export const tauriServices: DisTorrentServices = {
   groupAdd: (cid, fp) => invoke<void>('group_add', { convId: cid, fp }),
   groupRemove: (cid, fp) => invoke<void>('group_remove', { convId: cid, fp }),
   groupRename: (cid, title) => invoke<void>('group_rename', { convId: cid, title }),
-  /** Sair do grupo de verdade (local + aviso aos membros no core). */
   groupLeave: (cid) => invoke<void>('group_leave', { convId: cid }),
-  /** Dono: apaga o grupo para todos. */
   groupDelete: (cid) => invoke<void>('group_delete', { convId: cid }),
-  /** Apaga o grupo só nesta máquina. */
   groupDeleteLocal: (cid) => invoke<void>('group_delete_local', { convId: cid }),
   callRoomPublish: (callId, convId, kind, participants) =>
     invoke<void>('call_room_publish', { callId, convId, kind, participants }),
   callRoomClose: (convId) => invoke<void>('call_room_close', { convId }),
-  // Sair da sala ≠ encerrar a chamada: o core só fecha para todos quando o
-  // HOST sai e não sobra ninguém. Antes o convidado apagava o aviso de todos.
   callRoomLeave: (convId) => invoke<void>('call_room_leave', { convId }),
   callRoomJoin: (convId, kind) =>
     invoke<[string, string[]]>('call_room_join', { convId, kind }),
   callRoomsList: () => invoke<any[]>('call_rooms_list').catch(() => []),
   callInvite: (targetFp, kind) => invoke<string>('call_invite', { targetFp: targetFp, kind }),
-  // Reenvia só o ring. O convite sai uma única vez; perdido o frame, o outro
-  // lado nunca toca. Idempotente no receptor.
   callRingRetry: (callId, targetFp, kind) => invoke<void>('call_ring_retry', { callId, targetFp, kind }),
   callAccept: (callId, fromFp) => invoke<void>('call_accept', { callId: callId, fromFp: fromFp }),
   callReject: (callId, fromFp, reason) => invoke<void>('call_reject', { callId: callId, fromFp: fromFp, reason }),
@@ -313,7 +289,6 @@ export const tauriServices: DisTorrentServices = {
   fileRequestChunk: (fid,idx,holder) => invoke<void>('file_request_chunk', { fileId: fid, index: idx, holderFp: holder }),
   fileSendChunk: (target,fid,idx,b64) => invoke<void>('file_send_chunk', { targetFp: target, fileId: fid, index: idx, dataB64: b64 }),
 
-  // Segurança / anti-spam / moderação — validado no core (Rust)
   serverRulesGet: (cid) => invoke<ServerRules>('server_rules_get', { communityId: cid }),
   serverRulesSet: (rules) => invoke<void>('server_rules_set', { rules }),
   auditList: (cid, limit) => invoke<AuditEntry[]>('audit_list', { communityId: cid, limit: limit ?? null }),
@@ -328,7 +303,6 @@ export const tauriServices: DisTorrentServices = {
     invoke<NameCheckView>('validate_name', { kind, raw, existing: existing ?? null }),
   randomName: () => invoke<string>('random_name'),
 
-  // Cofre portátil .stormvault (5.4)
   stormvaultExport: (password, opts) =>
     invoke<import('./models').StormVaultExportResult>('stormvault_export', {
       password, includeSecret: opts?.includeSecret ?? true, maxMessages: opts?.maxMessages ?? null,
@@ -356,30 +330,31 @@ export const tauriServices: DisTorrentServices = {
   mediaSafetyGet: () => invoke<import('./models').MediaSafetySettings>('media_safety_get'),
   mediaSafetySet: (stripExif, blockExecutables) =>
     invoke<void>('media_safety_set', { stripExif, blockExecutables }),
+  retentionGet: () =>
+    invoke<import('./models').RetentionSettings>('retention_get'),
+  retentionSet: (days, servers, groups, dms) =>
+    invoke<import('./models').RetentionSettings>('retention_set', {
+      days,
+      servers,
+      groups,
+      dms,
+    }),
+  retentionRun: () => invoke<number>('retention_run'),
 
-  // Voz nativa (webrtc-rs + cpal + Opus) — só existe onde o core a constrói
-  // (Linux; desligável por DISTORRENT_NO_NATIVE_VOICE=1). Onde não existe o comando
-  // devolve false/null e o WebRTC do navegador segue intacto.
   voiceMediaAvailable: () => invoke<boolean>('voice_media_available'),
   voiceMediaStats: (callId) => invoke<VoiceMediaStats | null>('voice_media_stats', { callId }),
   voiceSetMuted: (callId, muted) => invoke<void>('voice_set_muted', { callId, muted }),
   voiceSetDeafened: (callId, deafened) => invoke<void>('voice_set_deafened', { callId, deafened }),
   voiceHangup: (callId) => invoke<void>('voice_hangup', { callId }),
-  // Vídeo nativo (Linux): o core codifica câmera/tela (GStreamer) na MESMA
-  // PeerConnection webrtc-rs da voz e decodifica o vídeo remoto em JPEG
-  // para a UI — o WebKitGTK não expõe RTCPeerConnection, então é este o
-  // único caminho de vídeo no desktop Linux.
   voiceVideoStart: (callId, peerFp, source, monitorId) =>
     invoke<string>('voice_video_start', { callId, peerFp, source, monitorId: monitorId ?? null }),
   voiceVideoStop: (callId, peerFp) => invoke<void>('voice_video_stop', { callId, peerFp }),
   voiceVideoFrame: (callId, peerFp, sinceSeq) =>
     invoke<import('./models').NativeVideoFrame | null>('voice_video_frame', { callId, peerFp, sinceSeq: sinceSeq ?? null }),
-  // Teste de mic nativo sem chamada (Linux: WebKitGTK sem getUserMedia).
   voiceMicTestStart: () => invoke<number>('voice_mic_test_start'),
   voiceMicTestLevel: (testId) => invoke<number>('voice_mic_test_level', { testId }),
   voiceMicTestStop: (testId) => invoke<void>('voice_mic_test_stop', { testId }),
   voiceMicName: () => invoke<string>('voice_mic_name'),
-  // ================= CAMADA SOCIAL v3 =================
   react: (convId, msgId, emoji) => invoke<boolean>('social_react', { convId, msgId, emoji }),
   reactions: (msgId) => invoke<ReactionSummary[]>('social_reactions', { msgId }),
   reactionsBulk: (msgIds) => invoke<ReactionSummary[]>('social_reactions_bulk', { msgIds }),
@@ -401,7 +376,6 @@ export const tauriServices: DisTorrentServices = {
   presenceSet: (status, custom, customEmoji) =>
     invoke<void>('presence_set', { status, custom, customEmoji }),
 
-  // Segundo plano / notificações — tudo implementado em `background.rs`.
   backgroundPrefs: () => invoke<import('./models').BackgroundPrefsView>('background_prefs_get'),
   backgroundPrefsSet: (patch) => invoke<void>('background_prefs_set', {
     closeToTray: patch.closeToTray ?? null,
@@ -409,9 +383,6 @@ export const tauriServices: DisTorrentServices = {
   }),
   autostartGet: () => invoke<boolean>('autostart_get'),
   autostartSet: (enabled) => invoke<boolean>('autostart_set', { enabled }),
-  // Liga o autostart no primeiro boot (padrão "abre com o Windows") e devolve
-  // o estado REAL do SO. Só no desktop nativo; no Android a UI mostra que não
-  // existe inicialização automática.
   autostartEnsure: () => invoke<boolean>('autostart_ensure'),
   notificationShow: (a) => invoke<void>('notification_show', {
     id: a.id,
@@ -424,17 +395,13 @@ export const tauriServices: DisTorrentServices = {
   notificationCancelAll: () => invoke<void>('notification_cancel_all'),
   notificationPermission: () => invoke<string>('notification_permission_state'),
   notificationRequestPermission: () => invoke<string>('notification_request_permission'),
-  // Espelha no Rust as preferências de aviso que vivem no localStorage. O
-  // aviso nativo é disparado pelo MOTOR (funciona com a janela escondida e no
-  // Android em segundo plano), e o motor não lê o localStorage da WebView.
   notifyPrefsSet: (system, preview, policy) =>
     invoke<void>('notify_prefs_set', { system, preview, policy: policy ?? null }),
-  // Android: serviço em primeiro plano que mantém o processo vivo com a tela
-  // apagada. Devolve o estado REAL do serviço (não um "ok" otimista).
   backgroundServiceSet: async (on: boolean) => {
     if (!isAndroidRuntime()) return false
     try {
       const { invoke } = await import('@tauri-apps/api/core')
+      // Seção 2: r
       const r = await invoke<{ rodando?: boolean }>(
         on ? 'plugin:bgservice|start' : 'plugin:bgservice|stop',
       )
@@ -465,31 +432,21 @@ export const tauriServices: DisTorrentServices = {
   },
   appShowWindow: () => invoke<void>('app_show_window'),
   appHideToTray: () => invoke<void>('app_hide_to_tray'),
-  /** Windows: esconde a barra "está compartilhando sua tela" do WebView2. */
   hideShareBar: async () => {
     if (!isAndroidRuntime()) {
-      try { await invoke<boolean>('hide_share_bar') } catch { /* comando opcional */ }
+      try { await invoke<boolean>('hide_share_bar') } catch {  }
     }
   },
-  /**
-   * Windows: liga/desliga o vigia nativo da barra de compartilhamento.
-   *
-   * O vigia roda no Rust (4x/s): a janela é recriada pelo Chromium ao trocar a
-   * fonte e um `setInterval` de JS deixava a barra piscar na barra de tarefas.
-   */
   shareBarWatch: async (ativo: boolean) => {
     if (!isAndroidRuntime()) {
-      try { await invoke<void>('share_bar_watch', { ativo }) } catch { /* comando opcional */ }
+      try { await invoke<void>('share_bar_watch', { ativo }) } catch {  }
     }
   },
   windowToggleFullscreen: () => invoke<boolean>('window_toggle_fullscreen'),
   appQuit: async () => {
-    // ANDROID: o foreground service mantém o processo vivo mesmo depois de
-    // `app.exit` — "sair" viraria uma tela preta com o app recebendo em
-    // segundo plano. Para os serviços ANTES de encerrar (sair de verdade).
     if (isAndroidRuntime()) {
-      try { await invoke<void>('plugin:bgservice|stop') } catch { /* sem serviço */ }
-      try { await invoke<void>('plugin:callfg|stop') } catch { /* sem chamada ativa */ }
+      try { await invoke<void>('plugin:bgservice|stop') } catch {  }
+      try { await invoke<void>('plugin:callfg|stop') } catch {  }
     }
     return invoke<void>('app_quit')
   },
@@ -546,10 +503,6 @@ export const tauriServices: DisTorrentServices = {
   bookmarkList: (convId) => invoke<[string, string][]>('bookmark_list', { convId }),
 }
 
-// distorrent-core serializa variantes *Ev com o sufixo (ex.: FileAnnounceEv ->
-// 'file_announce_ev'), enquanto a UI/browser usa o nome curto ('file_announce').
-// Sem este alias, no app nativo o anúncio de arquivo (e sinalização de chamada)
-// nunca chegava aos handlers — arquivo não aparecia e download não iniciava.
 const NATIVE_EV_ALIASES: Record<string, EngineEvent['type']> = {
   file_announce_ev: 'file_announce',
   file_chunk_request_ev: 'file_chunk_request',
