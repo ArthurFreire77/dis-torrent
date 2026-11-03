@@ -1,5 +1,42 @@
 # CHANGELOG
 
+## [1.1.46-pre-alpha] - 2026-11-03
+
+### Atualização automática destravada para todos
+
+Relato do dono: "ele não tá atualizando sozinho" — com a 1.1.45 publicada, o
+app continuava na 1.1.44 (e o mesmo valia para quem estivesse em qualquer
+versão anterior).
+
+**Causa raiz: o freio do loop virou trava permanente.** A marca
+`update.applied` era gravada **antes** de rodar o instalador e nunca era limpa
+depois. Quem instalou a 1.1.44 e subiu para ela ficou com
+`update.applied = 1.1.44` para sempre; toda checagem seguinte caía no freio e
+devolvia `stalled` — inclusive a da 1.1.45. O app congelou na versão instalada.
+
+Agora a marca é comparada com a versão que está **rodando**: se ela já entrou,
+é lixo e sai do caminho. Só continua `stalled` quando a marca está **à frente**
+do que roda (o instalador rodou e a cópia antiga sobreviveu).
+
+**Segundo defeito, no mesmo caminho:** o instalador era chamado com
+`/NORESTART`, que anula o `/RESTARTAPPLICATIONS`. Na atualização silenciosa o
+app fechava e **ficava fechado**; quem não abrisse à mão continuava na versão
+velha. O `/NORESTART` saiu — quem reabre é o `[Code]` do Inno, que já existia e
+espera o processo antigo morrer.
+
+**Terceiro:** `update.failed` era permanente. Uma falha de rede ou um UAC
+negado sem querer impedia para sempre de tentar aquela versão. Agora a marca
+carrega versão + instante e expira em 6 h.
+
+Cobertura nova em `tests/updateStuckFlag.test.ts`: varredura das versões reais
+(1.1.30 → 1.1.44) garantindo que **todas** saem para a nova com a marca de
+"aplicado" da própria versão — o estado exato que travava —, mais `stalled`
+legítimo, skip do usuário e o formato da marca de falha.
+
+**Verificação:** typecheck 0, lint 0, 416 unitários (14 novos), `cargo check`
+do `src-tauri` OK. **Não** validado: atualização ponta a ponta numa máquina de
+terceiro (precisa do instalador publicado e rede).
+
 ## [1.1.45-pre-alpha] - 2026-11-03
 
 ### Tela de chamada no estilo Meet — cinza, sem coluna preta e sem fantasma
