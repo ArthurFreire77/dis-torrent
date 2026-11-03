@@ -101,14 +101,24 @@ export default function CallTilesGrid({
     // BUGS REAIS corrigidos aqui (prints do dono):
     // 1. `gridAutoRows: minmax(200px, 1fr)` esticava cada card até o rodapé —
     //    dois participantes viravam duas COLUNAS compridas de avatar.
-    // 2. `ceil(sqrt(n))` fixava colunas pela contagem e ignorava a largura: com
-    //    6 pessoas num monitor largo ficavam 3 colunas estreitas; com 2 numa
-    //    janela pequena, 2 colunas apertadas. Chamada com VÁRIAS pessoas
-    //    precisa caber — é o caso normal de um servidor.
-    //
-    // Agora as colunas vêm da largura disponível: cada card tem um mínimo
-    // confortável (16:9) e a grade encolhe o número de colunas até caber.
+    // 2. `ceil(sqrt(n))` fixava colunas pela contagem e ignorava a largura.
+    // 3. Desalinhamento: `justifyContent: 'center'` fazia cada coluna encolher
+    //    para o conteúdo e o conjunto sair torto.
+    // 4. FIXAR não funcionava: a grade ignorava a ordem e o card fixado ficava
+    //    do mesmo tamanho dos outros. Agora o fixado ocupa a LINHA INTEIRA
+    //    (grande, como o "pin" do Meet) e os demais vão para a fileira de baixo.
     const cols = colunasQueCabem(tiles.length, largura, 12, padding)
+    const larguraCol = cols > 0 ? (Math.max(0, largura - padding * 2) - (cols - 1) * 12) / cols : 0
+    const alturaCard = larguraCol > 0
+      ? Math.max(160, Math.min(420, Math.round((larguraCol * 9) / 16)))
+      : 240
+
+    // FIXADO: ele vem em `tiles[0]` (o shell ordena), então basta dar a ele a
+    // largura de todas as colunas. `pin` só vale se houver mais de um card —
+    // sozinho ele já ocupa a tela.
+    const temFixado = !!pinnedId && tiles.length > 1 && tiles[0]?.id === pinnedId
+    const alturaFixado = Math.max(200, Math.min(560, Math.round(((largura - padding * 2) * 9) / 16)))
+
     return (
       <div
         ref={areaRef}
@@ -119,27 +129,36 @@ export default function CallTilesGrid({
           gap: 12,
           padding,
           gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          gridAutoRows: 'minmax(0, 1fr)',
+          // Linhas com a MESMA altura: nenhum card maior que o outro.
+          gridAutoRows: `${alturaCard}px`,
+          // Conjunto centralizado na área (como o Meet), sem esticar a grade.
           alignContent: 'center',
-          justifyContent: 'center',
+          justifyContent: 'stretch',
           overflowY: 'auto',
           background,
         }}
       >
-        {tiles.map((t) => (
-          <div
-            key={t.id}
-            style={{
-              minWidth: 0,
-              minHeight: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            {renderTile(t)}
-          </div>
-        ))}
+        {tiles.map((t, i) => {
+          const fixado = temFixado && i === 0
+          return (
+            <div
+              key={t.id}
+              style={{
+                minWidth: 0,
+                minHeight: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                // O fixado atravessa todas as colunas e ganha altura maior.
+                ...(fixado
+                  ? { gridColumn: `1 / -1`, height: alturaFixado }
+                  : null),
+              }}
+            >
+              {renderTile(t)}
+            </div>
+          )
+        })}
       </div>
     )
   }

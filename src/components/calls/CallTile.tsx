@@ -170,22 +170,21 @@ export function CallTile({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        // CARD DE PESSOA: proporção de vídeo + teto. Sem o `aspectRatio` o card
-        // era esticado pela linha da grade e virava uma coluna comprida de
-        // avatar (o print do dono). Expandido/miniatura e TELA têm regra
-        // própria abaixo/antes.
+        // CARD DE PESSOA: retângulo 16:9 de ALTURA IGUAL para todos.
+        //
+        // Print do dono: os cards saíam tortos, um maior que o outro, porque
+        // havia `maxWidth: 760` + `maxHeight: 420` por card — cada um parava
+        // num limite diferente. Aqui o card ocupa 100% da célula da grade
+        // (que é uniforme) e a proporção vem do `aspectRatio`; o teto de altura
+        // é UM só para a grade inteira, não por card.
         ...(isScreen || expanded || thumbnail
           ? null
           : {
               aspectRatio: PARTICIPANT_ASPECT,
-              // Teto de 420px: numa sala de 2 pessoas em 1600px de largura um
-              // card de 1200px de largura teria 675px de altura e ainda
-              // pareceria um retângulo vazio.
-              maxHeight: 420,
               width: '100%',
-              maxWidth: 760,
-              alignSelf: 'center',
-              justifySelf: 'center',
+              height: '100%',
+              alignSelf: 'stretch',
+              justifySelf: 'stretch',
             }),
         border: `2px solid ${
           tile.speaking && !isScreen ? c.green : tile.muted ? `${c.red}55` : isScreen ? `${c.accent}66` : 'transparent'
@@ -381,10 +380,6 @@ export function CallTile({
         )}
       </div>
 
-      {showAudioControls && !tile.isLocal && (
-        <ParticipantAudioControls fp={tile.audioKey ?? tile.fp} nickname={tile.kind === 'screen' ? `${tile.nickname} (tela)` : tile.nickname} callDeafened={callDeafened} />
-      )}
-
       {/* Áudio remoto SEMPRE presente, mas SÓ no tile de PESSOA. O tile de
           tela usa o mesmo stream da câmera como fallback (quando o outro lado
           não manda transmissão separada) — montar <audio> nos dois tocava a
@@ -406,6 +401,18 @@ export function CallTile({
             attachStream(el, tile.audioStream ?? tile.stream)
             if (el) applyParticipantPlayback(el, audioKey, callDeafened)
           }}
+        />
+      )}
+
+      {/* O botão de volume NÃO pode depender de haver stream: uma pessoa na
+          chamada sem áudio chegando ainda precisa do controle (e o valor fica
+          guardado para quando o áudio começar). Antes `showAudioControls` e o
+          `<audio>` dividiam a mesma condição e o controle sumia. */}
+      {showAudioControls && !tile.isLocal && (
+        <ParticipantAudioControls
+          fp={audioKey}
+          nickname={isScreen ? `${tile.nickname} (tela)` : tile.nickname}
+          callDeafened={callDeafened}
         />
       )}
 

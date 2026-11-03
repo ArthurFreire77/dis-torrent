@@ -480,19 +480,33 @@ export function VoiceStage({
     </div>
   )
 
+  /** Há mídia de verdade no palco? (tela, vídeo ou quadro nativo) */
+  const mediaTemConteudo = (() => {
+    if (!media) return false
+    const lista = Array.isArray(media) ? media : [media]
+    return lista.some((m) => m != null)
+  })()
+
   // ── Palco: a mídia ocupa o meio; os controles flutuam embaixo ────────────
   const palco = inCall && layout.stageFill ? (
     <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: c.stage }}>
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', paddingBottom: compact ? 0 : 92 }}>
         {media}
       </div>
-      {waitingAlone && (
+      {waitingAlone && !mediaTemConteudo && (
         // Chamada vazia: uma frase no meio do palco, sem card fantasma.
+        //
+        // SÓ quando não há NADA no palco. Antes ele aparecia por cima de uma
+        // tela compartilhada (print do dono: o texto "Você está na chamada"
+        // atravessava a transmissão), porque a condição era "estou sozinho" e
+        // não "o palco está vazio".
         <div
           style={{
             position: 'absolute', left: 0, right: 0, top: 0, bottom: compact ? 0 : 92,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             pointerEvents: 'none', padding: 24,
+            // Fundo próprio para o texto não brigar com nenhum card residual.
+            background: 'transparent',
           }}
         >
           <span style={{ fontSize: 13.5, color: c.muted, textAlign: 'center', lineHeight: 1.6, maxWidth: 360 }}>

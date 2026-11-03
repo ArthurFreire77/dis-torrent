@@ -1,9 +1,15 @@
 name: Release
 
+# POR QUE O GATILHO POR TAG SAIU: o build é LOCAL nesta máquina (regra do
+# projeto), e o workflow rodava em paralelo com o build local. Resultado real:
+# ele subia o `.exe` do NSIS na release (que o Defender acusa como
+# Contebrew.A!ml e bloqueia o download) DEPOIS do instalador Inno já publicado,
+# sobrescrevendo o bom pelo ruim. Também duplicava assets e travava o passo em
+# `already_exists`.
+#
+# Agora só roda quando alguém pede de propósito (Actions → Run workflow). A
+# release normal continua sendo feita pelo build local + API.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
