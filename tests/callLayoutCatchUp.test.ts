@@ -11,7 +11,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
-const manager = readFileSync('src/services/callManager.ts', 'utf8')
 const grid = readFileSync('src/components/calls/CallTilesGrid.tsx', 'utf8')
 
 test('threads NÃO ficam mais aninhadas na sidebar', () => {
@@ -20,27 +19,19 @@ test('threads NÃO ficam mais aninhadas na sidebar', () => {
 })
 
 test('canal de voz ocupa o espaço central com os quadrados da chamada', () => {
-  // Dentro da chamada do canal aberto, a mídia é o conteúdo principal.
+  // Dentro da chamada do canal aberto, a mídia é o conteúdo principal —
+  // agora pela tela unificada (`VoiceStage`), que recebe a grade de tiles.
   assert.match(shell, /const inThisCall = /, 'existe o estado "estou nesta chamada"')
-  assert.match(shell, /inThisCall \? \(\s*<CallTilesGrid/, 'a chamada ocupa o centro do canal')
+  assert.match(shell, /<VoiceStage/, 'a chamada ocupa o centro do canal')
+  assert.match(shell, /tiles=\{visibleCallTiles\}/, 'a grade de tiles vai para a tela da chamada')
 })
 
 test('os quadrados não aparecem DUAS vezes (centro + painel lateral)', () => {
-  assert.match(shell, /\{!inThisCall && \(\s*<CallTilesGrid/, 'o painel lateral só mostra tiles fora do canal')
-  assert.match(shell, /senão a mesma mídia\s*\n?\s*aparece duas vezes/, 'o porquê está documentado')
+  assert.match(shell, /\{painelLateralVisivel && \(/, 'o painel lateral só existe fora da tela unificada')
+  assert.match(shell, /duplicava cabeçalho, quadrados e botões/, 'o porquê está documentado')
 })
 
 test('a grade de tiles é UM componente (áudio/vídeo vivem nos tiles)', () => {
   assert.match(grid, /export default function CallTilesGrid/, 'grade reutilizável')
   assert.match(grid, /CallTileComponent/, 'usa o tile que monta <audio>/<video>')
-})
-
-test('entrar no canal abre par mesmo quando o roster chega atrasado', () => {
-  // Causa do "só conecta de segunda": o voiceStates era lido uma única vez e,
-  // na estreia, ainda não tinha o outro peer — ninguém abria o PC.
-  assert.match(manager, /catchUpVoiceRoster\(callId, communityId, channelId\)/, 'catch-up é chamado no join')
-  const bloco = manager.slice(manager.indexOf('private catchUpVoiceRoster'))
-  assert.ok(bloco.length > 0, 'a função existe')
-  assert.match(bloco.slice(0, 2000), /createPC\(fp, callId, true\)/, 'abre o par que faltava')
-  assert.match(bloco.slice(0, 1200), /\[1200, 3500, 8000\]/, 'tenta em três janelas')
 })

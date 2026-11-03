@@ -18,8 +18,10 @@ import {
 } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
-import CallChannelStage from '../components/calls/CallChannelStage'
 import CallTilesGrid from '../components/calls/CallTilesGrid'
+import VoiceStage from '../components/calls/VoiceStage'
+import { resolveVoiceLayout, callScreenTitle } from '../services/voiceLayout'
+import { parseVoiceCallId } from '../services/voiceChannelRef'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
@@ -1063,6 +1065,16 @@ export default function ThemeShell({ designId }: {designId:string}){
     setPinnedTileId(null)
   }, [activeCall])
 
+  // LARGURA DA JANELA: decide painel de controles/membros (regra em voiceLayout).
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 0,
+  )
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
   // Fixação/expansão só valem enquanto a transmissão existir (limpa id morto).
   const visibleCallTiles = useMemo(() => {
     const valid = callTiles.map((tile) => tile.id)
@@ -1388,8 +1400,38 @@ export default function ThemeShell({ designId }: {designId:string}){
   })()
   /** Estou na chamada DESTE canal? (decide tela cheia de mídia × botão entrar) */
   const inThisCall = !!activeCall && !!selCallChannel && activeCall.convId === selCallChannel.id
-  /** Chamada de canal aberta (qualquer tipo): o painel lateral é só controles. */
-  const inChannelCall = inThisCall
+  /**
+   * CANAL REAL da chamada ativa — derivado do `callId`, não de um estado
+   * paralelo. É o que faz o botão da sidebar/celular saber se está entrando
+   * ou saindo mesmo quando a chamada começou pelo outro caminho.
+   */
+  const canalDaChamada = useMemo(
+    () => parseVoiceCallId(activeCall?.callId, activeCall?.convId),
+    [activeCall?.callId, activeCall?.convId],
+  )
+  /**
+   * LAYOUT ÚNICO da tela de CHAMADA DE CANAL (regra pura em `services/voiceLayout`).
+   *
+   * Só vale para canal de servidor: em DM/grupo a conversa continua visível e
+   * o painel lateral é a única superfície da chamada — escondê-lo ali deixaria
+   * a chamada sem controles.
+   */
+  const voiceLayout = resolveVoiceLayout({
+    isChannel: !!selCallChannel,
+    inThisCall,
+    hasActiveCall: !!activeCall,
+    widthPx: viewportWidth,
+  })
+  /** A tela unificada está no comando (canal de chamada aberto). */
+  const inCallHere = inThisCall
+  /**
+   * O painel lateral aparece quando a chamada NÃO está na tela unificada.
+   *
+   * Em DM/grupo ele é a única superfície da chamada (a conversa continua
+   * visível); num canal de chamada a mídia e os controles já estão no
+   * `VoiceStage` e o painel duplicaria cabeçalho, quadrados e botões.
+   */
+  const painelLateralVisivel = !!activeCall && !inCallHere
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
   /** fps que estão em algum grupo meu (para "ONLINE" incluir não-amigos). */
   const groupMemberFps = useMemo<Set<string>>(() => {
@@ -2055,6 +2097,36 @@ export default function ThemeShell({ designId }: {designId:string}){
     return nick || String(fp).slice(0, 8)
   }
 
+  /**
+   * QUEM ESTÁ NA CHAMADA, para o lobby e a coluna de controles.
+   *
+   * Fonte dupla de propósito: o roster do manager (quem já trocou mídia) e o
+   * `voiceStates` do motor (quem entrou e ainda está abrindo o microfone).
+   * Só o primeiro deixava o lobby dizer "ninguém na chamada" com gente dentro.
+   * Fica DEPOIS de `nameOfFp` porque os nomes reais são a razão de existir.
+   */
+  const channelCallPeers = useMemo(() => {
+    const vistos = new Map<string, { fp: string; nome: string; muted?: boolean; deafened?: boolean; eu?: boolean }>()
+    const eu = identity?.fingerprint ?? ''
+    for (const [fp, muted, deafened] of voiceStates) {
+      if (!fp) continue
+      vistos.set(fp, { fp, nome: nameOfFp(fp) || fp.slice(0, 8), muted: !!muted, deafened: !!deafened, eu: fp === eu })
+    }
+    for (const p of (activeCall?.participants ?? []) as any[]) {
+      const fp = String(p?.fp ?? '')
+      if (!fp) continue
+      const antes = vistos.get(fp)
+      vistos.set(fp, {
+        fp,
+        nome: nameOfFp(fp) || p?.nickname || fp.slice(0, 8),
+        muted: p?.muted ?? antes?.muted,
+        deafened: p?.deafened ?? antes?.deafened,
+        eu: fp === eu,
+      })
+    }
+    return [...vistos.values()].sort((a, b) => (a.eu === b.eu ? a.nome.localeCompare(b.nome) : a.eu ? -1 : 1))
+  }, [voiceStates, activeCall?.participants, identity?.fingerprint])
+
   async function createThreadFrom(m: StoredMessage) {
     if (!selCommunity || !selConv) { setError('threads são de servidor — abra um canal de comunidade'); return }
     try {
@@ -2426,10 +2498,16 @@ export default function ThemeShell({ designId }: {designId:string}){
                                       // Canal de voz/vídeo: 'none' → detalhado; senão joinVoice.
                                       if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
                                       setCallActionBusy(true)
-                                      if (voiceChannel?.channelId === ch.id) {
+                                      // FONTE DE VERDADE: o `callId` (não o estado
+                                      // `voiceChannel`, que só era preenchido por
+                                      // este mesmo clique). Entrar pelo botão da tela
+                                      // do canal deixava o estado vazio e o clique
+                                      // aqui reentrava em vez de sair.
+                                      const estouNesteCanal = canalDaChamada?.channelId === ch.id
+                                      if (estouNesteCanal) {
                                         try {
                                           // `leaveVoice` já chama voiceLeave: não repetir (2 frames na rede).
-                                          await callManager.leaveVoice(selCommunity!, ch.id)
+                                          await callManager.leaveVoice(canalDaChamada.communityId, ch.id)
                                         } catch (e: any) { setError(String(e?.message ?? e)) }
                                         setVoiceChannel(null); setVoiceStates([])
                                       } else {
@@ -2565,19 +2643,23 @@ export default function ThemeShell({ designId }: {designId:string}){
               </div>
             </>
           )}
-          {/* VOICE BAR idêntico Discord — quando numa chamada de voz do servidor */}
-          {voiceChannel && (
+          {/* VOICE BAR idêntico Discord — quando numa chamada de voz do servidor.
+              Fonte de verdade é o `callId` (`canalDaChamada`): o estado paralelo
+              `voiceChannel` só era preenchido pelo clique na sidebar, então
+              entrar pelo botão da tela do canal deixava esta barra ausente (e o
+              "Sair" apontava para o servidor errado). */}
+          {canalDaChamada && (
             <div style={{ background: '#232428', borderTop: `1px solid ${borderColor}`, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}` }}/>
                 <span style={{ fontSize: 11, fontWeight: 800, color: t.green, flex: 1 }}>Voz conectada</span>
-                <span style={{ fontSize: 10, color: muted }}>/ {activeComm?.channels.find(([id])=>id===voiceChannel.channelId)?.[1] ?? voiceChannel.channelId.slice(0,8)}</span>
+                <span style={{ fontSize: 10, color: muted }}>/ {activeComm?.channels.find(([id])=>id===canalDaChamada.channelId)?.[1] ?? canalDaChamada.channelId.slice(0,8)}</span>
               </div>
               <div style={{ fontSize: 10, color: muted }}>{voiceStates.length} na voz • {voiceStates.filter(([,m])=>!m).length} com mic aberto • todos semeiam</div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <button onClick={() => { const nm=!isMuted; setIsMuted(nm); callManager.toggleMute(); services.voiceState(voiceChannel.communityId, voiceChannel.channelId, nm, isDeafened).catch(()=>{}) }} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ flex: 1, background: isMuted ? t.red : inputBg, color: isMuted ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={13} /> : <Icon d={Icons.mic} size={13} />}</button>
-                <button onClick={() => { const nd=!isDeafened; setIsDeafened(nd); if(nd) setIsMuted(true); callManager.toggleDeafen(); services.voiceState(voiceChannel.communityId, voiceChannel.channelId, isMuted || nd, nd).catch(()=>{}) }} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ flex: 1, background: isDeafened ? t.red : inputBg, color: isDeafened ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={13} /> : <Icon d={Icons.headphones} size={13} />}</button>
-                <button onClick={async () => { try { await callManager.leaveVoice(voiceChannel.communityId, voiceChannel.channelId) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceChannel(null); setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
+                <button onClick={() => { const nm=!isMuted; setIsMuted(nm); callManager.toggleMute(); services.voiceState(canalDaChamada.communityId, canalDaChamada.channelId, nm, isDeafened).catch(()=>{}) }} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ flex: 1, background: isMuted ? t.red : inputBg, color: isMuted ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={13} /> : <Icon d={Icons.mic} size={13} />}</button>
+                <button onClick={() => { const nd=!isDeafened; setIsDeafened(nd); if(nd) setIsMuted(true); callManager.toggleDeafen(); services.voiceState(canalDaChamada.communityId, canalDaChamada.channelId, isMuted || nd, nd).catch(()=>{}) }} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ flex: 1, background: isDeafened ? t.red : inputBg, color: isDeafened ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={13} /> : <Icon d={Icons.headphones} size={13} />}</button>
+                <button onClick={async () => { try { await callManager.leaveVoice(canalDaChamada.communityId, canalDaChamada.channelId) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceChannel(null); setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
               </div>
               {voiceStates.length>0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{voiceStates.map(([fp,m,d]) => <span key={fp} title={fp} style={{ fontSize: 10, background: inputBg, border: `1px solid ${borderColor}`, padding: '2px 6px', borderRadius: 99, color: m? t.red : d? t.yellow : t.green }}>{fp.slice(0,6)} {m ? <Icon d={Icons.micOff} size={10} /> : d ? <Icon d={Icons.volumeX} size={10} /> : <Icon d={Icons.mic} size={10} />}</span>)}</div>}
             </div>
@@ -2625,10 +2707,11 @@ export default function ThemeShell({ designId }: {designId:string}){
           </div>
         </div>
 
-        {/* Em canal de voz o painel lateral é só CONTROLES (a mídia fica no
-            centro): ele ocupa espaço fixo e estreito, senão sobrava um vão
-            vazio de 520px ao lado dos quadrados. */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: activeCall ? (inChannelCall ? 300 : callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
+        {/* LAYOUT ÚNICO: dentro de uma chamada o painel de controles já vive
+            DENTRO do `VoiceStage` (coluna estreita fixa). A margem do conteúdo
+            acompanha isso — antes o canal usava 300px fixos e DM/grupo até
+            56vw, e a mesma chamada mudava de largura ao entrar/sair. */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: painelLateralVisivel ? (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
           {view === 'servidores' && selCommunity ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, display: 'flex' }}>
@@ -2921,39 +3004,148 @@ export default function ThemeShell({ designId }: {designId:string}){
 
           {/* CANAL DE VOZ/VÍDEO: a tela é a CHAMADA — sem histórico e sem
               compositor de texto (era o "dá para digitar num canal de voz").
-              DENTRO da chamada, os quadrados PREENCHEM o espaço central em
-              modo palco (o painel lateral vira só controles: mostrar os dois
-              duplicava a mídia). */}
+
+              UM desenho só (`VoiceStage`) para lobby e chamada ativa: palco da
+              mídia + coluna de controles com o MESMO cabeçalho e os MESMOS
+              botões. Antes eram três layouts diferentes e a interface "pulava"
+              ao entrar/sair. A regra está em `services/voiceLayout.ts`. */}
           {selConv && selCallChannel && (
-            inThisCall ? (
-              <CallTilesGrid
-                tiles={visibleCallTiles}
-                fill
-                pinnedId={pinnedTileId}
-                onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
-                onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
-                deafened={!!activeCall?.deafened}
-                showAudioControls
-                minHeight={180}
-                palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
-                avatarColor={avatarColor}
-                avatarB64={callAvatars}
-                onOpenProfile={(fp) => setProfileFp(fp)}
-              />
-            ) : (
-              <CallChannelStage
-                communityId={selCommunity!}
-                channel={selCallChannel}
-                myFp={identity?.fingerprint ?? ''}
-                inCall={false}
-                busy={!!activeCall}
-                unavailable={!callsOk ? callsUnavailableDetail : null}
-                nameOf={nameOfFp}
-                onJoin={() => { if (selCommunity && selCallChannel) void callManager.joinVoice(selCommunity, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
-                onLeave={() => { void callManager.leaveVoice(selCommunity!, selCallChannel.id).catch((e: any) => setError(String(e?.message ?? e))) }}
-                palette={{ panel: bg, input: inputBg, border: borderColor, heading: t.heading, text, muted, green: t.green, red: t.red, accent: t.accent }}
-              />
-            )
+            <VoiceStage
+              layout={voiceLayout}
+              palette={{
+                stage: bg, panel: '#0f0f0f', input: inputBg, border: borderColor,
+                heading: t.heading, text, muted, green: t.green, red: t.red,
+                yellow: t.yellow, accent: t.accent,
+              }}
+              title={callScreenTitle({
+                channelName: selCallChannel.name,
+                conversationTitle: conversations.find((c) => c.id === activeCall?.convId)?.title,
+                peerName: peerTitle,
+              })}
+              subtitle={
+                selCallChannel.kind === 'video'
+                  ? 'Canal de vídeo — a câmera é opcional'
+                  : (selCallChannel.topic || 'Canal de voz')
+              }
+              kind={selCallChannel.kind === 'video' ? 'video' : 'voice'}
+              inCall={inThisCall}
+              phase={(activeCall?.phase ?? 'idle') as any}
+              startAt={activeCall?.startAt ?? Date.now()}
+              nowMs={nowMs}
+              mediaLive={mediaLive}
+              ringing={!!activeCall?.ringing}
+              route={callManager.getRungSummary()}
+              media={
+                <CallTilesGrid
+                  tiles={visibleCallTiles}
+                  fill
+                  pinnedId={pinnedTileId}
+                  onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
+                  onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+                  deafened={!!activeCall?.deafened}
+                  showAudioControls
+                  minHeight={180}
+                  palette={{ heading: t.heading, muted, green: t.green, red: t.red, accent: t.accent, border: borderColor }}
+                  avatarColor={avatarColor}
+                  avatarB64={callAvatars}
+                  onOpenProfile={(fp) => setProfileFp(fp)}
+                />
+              }
+              peers={channelCallPeers}
+              unavailable={!callsOk ? callsUnavailableDetail : null}
+              busy={!!activeCall && !inThisCall}
+              notice={notice}
+              muted={isMuted}
+              deafened={isDeafened}
+              cameraOn={!!activeCall?.cameraOn}
+              sharing={!!activeCall?.sharing}
+              cameraDisabled={!!activeCall?.sharing && !activeCall?.cameraOn}
+              onJoin={() => {
+                if (!selCommunity || !selCallChannel) return
+                if (callActionBusy) return
+                setCallActionBusy(true)
+                void callManager.joinVoice(selCommunity, selCallChannel.id)
+                  .catch((e: any) => setError(String(e?.message ?? e)))
+                  .finally(() => setCallActionBusy(false))
+              }}
+              onLeave={() => {
+                if (canalDaChamada) {
+                  void callManager.leaveVoice(canalDaChamada.communityId, canalDaChamada.channelId)
+                    .catch((e: any) => setError(String(e?.message ?? e)))
+                } else {
+                  void callManager.leave().catch((e: any) => setError(String(e?.message ?? e)))
+                }
+              }}
+              onToggleMute={() => { setIsMuted((m) => !m); callManager.toggleMute() }}
+              onToggleDeafen={() => {
+                const nd = !isDeafened
+                setIsDeafened(nd)
+                if (nd) setIsMuted(true)
+                callManager.toggleDeafen()
+              }}
+              onToggleCamera={() => { void callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e))) }}
+              onToggleScreen={() => {
+                if (activeCall?.sharing) { void callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return }
+                if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return }
+                setShowScreenPicker(true)
+              }}
+              screenAvailable={supportsScreenShare() || !!activeCall?.sharing}
+              screenUnavailableReason={screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG}
+              onOpenSettings={() => setShowCallSettings((v) => !v)}
+              settings={showCallSettings ? (
+                <CallSettingsPanel
+                  prefs={callMediaPrefsState}
+                  onApply={async (patch) => {
+                    const aplicado = await callManager.applyMediaPrefs(patch)
+                    setCallMediaPrefsState(aplicado)
+                    return aplicado
+                  }}
+                  onClose={() => setShowCallSettings(false)}
+                  onError={(m) => setError(m)}
+                  cameraOn={!!activeCall?.cameraOn}
+                  sharing={!!activeCall?.sharing}
+                  muted={!!activeCall?.muted}
+                  onToggleCamera={() => callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e)))}
+                  onToggleScreen={() => {
+                    if (activeCall?.sharing) return callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))
+                    setShowScreenPicker(true)
+                  }}
+                  screenQuality={callManager.getScreenShareOptions().quality}
+                  screenFps={callManager.getScreenShareOptions().fps}
+                  onScreenQualityChange={(q) => { void callManager.setScreenShareOptions({ quality: q as any }).catch((e: any) => setError(String(e?.message ?? e))); setScreenOptsTick((v) => v + 1) }}
+                  onScreenFpsChange={(f) => { void callManager.setScreenShareOptions({ fps: f as any }).catch((e: any) => setError(String(e?.message ?? e))); setScreenOptsTick((v) => v + 1) }}
+                />
+              ) : null}
+              extra={(
+                <>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowCallDiag((v) => !v)}
+                      title="Diagnóstico da chamada em tempo real (ICE, RTT, FPS, causa da falha)"
+                      aria-label="Diagnóstico da chamada"
+                      style={{ background: showCallDiag ? t.accent : inputBg, border: `1px solid ${borderColor}`, color: showCallDiag ? '#fff' : text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700 }}
+                    >Diagnóstico</button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddToCall(true)}
+                      style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700 }}
+                    >+ Amigo</button>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                    ><Icon d={Icons.attach} size={12} /> Arquivo</button>
+                  </div>
+                  {((activeCall?.qualityNotice as string | undefined) || qualityError) && (
+                    <div role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow, lineHeight: 1.5 }}>
+                      {qualityError ?? (activeCall?.qualityNotice as string)}
+                    </div>
+                  )}
+                  {showCallDiag && <CallDiagnostics compact />}
+                </>
+              )}
+            />
           )}
 
           {selConv && !selCallChannel && (
@@ -3500,11 +3692,11 @@ export default function ThemeShell({ designId }: {designId:string}){
         </div>
       )}
 
-      {/* Painel lateral: a navegação e a conversa permanecem acessíveis durante a chamada.
-          Em canal de voz/vídeo os QUADRADOS ficam no centro (senão a mesma mídia
-          aparece duas vezes e a tela fica sem espaço): aqui só os controles. */}
-      {activeCall && (
-        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: inChannelCall ? 300 : (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)'), background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
+      {/* Painel lateral: só quando a chamada NÃO está na tela unificada (ali
+          palco + controles já vivem no `VoiceStage`). Mostrar os dois era o que
+          duplicava cabeçalho, quadrados e botões na mesma tela. */}
+      {painelLateralVisivel && (
+        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)', background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
           <div style={{ minHeight: 56, height: 'auto', background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', gap: 8 }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 250, flex: '1 1 250px' }}>
               <span style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}22`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={16} /> : <Icon d={Icons.phone} size={16} />}</span>

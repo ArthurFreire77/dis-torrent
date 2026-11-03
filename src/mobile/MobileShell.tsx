@@ -25,6 +25,7 @@ import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../s
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
+import { parseVoiceCallId } from '../services/voiceChannelRef'
 import { isCallableChannel } from '../app/channels'
 import {
   InvitePanel,
@@ -1169,6 +1170,10 @@ export default function MobileShell() {
    * Entrar/sair de um canal de VOZ ou VÍDEO pelo celular — mesmo caminho do
    * desktop (`joinVoice`/`leaveVoice`). Câmera é opcional e mora na barra da
    * chamada: o canal `video` não abre nada diferente, só deixa o botão à mão.
+   *
+   * O servidor/canal vem do `callId` da chamada (não do `selCommunity`, que
+   * pode ser outro): sair de um canal usando o servidor aberto na hora chamava
+   * `voiceLeave` no servidor ERRADO e a sala continuava te vendo lá.
    */
   const enterCallChannel = useCallback(async (communityId: string, channelId: string) => {
     if (callActionBusy) return
@@ -1190,14 +1195,18 @@ export default function MobileShell() {
   /** Sair da chamada do canal aberto (mesmo `leaveVoice` do desktop). */
   const leaveCallChannel = useCallback(async () => {
     const st: any = activeCall
-    const canal = typeof st?.convId === 'string' ? st.convId : ''
-    if (!st || !String(st.callId ?? '').startsWith('voice-') || !selCommunity || !canal) return
+    const ref = parseVoiceCallId(st?.callId, st?.convId)
+    if (!ref) {
+      // Canal desconhecido: encerra o que está vivo em vez de não fazer nada.
+      try { await callManager.leave() } catch (e: any) { setError(String(e?.message ?? e)) }
+      return
+    }
     try {
-      await callManager.leaveVoice(selCommunity, canal)
+      await callManager.leaveVoice(ref.communityId, ref.channelId)
     } catch (e: any) {
       setError(String(e?.message ?? e))
     }
-  }, [activeCall, selCommunity])
+  }, [activeCall])
   // Lixeira: em grupo abre o diálogo (sair / dono escolhe apagar); DM apaga.
   const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
   /** Fechar o app (segundo plano × encerrar) — não é logout. */
@@ -1533,6 +1542,41 @@ export default function MobileShell() {
     // não serve (ids de servidor/canal já têm hífen).
     return typeof st.convId === 'string' && st.convId ? st.convId : null
   }, [activeCall])
+  /**
+   * Quem está no canal aberto, pelo MOTOR (`voiceStates`) — mesma fonte do
+   * desktop. Precisa de re-leitura em evento + tique porque no celular a
+   * WebView congela em segundo plano e perde os eventos de roster.
+   */
+  const [voiceStates, setVoiceStates] = useState<[string, boolean, boolean][]>([])
+  useEffect(() => {
+    if (!selCommunity || !selConv) { setVoiceStates((cur) => (cur.length === 0 ? cur : [])); return }
+    let vivo = true
+    const ler = () => {
+      services.voiceStates(selCommunity, selConv)
+        .then((v) => { if (vivo) setVoiceStates(Array.isArray(v) ? v : []) })
+        .catch(() => { /* sem motor ainda */ })
+    }
+    ler()
+    const t = window.setInterval(ler, 15_000)
+    const onVisible = () => { if (!document.hidden) ler() }
+    const un = services.subscribe((ev) => {
+      if (
+        ev.type === 'voice_joined' ||
+        ev.type === 'voice_left' ||
+        ev.type === 'voice_state_changed' ||
+        ev.type === 'peer_offline'
+      ) ler()
+    })
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      vivo = false
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+      un()
+    }
+  }, [selCommunity, selConv])
   /**
    * Canal de VOZ/VÍDEO aberto: a tela certa é a chamada, não o histórico de
    * texto. Antes o toque em "voz" caía no compositor de mensagens do canal.
@@ -2206,12 +2250,32 @@ export default function MobileShell() {
       const st: any = activeCall
       const dentro = !!inCallChannelId && inCallChannelId === selCallChannel.id
       const ligando = dentro && (st?.phase === 'connecting' || st?.phase === 'outgoing' || st?.phase === 'reconnecting')
-      const participantes = ((st?.participants ?? []) as any[]).map((p) => ({
-        fp: String(p?.fp ?? ''),
-        nickname: typeof p?.nickname === 'string' ? p.nickname : undefined,
-        muted: !!p?.muted,
-        deafened: !!p?.deafened,
-      }))
+      // QUEM ESTÁ NO CANAL: o motor (`voiceStates`) é a fonte que enxerga quem
+      // entrou e ainda está abrindo o microfone; o roster do manager pode não
+      // ter a pessoa ainda. Antes o lobby dizia "ninguém na chamada" com gente
+      // dentro e ninguém entrava.
+      const porFp = new Map<string, { fp: string; nickname?: string; muted?: boolean; deafened?: boolean }>()
+      for (const [fp, muted, deafened] of voiceStates) {
+        if (!fp) continue
+        porFp.set(fp, {
+          fp,
+          nickname: resolveMemberName(fp) || fp.slice(0, 8),
+          muted: !!muted,
+          deafened: !!deafened,
+        })
+      }
+      for (const p of ((st?.participants ?? []) as any[])) {
+        const fp = String(p?.fp ?? '')
+        if (!fp) continue
+        const antes = porFp.get(fp)
+        porFp.set(fp, {
+          fp,
+          nickname: resolveMemberName(fp) || (typeof p?.nickname === 'string' ? p.nickname : undefined) || antes?.nickname,
+          muted: p?.muted ?? antes?.muted,
+          deafened: p?.deafened ?? antes?.deafened,
+        })
+      }
+      const participantes = [...porFp.values()]
       return (
         <MobileCallChannel
           channelName={selCallChannel.name}
@@ -2220,7 +2284,7 @@ export default function MobileShell() {
           inCall={dentro}
           connecting={!!ligando}
           seconds={dentro ? callDuration : 0}
-          participants={dentro ? participantes : []}
+          participants={participantes}
           media={dentro ? renderCallTilesMobile(false) : null}
           myFp={identity?.fingerprint ?? ''}
           muted={isMuted}

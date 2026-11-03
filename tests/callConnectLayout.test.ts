@@ -36,6 +36,45 @@ test('quem ENTRA também oferece (informação fresca do roster)', () => {
   assert.doesNotMatch(trecho, /const iniciar = !!this\.myFp && this\.myFp > fp/, 'sem a trava do fp maior')
 })
 
+test('entrar no canal abre par mesmo quando o roster chega atrasado', () => {
+  // Causa do "só conecta de segunda": o voiceStates era lido uma única vez e,
+  // na estreia, ainda não tinha o outro peer — ninguém abria o PC. As janelas
+  // vão até 25 s porque o prompt de microfone pode levar mais que 8 s.
+  assert.match(manager, /catchUpVoiceRoster\(callId, communityId, channelId\)/, 'catch-up é chamado no join')
+  const bloco = manager.slice(manager.indexOf('private catchUpVoiceRoster'))
+  assert.ok(bloco.length > 0, 'a função existe')
+  assert.match(bloco.slice(0, 2200), /createPC\(fp, callId, true\)/, 'abre o par que faltava')
+  assert.match(bloco.slice(0, 1400), /\[1200, 3000, 6000, 10000, 16000, 25000\]/, 'tenta em seis janelas')
+})
+
+test('roster que chega durante o prompt do microfone não é descartado', () => {
+  // `joinVoice` anuncia a entrada ANTES de esperar o getUserMedia. O outro
+  // lado responde na hora e o evento chegava sem `this.state` — era jogado
+  // fora e ninguém abria par na estreia ("só conecta na segunda").
+  assert.match(manager, /pendingVoiceJoins = new Map/, 'existe a fila do roster adiantado')
+  const joined = manager.slice(manager.indexOf('private onVoiceParticipantJoined'))
+  assert.match(joined.slice(0, 1400), /pendingVoiceJoins\.get\(callId\)/, 'guarda em vez de descartar')
+  const joinVoice = manager.slice(manager.indexOf('async joinVoice'))
+  assert.match(joinVoice.slice(0, 12000), /const adiantados = this\.pendingVoiceJoins\.get\(callId\)/, 'drena no join')
+})
+
+test('captura de mídia é serializada (AbortError ao abrir câmera/mic)', () => {
+  // `getUserMedia` concorrente ABORTA o anterior: entrar na chamada e clicar
+  // na câmera no mesmo instante derrubava o pedido com AbortError.
+  assert.match(manager, /function comFilaDeCaptura/, 'existe a fila global de captura')
+  assert.match(manager, /let capturaFila: Promise<unknown> = Promise\.resolve\(\)/)
+  const get = manager.slice(manager.indexOf('async function getLocalMedia('))
+  assert.match(get.slice(0, 400), /comFilaDeCaptura\(/, 'getLocalMedia passa pela fila')
+})
+
+test('aparelho salvo que sumiu volta para o padrão (câmera que "não abre")', () => {
+  const get = manager.slice(manager.indexOf('async function getLocalMediaInner('))
+  const bloco = get.slice(0, 3200)
+  assert.match(bloco, /usaDeviceExato/, 'detecta preferência de device salva')
+  assert.match(bloco, /setCallMediaPrefs\(\{ audioInputId: '', videoInputId: '' \}\)/, 'esquece o device morto')
+  assert.match(bloco, /videoConstraintsFromPrefs\(\{ \.\.\.mediaPrefs, videoInputId: '' \}\)/, 'recaptura no padrão')
+})
+
 test('sem par ICE selecionado a rota é "n/d", nunca "LAN"', () => {
   const rota = manager.slice(manager.indexOf('getRungSummary(): string'))
   assert.match(rota.slice(0, 1500), /const comPar = reports\.filter/, 'filtra relatórios sem par')
@@ -65,7 +104,9 @@ test('palco do canal de voz PREENCHE a área toda (relato do dono: "completar a 
   assert.match(shell.slice(primeiroUso, primeiroUso + 800), /\bfill\b/, 'a grade do canal recebe o modo palco')
 })
 
-test('em chamada de canal o painel lateral fica estreito', () => {
-  assert.match(shell, /const inChannelCall = inThisCall/)
-  assert.match(shell, /inChannelCall \? 300 :/, 'painel de controles tem largura fixa')
+test('em chamada de canal o painel lateral fica fora da tela unificada', () => {
+  // O painel de controles agora vive DENTRO da tela unificada (coluna fixa e
+  // estreita); o painel lateral só existe fora dela.
+  assert.match(shell, /resolveVoiceLayout\(/)
+  assert.match(shell, /painelLateralVisivel \? \(callPanelSize/, 'a margem do conteúdo segue o layout')
 })

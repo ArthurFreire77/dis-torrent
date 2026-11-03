@@ -13,7 +13,7 @@ const stage = readFileSync('src/components/calls/CallChannelStage.tsx', 'utf8')
 
 test('desktop troca a tela de mensagens pela tela da chamada', () => {
   assert.match(shell, /selCallChannel &&/, 'existe o ramo que detecta canal de chamada')
-  assert.match(shell, /<CallChannelStage/, 'a tela da chamada é renderizada')
+  assert.match(shell, /<VoiceStage/, 'a tela da chamada é renderizada')
   // O compositor e o histórico ficam FORA do caso de chamada.
   assert.match(shell, /\{selConv && !selCallChannel && \(\s*<>/, 'histórico só em canal de texto')
   assert.match(shell, /\{selConv && !selCallChannel && \(\s*<div style=\{\{ padding: '0 16px 24px'/, 'compositor só em canal de texto')
@@ -39,5 +39,7 @@ test('tela da chamada é honesta: sem entrar, mostra quem está e o motivo', () 
 
 test('entrar/sair usa o MESMO joinVoice/leaveVoice do canal de voz', () => {
   assert.match(shell, /callManager\.joinVoice\(selCommunity, selCallChannel\.id\)/)
-  assert.match(shell, /callManager\.leaveVoice\(selCommunity!, selCallChannel\.id\)/)
+  // Sair usa o canal DERIVADO do callId — não o `selCommunity` da tela, que
+  // pode ser outro servidor e mandava o `voiceLeave` para o lugar errado.
+  assert.match(shell, /callManager\.leaveVoice\(canalDaChamada\.communityId, canalDaChamada\.channelId\)/)
 })

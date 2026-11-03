@@ -534,7 +534,28 @@ function describeMediaError(e: unknown): string | null {
   if (name === 'SecurityError') return 'permissão de mídia bloqueada pelo contexto (HTTPS/app nativo exigido)'
   return null
 }
+/**
+ * Fila GLOBAL de captura.
+ *
+ * `getUserMedia` concorrente ABORTA a captura anterior: entrar na chamada (mic +
+ * câmera) e clicar no botão da câmera no mesmo instante derrubava o pedido com
+ * `AbortError` — era o "falha ao abrir microfone/câmera (AbortError)" com a
+ * câmera já ligada na tela. Serializar aqui resolve na origem: a segunda
+ * captura espera a primeira terminar em vez de cancelá-la.
+ */
+let capturaFila: Promise<unknown> = Promise.resolve()
+function comFilaDeCaptura<T>(fn: () => Promise<T>): Promise<T> {
+  const vez = capturaFila.catch(() => undefined).then(fn)
+  // A fila não guarda rejeição (senão a próxima captura herda o erro).
+  capturaFila = vez.catch(() => undefined)
+  return vez
+}
+
 async function getLocalMedia(constraints: MediaStreamConstraints): Promise<MediaStream | null> {
+  return comFilaDeCaptura(() => getLocalMediaInner(constraints))
+}
+
+async function getLocalMediaInner(constraints: MediaStreamConstraints): Promise<MediaStream | null> {
   try {
     const md: any = (typeof navigator !== 'undefined' ? (navigator as any).mediaDevices : null)
     if (!md?.getUserMedia) {
@@ -561,6 +582,21 @@ async function getLocalMedia(constraints: MediaStreamConstraints): Promise<Media
     try {
       return await md.getUserMedia(merged)
     } catch (e) {
+      const nome = (e as Error)?.name ?? ''
+      // DEVICE ESCOLHIDO QUE SUMIU (câmera trocada, dock desconectado, outro
+      // aparelho): `deviceId: { exact }` recusa com OverconstrainedError e
+      // NENHUMA das degradações abaixo removia o deviceId — a câmera "não abria"
+      // para sempre até alguém abrir as configurações e trocar o aparelho.
+      // Aqui a preferência morta é esquecida e a captura recomeça no padrão.
+      const usaDeviceExato = !!mediaPrefs.videoInputId || !!mediaPrefs.audioInputId
+      if (usaDeviceExato && (nome === 'OverconstrainedError' || nome === 'NotFoundError')) {
+        try {
+          const s = await md.getUserMedia({ ...merged, audio: merged.audio ? { echoCancellation: mediaPrefs.echoCancellation, noiseSuppression: mediaPrefs.noiseSuppression, autoGainControl: mediaPrefs.autoGainControl, channelCount: 1 } : merged.audio, video: merged.video ? { ...videoConstraintsFromPrefs({ ...mediaPrefs, videoInputId: '' }) } : merged.video })
+          setCallMediaPrefs({ audioInputId: '', videoInputId: '' })
+          try { localMediaNotice?.('o aparelho salvo não está mais disponível — usei o microfone/câmera padrão') } catch { /* ignore */ }
+          return s
+        } catch { /* segue para as degradações normais */ }
+      }
       // OverconstrainedError: degrada em ordem (720p/60 → … → 480p) — áudio nunca sai da jogada.
       if (merged.video && (e as Error)?.name === 'OverconstrainedError') {
         const quedas: MediaTrackConstraints[] = [
@@ -1018,6 +1054,19 @@ export class CallManager {
   /** Candidatos ICE LOCAIS por peer — reenviados quando o gathering termina (ver resendLocalIce). */
   private localIce = new Map<string, RTCIceCandidate[]>()
   private pendingOffers = new Map<string, { callId: string; sdp: string }>()
+  /**
+   * `voice_joined`/`voice_state_changed` recebidos ANTES de o estado da
+   * chamada existir.
+   *
+   * POR QUE EXISTE ("só conecta na segunda"): o `joinVoice` anuncia a entrada
+   * e só DEPOIS espera o `getUserMedia` (prompt de permissão na estreia). O
+   * outro lado recebe o anúncio na hora, abre o par e manda offer — mas aqui
+   * ainda não há `this.state`, então o evento de roster era descartado. O
+   * catch-up de 1,2/3,5/8 s também desistia cedo (o prompt pode levar mais que
+   * isso), ninguém criava PC e a tela ficava em "Conectando…". Na segunda vez
+   * a permissão já estava dada, o estado nascia antes e tudo funcionava.
+   */
+  private pendingVoiceJoins = new Map<string, Set<string>>()
   /** Chamadas que ESTE lado aceitou/originou: offer chega antes do clique em Aceitar (bug do e2e). */
   private acceptedCalls = new Set<string>()
   /** Último SDP de offer aceito por peer (dedup de reenvio / anti-GLARE). */
@@ -1872,7 +1921,17 @@ export class CallManager {
   private onVoiceParticipantJoined(callId: string, fp: string) {
     try {
       const st = this.state
-      if (!st || st.callId !== callId || !fp || fp === this.myFp) return
+      if (!fp || fp === this.myFp) return
+      // ROSTER CHEGOU ANTES DO ESTADO: guarda em vez de descartar (ver
+      // `pendingVoiceJoins` — é a causa do "só conecta na segunda").
+      if (!st || st.callId !== callId) {
+        if (callId.startsWith('voice-')) {
+          let set = this.pendingVoiceJoins.get(callId)
+          if (!set) { set = new Set(); this.pendingVoiceJoins.set(callId, set) }
+          set.add(fp)
+        }
+        return
+      }
       const added = addVoiceParticipant(st.participants, fp)
       if (added) {
         this.dropInvite(fp)
@@ -1916,7 +1975,19 @@ export class CallManager {
   private onVoiceParticipantState(callId: string, fp: string, muted: boolean, deafened: boolean) {
     try {
       const st = this.state
-      if (!st || st.callId !== callId || !fp || fp === this.myFp) return
+      if (!fp || fp === this.myFp) return
+      // Mesmo caso do `voice_joined`: o anúncio reverso (quem já estava no
+      // canal respondendo ao meu join) pode chegar durante o prompt do
+      // microfone, antes de o estado existir. Guardar evita esperar 15 s pelo
+      // re-anúncio — e é justamente o que fazia a estreia não conectar.
+      if (!st || st.callId !== callId) {
+        if (callId.startsWith('voice-')) {
+          let set = this.pendingVoiceJoins.get(callId)
+          if (!set) { set = new Set(); this.pendingVoiceJoins.set(callId, set) }
+          set.add(fp)
+        }
+        return
+      }
       const added = addVoiceParticipant(st.participants, fp)
       const changed = updateVoiceParticipantState(st.participants, fp, muted, deafened)
       if (added) this.dropInvite(fp)
@@ -2186,6 +2257,17 @@ export class CallManager {
           }
         }
       } catch { /* roster best-effort: os eventos ainda chegam */ }
+      // Idem caminho navegador: o `voice_joined` pode ter chegado durante o join.
+      const adiantadosNativo = this.pendingVoiceJoins.get(callId)
+      this.pendingVoiceJoins.delete(callId)
+      if (adiantadosNativo) {
+        for (const fp of adiantadosNativo) {
+          if (!fp || fp === me.fingerprint) continue
+          if (!this.state.participants.some((p: any) => p.fp === fp)) {
+            this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
+          }
+        }
+      }
       // Reconciliador: eventos perdidos não deixam mais o painel divergente.
       this.startRosterReconcile(callId, communityId, channelId)
       this.startNativeVoiceMonitor(callId)
@@ -2215,7 +2297,6 @@ export class CallManager {
       relayManual: false,
       relayReason: null,
     }
-    // EU (joiner) ofereço a quem já está; quem entra depois oferece a nós (anti-glare resolve).
     try {
       const states = await services.voiceStates(communityId, channelId)
       for (const [fp] of states) {
@@ -2223,9 +2304,6 @@ export class CallManager {
         if (!this.state.participants.some((p: any) => p.fp === fp)) {
           this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
         }
-      }
-      for (const [fp] of states) {
-        if (!fp || fp === me.fingerprint) continue
         // QUEM ENTRA ABRE O PAR, sempre.
         //
         // Antes só o fp MAIOR abria — mas o outro lado não sabia que eu entrei
@@ -2236,6 +2314,23 @@ export class CallManager {
         try { await this.createPC(fp, callId, true) } catch { /* par best-effort */ }
       }
     } catch { /* lista best-effort: voice_joined still wires latecomers */ }
+    // ROSTER QUE CHEGOU DURANTE O PROMPT DO MICROFONE: o `voice_joined`/o
+    // anúncio reverso podem ter sido recebidos antes de `this.state` existir
+    // neste join (ver `pendingVoiceJoins`). Sem drenar aqui, o par só voltaria
+    // no re-anúncio de 15 s — ou nunca, se o peer também estivesse ocupado.
+    const adiantados = this.pendingVoiceJoins.get(callId)
+    this.pendingVoiceJoins.delete(callId)
+    if (adiantados) {
+      for (const fp of adiantados) {
+        if (!fp || fp === me.fingerprint) continue
+        if (!this.state.participants.some((p: any) => p.fp === fp)) {
+          this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
+        }
+        if (!this.pcs.has(fp)) {
+          try { await this.createPC(fp, callId, true) } catch { /* par best-effort */ }
+        }
+      }
+    }
     // Origem de verdade contínua para o roster (ver startRosterReconcile).
     this.startRosterReconcile(callId, communityId, channelId)
     // CATCH-UP DO ROSTER — o bug do "só conecta na segunda".
@@ -2274,9 +2369,13 @@ export class CallManager {
    * Relê o roster do canal alguns instantes depois do join e abre os pares que
    * faltam. Resolve o "só conecta na segunda" (na estreia o `voiceStates` não
    * tinha o outro peer ainda).
+   *
+   * As janelas vão até 25 s porque na estreia o `joinVoice` espera o prompt de
+   * permissão do microfone: 8 s era menos que o tempo de o usuário clicar em
+   * "Permitir", e aí a estreia ficava sem par nenhum.
    */
   private catchUpVoiceRoster(callId: string, communityId: string, channelId: string) {
-    const delays = [1200, 3500, 8000]
+    const delays = [1200, 3000, 6000, 10000, 16000, 25000]
     for (const ms of delays) {
       try {
         setTimeout(() => {
@@ -3348,6 +3447,7 @@ export class CallManager {
       this.pendingIce.clear()
       this.localIce.clear()
       this.pendingOffers.clear()
+      this.pendingVoiceJoins.clear()
       this.acceptedCalls.clear()
       this.lastRemoteOffer.clear()
       this.iceReports.clear()
@@ -3450,6 +3550,7 @@ export class CallManager {
       this.pendingIce.clear()
       this.localIce.clear()
       this.pendingOffers.clear()
+      this.pendingVoiceJoins.clear()
       this.acceptedCalls.clear()
       this.lastRemoteOffer.clear()
       this.iceReports.clear()
@@ -5687,6 +5788,7 @@ export class CallManager {
     this.pendingIce.clear()
     this.localIce.clear()
     this.pendingOffers.clear()
+    this.pendingVoiceJoins.clear()
     this.offerQueue.clear()
     this.acceptedCalls.clear()
     this.lastRemoteOffer.clear()

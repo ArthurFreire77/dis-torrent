@@ -17,7 +17,9 @@ test('tela do canal de voz/vídeo MONTA a mídia (sem isso conecta e fica muda)'
   // de chamada que não renderiza os tiles conecta, conta o tempo e não toca
   // nem mostra nada — foi exatamente o relato.
   assert.match(callChannel, /media\?: ReactNode/, 'a tela precisa aceitar os quadrados')
-  assert.match(callChannel, /\{inCall && media &&/, 'os quadrados precisam ser RENDERIZADOS')
+  // Renderizado no caminho de chamada ativa (`if (inCall)`).
+  const bloco = callChannel.slice(callChannel.indexOf('if (inCall)'), callChannel.indexOf('if (inCall)') + 3000)
+  assert.match(bloco, /\{media\}/, 'os quadrados precisam ser RENDERIZADOS')
   assert.match(mobileShell, /media=\{dentro \? renderCallTilesMobile\(false\) : null\}/, 'o shell precisa passar a mídia')
 })
 
