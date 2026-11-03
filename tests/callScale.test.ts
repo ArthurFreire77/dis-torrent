@@ -1,12 +1,3 @@
-// Chamadas com MUITA gente, servidores GIGANTES e "não cair da call".
-//
-// Três relatos do dono:
-// 1. "garanta que funcione com várias pessoas a chamada";
-// 2. "um cara do server com 300 mil pessoas não entra — não deve aparecer
-//    ninguém, imagina aparecer 300 mil pessoas nessa tela, isso vale para todo
-//    server";
-// 3. "depois de um tempo eu caio da call" (não pode acontecer nunca).
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -29,14 +20,11 @@ const mobile = readFileSync('src/mobile/MobileShell.tsx', 'utf8')
 const grid = readFileSync('src/components/calls/CallTilesGrid.tsx', 'utf8')
 const storage = readFileSync('distorrent-core/src/storage.rs', 'utf8')
 
-// ---------- grade da chamada: várias pessoas ----------
-
 test('uma pessoa ocupa a tela sozinha', () => {
   assert.equal(colunasQueCabem(1, 1600), 1)
 })
 
 test('duas pessoas NÃO viram duas colunas em janela estreita', () => {
-  // 380px úteis: um card de 300px + gap não cabe duas vezes.
   assert.equal(colunasQueCabem(2, 380), 1, 'empilha em vez de esmagar')
 })
 
@@ -65,23 +53,20 @@ test('largura desconhecida (SSR) usa o palpite quadrado', () => {
 })
 
 test('muita gente ROLA em vez de esmagar os cards', () => {
-  // 12 pessoas em 1 coluna (janela estreita) não cabem em 600px de altura.
   assert.equal(precisaRolar(12, 1, 600), true)
   assert.equal(precisaRolar(1, 1, 600), false)
 })
 
 test('o card tem largura mínima confortável', () => {
   assert.ok(CARD_MIN_WIDTH_PX >= 240, 'card não pode virar selo')
-  // Em 900px úteis cabem 2 (300*2 + gap), não 3.
   assert.equal(colunasQueCabem(9, 900), 2)
 })
 
 test('a grade MEDE a área (não confia só em sqrt)', () => {
   assert.match(grid, /ResizeObserver/, 'acompanha o tamanho da área')
-  assert.match(grid, /colunasQueCabem\(tiles.length, largura/, 'passa a largura real')
+  assert.match(grid, /bestGrid\(/, 'a distribuição vem do motor de layout')
+  assert.match(grid, /orientationchange/, 'girar o celular reorganiza')
 })
-
-// ---------- servidor gigante: 300 mil membros ----------
 
 test('300 mil membros nunca viram 300 mil linhas', () => {
   const gigante = Array.from({ length: 300_000 }, (_, i) => [`fp${i}`, `user${i}`] as [string, string])
@@ -103,7 +88,6 @@ test('num servidor gigante, EU e os online aparecem primeiro', () => {
   const w = windowMembers(lista, 10, (m) => m.eu || m.on)
   const ids = w.visiveis.map((m) => m.id)
   assert.ok(ids.includes('p4321'), 'eu nunca sumo da lista')
-  // 11 preferidos (eu + 10 online) para 10 vagas: pelo menos um online entra.
   assert.ok(ids.includes('p4990'), 'quem está online aparece antes do resto')
   assert.equal(w.visiveis.length, 10)
   assert.equal(w.restantes, 4990)
@@ -130,11 +114,7 @@ test('o celular tem o mesmo teto', () => {
   assert.match(mobile, /janela\.restantes > 0/)
 })
 
-// ---------- não cair da call ----------
-
 test('CANAL DE VOZ nunca é encerrado por tempo', () => {
-  // O watchdog de reconexão chamava leave() após 30 s sem mídia. Num canal a
-  // pessoa está ESPERANDO gente entrar — cair sozinha é o bug relatado.
   const bloco = manager.slice(manager.indexOf('private startReconnectWatchdog'))
   const trecho = bloco.slice(0, 1800)
   assert.match(trecho, /if \(callId && callId\.startsWith\('voice-'\)\) return/, 'não arma no canal')
@@ -143,16 +123,19 @@ test('CANAL DE VOZ nunca é encerrado por tempo', () => {
 
 test('o watchdog de conexão não desiste no canal vazio', () => {
   const bloco = manager.slice(manager.indexOf('private onConnectWatchdogFire'))
-  assert.match(bloco.slice(0, 3000), /CANAL VAZIO NÃO É FALHA/)
-  assert.doesNotMatch(bloco.slice(0, 3000), /ninguém conectou a mídia ainda/)
+  const trecho = bloco.slice(0, 3000)
+  assert.match(trecho, /this\.connectWatchdogGrants = 0/, 'zera o contador em vez de esgotar')
+  assert.match(
+    trecho,
+    /this\.pcs\.size === 0 && st\.callId\.startsWith\('voice-'\)/,
+    'canal vazio reagenda sem marcar falha',
+  )
+  assert.doesNotMatch(trecho, /ninguém conectou a mídia ainda/, 'não declara desistência')
 })
-
-// ---------- presença de voz expira (fantasma) ----------
 
 test('voice_states tem prazo de validade por re-anúncio', () => {
   assert.match(storage, /VOICE_PRESENCE_TTL_MS/)
   assert.match(storage, /announced_at/)
-  // A leitura remove o que parou de re-anunciar — é o "secura" fantasma.
   const li = storage.slice(storage.indexOf('pub fn list_voice_states'))
   assert.match(li.slice(0, 1600), /DELETE FROM voice_states/)
   assert.match(li.slice(0, 1600), /announced_at < \?3/)

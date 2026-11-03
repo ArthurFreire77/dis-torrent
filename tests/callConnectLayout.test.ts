@@ -1,12 +1,3 @@
-// Regressões do "Conectando… eterno" e do layout dos quadrados.
-//
-// Relato: "ainda continua a conectar só de segunda" + "ficou péssimo o design".
-// Duas causas distintas:
-// 1. só o fingerprint MAIOR abria o par, e na estreia o outro lado ainda não
-//    sabia que eu entrei — ninguém oferecia mídia;
-// 2. `getRungSummary` dizia "rota LAN" mesmo sem NENHUM par ICE selecionado, e
-//    os quadrados esticavam com `1fr` até a altura toda da janela.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -18,7 +9,6 @@ const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
 test('os DOIS lados abrem o par (não só o fingerprint maior)', () => {
   const roster = manager.slice(manager.indexOf('private onVoiceParticipantJoined'))
   const bloco = roster.slice(0, 1800)
-  // JSX/quebras de linha: procura as duas condições sem exigir a mesma linha.
   assert.match(bloco, /!this\.pcs\.has\(fp\)/, 'abre o par quando não existe')
   assert.match(bloco, /isCallPhaseActive\(st\.phase\)/, 'só com chamada ativa')
   assert.doesNotMatch(bloco, /this\.myFp > fp/, 'a regra do fp maior não pode mais bloquear a abertura')
@@ -37,9 +27,6 @@ test('quem ENTRA também oferece (informação fresca do roster)', () => {
 })
 
 test('entrar no canal abre par mesmo quando o roster chega atrasado', () => {
-  // Causa do "só conecta de segunda": o voiceStates era lido uma única vez e,
-  // na estreia, ainda não tinha o outro peer — ninguém abria o PC. As janelas
-  // vão até 25 s porque o prompt de microfone pode levar mais que 8 s.
   assert.match(manager, /catchUpVoiceRoster\(callId, communityId, channelId\)/, 'catch-up é chamado no join')
   const bloco = manager.slice(manager.indexOf('private catchUpVoiceRoster'))
   assert.ok(bloco.length > 0, 'a função existe')
@@ -48,9 +35,6 @@ test('entrar no canal abre par mesmo quando o roster chega atrasado', () => {
 })
 
 test('roster que chega durante o prompt do microfone não é descartado', () => {
-  // `joinVoice` anuncia a entrada ANTES de esperar o getUserMedia. O outro
-  // lado responde na hora e o evento chegava sem `this.state` — era jogado
-  // fora e ninguém abria par na estreia ("só conecta na segunda").
   assert.match(manager, /pendingVoiceJoins = new Map/, 'existe a fila do roster adiantado')
   const joined = manager.slice(manager.indexOf('private onVoiceParticipantJoined'))
   assert.match(joined.slice(0, 1400), /pendingVoiceJoins\.get\(callId\)/, 'guarda em vez de descartar')
@@ -59,8 +43,6 @@ test('roster que chega durante o prompt do microfone não é descartado', () => 
 })
 
 test('captura de mídia é serializada (AbortError ao abrir câmera/mic)', () => {
-  // `getUserMedia` concorrente ABORTA o anterior: entrar na chamada e clicar
-  // na câmera no mesmo instante derrubava o pedido com AbortError.
   assert.match(manager, /function comFilaDeCaptura/, 'existe a fila global de captura')
   assert.match(manager, /let capturaFila: Promise<unknown> = Promise\.resolve\(\)/)
   const get = manager.slice(manager.indexOf('async function getLocalMedia('))
@@ -96,18 +78,13 @@ test('quadrado tem TETO de altura (não estica a janela toda)', () => {
 })
 
 test('palco do canal de voz PREENCHE a área toda (relato do dono: "completar a tela como nos amigos, num espaço maior")', () => {
-  // O `fill` é EXCLUSIVO do centro do canal: painel lateral e mobile
-  // continuam com quadrados com teto (o esticamento de antes era lá).
   assert.match(grid, /fill\?: boolean/, 'prop fill existe')
-  // Um `gridAutoRows` para o palco e um para a grade normal (wrap não usa).
-  assert.equal(grid.split('gridAutoRows').length - 1, 2, 'cada modo de grade define as próprias linhas')
+  assert.match(grid, /bestGrid\(/, 'o modo palco calcula a grade pela área medida')
   const primeiroUso = shell.indexOf('<VoiceStage')
   assert.match(shell.slice(primeiroUso, primeiroUso + 4000), /\bfill\b/, 'a grade do canal recebe o modo palco')
 })
 
 test('em chamada de canal o painel lateral fica fora da tela unificada', () => {
-  // O painel de controles agora vive DENTRO da tela unificada (coluna fixa e
-  // estreita); o painel lateral só existe fora dela.
   assert.match(shell, /resolveVoiceLayout\(/)
   assert.match(shell, /painelLateralVisivel \? \(callPanelSize/, 'a margem do conteúdo segue o layout')
 })

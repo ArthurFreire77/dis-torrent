@@ -1,10 +1,3 @@
-// CallTile — um QUADRADO da chamada: pessoa (câmera/avatar) ou tela.
-// Antes cada shell desenhava inline e a tela era esticada (`cover`), quem
-// transmitia não via a própria câmera e não havia tile separado para a tela.
-// Aqui o tipo decide a apresentação: pessoa `cover`; tela `contain` +
-// `aspect-ratio` real do vídeo (atualizado no `resize` — cobre troca de
-// monitor e janela durante o share).
-
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { attachStream } from '../../shared/mediaAttach'
 import { Icon, Icons } from '../../shared/icons'
@@ -25,25 +18,19 @@ export interface CallTileProps {
   tile: CallTileModel
   pinned?: boolean
   expanded?: boolean
-  /** Miniatura ao lado de um quadrado expandido: esconde rótulos e reduz controles. */
   thumbnail?: boolean
+  touch?: boolean
   onPin?: (id: string) => void
   onExpand?: (id: string) => void
-  /** Volume/mute por participante (só desktop, e só para remoto). */
   showAudioControls?: boolean
   callDeafened?: boolean
   palette: CallTilePalette
-  /** Altura mínima do quadrado no grid (px). */
   minHeight?: number
-  /** `cover` para câmera, `contain` para tela — automático pelo tipo. */
   avatarColor: (fp: string) => string
-  /** Foto de perfil (base64) por fingerprint; sem ela, inicial + cor. */
   avatarB64?: Record<string, string | undefined>
-  /** Abre o perfil da pessoa (foto/nome/fingerprint) ao tocar no avatar. */
   onOpenProfile?: (fp: string) => void
 }
 
-/** `true` se o elemento tem dimensões de vídeo válidas. */
 function readAspect(el: HTMLVideoElement | null): string | null {
   try {
     if (!el) return null
@@ -56,13 +43,6 @@ function readAspect(el: HTMLVideoElement | null): string | null {
   }
 }
 
-/**
- * Proporção do card de PESSOA (não da tela).
- *
- * Sem isto o quadrado era esticado pela linha da grade até o rodapé: no print
- * do dono apareciam duas colunas de 800 px de altura com um avatar de 104 px
- * no meio do vazio. Vídeo de chamada é 16:9; o card segue a mesma forma.
- */
 const PARTICIPANT_ASPECT = '16 / 9'
 
 export function CallTile({
@@ -70,6 +50,7 @@ export function CallTile({
   pinned = false,
   expanded = false,
   thumbnail = false,
+  touch = false,
   onPin,
   onExpand,
   showAudioControls = false,
@@ -85,16 +66,7 @@ export function CallTile({
   const [aspect, setAspect] = useState<string | null>(null)
   const isScreen = tile.kind === 'screen'
 
-  /**
-   * RE-APLICA o áudio quando o stream remoto chega.
-   *
-   * O `ref` só roda quando o elemento monta; o stream remoto quase sempre chega
-   * DEPOIS (offer → ontrack → re-render). Sem este efeito, o `<audio>` ficava
-   * montado com `srcObject` nulo e a chamada ficava muda.
-   */
   const audioSrc = (tile.isLocal ? null : (tile.audioStream ?? tile.stream)) ?? null
-  // Volume/mudo por TRANSMISSÃO (`p:<fp>` voz, `s:<fp>` tela): a tela tem o
-  // próprio controle em vez de dividir o da voz.
   const audioKey = tile.audioKey ?? tile.fp
   useEffect(() => {
     if (!audioSrc) return
@@ -104,7 +76,6 @@ export function CallTile({
     applyParticipantPlayback(el, audioKey, callDeafened)
   }, [tile.isLocal, tile.kind, tile.fp, audioKey, audioSrc, callDeafened])
 
-  // Proporção real da fonte: no primeiro frame e a cada mudança de resolução.
   const syncAspect = useCallback(() => {
     const next = readAspect(videoRef.current)
     if (next) setAspect((cur) => (cur === next ? cur : next))
@@ -118,11 +89,11 @@ export function CallTile({
     try {
       ro = new ResizeObserver(syncAspect)
       ro.observe(el)
-    } catch { /* engine sem ResizeObserver: fica no loadedmetadata */ }
+    } catch {  }
     el.addEventListener('loadedmetadata', syncAspect)
     el.addEventListener('resize', syncAspect)
     return () => {
-      try { ro?.disconnect() } catch { /* ignore */ }
+      try { ro?.disconnect() } catch {  }
       el.removeEventListener('loadedmetadata', syncAspect)
       el.removeEventListener('resize', syncAspect)
     }
@@ -137,22 +108,11 @@ export function CallTile({
       data-call-participant={tile.kind === 'participant' ? tile.fp : undefined}
       data-call-screen-fp={tile.kind === 'screen' ? tile.fp : undefined}
       style={{
-        // TELA: fundo preto e caixa DELIMITADA pela proporção real (`aspectRatio`
-        // na caixa — sem faixa morta, escala sempre igual à do stream).
-        // EXPANDIDO: caixa na proporção, CENTRALIZADA — maior área útil sem
-        // barras nem esticar.
-        // Pessoa continua no gradiente.
         background: isScreen ? '#000' : `radial-gradient(120% 90% at 50% 20%, #31343a 0%, #22242a 70%)`,
         borderRadius: 12,
         overflow: 'hidden',
         position: 'relative',
         minHeight: expanded ? 0 : thumbnail ? 72 : minHeight,
-        // Quadrado normal da tela: SEM `aspectRatio`.
-        //
-        // O aspect-ratio próprio fazia o card crescer além da linha da grade e
-        // cobrir o card vizinho (print do dono: tela sobreposta aos
-        // participantes). Agora ele obedece à célula e o vídeo letterboxa com
-        // `contain` no preto.
         ...(isScreen && aspect
           ? expanded
             ? {
@@ -171,13 +131,6 @@ export function CallTile({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        // CARD DE PESSOA: retângulo 16:9 de ALTURA IGUAL para todos.
-        //
-        // Print do dono: os cards saíam tortos, um maior que o outro, porque
-        // havia `maxWidth: 760` + `maxHeight: 420` por card — cada um parava
-        // num limite diferente. Aqui o card ocupa 100% da célula da grade
-        // (que é uniforme) e a proporção vem do `aspectRatio`; o teto de altura
-        // é UM só para a grade inteira, não por card.
         ...(isScreen || expanded || thumbnail
           ? null
           : {
@@ -193,8 +146,8 @@ export function CallTile({
         boxShadow: '0 2px 10px rgba(0,0,0,.35)',
       }}
     >
-      {/* A TELA ocupa o quadrado SEM esticar em NENHUM modo (normal: caixa na
-          proporção; expandido/miniatura: `contain` com letterbox correto). */}
+      {
+}
       <div
         style={
           isScreen
@@ -206,7 +159,6 @@ export function CallTile({
           <video
             autoPlay
             playsInline
-            // Vídeo SEMPRE mudo: o som sai do <audio> do participante (sem eco).
             muted
             ref={(el) => {
               videoRef.current = el
@@ -215,8 +167,6 @@ export function CallTile({
             style={
               isScreen
                 ? {
-                    // TELA: `max-*` + `auto` mantém a proporção intrínseca;
-                    // width/height 100% esticava quando a caixa não era 16:9.
                     maxWidth: '100%',
                     maxHeight: '100%',
                     width: 'auto',
@@ -225,18 +175,16 @@ export function CallTile({
                     background: '#000',
                     display: 'block',
                   }
-                : {
-                    width: '100%',
-                    height: '100%',
-                    // cover = pessoa; a tela usa o ramo acima (contain).
-                    objectFit: 'cover',
-                    background: '#000',
-                    display: 'block',
-                  }
+        : {
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            background: '#000',
+            display: 'block',
+          }
             }
           />
         ) : showImage ? (
-          /* Caminho NATIVO (Linux): sem MediaStream na página — <img> honesto. */
           <img
             src={tile.videoUrl}
             alt={tile.label}
@@ -248,7 +196,7 @@ export function CallTile({
           />
         ) : (
           <div style={{ textAlign: 'center', padding: 8 }}>
-            {/* Foto de perfil quando existe; sem ela, inicial + cor do fp. */}
+            {}
             <button
               type="button"
               onClick={isScreen || !onOpenProfile ? undefined : () => onOpenProfile(tile.fp)}
@@ -287,8 +235,6 @@ export function CallTile({
                   ? 'câmera ativa no motor nativo — prévia indisponível nesta tela'
                   : tile.isLocal
                     ? 'sua câmera está desligada'
-                    // Remoto sem vídeo: NÃO é "aguardando o vídeo" (parecia travado).
-                    // Pode estar com a câmera desligada de propósito.
                     : tile.cameraOn === false
                       ? 'câmera desligada'
                       : 'conectando o vídeo…'}
@@ -297,7 +243,7 @@ export function CallTile({
         )}
       </div>
 
-      {/* Selo de origem: identifica QUEM compartilha (não confundir tela com câmera). */}
+      {}
       {isScreen ? (
         <span
           title={`Tela compartilhada por ${tile.nickname}`}
@@ -338,8 +284,18 @@ export function CallTile({
         </span>
       )}
 
-      {/* Fixar/expandir para PESSOA e TELA (antes só o participante tinha). */}
-      <div style={{ position: 'absolute', right: 8, top: 38, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {}
+      <div
+        style={{
+          position: 'absolute',
+          right: touch ? 6 : 8,
+          bottom: touch ? 6 : undefined,
+          top: touch ? undefined : 38,
+          display: 'flex',
+          flexDirection: touch ? 'row' : 'column',
+          gap: 4,
+        }}
+      >
         {onPin && (
           <button
             type="button"
@@ -350,11 +306,11 @@ export function CallTile({
               border: '1px solid #ffffff44', borderRadius: 6,
               background: pinned ? c.accent : '#111c',
               color: '#fff', cursor: 'pointer',
-              width: 26, height: 26, padding: 0,
+              width: touch ? 34 : 26, height: touch ? 34 : 26, padding: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
           >
-            <Icon d={Icons.pin} size={13} />
+            <Icon d={Icons.pin} size={touch ? 16 : 13} />
           </button>
         )}
         {onExpand && (
@@ -371,29 +327,22 @@ export function CallTile({
               border: '1px solid #ffffff44', borderRadius: 6,
               background: expanded ? c.accent : '#111c',
               color: '#fff', cursor: 'pointer',
-              // Caixa própria: padding de glifo deixava o botão desalinhado.
-              width: 26, height: 26, padding: 0,
+              width: touch ? 34 : 26, height: touch ? 34 : 26, padding: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             }}
           >
-            <Icon d={expanded ? Icons.collapse : Icons.expand} size={13} />
+            <Icon d={expanded ? Icons.collapse : Icons.expand} size={touch ? 16 : 13} />
           </button>
         )}
       </div>
 
-      {/* Áudio remoto SEMPRE presente, mas SÓ no tile de PESSOA. O tile de
-          tela usa o mesmo stream da câmera como fallback (quando o outro lado
-          não manda transmissão separada) — montar <audio> nos dois tocava a
-          mesma trilha em dobro: voz dobrada (+6 dB e filtro em pente).
-          Usa `audioStream` (independente de vídeo): numa chamada de voz ou com
-          a câmera do outro desligada o `stream` é vazio, e condicionar o
-          <audio> a ele deixava a chamada muda.
-          NÃO usar `hidden`: no WebView do Android o elemento com display:none
-          às vezes não inicia a reprodução. Fora da tela, mas renderizado. */}
+      {
+}
       {!tile.isLocal && (tile.audioStream ?? tile.stream) && (
         <audio
           autoPlay
           playsInline
+          // Seção 1: data
           data-call-audio-fp={audioKey}
           aria-hidden
           style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none', left: -9999 }}
@@ -405,10 +354,8 @@ export function CallTile({
         />
       )}
 
-      {/* O botão de volume NÃO pode depender de haver stream: uma pessoa na
-          chamada sem áudio chegando ainda precisa do controle (e o valor fica
-          guardado para quando o áudio começar). Antes `showAudioControls` e o
-          `<audio>` dividiam a mesma condição e o controle sumia. */}
+      {
+}
       {showAudioControls && !tile.isLocal && (
         <ParticipantAudioControls
           fp={audioKey}

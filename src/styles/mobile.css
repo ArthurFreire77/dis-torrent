@@ -1,9 +1,3 @@
-/* ==========================================================================
-   Tela de carregamento (boot) — usada pelos DOIS shells enquanto a
-   identidade/o motor P2P sobem. Antes era um <div> vazio com fundo cinza:
-   o app parecia ter travado. Compartilhado em stylesheet para valer desde o
-   primeiro paint.
-   ========================================================================== */
 .boot {
   min-height: 100dvh;
   display: flex;
@@ -35,25 +29,6 @@
 @media (prefers-reduced-motion: reduce) {
   .boot-bar i { animation: none; width: 100% }
 }
-
-/* ==========================================================================
-   Estilos do shell MOBILE.
-
-   ANTES isto era uma string `mobileCss` injetada pelo React dentro de um
-   <style> — e o usuário via partes da tela sem CSS (abas de Amigos com o
-   estilo cinza padrão do navegador). Duas causas, uma só solução: mover para
-   um stylesheet de verdade, servido por <link> no <head>.
-
-   1) FOUC: o <style> só existia DEPOIS do primeiro paint do React. Entre o
-      paint e o mount, os botões `.m-tab`/`.m-row` apareciam crus.
-   2) Qualquer caminho de render que não montasse o <style> (tela de conversa
-      vs. shell raiz) ficava sem as classes.
-
-   Com o arquivo aqui as regras valem desde o primeiro paint e não podem
-   desaparecer. Os valores batem com o tema `t` de MobileShell.tsx
-   (tema escuro fixo — se um dia o tema voltar a ser dinâmico, use variáveis
-   CSS e mantenha os dois em sincronia).
-   ========================================================================== */
 
 .m-root {
   background: #14161a;

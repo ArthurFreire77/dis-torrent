@@ -1,20 +1,3 @@
-// Tela de um canal de VOZ/VÍDEO no celular.
-//
-// Antes, tocar num canal de voz abria o histórico de mensagens do canal e o
-// compositor — não havia como entrar na chamada pelo celular. Esta tela é o
-// equivalente mobile do painel de chamada do desktop: mostra quem está no
-// canal, entra/sai e expõe mic/fone/câmera (câmera é OPCIONAL: o canal de
-// vídeo usa o mesmo caminho do de voz).
-//
-// ## Layout (unificado com o desktop)
-//
-// DENTRO da chamada a mídia ocupa a tela toda e os controles ficam numa barra
-// fixa embaixo — o mesmo desenho do `VoiceStage` no PC. Antes os quadrados de
-// 124 px ficavam no topo de uma lista rolável: numa chamada de vídeo sobrava
-// espaço morto e o vídeo do outro aparecia pequeno no meio do nada.
-//
-// FORA da chamada, um cartão central (lobby) com quem está e o botão Entrar.
-
 import { Ic, type IconName } from '../shared/icons'
 import type { ReactNode } from 'react'
 
@@ -39,18 +22,19 @@ function fmtDuration(s: number): string {
   return h > 0 ? `${h}:${m}:${sec}` : `${m}:${sec}`
 }
 
-/** Botão redondo de controle (mesmo desenho dos dois shells). */
 function Botao({
   label,
   icon,
   on,
   danger,
+  disabled,
   onClick,
 }: {
   label: string
   icon: IconName
   on?: boolean
   danger?: boolean
+  disabled?: boolean
   onClick: () => void
 }) {
   return (
@@ -60,18 +44,19 @@ function Botao({
       aria-label={label}
       title={label}
       aria-pressed={!!on}
+      disabled={disabled}
       style={{
         width: 46,
         height: 46,
         borderRadius: '50%',
         border: 'none',
         flexShrink: 0,
-        // Vermelho = estado ruim (mudo/surdo). Ligado = verde, igual ao PC.
-        background: danger ? T.red : on ? T.green : 'rgba(255,255,255,.12)',
-        color: '#fff',
+        background: disabled ? 'rgba(255,255,255,.06)' : danger ? T.red : on ? T.green : 'rgba(255,255,255,.12)',
+        color: disabled ? 'rgba(255,255,255,.4)' : '#fff',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
+        opacity: disabled ? 0.7 : 1,
       }}
     >
       <Ic name={icon} size={19} />
@@ -93,42 +78,36 @@ export default function MobileCallChannel({
   deafened,
   cameraOn,
   error,
+  canSwitchCamera,
   onBack,
   onJoin,
   onLeave,
   onToggleMute,
   onToggleDeafen,
   onToggleCamera,
+  onSwitchCamera,
 }: {
   channelName: string
   kind: 'voice' | 'video'
   communityName?: string
-  /** Estou dentro desta chamada agora. */
   inCall: boolean
-  /** Entrei e o ICE ainda não fechou. */
   connecting: boolean
   seconds: number
   participants: CallChannelParticipant[]
-  /**
-   * Quadrados da chamada (`CallTile`) — OBRIGATÓRIO quando `inCall`.
-   *
-   * Eles não são decoração: o `<audio>` que toca a voz remota e o `<video>` da
-   * câmera/tela vivem DENTRO do `CallTile`. Uma tela de chamada sem eles
-   * conecta, conta o tempo e fica muda e sem imagem — foi exatamente o bug do
-   * canal de voz no celular.
-   */
   media?: ReactNode
   myFp: string
   muted: boolean
   deafened: boolean
   cameraOn: boolean
   error: string | null
+  canSwitchCamera?: boolean
   onBack: () => void
   onJoin: () => void
   onLeave: () => void
   onToggleMute: () => void
   onToggleDeafen: () => void
   onToggleCamera: () => void
+  onSwitchCamera?: () => void
 }) {
   const titulo = kind === 'video' ? 'Canal de vídeo' : 'Canal de voz'
   const outros = participants.filter((p) => p.fp !== myFp)
@@ -143,7 +122,7 @@ export default function MobileCallChannel({
         aria-label="Voltar"
         onClick={onBack}
         style={{
-          width: 36, height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          width: 44, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center',
           background: 'transparent', border: 'none', color: T.text, flexShrink: 0,
         }}
       >
@@ -177,7 +156,6 @@ export default function MobileCallChannel({
     </div>
   )
 
-  // ── DENTRO DA CHAMADA: mídia domina a tela; controles na barra inferior ──
   if (inCall) {
     return (
       <div style={{
@@ -186,50 +164,33 @@ export default function MobileCallChannel({
       }}>
         {barraTopo}
 
-        {/* Palco: os tiles ocupam todo o espaço livre. `minHeight: 0` é o que
-            permite o flex encolher em vez de estourar a tela do celular. */}
-        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {media}
-          {error && (
-            <div role="alert" style={{
-              fontSize: 11.5, color: '#ff9c9c', lineHeight: 1.5,
-              background: '#2a1518', border: `1px solid ${T.red}55`,
-              borderRadius: 10, padding: '8px 10px',
-            }}>{error}</div>
-          )}
-          {outros.length > 0 && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, paddingBottom: 4 }}>
-              {outros.map((p) => {
-                const mudo = !!(p.muted || p.deafened)
-                return (
-                  <span
-                    key={p.fp}
-                    title={p.deafened ? 'surdo' : p.muted ? 'microfone mudo' : 'microfone aberto'}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 5,
-                      fontSize: 11, fontWeight: 700, maxWidth: 160,
-                      color: mudo ? T.muted : T.text,
-                      background: T.input, border: `1px solid ${T.border}`,
-                      borderRadius: 99, padding: '3px 9px',
-                    }}
-                  >
-                    <span style={{ display: 'flex', color: mudo ? T.red : T.green }}>
-                      <Ic name={p.deafened ? 'volumeX' : p.muted ? 'micOff' : 'mic'} size={10} />
-                    </span>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {p.nickname || p.fp.slice(0, 8)}
-                    </span>
-                  </span>
-                )
-              })}
+        {}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 6 }}>
+          {media ?? (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ textAlign: 'center', color: T.muted, fontSize: 12.5, maxWidth: 280, lineHeight: 1.6 }}>
+                <Ic name="speaker" size={34} />
+                <div style={{ marginTop: 10 }}>
+                  {outros.length === 0
+                    ? 'Você está sozinho na chamada — quem entrar aparece aqui.'
+                    : 'Conectando o vídeo dos participantes…'}
+                </div>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Controles: mesma ordem do desktop (mic, áudio, câmera, sair). */}
+        {error && (
+          <div role="alert" style={{
+            margin: '0 10px 6px', fontSize: 11.5, color: '#ff9c9c', lineHeight: 1.5,
+            background: '#2a1518', border: `1px solid ${T.red}55`,
+            borderRadius: 10, padding: '8px 10px', flexShrink: 0,
+          }}>{error}</div>
+        )}
+
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
-          padding: '10px 12px', paddingBottom: 'calc(10px + env(safe-area-inset-bottom))',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+          padding: '8px 10px', paddingBottom: 'calc(8px + env(safe-area-inset-bottom))',
           background: T.panel, borderTop: `1px solid ${T.border}`, flexShrink: 0,
         }}>
           <Botao
@@ -252,14 +213,17 @@ export default function MobileCallChannel({
             on={cameraOn}
             onClick={onToggleCamera}
           />
+          {canSwitchCamera && onSwitchCamera && (
+            <Botao label="Trocar de câmera" icon="camera" onClick={onSwitchCamera} />
+          )}
           <button
             type="button"
             onClick={onLeave}
             aria-label="Sair da chamada"
             style={{
-              height: 46, minWidth: 92, padding: '0 18px', borderRadius: 23,
+              height: 46, minWidth: 76, padding: '0 14px', borderRadius: 23,
               border: 'none', background: T.red, color: '#fff',
-              fontSize: 14, fontWeight: 800,
+              fontSize: 14, fontWeight: 800, flexShrink: 0,
             }}
           >
             Sair
@@ -269,7 +233,6 @@ export default function MobileCallChannel({
     )
   }
 
-  // ── FORA DA CHAMADA: lobby com quem está e o botão Entrar ────────────────
   return (
     <div style={{
       height: '100dvh', display: 'flex', flexDirection: 'column',
@@ -302,6 +265,7 @@ export default function MobileCallChannel({
           ) : (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
               {participants.map((p) => {
+                // Seção 1: eu
                 const eu = p.fp === myFp
                 const mudo = !!(p.muted || p.deafened)
                 return (
@@ -361,7 +325,6 @@ export default function MobileCallChannel({
   )
 }
 
-/** Conta quem está de fato no canal (usado no lobby). */
 function participantesCount(participants: CallChannelParticipant[]): number {
   return Array.isArray(participants) ? participants.filter((p) => !!p?.fp).length : 0
 }

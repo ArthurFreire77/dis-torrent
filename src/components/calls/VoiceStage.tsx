@@ -1,29 +1,3 @@
-// VoiceStage — a TELA ÚNICA de chamada (canal de voz/vídeo).
-//
-// ## Por que existe
-//
-// Relato do dono (com print): "a interface tá uma merda na tela de servidores,
-// unifica; faz um padrão que pega a tela do lado direito mais completa".
-//
-// A primeira versão ainda tinha uma COLUNA preta fixa à direita: em cima a
-// lista "NA CHAMADA" e três botões, embaixo os controles, e no meio um vazio
-// gigante. O palco ficava espremido à esquerda e os cards viravam duas
-// colunas compridas de avatar.
-//
-// ## Desenho atual (pedido do dono: "tipo um Google Meet")
-//
-// - fundo CINZA padrão em tudo (nada de preto);
-// - barra fina no topo: nome do canal, tempo e rota;
-// - a mídia ocupa o MEIO, em cards 16:9 centralizados;
-// - os CONTROLES ficam numa barra flutuante no rodapé do meio (mic, câmera,
-//   tela, ajustes, sair) — sem coluna lateral;
-// - quem está na chamada e os extras (diagnóstico/arquivo) ficam num painel
-//   que ABRE por cima, atrás de um botão — o palco nunca é espremido por ele.
-//
-// IMPORTANTE: os `<audio>` remotos vivem nos `CallTile` (via `CallTilesGrid`).
-// Este componente NUNCA deve ser renderizado sem eles quando já há chamada —
-// uma tela de chamada sem os tiles conecta, conta o tempo e fica muda.
-
 import { useState, type ReactNode } from 'react'
 import { Icon, Icons } from '../../shared/icons'
 import CallPhaseBadge from '../CallPhaseBadge'
@@ -31,11 +5,8 @@ import type { CallPhase } from '../../services/callPhases'
 import { participantsLabel, type VoiceLayout } from '../../services/voiceLayout'
 
 export interface VoiceStagePalette {
-  /** Fundo do palco (área da mídia). */
   stage: string
-  /** Fundo das barras (topo/controles). */
   panel: string
-  /** Fundo de campos/botões secundários. */
   input: string
   border: string
   heading: string
@@ -52,53 +23,33 @@ export interface VoiceStagePeer {
   nome: string
   muted?: boolean
   deafened?: boolean
-  /** Estou eu nesta linha. */
   eu?: boolean
 }
 
 export interface VoiceStageProps {
   layout: VoiceLayout
   palette: VoiceStagePalette
-  /** Nome do canal/conversa (título do cabeçalho). */
   title: string
-  /** "3 pessoas na chamada", "Canal de voz", "conectando…". */
   subtitle?: string
-  /** Ícone do tipo: canal de vídeo, de voz ou chamada direta. */
   kind: 'voice' | 'video'
-  /** Dentro da chamada agora. */
   inCall: boolean
-  /** Fase real (conectando, conectado, reconectando…). */
   phase: CallPhase
   startAt: number
   nowMs: number
   mediaLive: boolean
   ringing?: boolean
-  /** Rota ICE resumida (LAN/STUN/TURN/sem rota). */
   route?: string
-  /**
-   * Estou sozinho no canal, esperando alguém entrar.
-   *
-   * Muda o texto de "Conectando…" para "Esperando alguém entrar": sozinho não
-   * existe negociação em andamento, e prometer conexão seria mentira.
-   */
   waitingAlone?: boolean
-  /** Quadrados da chamada — obrigatórios dentro da chamada. */
   media?: ReactNode
-  /** Quem está na chamada (lista do painel). */
   peers?: VoiceStagePeer[]
-  /** Motivo honesto de não poder entrar (null = pode). */
   unavailable?: string | null
-  /** Outra chamada em andamento (não dá para entrar nesta). */
   busy?: boolean
-  /** Aviso transitório (erro/qualidade) acima dos controles. */
   notice?: string | null
-  /** Conteúdo extra no painel de pessoas (diagnóstico, adicionar amigo…). */
   extra?: ReactNode
   muted: boolean
   deafened: boolean
   cameraOn: boolean
   sharing: boolean
-  /** Câmera indisponível enquanto a tela está no ar (mesma m-line). */
   cameraDisabled?: boolean
   onJoin: () => void
   onLeave: () => void
@@ -108,10 +59,11 @@ export interface VoiceStageProps {
   onToggleScreen?: () => void
   screenAvailable?: boolean
   screenUnavailableReason?: string | null
+  onSwitchCamera?: () => void
+  cameraSwitchLabel?: string | null
+  cameraSwitchDisabled?: boolean
   onOpenSettings?: () => void
-  /** Painel de ajustes (já renderizado pelo shell) — abre por cima do palco. */
   settings?: ReactNode
-  /** `true` no celular: barra de controles simplificada. */
   compact?: boolean
 }
 
@@ -125,7 +77,6 @@ function fmtDuracao(ms: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
-/** Botão redondo dos controles (Google Meet: cinza; desligado = vermelho). */
 function ControlButton({
   label,
   icon,
@@ -161,8 +112,6 @@ function ControlButton({
         border: 'none',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.45 : 1,
-        // Cinza = estado neutro/ligado (padrão do Meet). Vermelho só quando é
-        // estado RUIM de verdade: microfone mudo, ensurdecido ou Sair.
         background: danger ? '#ea4335' : on ? 'rgba(255,255,255,.16)' : 'rgba(255,255,255,.10)',
         color: '#fff',
         display: 'flex',
@@ -210,13 +159,16 @@ export function VoiceStage({
   onToggleScreen,
   screenAvailable = true,
   screenUnavailableReason,
+  onSwitchCamera,
+  cameraSwitchLabel = null,
+  cameraSwitchDisabled = false,
   onOpenSettings,
   settings,
   compact = false,
 }: VoiceStageProps) {
+  // Seção 1: entrarBloqueado
   const entrarBloqueado = !inCall && (busy || !!unavailable)
   const duracao = inCall ? fmtDuracao(Math.max(0, nowMs - startAt)) : ''
-  /** Painel de pessoas/extras: fecha por padrão para o palco ficar limpo. */
   const [painelAberto, setPainelAberto] = useState(false)
 
   const listaPeers = (
@@ -249,8 +201,6 @@ export function VoiceStage({
     </div>
   )
 
-  // ── Controles: barra ARREDONDADA flutuante no rodapé do meio ─────────────
-  // (pedido do dono: "joga tudo isso lá pro meio, tipo Google Meet").
   const controles = (
     <div
       style={{
@@ -265,7 +215,6 @@ export function VoiceStage({
         border: `1px solid ${c.border}`,
         borderRadius: compact ? 0 : 999,
         boxShadow: compact ? 'none' : '0 6px 24px rgba(0,0,0,.45)',
-        // A barra flutua sobre o palco, como no Meet.
         ...(compact
           ? { flexShrink: 0 }
           : { position: 'absolute' as const, left: '50%', bottom: 20, transform: 'translateX(-50%)', zIndex: 3 }),
@@ -295,12 +244,20 @@ export function VoiceStage({
             }
             icon={Icons.video}
             on={cameraOn}
-            // Câmera desligada NÃO é erro (o Meet pinta de cinza): só o mic
-            // mudo e o surdo usam vermelho, que aí sim é um estado ruim.
             danger={false}
             disabled={cameraDisabled}
             onClick={onToggleCamera}
           />
+          {onSwitchCamera && !compact && (
+            <ControlButton
+              label={cameraSwitchLabel ?? 'Trocar de câmera'}
+              icon={Icons.camera}
+              on={false}
+              danger={false}
+              disabled={cameraSwitchDisabled}
+              onClick={onSwitchCamera}
+            />
+          )}
           {onToggleScreen && !compact && (
             <ControlButton
               label={
@@ -385,7 +342,7 @@ export function VoiceStage({
     </div>
   )
 
-  // ── Barra do topo: nome, tempo/fase, rota e o botão de pessoas ───────────
+  // Seção 2: cabecalho
   const cabecalho = (
     <div
       style={{
@@ -416,8 +373,6 @@ export function VoiceStage({
           {inCall ? (
             <>
               {waitingAlone ? (
-                // SOZINHO no canal: não há negociação em curso. Prometer
-                // "Conectando…" aqui era o que parecia travado para sempre.
                 <span
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -480,32 +435,23 @@ export function VoiceStage({
     </div>
   )
 
-  /** Há mídia de verdade no palco? (tela, vídeo ou quadro nativo) */
   const mediaTemConteudo = (() => {
     if (!media) return false
     const lista = Array.isArray(media) ? media : [media]
     return lista.some((m) => m != null)
   })()
 
-  // ── Palco: a mídia ocupa o meio; os controles flutuam embaixo ────────────
   const palco = inCall && layout.stageFill ? (
     <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: c.stage }}>
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', paddingBottom: compact ? 0 : 92 }}>
         {media}
       </div>
       {waitingAlone && !mediaTemConteudo && (
-        // Chamada vazia: uma frase no meio do palco, sem card fantasma.
-        //
-        // SÓ quando não há NADA no palco. Antes ele aparecia por cima de uma
-        // tela compartilhada (print do dono: o texto "Você está na chamada"
-        // atravessava a transmissão), porque a condição era "estou sozinho" e
-        // não "o palco está vazio".
         <div
           style={{
             position: 'absolute', left: 0, right: 0, top: 0, bottom: compact ? 0 : 92,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             pointerEvents: 'none', padding: 24,
-            // Fundo próprio para o texto não brigar com nenhum card residual.
             background: 'transparent',
           }}
         >
@@ -519,7 +465,6 @@ export function VoiceStage({
     </div>
   ) : null
 
-  // ── Lobby (fora da chamada) ───────────────────────────────────────────────
   const lobby = !inCall && (
     <div
       style={{
@@ -581,7 +526,7 @@ export function VoiceStage({
     </div>
   )
 
-  // ── Painel de pessoas (abre por cima; não espreme o palco) ───────────────
+  // Seção 3: painelPessoas
   const painelPessoas = painelAberto && inCall && (
     <>
       <div
@@ -636,7 +581,6 @@ export function VoiceStage({
         flex: 1,
         minWidth: 0,
         minHeight: 0,
-        // Âncora do painel de pessoas e da barra flutuante.
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',

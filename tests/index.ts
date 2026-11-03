@@ -1,11 +1,3 @@
-// Entrada do runner de testes unitários (node:test).
-//
-// Por que este arquivo existe: `node --test` trata um diretório como módulo
-// executável e não pega `*.ts` sozinho, então importamos cada suite aqui para
-// que `npm run test:unit` rode com 0 falhas.
-//
-// Cada suite também roda isolado, útil pra depurar uma só:
-//   node --experimental-strip-types --test tests/<arquivo>.test.ts
 import './appUptime.test.ts'
 import './botCommands.test.ts'
 import './botWizard.test.ts'
@@ -23,6 +15,9 @@ import './callPlayback.test.ts'
 import './connectionDiagnostics.test.ts'
 import './callWire.test.ts'
 import './callTiles.test.ts'
+import './callLayout.test.ts'
+import './callCameras.test.ts'
+import './messageRetention.test.ts'
 import './channels.test.ts'
 import './clipboardImage.test.ts'
 import './downloadQueue.test.ts'

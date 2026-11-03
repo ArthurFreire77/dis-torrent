@@ -1,13 +1,13 @@
-// Grade de quadrados da chamada — usada no painel lateral E na tela do canal.
-//
-// POR QUE EXISTE: os mesmos `CallTile` (e é neles que ficam o `<audio>` da voz
-// e o `<video>` da câmera/tela) precisam aparecer em dois lugares. Duplicar o
-// JSX fazia a tela do canal esquecer os tiles — chamada conectada e muda.
-
 import CallTileComponent from './CallTile'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { colunasQueCabem } from '../../services/callGrid'
 import type { CallTile } from '../../services/callTiles'
+import {
+  bestGrid,
+  maxColumnsFor,
+  spotlightLayout,
+  type CallGridSpec,
+  type CallSpotlightSpec,
+} from '../../services/callLayout'
 
 export interface CallTilesGridProps {
   tiles: CallTile[]
@@ -16,23 +16,49 @@ export interface CallTilesGridProps {
   onExpand: (id: string) => void
   deafened: boolean
   compact?: boolean
-  /** Controles de volume por participante (só desktop). */
   showAudioControls?: boolean
   minHeight?: number
   palette: { heading: string; muted: string; green: string; red: string; accent: string; border: string }
   avatarColor: (fp: string) => string
   avatarB64?: Record<string, string | undefined>
   onOpenProfile?: (fp: string) => void
-  /** Fundo fora dos tiles (o painel lateral usa um tom mais escuro). */
   background?: string
   padding?: number
-  /** Altura máxima de cada quadrado — sem teto o card esticava a tela toda. */
   maxTileHeight?: number
-  /**
-   * Modo palco (canal de voz): a grade PREENCHE a área toda em vez de
-   * soltar quadrados com teto no topo do espaço central.
-   */
   fill?: boolean
+  platform?: 'mobile' | 'desktop'
+}
+
+function useAreaSize() {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [size, setSize] = useState({ width: 0, height: 0 })
+  const medir = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const w = el.clientWidth
+    const h = el.clientHeight
+    setSize((cur) => (Math.abs(cur.width - w) < 4 && Math.abs(cur.height - h) < 4 ? cur : { width: w, height: h }))
+  }, [])
+  useEffect(() => {
+    medir()
+    let ro: ResizeObserver | null = null
+    try {
+      ro = new ResizeObserver(medir)
+      if (ref.current) ro.observe(ref.current)
+    } catch {
+    }
+    window.addEventListener('resize', medir)
+    window.addEventListener('orientationchange', medir)
+    return () => {
+      try {
+        ro?.disconnect()
+      } catch {
+      }
+      window.removeEventListener('resize', medir)
+      window.removeEventListener('orientationchange', medir)
+    }
+  }, [medir])
+  return { ref, size }
 }
 
 export default function CallTilesGrid({
@@ -50,163 +76,195 @@ export default function CallTilesGrid({
   onOpenProfile,
   background = '#1a1a1a',
   padding = 12,
-  /** Altura máxima de cada quadrado — sem teto o card esticava a tela toda. */
   maxTileHeight = 420,
   fill = false,
+  platform = 'desktop',
 }: CallTilesGridProps) {
-  const altura = minHeight ?? (compact ? 112 : 150)
-  // LARGURA REAL da área do palco: decide quantas colunas cabem sem esmagar os
-  // cards. Sem medir, `ceil(sqrt(n))` ignorava a janela (ver `callGrid.ts`).
-  const areaRef = useRef<HTMLDivElement | null>(null)
-  const [largura, setLargura] = useState(0)
-  const medir = useCallback(() => {
-    const el = areaRef.current
-    if (!el) return
-    const w = el.clientWidth
-    setLargura((cur) => (Math.abs(cur - w) < 8 ? cur : w))
-  }, [])
-  useEffect(() => {
-    medir()
-    let ro: ResizeObserver | null = null
-    try {
-      ro = new ResizeObserver(medir)
-      if (areaRef.current) ro.observe(areaRef.current)
-    } catch { /* engine sem ResizeObserver: fica no primeiro cálculo */ }
-    window.addEventListener('resize', medir)
-    return () => {
-      try { ro?.disconnect() } catch { /* ignore */ }
-      window.removeEventListener('resize', medir)
-    }
-  }, [medir])
+  const alturaMin = minHeight ?? (compact ? 112 : 150)
+  const { ref: areaRef, size } = useAreaSize()
+  const gap = compact ? 6 : 12
 
-  // `alturaMin` é o mínimo do card; no palco o teto é a própria célula, então
-  // o chamador pode baixar o mínimo para o card não ser cortado pela linha.
-  const renderTile = (t: CallTile, alturaMin = altura) => (
+  const renderTile = (t: CallTile, alturaCard = alturaMin, thumbnail = false) => (
     <CallTileComponent
       tile={t}
       pinned={t.id === pinnedId}
+      thumbnail={thumbnail}
       onPin={onPin}
-      onExpand={onExpand}
-      showAudioControls={showAudioControls}
+      onExpand={thumbnail ? undefined : onExpand}
+      showAudioControls={showAudioControls && !thumbnail}
       callDeafened={deafened}
       palette={palette}
-      minHeight={alturaMin}
+      minHeight={alturaCard}
       avatarColor={avatarColor}
       avatarB64={avatarB64}
       onOpenProfile={onOpenProfile}
     />
   )
 
-  if (fill) {
-    // PALCO do canal de voz: preenche a área toda.
-    //
-    // BUGS REAIS corrigidos aqui (prints do dono):
-    // 1. `gridAutoRows: minmax(200px, 1fr)` esticava cada card até o rodapé —
-    //    dois participantes viravam duas COLUNAS compridas de avatar.
-    // 2. `ceil(sqrt(n))` fixava colunas pela contagem e ignorava a largura.
-    // 3. Desalinhamento: `justifyContent: 'center'` fazia cada coluna encolher
-    //    para o conteúdo e o conjunto sair torto.
-    // 4. FIXAR não funcionava: a grade ignorava a ordem e o card fixado ficava
-    //    do mesmo tamanho dos outros. Agora o fixado ocupa a LINHA INTEIRA
-    //    (grande, como o "pin" do Meet) e os demais vão para a fileira de baixo.
-    const cols = colunasQueCabem(tiles.length, largura, 12, padding)
-    const larguraCol = cols > 0 ? (Math.max(0, largura - padding * 2) - (cols - 1) * 12) / cols : 0
-    const alturaCard = larguraCol > 0
-      ? Math.max(160, Math.min(420, Math.round((larguraCol * 9) / 16)))
-      : 240
-
-    // FIXADO: ele vem em `tiles[0]` (o shell ordena), então basta dar a ele a
-    // largura de todas as colunas. `pin` só vale se houver mais de um card —
-    // sozinho ele já ocupa a tela.
-    const temFixado = !!pinnedId && tiles.length > 1 && tiles[0]?.id === pinnedId
-    const alturaFixado = Math.max(200, Math.min(560, Math.round(((largura - padding * 2) * 9) / 16)))
-
+  if (!fill) {
     return (
       <div
-        ref={areaRef}
         style={{
           flex: 1,
           minHeight: 0,
-          display: 'grid',
-          gap: 12,
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignContent: 'flex-start',
+          justifyContent: 'center',
+          gap: compact ? 6 : 10,
           padding,
-          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          // Linhas com a MESMA altura: nenhum card maior que o outro.
-          gridAutoRows: `${alturaCard}px`,
-          // Conjunto centralizado na área (como o Meet), sem esticar a grade.
-          alignContent: 'center',
-          justifyContent: 'stretch',
           overflowY: 'auto',
           background,
         }}
       >
-        {tiles.map((t, i) => {
-          const fixado = temFixado && i === 0
-          // TELA junto de participantes: linha INTEIRA, na posição dela.
-          // Antes ela dividia a célula com um participante e o card, com
-          // `aspectRatio` próprio, crescia além da linha e cobria o vizinho.
-          const telaCheia = t.kind === 'screen' && tiles.length > 1
-          return (
-            <div
-              key={t.id}
-              style={{
-                minWidth: 0,
-                minHeight: 0,
-                // A célula RECORTA o card: nada vaza para a linha de baixo.
-                overflow: 'hidden',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                // O fixado atravessa todas as colunas e ganha altura maior.
-                ...(fixado
-                  ? { gridColumn: `1 / -1`, height: alturaFixado }
-                  : null),
-                ...(telaCheia && !fixado ? { gridColumn: '1 / -1' } : null),
-              }}
-            >
-              {/* Sem mínimo: a célula já define a altura (o card não pode
-                  crescer além dela). */}
-              {renderTile(t, 0)}
-            </div>
-          )
-        })}
+        {tiles.map((tile) => (
+          <div
+            key={tile.id}
+            style={{
+              flex: `1 1 ${compact ? 220 : 300}px`,
+              maxWidth: tiles.length === 1 ? 560 : undefined,
+              height: maxTileHeight,
+              maxHeight: '100%',
+              minWidth: 0,
+              display: 'flex',
+            }}
+          >
+            {renderTile(tile)}
+          </div>
+        ))}
       </div>
     )
   }
 
+  const innerW = Math.max(0, size.width - padding * 2)
+  const innerH = Math.max(0, size.height - padding * 2)
+  const fixado = pinnedId ? tiles.find((t) => t.id === pinnedId) ?? null : null
+  const temDestaque = !!fixado && tiles.length > 1
+  const outros = temDestaque && fixado ? tiles.filter((t) => t.id !== fixado.id) : tiles
+
+  const minCard = platform === 'mobile' ? 130 : 240
+  const spec: CallGridSpec = bestGrid({
+    count: outros.length,
+    width: innerW,
+    height: innerH,
+    gap,
+    minTileWidth: minCard,
+    maxColumns: maxColumnsFor(platform, innerW),
+  })
+  const spot: CallSpotlightSpec | null = temDestaque
+    ? spotlightLayout({ count: outros.length, width: innerW, height: innerH, gap, aspect: 16 / 9 })
+    : null
+
+  const grade = (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${spec.columns}, minmax(0, 1fr))`,
+        gap,
+        width: '100%',
+        height: spec.scroll ? 'auto' : '100%',
+        justifyItems: 'center',
+        alignItems: 'center',
+        alignContent: spec.scroll ? 'start' : 'center',
+        overflowY: spec.scroll ? 'auto' : 'hidden',
+        overflowX: 'hidden',
+      }}
+    >
+      {outros.map((t) => (
+        <div
+          key={t.id}
+          style={{
+            width: spec.tileWidth > 0 ? Math.round(spec.tileWidth) : '100%',
+            height: spec.tileHeight > 0 ? Math.round(spec.tileHeight) : '100%',
+            minWidth: 0,
+            minHeight: 0,
+            overflow: 'hidden',
+            display: 'flex',
+          }}
+        >
+          {renderTile(t, 0)}
+        </div>
+      ))}
+    </div>
+  )
+
+  // Seção 1: destaque
+  const destaque = fixado ? (
+    <div
+      style={{
+        width: spot && spot.main.width > 0 ? Math.round(spot.main.width) : '100%',
+        height: spot && spot.main.height > 0 ? Math.round(spot.main.height) : '100%',
+        minWidth: 0,
+        minHeight: 0,
+        overflow: 'hidden',
+        display: 'flex',
+        flexShrink: 0,
+      }}
+    >
+      {renderTile(fixado, 0)}
+    </div>
+  ) : null
+
+  const faixa = spot ? (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: spot.strip === 'right' ? 'column' : 'row',
+        gap,
+        alignItems: 'center',
+        justifyContent: spot.strip === 'right' ? 'flex-start' : 'center',
+        flexShrink: 0,
+        alignSelf: 'stretch',
+        overflowY: spot.strip === 'right' && spot.scroll ? 'auto' : 'hidden',
+        overflowX: spot.strip === 'bottom' && spot.scroll ? 'auto' : 'hidden',
+        ...(spot.strip === 'right'
+          ? { width: Math.min(spot.thumb.width + gap, Math.max(96, innerW * 0.3)) }
+          : { width: '100%', height: spot.thumb.height + (spot.scroll ? 6 : 0) }),
+      }}
+    >
+      {outros.map((t) => (
+        <div
+          key={t.id}
+          style={{
+            width: Math.round(spot.thumb.width),
+            height: Math.round(spot.thumb.height),
+            minWidth: 0,
+            minHeight: 0,
+            overflow: 'hidden',
+            display: 'flex',
+            flexShrink: 0,
+          }}
+        >
+          {renderTile(t, 0, true)}
+        </div>
+      ))}
+    </div>
+  ) : null
+
   return (
     <div
+      ref={areaRef}
       style={{
         flex: 1,
         minHeight: 0,
         display: 'flex',
-        flexWrap: 'wrap',
-        alignContent: 'flex-start',
+        flexDirection: spot && spot.strip === 'bottom' ? 'column' : 'row',
+        alignItems: 'center',
         justifyContent: 'center',
-        gap: 10,
+        gap,
         padding,
-        overflowY: 'auto',
+        overflow: 'hidden',
         background,
       }}
     >
-      {tiles.map((tile) => (
-        <div
-          key={tile.id}
-          style={{
-            // Quadrado com TETO de altura: antes `1fr` esticava um único card
-            // por 600px de altura — a tela virava dois retângulos gigantes de
-            // borda a borda (relato: "ficou péssimo o design").
-            flex: `1 1 ${compact ? 240 : 320}px`,
-            maxWidth: tiles.length === 1 ? 520 : undefined,
-            height: maxTileHeight,
-            maxHeight: '100%',
-            minWidth: 0,
-            display: 'flex',
-          }}
-        >
-          {renderTile(tile)}
-        </div>
-      ))}
+      {temDestaque ? (
+        <>
+          {destaque}
+          {faixa}
+        </>
+      ) : (
+        grade
+      )}
     </div>
   )
 }

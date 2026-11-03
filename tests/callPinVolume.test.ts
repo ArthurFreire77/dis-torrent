@@ -1,12 +1,3 @@
-// Fixar e volume precisam FUNCIONAR (relato do dono com prints do Meet).
-//
-// "e o fixar deve ser funcional e volume também deve ser tudo bem funcional".
-// Dois bugs reais:
-// - o card fixado continuava do mesmo tamanho dos outros (a grade do palco
-//   ignorava `pinnedId` e a ordem);
-// - o controle de volume era um `<details>` nativo que FECHAVA ao arrastar o
-//   slider, porque o tile remonta a cada evento da chamada.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -41,28 +32,27 @@ test('id inexistente não reordena nada', () => {
   assert.deepEqual(sortTilesForPin(tiles, 'zzz').map((x) => x.id), ['a', 'b'])
 })
 
-test('o palco dá ao fixado a linha INTEIRA (card grande)', () => {
-  // Sem `gridColumn: 1 / -1` o fixado ficava do mesmo tamanho dos demais e o
-  // botão de fixar parecia não fazer nada.
-  assert.match(grid, /const temFixado = !!pinnedId/)
-  assert.match(grid, /gridColumn: `1 \/ -1`/)
-  assert.match(grid, /tiles\[0\]\?\.id === pinnedId/, 'depende da ordem do shell')
+test('o palco dá DESTAQUE ao fixado, procurado por ID', () => {
+  assert.match(grid, /const fixado = pinnedId \? tiles\.find/, 'acha o fixado pelo id')
+  assert.match(grid, /const temDestaque = !!fixado && tiles\.length > 1/, 'só destaca com mais de um card')
+  assert.doesNotMatch(
+    grid,
+    /tiles\[0\]\?\.id === pinnedId/,
+    'confiar em tiles[0] desligava a fixação quando a ordem mudava',
+  )
 })
 
 test('fixado só vale com mais de um card (sozinho já ocupa tudo)', () => {
   assert.match(grid, /tiles\.length > 1/)
 })
 
-test('todos os cards têm a MESMA altura (retângulos iguais)', () => {
-  // Print do dono: cards de tamanhos diferentes, tortos.
-  assert.match(grid, /gridAutoRows: `\$\{alturaCard\}px`/, 'altura única para as linhas')
-  // `justifyContent: 'center'` numa grade de colunas 1fr encolhia as colunas.
-  assert.doesNotMatch(grid, /justifyContent: 'center',\s*\n\s*overflowY/, 'center fazia as colunas encolherem')
+test('os cards mantêm a PROPORÇÃO (nada de esticar para preencher a célula)', () => {
+  assert.match(grid, /tileWidth/, 'largura calculada pelo motor de layout')
+  assert.match(grid, /tileHeight/, 'altura calculada pelo motor de layout')
+  assert.match(grid, /justifyItems: 'center'/, 'card centrado, não esticado')
 })
 
 test('o volume não usa <details> nativo (fechava ao arrastar)', () => {
-  // O tile remonta a cada evento da chamada e o `<details>` nativo fechava no
-  // meio do gesto do slider. O aberto/fechado agora é estado do React.
   assert.doesNotMatch(controls, /<details[\s>]/, 'sem tag details')
   assert.doesNotMatch(controls, /<summary[\s>]/, 'sem tag summary')
   assert.match(controls, /const \[aberto, setAberto\]/, 'aberto/fechado é estado do React')

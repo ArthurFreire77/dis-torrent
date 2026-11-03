@@ -5,14 +5,12 @@ import { Section } from '../shared/Section'
 import { useConversations, useEngineEvents, useMessages, useNetwork } from '../app/hooks'
 import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
-import CallTileComponent from '../components/calls/CallTile'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import { callRooms, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
 import { FileCard } from '../components/FileCard'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
-import CallSettingsPanel from '../components/calls/CallSettingsPanel'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import { downloadManager } from '../services/downloadManager'
@@ -25,6 +23,9 @@ import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../s
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
+import MobileCallStage from './MobileCallStage'
+import { cameraCycleLabel, shouldShowCameraSwitch } from '../services/callCameras'
+import { useCallCameras } from '../services/useCallCameras'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import { isCallableChannel } from '../app/channels'
@@ -60,18 +61,15 @@ import {
   setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
+import { MessageRetentionSettings } from '../components/prefs/MessageRetentionSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
 import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage, MemberPairing, ChannelMeta } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 
-// DisTorrent mobile — top design mobile-first (não clone do PC antigo)
-// Glass + blur, bottom-nav, cards arredondados, composer flutuante — 100% mobile
 const MONO = "'JetBrains Mono', monospace"
 
-/** Fingerprint = 12 hex chars (blake3 truncado, ver distorrent-core/identity.rs). */
 const FP_RE = /^[0-9a-f]{12}$/
 
-/** Item do autocompletar do composer mobile (mesma forma do desktop). */
 interface AutoItemMobile {
   key: string
   kind: 'mention' | 'emoji' | 'slash'
@@ -83,9 +81,7 @@ interface AutoItemMobile {
   fp?: string
 }
 
-// `isImageName`/`isVideoName` vêm de `fileRules` (fonte única das extensões).
 import { isImageName, isVideoName } from '../services/fileRules'
-// Tetos de auto-carregamento vivem em `mediaAutoFetchCap` (fileSwarm), compartilhados.
 
 const t = {
   rail: '#0f1115', sidebar: '#1a1d23', main: '#14161a', composer: '#1f2126',
@@ -95,7 +91,6 @@ const t = {
   green: '#23a559', yellow: '#f0b232', red: '#f23f42',
   text: '#f2f3f5', heading: '#ffffff', muted: '#8e929b',
 }
-
 
 const stateLabel: Record<NetworkState, string> = {
   CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
@@ -110,7 +105,6 @@ function avatarColor(fp: string): string {
   return palette[h % palette.length]
 }
 
-// memo: avatar/dot puros — evita recriar DOM a cada render do shell.
 const Avatar = memo(function Avatar({ name, fp, size, avatarB64, accent }: { name: string; fp: string; size: number; avatarB64?: string; accent?: string }) {
   const initial = (name || '?').trim().charAt(0).toUpperCase()
   return (
@@ -126,16 +120,13 @@ const PeerDot = memo(function PeerDot({ on, ring }: { on: boolean; ring?: string
   return <span style={{ position: 'absolute', right: -2, bottom: -2, width: 12, height: 12, borderRadius: '50%', background: on ? t.green : '#80848e', border: `3px solid ${ring ?? t.main}` }} />
 })
 
-// Linhas memoizadas: props iguais pulam re-render (antes eram todas recriadas).
 const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete, room, onJoinRoom }: {
   c: Conversation
   online: boolean
   selected: boolean
-  /** Foto do peer. Prop (não estado do shell): o memo não alcança o escopo. */
   avatarB64?: string
   onOpen: (c: Conversation) => void
   onDelete: (id: string, title: string, isSelected: boolean) => void
-  /** Chamada em andamento nesta conversa (anel verde + Entrar). */
   room?: CallRoomView | null
   onJoinRoom?: (c: Conversation, room: CallRoomView) => void
 }) {
@@ -170,6 +161,7 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
   )
 })
 
+// Seção 1: ServerRow
 const ServerRow = memo(function ServerRow({ c, active, onSelect }: {
   c: CommunityView
   active: boolean
@@ -187,7 +179,6 @@ const ServerRow = memo(function ServerRow({ c, active, onSelect }: {
 const FriendRow = memo(function FriendRow({ f, online, avatarB64, onOpen, onRemove, onBlock }: {
   f: { fp: string, nickname: string }
   online: boolean
-  /** Foto do amigo (ver ConvRow: prop em vez de estado do shell). */
   avatarB64?: string
   onOpen: (fp: string, nick?: string) => void
   onRemove: (fp: string, nickname: string) => void
@@ -210,8 +201,6 @@ const FriendRow = memo(function FriendRow({ f, online, avatarB64, onOpen, onRemo
   )
 })
 
-// Item de mensagem memoizado; parse/lookup 1x por mensagem no useMemo pai.
-// Cartão em `components/FileCard.tsx` (o MESMO do desktop, com tema mobile).
 function MobileFileCard({ m, mine, fmeta, pct, speed, status, error, announced, previewUrl, onDownload, onRetry }: {
   m: StoredMessage
   mine: boolean
@@ -259,8 +248,6 @@ function EmptyBlock({ msg, sub }: { msg: string; sub?: any }) {
     </div>
   )
 }
-
-// ---------- telas de conta (estilo desktop) ----------
 
 function AuthCard({ children }: { children: any }) {
   const perks = [
@@ -313,8 +300,6 @@ function CreateAccount({ onDone }: { onDone: (id: Identity) => void }) {
     }
   }
 
-  /** Já tem conta em outro aparelho? Importa o cofre direto (sem conta nova).
-   *  Usa campos na tela: `window.prompt` não funciona no WebView/WebKitGTK. */
   const [vaultFileName, setVaultFileName] = useState<string | null>(null)
   const [vaultB64, setVaultB64] = useState('')
   const [vaultPass, setVaultPass] = useState('')
@@ -342,6 +327,7 @@ function CreateAccount({ onDone }: { onDone: (id: Identity) => void }) {
     fileRef.current.click()
   }
 
+  // Seção 2: doImportVault
   async function doImportVault() {
     if (!vaultB64 || vaultPass.length < 8) {
       setErr('a senha do cofre precisa de pelo menos 8 caracteres')
@@ -417,9 +403,6 @@ function LockScreen({ nickname, onUnlock }: { nickname: string; onUnlock: (id: I
   )
 }
 
-// ---------- tela de carregamento (boot) ----------
-
-// Tela de boot com barra/texto/aviso — não deixa o app parecer travado.
 function BootScreen({ native }: { native: boolean }){
   const [slow, setSlow] = useState(false)
   useEffect(() => {
@@ -439,8 +422,6 @@ function BootScreen({ native }: { native: boolean }){
     </div>
   )
 }
-
-// ---------- app principal ----------
 
 export default function MobileShell() {
   const prefs = usePrefs()
@@ -463,7 +444,7 @@ export default function MobileShell() {
     try {
       if (input) localStorage.setItem(draftKey(selConv), input)
       else localStorage.removeItem(draftKey(selConv))
-    } catch { /* quota cheia: rascunho fica só na sessão */ }
+    } catch {  }
   }, [input, selConv])
   const [communities, setCommunities] = useState<CommunityView[]>([])
   const [callActionBusy, setCallActionBusy] = useState(false)
@@ -473,13 +454,11 @@ export default function MobileShell() {
   const [friendsTab, setFriendsTab] = useState<'online' | 'todos' | 'pendentes' | 'bloqueados' | 'adicionar'>('online')
   const [friendRequests, setFriendRequests] = useState<{ fp: string, nickname: string }[]>([])
   const [friendsAccepted, setFriendsAccepted] = useState<{ fp: string, nickname: string }[]>([])
-  // O core mantem `blocked`; nenhum dos dois shells buscava esse status.
   const [friendsBlocked, setFriendsBlocked] = useState<{ fp: string, nickname: string }[]>([])
   const [pendingOut, setPendingOut] = useState<{ fp: string, nickname: string }[]>([])
   const [friendFpInput, setFriendFpInput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  // v6 — fila de downloads (painel) + relógio p/ o badge de fase da chamada.
   const [showDownloads, setShowDownloads] = useState(false)
   const [dlCount, setDlCount] = useState(0)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -487,10 +466,8 @@ export default function MobileShell() {
   const [addingFriend, setAddingFriend] = useState(false)
   const [friendErr, setFriendErr] = useState<string | null>(null)
   const friendInputRef = useRef<HTMLInputElement | null>(null)
-  // T1: envio é por CONVERSA (não relógio global) + barra duplo-Enter <300ms.
   const lastSendByConvRef = useRef<{ conv: string; at: number }>({ conv: '', at: 0 })
   const [searchQ, setSearchQ] = useState('')
-  // --- camada social (5.5) ---
   const [bots, setBots] = useState<BotView[]>([])
   const [replyToMsg, setReplyToMsg] = useState<{ id: string; name: string; body: string } | null>(null)
   const [forwardFrom, setForwardFrom] = useState<{ id: string; name: string; body: string } | null>(null)
@@ -499,48 +476,38 @@ export default function MobileShell() {
   const [showSearch, setShowSearch] = useState(false)
   const [showPins, setShowPins] = useState(false)
   const [showBookmarks, setShowBookmarks] = useState(false)
-  // Mobile é invite-only: criar servidor só no desktop.
   const [showThread, setShowThread] = useState(false)
   const [threadMsgs, setThreadMsgs] = useState<StoredMessage[]>([])
   const [threadInput, setThreadInput] = useState('')
   const [myPresence] = useState<PresenceStatus>('online')
   const [composerEmoji, setComposerEmoji] = useState(false)
-  /** Quem está digitando na conversa aberta (fp → nome, expira em 3,5s). */
   const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const [flash, setFlash] = useState<string | null>(null)
+  // Seção 3: const
   const [pinnedMsgs, setPinnedMsgs] = useState<{ id: string; body: string; author: string }[]>([])
   const readRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
   const [topMenu, setTopMenu] = useState(false)
   const [showPrivacy, setShowPrivacy] = useState(false)
-  /** Seletor completo de compartilhamento (fonte/áudio/qualidade/FPS). */
   const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
-  // PRIVACIDADE × CHAMADAS (mesma regra do ThemeShell): ICE WebRTC não passa
-  // pelo SOCKS5 — a UI avisa que a chamada não é anônima.
   const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
   useEffect(() => {
     setCallPrivacyForIce(privacyMode)
-    // Estado EFETIVO do proxy (fail-closed): o modal não vende "ativado" morto.
     services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
   }, [privacyMode])
-  // --- proxy SOCKS5 (modo proxy/Tor): endereço + teste online + ativação ---
   const [proxyAddr, setProxyAddr] = useState('')
   const [proxyIsDefault, setProxyIsDefault] = useState(true)
   const [proxyTesting, setProxyTesting] = useState(false)
   const [proxyTestOk, setProxyTestOk] = useState<number | null>(null)
   const [proxyTestErr, setProxyTestErr] = useState<string | null>(null)
   const [proxyPendingMode, setProxyPendingMode] = useState<PrivacyMode | null>(null)
-  /** Último envio de "digitando" (throttle de 2s, igual desktop/Discord). */
   const lastTypingSent = useRef(0)
-  /** Momento de abertura do app — usado pelo /uptime (paridade com desktop). */
   const bootAtMobile = useRef(Date.now())
-  /** Início do PROCESSO para a trava de saída (15 min), independente de re-render. */
   const appStartedAt = useRef(resolveSessionStart(bootAtMobile.current, typeof sessionStorage !== 'undefined' ? sessionStorage : null))
 
-  /** Avisa a conversa que estou digitando. Throttled: no máximo 1x/2s. */
   function notifyTyping(v: string) {
     try {
       if (!selConv || !v.trim()) return
@@ -548,12 +515,11 @@ export default function MobileShell() {
       if (now - lastTypingSent.current < 2000) return
       lastTypingSent.current = now
       void services.sendTyping?.(selConv).catch(() => {})
-    } catch { /* digitando é cosmético: nunca derruba a digitação */ }
+    } catch {  }
   }
 
   async function refreshPrivacyExtras(mode?: PrivacyMode) {
     try {
-      // endereço do MODO-ALVO (proxy × Tor): sem isto gravava a porta errada.
       const pc = await services.proxyAddrGet(mode)
       setProxyAddr(pc.addr)
       setProxyIsDefault(pc.is_default)
@@ -577,7 +543,6 @@ export default function MobileShell() {
 
   async function saveProxyAndActivate(mode: PrivacyMode) {
     try {
-      // grava na chave do modo-alvo antes de trocar o modo (relay re-rotala)
       await services.proxyAddrSet(proxyAddr.trim(), mode)
       const r = await services.privacySet(mode)
       setPrivacyMode(r.mode)
@@ -590,7 +555,6 @@ export default function MobileShell() {
   }
 
   function pickPrivacyMode(pm: PrivacyMode) {
-    // proxy/Tor: pede IP + teste online ANTES de ativar (nunca liga às cegas).
     if (pm === 'proxy' || pm === 'full') {
       setProxyPendingMode(pm)
       setProxyTestOk(null); setProxyTestErr(null)
@@ -605,7 +569,6 @@ export default function MobileShell() {
     }).catch((e: any) => setError(String(e?.message ?? e)))
   }
 
-  /** Fecha o painel e descarta o formulário de proxy pendente (sem aplicar). */
   function closePrivacy() {
     setShowPrivacy(false)
     setProxyPendingMode(null)
@@ -614,13 +577,10 @@ export default function MobileShell() {
   }
   const [version, setVersion] = useState('')
   const [fileList, setFileList] = useState<any[]>([])
-  /** Fila real de downloads (progresso, velocidade, pausa, erro) por arquivo. */
   const [dlByFile, setDlByFile] = useState<Record<string, { pct: number; speed: number; status: string; error?: string }>>({})
-  /** Prévia de imagens (file_id → blob URL) renderizada inline, sem salvar. */
   const [previews, setPreviews] = useState<Record<string, string>>({})
   const previewsRef = useRef<Record<string, string>>({})
   const previewUrlsRef = useRef<string[]>([])
-  /** Publica a blob URL; revoga a anterior (evita blob órfão na memória). */
   const mountPreview = useCallback((fileId: string, blob: Blob) => {
     if (previewsRef.current[fileId]) return
     const url = URL.createObjectURL(blob)
@@ -628,40 +588,26 @@ export default function MobileShell() {
     previewsRef.current[fileId] = url
     setPreviews({ ...previewsRef.current })
   }, [])
-  // --- CALL: bind real no CallManager (voz/vídeo P2P igual desktop) ---
   const [activeCall, setActiveCall] = useState<any>(null)
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
-  // fp → apelido (memo do ring): nome > fingerprint no "está ligando…".
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
   const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
-  // Seleção por ID DE TRANSMISSÃO (`p:<fp>` / `s:<fp>`): tela e pessoa separados.
   const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [isMuted, setIsMuted] = useState(false)
-  /** Surdo/ensurdecido da chamada (mesma fonte do desktop: estado real do manager). */
   const [isDeafened, setIsDeafened] = useState(false)
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
   const [showCallDiag, setShowCallDiag] = useState(false)
-  /** Engrenagem da chamada (microfone/câmera/resolução/FPS) no celular. */
-  const [showCallSettings, setShowCallSettings] = useState(false)
   const [callMediaPrefsState, setCallMediaPrefsState] = useState(() => getCallMediaPrefs())
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   const swarmNotifyRef = useRef<() => void>(() => {})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  // link de convite público (?invite=TOKEN)
   const [showInvite, setShowInvite] = useState(false)
   const [inviteInput, setInviteInput] = useState('')
-  /** Pareamento REAL dos membros do servidor selecionado. */
   const [memberPairing, setMemberPairing] = useState<MemberPairing[]>([])
-  /**
-   * Canais COMPLETOS (tipo, categoria, tópico) do servidor aberto.
-   * `communities[].channels` é só (id, nome): sem esta lista o celular não
-   * sabia distinguir voz de texto nem mostrar categoria — e canal/tag criado
-   * no PC ficava invisível até reabrir o app.
-   */
   const [channelListCache, setChannelListCache] = useState<ChannelMeta[]>([])
   const [showServerDetails, setShowServerDetails] = useState(false)
   const endRef = useRef<HTMLDivElement | null>(null)
@@ -681,7 +627,6 @@ export default function MobileShell() {
     }).catch(() => setPhase('create'))
   }, [])
 
-  // Convite por deep link: consome a URL pendente com o app destravado.
   useEffect(() => {
     if (phase !== 'app') return
     const token = consumeInvite() ?? peekInvite()
@@ -698,10 +643,10 @@ export default function MobileShell() {
     })
   }, [])
 
-  // Pareamento do servidor aberto (evidência real: direto/relay/offline).
   useEffect(() => {
     setMemberPairing([])
     if (!selCommunity) { setChannelListCache([]); return }
+    // Seção 4: alive
     let alive = true
     const load = () => {
       services
@@ -709,34 +654,28 @@ export default function MobileShell() {
         .then((m) => {
           if (alive) setMemberPairing(m ?? [])
         })
-        .catch(() => { /* motor subindo */ })
+        .catch(() => {  })
     }
     const loadChannels = () => {
       services
         .channelList(selCommunity)
         .then((list) => { if (alive) setChannelListCache(Array.isArray(list) ? list : []) })
-        .catch(() => { /* sem motor: mantém a última lista boa */ })
+        .catch(() => {  })
     }
-    // PAREA AGORA e pede o estado: sem isto o servidor recém-aberto só
-    // conectava no tique de até 45 s e a tag/canal criado no PC demorava.
-    try { void services.communityPairNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
-    try { void services.communitySyncNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
+    try { void services.communityPairNow?.(selCommunity)?.catch(() => {  }) } catch {  }
+    try { void services.communitySyncNow?.(selCommunity)?.catch(() => {  }) } catch {  }
     load()
     loadChannels()
-    // O sync chega como EVENTO (`community_joined`), então a lista precisa
-    // recarregar na hora — `communities.length` não muda e o efeito não roda.
     const off = services.subscribe((ev) => {
       if (ev.type === 'community_joined' || ev.type === 'channel_created' || ev.type === 'channel_deleted') {
         loadChannels()
       }
     })
-    // Voltar do segundo plano não pode deixar a lista velha: a WebView do
-    // celular congela e os eventos do intervalo se perdem.
     const onVisible = () => {
       if (document.hidden) return
       load()
       loadChannels()
-      try { void services.communitySyncNow?.(selCommunity)?.catch(() => { /* best-effort */ }) } catch { /* ignore */ }
+      try { void services.communitySyncNow?.(selCommunity)?.catch(() => {  }) } catch {  }
     }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
@@ -750,55 +689,50 @@ export default function MobileShell() {
     }
   }, [selCommunity, communities.length])
 
-  // identidade real no CallManager (sem isso chamadas falham "sem identidade")
   useEffect(() => {
     setCallIdentity(identity ? { fingerprint: identity.fingerprint, nickname: identity.nickname } : null)
   }, [identity])
   useEffect(() => {
     callManager.bind((s: any) => {
       setActiveCall(s)
-      // Mudo/surdo reais vêm do manager: o botão da chamada não pode mentir.
       if (s) { setIsMuted(!!s.muted); setIsDeafened(!!s.deafened) }
     })
     let stopBots: (() => void) | undefined
-    try { stopBots = botRuntime.start() } catch { /* runtime é best-effort */ }
-    try { downloadManager.load() } catch { /* fila segue vazia */ }
+    try { stopBots = botRuntime.start() } catch {  }
+    try { downloadManager.load() } catch {  }
     let unCount = () => {}
     try {
       unCount = downloadManager.subscribe((items) => {
-        try { setDlCount(items.filter(i => i.status === 'queued' || i.status === 'downloading' || i.status === 'verifying' || i.status === 'saving').length) } catch { /* ignore */ }
-        // Mesma assinatura alimenta o cartão de arquivo (velocidade/erro reais).
+        try { setDlCount(items.filter(i => i.status === 'queued' || i.status === 'downloading' || i.status === 'verifying' || i.status === 'saving').length) } catch {  }
         try {
           const next: Record<string, { pct: number; speed: number; status: string; error?: string }> = {}
           for (const it of items) {
             next[it.file_id] = { pct: it.progress, speed: it.speedBps, status: it.status, error: it.error }
           }
           setDlByFile(next)
-        } catch { /* ignore */ }
+        } catch {  }
       })
-    } catch { /* sem contador */ }
+    } catch {  }
     const unNotice = callManager.onCallNotice
     callManager.onCallNotice = (msg: string) => {
-      try { setNotice(msg); window.setTimeout(() => setNotice(null), 6000) } catch { /* ignore */ }
+      try { setNotice(msg); window.setTimeout(() => setNotice(null), 6000) } catch {  }
     }
     const unIce = callManager.onIceFailed
     callManager.onIceFailed = (info) => {
       try {
         setNotice(info.state === 'failed' ? ICE_FAILED_MSG : ICE_RELAY_MSG)
         window.setTimeout(() => setNotice(null), 6000)
-      } catch { /* ignore */ }
+      } catch {  }
     }
     const unIncomingGone = callManager.onIncomingGone
     callManager.onIncomingGone = (callId: string) => {
       setIncomingCall((cur: any) => (cur && cur.call_id === callId ? null : cur))
-      try { sfxRingStop() } catch { /* ignore */ }
+      try { sfxRingStop() } catch {  }
     }
     callManager.onRoomsChanged = () => { void syncCallRooms(() => services.callRoomsList()) }
-    return () => { callManager.unbind(); try { stopBots?.() } catch { /* ignore */ }; try { unCount() } catch { /* ignore */ }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone; callManager.onRoomsChanged = null }
+    return () => { callManager.unbind(); try { stopBots?.() } catch {  }; try { unCount() } catch {  }; callManager.onCallNotice = unNotice; callManager.onIceFailed = unIce; callManager.onIncomingGone = unIncomingGone; callManager.onRoomsChanged = null }
   }, [])
-  // Conversa aberta cancela o aviso dela; clique na notificação abre a conversa.
   useEffect(() => { setOpenConversation(selConv) }, [selConv])
-  // Mapa conversa → peer (a notificação precisa do fp para achar a foto).
   useEffect(() => {
     for (const c of conversations) {
       if (c.peer_fp) registerConversationPeer(c.id, c.peer_fp)
@@ -806,7 +740,6 @@ export default function MobileShell() {
   }, [conversations])
   useEffect(() => onOpenConversation((conv) => { setSelConv(conv); setSelPeerFp(null) }), [])
 
-  // ANDROID: botões da notificação de chamada viram chamadas do callManager.
   useEffect(() => onCallNotificationAction((callId, action) => {
     const inc = incomingCall
     if (!inc || inc.call_id !== callId) return
@@ -846,7 +779,6 @@ export default function MobileShell() {
     if (q === '480p' || q === '720p' || q === '1080p' || q === '4K') setCallQuality(q)
   }, [activeCall?.quality])
 
-  // Quadrados da chamada (regra pura do desktop); mídia do "eu" vem do manager.
   const callTilesMobile = useMemo(() => buildCallTiles({
     participants: (activeCall?.participants ?? []) as any[],
     myFp: identity?.fingerprint ?? null,
@@ -859,7 +791,6 @@ export default function MobileShell() {
       nativeMedia: !!(activeCall as any).nativeMedia,
     } : null,
   }), [
-    // O roster é clonado no onUpdate do callManager (memo depende da referência).
     activeCall?.participants,
     activeCall?.sharing,
     activeCall?.cameraOn,
@@ -870,7 +801,7 @@ export default function MobileShell() {
     identity?.fingerprint,
   ])
 
-  // Idem desktop: verde só com mídia de verdade (ver CallPhaseBadge).
+  // Seção 5: mediaLiveMobile
   const mediaLiveMobile = useMemo(() => {
     if (!activeCall) return false
     for (const p of ((activeCall as any).participants ?? []) as any[]) {
@@ -888,7 +819,6 @@ export default function MobileShell() {
     return pin ? sortTilesForPin(callTilesMobile, pin) : callTilesMobile
   }, [callTilesMobile, pinnedTileId])
 
-  /** Quadrado aberto em TELA CHEIA no mobile (null = layout normal). */
   const stageTileMobile = useMemo(
     () => (expandedTileId ? callTilesMobile.find((tile) => tile.id === expandedTileId) ?? null : null),
     [callTilesMobile, expandedTileId],
@@ -896,12 +826,24 @@ export default function MobileShell() {
 
   useEffect(() => {
     if (pinnedTileId && !callTilesMobile.some((tile) => tile.id === pinnedTileId)) setPinnedTileId(null)
-    // Tela cheia fantasma (mesmo bug do desktop): limpa ao sair da chamada.
     if (!activeCall && expandedTileId) setExpandedTileId(null)
   }, [callTilesMobile, pinnedTileId])
   useEffect(() => {
     if (expandedTileId && !callTilesMobile.some((tile) => tile.id === expandedTileId)) setExpandedTileId(null)
   }, [callTilesMobile, expandedTileId])
+
+  const camerasMobile = useCallCameras(!!activeCall)
+  const cameraSwitchLabelMobile = cameraCycleLabel(camerasMobile, callMediaPrefsState.videoInputId)
+  const mostrarTrocaCameraMobile = shouldShowCameraSwitch(camerasMobile)
+  const trocarCameraMobile = async () => {
+    try {
+      setError(null)
+      await callManager.switchCamera()
+      setCallMediaPrefsState(getCallMediaPrefs())
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+    }
+  }
   async function changeQuality(q: CallQuality) {
     setQualityError(null)
     try { await callManager.setQuality(q); setCallQuality(q) }
@@ -917,13 +859,11 @@ export default function MobileShell() {
     } catch { setTurnMsg('não foi possível salvar neste aparelho.') }
   }
 
-  // GARGALO 1: coalescing de refreshFriends (máx 1/5s), polling 30s, pausa oculta.
-  const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []) } catch { /* ignore */ } }, [])
+  const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []) } catch {  } }, [])
   const refreshFriends = useMemo(() => coalesceAsyncRefresh(refreshFriendsImpl, 5000), [refreshFriendsImpl])
-  async function refreshCommunities() { try { setCommunities(await services.communitiesList() ?? []) } catch { /* ignore */ } }
+  async function refreshCommunities() { try { setCommunities(await services.communitiesList() ?? []) } catch {  } }
   useEffect(() => { if (phase !== 'app') return; refreshFriends(); refreshCommunities(); const id = window.setInterval(() => { if (!document.hidden) refreshFriends() }, 30000); return () => window.clearInterval(id) }, [phase, refreshFriends])
   useEffect(() => () => refreshFriends.cancel(), [refreshFriends])
-  // GARGALO 2: throttle de 300ms no fileSwarm.onChange (evita render por chunk).
   useEffect(() => {
     const notify = throttleTrailing(() => setFileList([...fileSwarm.files.values()]), 300)
     swarmNotifyRef.current = notify
@@ -932,8 +872,6 @@ export default function MobileShell() {
     setFileList([...fileSwarm.files.values()])
     return () => { notify.cancel(); swarmNotifyRef.current = () => {}; fileSwarm.onChange = prev }
   }, [])
-  // Prévia de MÍDIA: blob por arquivo completo; prepareMedia reidrata do disco
-  // antes da rede (respeita o cap). URLs revogados no unmount.
   const previewFetchingRef = useRef<Map<string, number>>(new Map())
   useEffect(() => {
     for (const sf of fileSwarm.files.values()) {
@@ -941,13 +879,11 @@ export default function MobileShell() {
       const isVid = isVideoName(sf.name)
       if (!isImg && !isVid) continue
       if (previewsRef.current[sf.file_id]) continue
-      // já montado em memória: nada a fazer (evita revogar URL viva)
       const blob = fileSwarm.blobFor(sf.file_id)
       if (blob) {
         mountPreview(sf.file_id, blob)
         continue
       }
-      // uma tentativa por vez por arquivo (rede ruim não vira tempestade)
       const tries = previewFetchingRef.current.get(sf.file_id) ?? 0
       if (tries >= 3) continue
       previewFetchingRef.current.set(sf.file_id, tries + 1)
@@ -956,15 +892,13 @@ export default function MobileShell() {
           const b = fileSwarm.blobFor(sf.file_id)
           if (b) { mountPreview(sf.file_id, b); previewFetchingRef.current.delete(sf.file_id) }
         })
-        .catch(() => { /* card mostra o motivo; próxima varredura tenta de novo */ })
+        .catch(() => {  })
     }
   }, [fileList])
   useEffect(() => () => {
-    for (const u of previewUrlsRef.current) { try { URL.revokeObjectURL(u) } catch { /* ignore */ } }
+    for (const u of previewUrlsRef.current) { try { URL.revokeObjectURL(u) } catch {  } }
     previewUrlsRef.current = []
   }, [])
-  // O corpo da MENSAGEM já traz os metadados do arquivo; registra o swarm sem
-  // depender do FileAnnounce separado (que podia se perder).
   useEffect(() => {
     let changed = false
     for (const m of messages) {
@@ -976,7 +910,6 @@ export default function MobileShell() {
     if (changed) swarmNotifyRef.current()
   }, [messages, identity])
   useEngineEvents(ev => {
-    // mensagem em QUALQUER conversa atualiza a lista (DM nova aparecia só após restart)
     if (ev.type === 'message_new') {
       const mentioned = !!identity && typeof (ev as unknown as { body?: unknown }).body === 'string'
         && (ev as unknown as { body: string }).body.includes(identity.fingerprint)
@@ -1000,7 +933,6 @@ export default function MobileShell() {
       }
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
-    // REAÇÃO em mensagem MINHA: mesmo caminho do desktop (aviso do sistema).
     if (ev.type === 'reaction_changed') {
       const minha = messages.some(
         (m) => m.id === ev.msg_id && (m.direction === 'out' || m.author_fp === identity?.fingerprint),
@@ -1022,12 +954,12 @@ export default function MobileShell() {
         })
       }
     }
-    // "digitando…" — o desktop já mostrava; no mobile faltava (lacuna auditada).
     if (ev.type === 'typing') {
       const cid = (ev as unknown as { conv_id?: string; convId?: string }).conv_id ?? (ev as unknown as { convId?: string }).convId
       const fp = (ev as unknown as { fp?: string }).fp
       if (!cid || !fp || fp === identity?.fingerprint) return
       if (cid !== selConv) return
+      // Seção 6: nick
       const nick = (ev as unknown as { nickname?: string }).nickname ?? fp.slice(0, 8)
       setTypingPeers(prev => ({ ...prev, [fp]: { nick, at: Date.now() } }))
       if (typingTimeouts.current[fp]) clearTimeout(typingTimeouts.current[fp])
@@ -1039,16 +971,13 @@ export default function MobileShell() {
         })
       }, 3500)
     }
-    // aceite cria DM no store — refresca conversas junto (era só friends)
     if (ev.type === 'friend_request_in' || ev.type === 'friend_accepted' || ev.type === 'friend_removed') { refreshFriends(); refreshConvos() }
     if (ev.type === 'community_joined') { refreshCommunities(); refreshConvos() }
     if (ev.type === 'community_removed') { refreshCommunities(); refreshConvos(); if (selCommunity === ev.community_id) { setSelCommunity(null); setSelConv(null); setSelPeerFp(null) } }
     if (ev.type === 'group_synced') { refreshConvos(); refreshCommunities() }
     if (ev.type === 'call_incoming') {
       const fp = ev.from_fp
-    // SELF-RING: eco do próprio invite não toca o telefone de quem ligou.
       if (fp && identity?.fingerprint && fp === identity.fingerprint) return
-      // Nome, nunca fingerprint: "Ana está ligando" é reconhecível, um fp não.
       const known = peers.find((p) => p.fp === fp)?.nickname
         || peerNickCacheRef.current[fp]
         || (ev as unknown as { nickname?: string }).nickname
@@ -1059,7 +988,6 @@ export default function MobileShell() {
         setIncomingCall(ev)
       }
       if (myPresence !== 'dnd') sfxRingStart()
-      // Com a tela apagada, o aviso do sistema faz a chamada aparecer.
       notifyIncomingCall({ callId: ev.call_id, title: known || fp.slice(0, 8) })
     }
     if (ev.type === 'call_ended') {
@@ -1071,7 +999,6 @@ export default function MobileShell() {
       const ok = fileSwarm.onAnnounce(ev.file_id, ev.name, ev.size, ev.chunks, ev.hash, ev.from_fp, (ev as any).chunk_hashes ?? undefined)
       if (!ok && fileSwarm.lastError) setError(fileSwarm.lastError)
       swarmNotifyRef.current()
-      // Mídia nova: busca só para renderizar inline (sem salvar; respeita cap).
       if (ok && (isImageName(ev.name) || isVideoName(ev.name))) {
         const sf = fileSwarm.files.get(ev.file_id)
         if (sf) void fileSwarm.prepareMedia(sf).then(() => swarmNotifyRef.current()).catch(() => {})
@@ -1082,7 +1009,6 @@ export default function MobileShell() {
   })
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages.length, selConv])
 
-  // GARGALO 3: derivados em useMemo (só recalculam quando a fonte muda).
   const selConvObj = useMemo(() => conversations.find(c => c.id === selConv) ?? null, [conversations, selConv])
   const peerTitle = useMemo(() => selConvObj?.title || peers.find(p => p.fp === selPeerFp)?.nickname || selPeerFp || '', [selConvObj, peers, selPeerFp])
   const activeComm = useMemo(() => selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null, [communities, selCommunity])
@@ -1093,7 +1019,6 @@ export default function MobileShell() {
   const onlineFriends = useMemo(() => friendsAccepted.filter(f =>
     onlineFps.has(f.fp) && presence.get(f.fp)?.status !== 'invisible'
   ), [friendsAccepted, onlineFps, presence])
-  // Membros de TODOS os grupos (contador do topo: amigos + grupos + servidor).
   const [groupMemberFps, setGroupMemberFps] = useState<[string, string][]>([])
   useEffect(() => {
     const grupos = conversations.filter((c) => c.kind === 'group')
@@ -1105,7 +1030,7 @@ export default function MobileShell() {
         try {
           const mems = await services.groupMembers(g.id)
           for (const m of mems as unknown as [string, string][]) if (m?.[0]) pares.push(m)
-        } catch { /* grupo sem roster (offline): ignora */ }
+        } catch {  }
       }
       if (vivo) setGroupMemberFps(pares)
     }
@@ -1114,57 +1039,36 @@ export default function MobileShell() {
     return () => { vivo = false; off() }
   }, [conversations])
 
-  // GRUPO ABERTO: pareia os membros AGORA (pedido do dono: quem está no grupo
-  // mas não é amigo precisa aparecer online e conectar). Sem isto eles só eram
-  // discados pelo tique de 45 s do motor — e, em grupo, antes não eram discados
-  // nunca.
   useEffect(() => {
     if (!selConv) return
     const conv = conversations.find((c) => c.id === selConv)
     if (conv?.kind !== 'group') return
-    try { void services.groupPairNow?.(selConv).catch(() => { /* sem motor */ }) } catch { /* ignore */ }
+    try { void services.groupPairNow?.(selConv).catch(() => {  }) } catch {  }
   }, [selConv, conversations])
 
   const shownFriends = friendsTab === 'online' ? onlineFriends : friendsAccepted
-  /**
-   * TUDO que tem vínculo comigo e está online agora: amigos + membros dos
-   * grupos + membros pareados do servidor aberto. O contador do topo mostrava
-   * só "amigos online" e dava 0 mesmo com gente do grupo conectada.
-   */
   const linkedOnline = useMemo(() => {
     const s = new Set<string>()
-    // TODO peer com sessão viva conta (amigo, grupo, servidor): o filtro por
-    // vínculo carregado fazia o contador ficar menor que o real.
     for (const p of peers) if (p.state === 'CONNECTED') s.add(p.fp)
     if (identity?.fingerprint) s.delete(identity.fingerprint)
     return s
   }, [peers, identity?.fingerprint])
   const unreadTotal = useMemo(() => conversations.reduce((a, c) => a + (((c as any).unread_count as number) || 0), 0), [conversations])
   const netState: NetworkState | null = status?.state ?? null
-  // Honesta: verde só com ≥1 peer Online real; nó ouvindo sem peers ≠ ONLINE.
   const nativeKind = services.kind === 'native'
   const peerCount = status?.online_peers ?? 0
   const netOnline = peerCount > 0 && (netState === 'CONNECTED' || netState === 'DISCONNECTED')
   const pillColor = !nativeKind ? t.accent : netState === null ? t.yellow : netOnline ? t.green : netState === 'DISCONNECTED' ? '#80848e' : t.yellow
   const pillLabel = !nativeKind ? 'LOCAL' : netState === null ? 'INICIANDO…' : netOnline ? 'ONLINE' : stateLabel[netState as NetworkState]
-  // Contagem = peers com sessão viva (amigos + membros), não "amigos online";
-  // "0" aparece: é informação honesta.
-  // Qualquer vínculo online (amigos + grupos + servidor aberto), nunca o meu fp.
   const linkedCount = linkedOnline.size || peerCount
   const onlineLabel = `${pillLabel} · ${linkedCount}`
   const privacyLabel = PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode
 
-  // Callbacks estáveis (useCallback) para as linhas memo manterem props iguais.
   const openDm = useCallback(async (fp: string, nick?: string) => { if (!fp || fp.trim() === '') { setError('Selecione um amigo válido'); return } try { const conv = await services.dmOpen(fp.trim(), (nick || fp).trim()); setSelCommunity(null); setSelPeerFp(fp.trim()); setSelConv(conv.id); setTab('chats'); refreshConvos() } catch (e: any) { setError(String(e?.message ?? e)) } }, [refreshConvos])
   const openConv = useCallback((c: Conversation) => { setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp) }, [])
-  // Salas de chamada anunciadas: anel verde + botão Entrar na lista.
   const [callRoomsMap, setCallRoomsMap] = useState<Map<string, CallRoomView>>(() => callRooms.snapshot())
   useEffect(() => {
     const off = callRooms.subscribe(setCallRoomsMap)
-    // SINCRONIZA AO VOLTAR: no Android o WebView congela o JS em segundo
-    // plano, então os eventos `call_room` daquele intervalo se perdem e a sala
-    // só aparecia depois de fechar e abrir o app. O snapshot do motor cobre o
-    // buraco; o intervalo cobre o caso de a página nunca perder o foco.
     const sync = () => { void syncCallRooms(() => services.callRoomsList()) }
     sync()
     const t = window.setInterval(sync, ROOM_SYNC_MS)
@@ -1180,7 +1084,7 @@ export default function MobileShell() {
   }, [])
   useEffect(() => {
     const un = services.subscribe((ev: any) => { if (ev?.type === 'call_room') callRooms.apply(ev) })
-    return () => { try { un() } catch { /* ignore */ } }
+    return () => { try { un() } catch {  } }
   }, [])
   const joinRoom = useCallback(async (c: Conversation, room: CallRoomView) => {
     if (activeCall) { setError('já existe uma chamada em andamento'); return }
@@ -1189,15 +1093,6 @@ export default function MobileShell() {
       await callManager.enterRoom(c.id, room.kind)
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }, [activeCall])
-  /**
-   * Entrar/sair de um canal de VOZ ou VÍDEO pelo celular — mesmo caminho do
-   * desktop (`joinVoice`/`leaveVoice`). Câmera é opcional e mora na barra da
-   * chamada: o canal `video` não abre nada diferente, só deixa o botão à mão.
-   *
-   * O servidor/canal vem do `callId` da chamada (não do `selCommunity`, que
-   * pode ser outro): sair de um canal usando o servidor aberto na hora chamava
-   * `voiceLeave` no servidor ERRADO e a sala continuava te vendo lá.
-   */
   const enterCallChannel = useCallback(async (communityId: string, channelId: string) => {
     if (callActionBusy) return
     const support = getCallsSupport()
@@ -1215,12 +1110,10 @@ export default function MobileShell() {
       setCallActionBusy(false)
     }
   }, [callActionBusy])
-  /** Sair da chamada do canal aberto (mesmo `leaveVoice` do desktop). */
   const leaveCallChannel = useCallback(async () => {
     const st: any = activeCall
     const ref = parseVoiceCallId(st?.callId, st?.convId)
     if (!ref) {
-      // Canal desconhecido: encerra o que está vivo em vez de não fazer nada.
       try { await callManager.leave() } catch (e: any) { setError(String(e?.message ?? e)) }
       return
     }
@@ -1230,9 +1123,8 @@ export default function MobileShell() {
       setError(String(e?.message ?? e))
     }
   }, [activeCall])
-  // Lixeira: em grupo abre o diálogo (sair / dono escolhe apagar); DM apaga.
+  // Seção 7: const
   const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
-  /** Fechar o app (segundo plano × encerrar) — não é logout. */
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => {
     const conv = conversations.find((c) => c.id === id)
@@ -1241,7 +1133,7 @@ export default function MobileShell() {
       try {
         const mems = await services.groupMembers(id)
         owner = mems.length > 0 && mems[0][0] === identity?.fingerprint
-      } catch { /* sem roster: cai como membro comum */ }
+      } catch {  }
       setLeaveTarget({ id, title, owner })
       return
     }
@@ -1254,17 +1146,13 @@ export default function MobileShell() {
   }, [conversations, identity?.fingerprint, refreshConvos])
   const removeFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Remover ${nickname || fp} dos amigos?`)) return; try { await services.friendRemove(fp); refreshFriends(); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
   const blockFriend = useCallback(async (fp: string, nickname: string) => { if (!confirm(`Bloquear ${nickname || fp}? As mensagens recebidas serão rejeitadas.`)) return; try { await services.friendBlock(fp); refreshFriends(); refreshConvos(); setNotice('Participante bloqueado') } catch (err: any) { setError(String(err?.message ?? err)) } }, [refreshFriends, refreshConvos])
-  // v6: fila real no downloadManager; painel para acompanhar; card lê o swarm.
   const downloadFile = useCallback((fileId: string) => {
-    // Mesma ação do desktop (`services/downloadAction`), com hash; não abre painel.
     const cur = fileSwarm.files.get(fileId)
     if (!cur) { setError('anúncio do arquivo ainda não chegou — aguarde uns segundos'); return }
     setError(null)
     void startDownload({ file_id: fileId, name: cur.name, size: cur.size, chunks: cur.chunks, hash: cur.hash })
       .catch((e: any) => setError(String(e?.message ?? e)))
   }, [])
-  // Suporte a chamadas: 'full' = WebRTC direto, 'none' = desabilita com diagnóstico.
-  // Sem modo áudio-via-relay: sem WebRTC a chamada falha honesto.
   const callsSupport = getCallsSupport()
   const callsOk = callsSupport !== 'none'
   const callsUnavailableDetail = callsSupport === 'none' ? getCallsUnavailableMessage() : CALLS_UNAVAILABLE_MSG
@@ -1276,7 +1164,6 @@ export default function MobileShell() {
   async function startCall(kind: 'voice' | 'video') {
     if (callActionBusy) return
     if (!selConv) return
-    // GRUPO: chama TODOS os membros (antes só o peer da conversa recebia invite).
     let fps: string[] = []
     if (selConvObj?.kind === 'group') {
       try {
@@ -1284,14 +1171,13 @@ export default function MobileShell() {
         fps = (mems as Array<{ fp?: string } | [string, string]>)
           .map((m) => (Array.isArray(m) ? m[0] : m?.fp) ?? '')
           .filter((fp) => !!fp && fp !== identity?.fingerprint)
-      } catch { /* lista best-effort */ }
+      } catch {  }
       if (fps.length === 0) { setError('este grupo não tem membros para chamar'); return }
     } else {
       const fp = selPeerFp ?? selConvObj?.peer_fp
       if (!fp) { setError('selecione um amigo para ligar'); return }
       fps = [fp]
     }
-    // Rota única: WebRTC direto (host/STUN/TURN) ou erro honesto.
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     setCallActionBusy(true)
     try { await callManager.start(kind, selConv, fps) } catch (e: any) { setError(String(e?.message ?? e)) }
@@ -1301,7 +1187,6 @@ export default function MobileShell() {
     if (!incomingCall || callActionBusy) return
     const support = getCallsSupport()
     if (support === 'none') { setError(getCallsUnavailableMessage()); return }
-    // Valida ANTES de avisar o peer (evita estados divergentes entre os dois).
     const bloqueio = callManager.canAccept(incomingCall.call_id)
     if (bloqueio) { setError(bloqueio); setIncomingCall(null); sfxRingStop(); return }
     setCallActionBusy(true)
@@ -1356,7 +1241,6 @@ export default function MobileShell() {
 
   async function send() {
     const raw = input.trim()
-    // Comando de barra: executa local e posta a resposta (igual desktop).
     if (raw.startsWith('/') && !/\s/.test(raw.split('\n')[0]!)) {
       const first = raw.split('\n')[0] ?? ''
       const sp = first.indexOf(' ')
@@ -1366,7 +1250,6 @@ export default function MobileShell() {
       setInput('')
       if (out && selConv) {
         const convId = selConv
-        // `selCommunity` não prova que é canal; membership real é a única fonte.
         const communityId = selCommunity && communities.some(c =>
           c.id === selCommunity && c.channels.some(([cid]) => cid === convId),
         ) ? selCommunity : null
@@ -1386,38 +1269,32 @@ export default function MobileShell() {
     if (!body || !selConv) return
     const now = Date.now()
     const convId = selConv
-    // Antiduplo-SUBMIT por conversa (ver `lastSendByConvRef`).
     if (lastSendByConvRef.current.conv === convId && now - lastSendByConvRef.current.at < 300) return
     lastSendByConvRef.current = { conv: convId, at: now }
-    // `selCommunity` não prova que é canal; membership real é a única fonte.
     const communityId = selCommunity && communities.some(c =>
       c.id === selCommunity && c.channels.some(([cid]) => cid === convId),
     ) ? selCommunity : null
     const myFp = identity?.fingerprint ?? ''
     const ts = Date.now()
     const tempId = `pending-${ts}`
-    // T1 eco otimista: monta StoredMessage local e append IMEDIATO + limpa input na hora.
     const optimistic: StoredMessage = { id: tempId, conv_id: convId, author_fp: myFp, body, ts, sig: 'pending', direction: 'out', status: 'sending' }
     append(optimistic)
     setInput('')
     setError(null)
     try {
+      // Seção 8: m
       const m = communityId ? await services.sendChannelMessage(communityId, convId, body) : await services.messageSend(convId, body)
-      // Substitui o otimista pelo definitivo (match por tempId, com fallback).
       replaceOptimistic(tempId, m)
-      // Resposta inline: o motor guarda o vínculo e difunde para os peers.
       if (replyToMsg) {
-        void services.reply(convId, m.id, replyToMsg.id).catch(() => { /* vínculo é bônus, não bloqueia */ })
+        void services.reply(convId, m.id, replyToMsg.id).catch(() => {  })
         setReplyToMsg(null)
       }
       if (!communityId) refreshConvos()
     } catch (e: any) {
-      // Em erro marca failed com botao reenviar — nao some com o texto (fica no balao).
       failOptimistic(tempId)
       setError(String(e?.message ?? e))
     }
   }
-  /** Comandos de barra do mobile — os mesmos do desktop (paridade). */
   const runSlashMobile = useCallback(async (name: string, args: string): Promise<string> => {
     try {
       switch (name) {
@@ -1444,8 +1321,6 @@ export default function MobileShell() {
     if (!m.conv_id) return
     patchStatus(m.id, 'sending')
     setError(null)
-    // Reenvio pelo MESMO id (ver ThemeShell): reenviar texto criava outro
-    // `msg_id` e duplicava a mensagem ao reabrir a conversa.
     try {
       const fresh = await services.messageResend(m.id)
       replaceOptimistic(m.id, fresh)
@@ -1480,13 +1355,11 @@ export default function MobileShell() {
       setAddingFriend(false)
     }
   }
-  /** Cola o fingerprint da área de transferência (atalho de 1 toque no celular). */
   async function pasteFp() {
     try {
       const txt = (await navigator.clipboard?.readText?.()) ?? ''
       const clean = txt.trim().toLowerCase()
       if (!clean) { setFriendErr('Área de transferência vazia — copie o fingerprint do seu amigo.'); return }
-      // se colou um texto maior, extrai o 1º bloco de 12 hex
       const found = clean.match(/[0-9a-f]{12}/)?.[0] ?? clean
       setFriendFpInput(found)
       setFriendErr(null)
@@ -1495,19 +1368,16 @@ export default function MobileShell() {
       setFriendErr('Não foi possível ler a área de transferência — cole manualmente no campo.')
     }
   }
-  /** Reenvia agora um pedido pendente (a rede também reenvia sozinha a cada 15s). */
   async function retryFriendReq(fp: string) {
     setError(null); setFriendErr(null); setFriendSuccess(null)
     try { await services.friendRequest(fp); setFriendSuccess('Solicitação reenviada!'); refreshFriends() }
     catch (e: any) { setFriendErr(String(e?.message ?? e)) }
   }
-  /** Cancela um pedido ainda não aceito (avisa o peer e limpa local). */
   async function cancelFriendReq(fp: string) {
     setError(null); setFriendErr(null); setFriendSuccess(null)
     try { await services.friendRemove(fp); refreshFriends() }
     catch (e: any) { setFriendErr(String(e?.message ?? e)) }
   }
-  // foca o campo automaticamente ao abrir a aba "Adicionar amigo"
   useEffect(() => {
     if (friendsTab !== 'adicionar') return
     const id = window.setTimeout(() => friendInputRef.current?.focus(), 60)
@@ -1516,26 +1386,23 @@ export default function MobileShell() {
   async function respond(fp: string, ok: boolean) { try { await services.friendRespond(fp, ok); refreshFriends() } catch (e: any) { setError(String(e?.message ?? e)) } }
   async function copyMyFp() { await navigator.clipboard?.writeText(identity?.fingerprint ?? '').catch(() => {}); setError(null); setNotice('Fingerprint copiado!'); window.setTimeout(() => setNotice(null), 2500) }
 
-  // Envio de arquivo no celular: input real + shareFile do swarm + mensagem.
   async function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]; if (!f) return
     await sendFileNow(f)
     e.target.value = ''
   }
 
-  /** Envia um arquivo pelo swarm e publica o metadado na conversa aberta. */
   async function sendFileNow(f: File) {
     try {
       const sf = await fileSwarm.shareFile(f)
       setFileList([...fileSwarm.files.values()])
       if (selConv) {
         const body = encodeFileBody(sf)
-        try { const m = selCommunity ? await services.sendChannelMessage(selCommunity, selConv, body) : await services.messageSend(selConv, body); append(m); refreshConvos() } catch { /* silent */ }
+        try { const m = selCommunity ? await services.sendChannelMessage(selCommunity, selConv, body) : await services.messageSend(selConv, body); append(m); refreshConvos() } catch {  }
       }
     } catch (err: any) { setError(String(err?.message ?? err)) }
   }
 
-  /** Ctrl+V com imagem na área de transferência (o textarea só aceita texto). */
   async function handleComposerPaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
     const dt = e.clipboardData
     const imagens = pastedImages(dt, new Date())
@@ -1552,24 +1419,12 @@ export default function MobileShell() {
     }
   }
 
-  // Entrada por convite: fluxo ÚNICO pelo `JoinServerForm` (mesmo do desktop).
-
-  // Nós de mensagem memoizados: parse/lookup 1x por mensagem; social em lote.
-  // canal de servidor? (definido aqui porque `messageNodes` já precisa dele)
   const isChannel = !!selCommunity
-  /** Canal em que EU estou na chamada agora (barra de voz do celular). */
   const inCallChannelId = useMemo(() => {
     const st: any = activeCall
     if (!st || !String(st.callId ?? '').startsWith('voice-')) return null
-    // `joinVoice` grava o id do CANAL em `convId`; cortar o `callId` por '-'
-    // não serve (ids de servidor/canal já têm hífen).
     return typeof st.convId === 'string' && st.convId ? st.convId : null
   }, [activeCall])
-  /**
-   * Quem está no canal aberto, pelo MOTOR (`voiceStates`) — mesma fonte do
-   * desktop. Precisa de re-leitura em evento + tique porque no celular a
-   * WebView congela em segundo plano e perde os eventos de roster.
-   */
   const [voiceStates, setVoiceStates] = useState<[string, boolean, boolean][]>([])
   useEffect(() => {
     if (!selCommunity || !selConv) { setVoiceStates((cur) => (cur.length === 0 ? cur : [])); return }
@@ -1577,7 +1432,7 @@ export default function MobileShell() {
     const ler = () => {
       services.voiceStates(selCommunity, selConv)
         .then((v) => { if (vivo) setVoiceStates(Array.isArray(v) ? v : []) })
-        .catch(() => { /* sem motor ainda */ })
+        .catch(() => {  })
     }
     ler()
     const t = window.setInterval(ler, 15_000)
@@ -1600,16 +1455,11 @@ export default function MobileShell() {
       un()
     }
   }, [selCommunity, selConv])
-  /**
-   * Canal de VOZ/VÍDEO aberto: a tela certa é a chamada, não o histórico de
-   * texto. Antes o toque em "voz" caía no compositor de mensagens do canal.
-   */
+  // Seção 9: selCallChannel
   const selCallChannel = useMemo(() => {
     if (!isChannel || !selConv) return null
     const meta = channelListCache.find((c) => c.id === selConv)
     if (meta) return isCallableChannel(meta.kind) ? meta : null
-    // Cache ainda vazio (app abriu direto numa chamada): se a chamada ATIVA é
-    // deste canal, a tela certa continua sendo a chamada — nunca o compositor.
     const st: any = activeCall
     if (st && String(st.callId ?? '').startsWith('voice-') && st.convId === selConv) {
       return {
@@ -1623,16 +1473,10 @@ export default function MobileShell() {
     }
     return null
   }, [isChannel, selConv, channelListCache, activeCall, activeComm, selConvObj])
-  /** A conversa aberta é um grupo de DM? (afeta cabeçalho e painel de membros) */
   const isGroupConv = selConvObj?.kind === 'group'
-  /** Sala de chamada viva nesta conversa (botão Entrar do cabeçalho). */
   const selConvRoom = selConv ? callRoomsMap.get(selConv) ?? null : null
-  /**
-   * Membros do grupo aberto — vem do MOTOR (SQLite), não tratado como DM.
-   */
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [showGroupPanel, setShowGroupPanel] = useState(false)
-  /** fp → apelido, do roster REAL do grupo/canal (usado como nome do autor). */
   const [memberNicks, setMemberNicks] = useState<Record<string, string>>({})
 
   useEffect(() => {
@@ -1643,7 +1487,6 @@ export default function MobileShell() {
         const mems = await services.groupMembers(selConv)
         if (!vivo) return
         setGroupMemberCount(mems.length)
-        // Guarda nome E fp: sem isto as mensagens saíam assinadas com o nome do grupo.
         const map: Record<string, string> = {}
         for (const m of mems as Array<{ fp?: string; nickname?: string }>) {
           if (m?.fp) map[m.fp] = m.nickname || ''
@@ -1656,17 +1499,13 @@ export default function MobileShell() {
     return () => { vivo = false; off() }
   }, [selConv, isGroupConv])
 
-
-
   const social = useSocialWindow(messages, selConv)
   const actions = useMessageActions((ids) => social.refreshIds(ids))
 
-  // ---- autocompletar @menção / :emoji: / /comando (paridade com o desktop) ----
   const [activeAutocomplete, setActiveAutocomplete] = useState<{ kind: 'mention' | 'emoji' | 'slash'; query: string; start: number; end: number } | null>(null)
   const [autocompleteIdx, setAutocompleteIdx] = useState(0)
   const [serverEmojiMap, setServerEmojiMap] = useState<Record<string, string>>({})
 
-  // Emoji customizado do servidor: :nome: precisa renderizar no texto.
   useEffect(() => {
     if (!selCommunity) { setServerEmojiMap({}); return }
     let alive = true
@@ -1681,7 +1520,6 @@ export default function MobileShell() {
     return () => { alive = false }
   }, [selCommunity])
 
-  // Membros do servidor atual (para @menção).
   const communityMembers = useMemo<{ fp: string; nickname: string }[]>(() => {
     if (!activeComm) return []
     return (activeComm.members ?? []).map(([fp, nick]) => ({ fp, nickname: nick || fp.slice(0, 8) }))
@@ -1741,10 +1579,9 @@ export default function MobileShell() {
     setInput(next)
     setActiveAutocomplete(null)
     const caret = start + it.insert.length
-    setTimeout(() => { try { composerRef.current?.setSelectionRange(caret, caret); composerRef.current?.focus() } catch { /* ignore */ } }, 0)
+    setTimeout(() => { try { composerRef.current?.setSelectionRange(caret, caret); composerRef.current?.focus() } catch {  } }, 0)
   }
 
-  // Perfis (avatar + cor): o autor usa a identidade que ele configurou.
   const [profilesByFp, setProfilesByFp] = useState<Record<string, ProfileView>>({})
   useEffect(() => {
     let alive = true
@@ -1755,17 +1592,12 @@ export default function MobileShell() {
     }
     load()
     const h = window.setInterval(load, 15000)
-    // O mobile escuta `profile_changed` (foto nova aparecia até 15s tarde).
     const un = services.subscribe((ev: any) => {
       if (ev.type !== 'profile_changed') return
       setProfilesByFp(prev => ({ ...prev, [ev.fp]: ev.profile }))
     })
     return () => { alive = false; window.clearInterval(h); un() }
   }, [])
-  /**
-   * Nome de membro do grupo/canal: roster → perfil → peer; '' se não sabe.
-   * Declarado após `profilesByFp` de propósito (o resolvedor lê esse estado).
-   */
   const resolveMemberName = useCallback((fp: string): string => {
     if (!fp) return ''
     if (fp === identity?.fingerprint) return identity?.nickname ?? ''
@@ -1777,16 +1609,15 @@ export default function MobileShell() {
     )
   }, [memberNicks, profilesByFp, peers, identity])
   const myFp = identity?.fingerprint ?? ''
-  /** Foto de perfil por fp nos quadrados da chamada (mobile). */
   const mobileCallAvatars = useMemo<Record<string, string | undefined>>(() => {
     const out: Record<string, string | undefined> = {}
     for (const [fp, p] of Object.entries(profilesByFp)) if (p?.avatar_b64) out[fp] = p.avatar_b64
     return out
   }, [profilesByFp])
+  // Seção 10: readState
   const readState = useReadState(selConv, myFp)
   const unreadMarkTs = readState.lastRead
 
-  // Bots do canal (para o badge BOT nas mensagens) + mensagens fixadas.
   useEffect(() => {
     if (!selCommunity) { setBots([]); return }
     let alive = true
@@ -1819,7 +1650,6 @@ export default function MobileShell() {
     return () => { alive = false; un() }
   }, [selConv, messages.length, social.bodies, identity, selConvObj])
 
-  /** Contexto do renderer de texto: quem é "eu", nomes e emojis do servidor. */
   const richCtx = useMemo<InlineCtx>(() => {
     const names = new Map<string, string>()
     for (const m of messages) {
@@ -1836,7 +1666,6 @@ export default function MobileShell() {
 
   const messageNodes = useMemo(() => messages.map((m, idx) => {
     const mine = m.direction === 'out'
-    // NOME DO AUTOR — nunca o título do GRUPO; ordem igual ao desktop.
     const authorName = mine
       ? identity?.nickname ?? 'você'
       : (isChannel
@@ -1853,7 +1682,6 @@ export default function MobileShell() {
       const sf = fileSwarm.files.get(fmeta.file_id)
       announced = !!sf
       pct = sf ? fileSwarm.progress(sf) : 0
-      // A fila do downloadManager tem o estado REAL (velocidade/pausa/erro).
       const q = dlByFile[fmeta.file_id]
       if (q) {
         pct = q.pct
@@ -1870,7 +1698,6 @@ export default function MobileShell() {
       && prev.author_fp === m.author_fp && prev.direction === m.direction
       && (m.ts - prev.ts) < 5 * 60 * 1000
       && !social.meta.get(prev.id)?.deleted
-    // mensagem citada (preview da resposta)
     const replyId = meta?.reply_to
     const replyMsg = replyId ? messages.find((x) => x.id === replyId) : undefined
     const replyTo = replyId
@@ -1937,9 +1764,7 @@ export default function MobileShell() {
     )
   }), [messages, identity, selConvObj, fileList, previews, downloadFile, resendMessage, social.reactions, social.meta, social.bodies, richCtx, selConv, selCommunity, actions, bots, myFp, setFlash, profilesByFp, peers, peerNickCacheRef, onlineFps])
 
-  /** Refs de scroll: cada linha recebe id para o "pular para a citada". */
   useEffect(() => {
-    // marca a conversa como lida ao abrir (cursor real do motor)
     if (selConv && messages.length) {
       const last = messages[messages.length - 1]
       if (last && !readRef.current.has(selConv)) {
@@ -1949,14 +1774,12 @@ export default function MobileShell() {
     }
   }, [selConv, messages])
 
-
-  // ================= SHEETS DA CAMADA SOCIAL (5.5) =================
+  // Seção 11: const
   const [searchHits, setSearchHits] = useState<SearchHit[]>([])
   const [searchBusy, setSearchBusy] = useState(false)
   const [sheetSearchQ, setSheetSearchQ] = useState('')
   const [threadId, setThreadId] = useState<string | null>(null)
 
-  /** Busca REAL no motor (SQL) com filtros `from:`/`in:`/`has:`. */
   async function runSearch(raw: string) {
     setSheetSearchQ(raw)
     const text = raw.trim()
@@ -1999,20 +1822,13 @@ export default function MobileShell() {
     try { setThreadMsgs(await services.threadMessages(id, 100) ?? []) } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
-  /**
-   * Discussão (thread) aberta: carga única + AO VIVO.
-   *
-   * Antes esta tela só buscava as mensagens ao abrir e depois de você enviar:
-   * a mensagem de outra pessoa nunca aparecia (tinha que fechar e abrir de
-   * novo) e a lista abria no topo, parecendo vazia.
-   */
   useEffect(() => {
     if (!showThread || !threadId) return
     let vivo = true
     const carregar = () => {
       services.threadMessages(threadId, 100)
         .then((list) => { if (vivo) setThreadMsgs(Array.isArray(list) ? list : []) })
-        .catch(() => { /* mantém o que já está na tela */ })
+        .catch(() => {  })
     }
     carregar()
     const off = services.subscribe((ev) => {
@@ -2029,10 +1845,9 @@ export default function MobileShell() {
     setThreadInput('')
     try {
       const m = await services.threadSend(selCommunity, threadId, body)
-      // Entra na hora, sem depender de novo fetch (a resposta pode vir depois).
       setThreadMsgs((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]))
     } catch (e: any) {
-      setThreadInput(body) // devolve o texto: perder a mensagem digitada é pior
+      setThreadInput(body)
       setError(String(e?.message ?? e))
     }
   }
@@ -2053,7 +1868,7 @@ export default function MobileShell() {
   function renderMobileSheets() {
     return (
       <>
-        {/* Painel do GRUPO: membros reais, renomear e remover. */}
+        {}
         {showGroupPanel && isGroupConv && selConv && sheetWrap(
           selConvObj?.title || 'Grupo',
           <GroupPanel
@@ -2068,15 +1883,14 @@ export default function MobileShell() {
             onChanged={() => {
               void services.groupMembers(selConv).then((m) => setGroupMemberCount(m.length)).catch(() => {})
               refreshConvos()
-              // Saiu/apagou o grupo: fecha a conversa que não existe mais.
               services.conversationsList().then((l) => {
                 if (!l.some((c) => c.id === selConv)) { setSelConv(null); setSelPeerFp(null) }
-              }).catch(() => { /* lista best-effort */ })
+              }).catch(() => {  })
             }}
           />,
           () => setShowGroupPanel(false),
         )}
-        {/* BUSCA */}
+        {}
         {showSearch && sheetWrap('Buscar mensagens', (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
             <div style={{ display: 'flex', gap: 8 }}>
@@ -2115,7 +1929,7 @@ export default function MobileShell() {
           </div>
         ), () => { setShowSearch(false); setSearchHits([]) })}
 
-        {/* FIXADAS */}
+        {}
         {showPins && sheetWrap(`Mensagens fixadas (${pinnedMsgs.length})`, (
           <div style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
             {pinnedMsgs.length === 0 && <div style={{ fontSize: 12, color: t.muted, padding: 8 }}>nada fixado nesta conversa</div>}
@@ -2132,7 +1946,7 @@ export default function MobileShell() {
           </div>
         ), () => setShowPins(false))}
 
-        {/* MARCADORES SALVOS — paridade com a inbox do desktop (Social.tsx) */}
+        {}
         {showBookmarks && sheetWrap('Mensagens salvas', (
           <BookmarksPanel convId={selConv ?? ''} messages={messages} onClose={() => setShowBookmarks(false)} onJump={(id) => {
             setShowBookmarks(false)
@@ -2141,7 +1955,7 @@ export default function MobileShell() {
           }} />
         ), () => setShowBookmarks(false))}
 
-        {/* THREAD */}
+        {}
         {showThread && sheetWrap(threadFor?.name ? `Discussão — ${threadFor.name}` : 'Discussão', (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
             {threadFor?.body && (
@@ -2161,6 +1975,7 @@ export default function MobileShell() {
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
+                // Seção 12: value
                 value={threadInput}
                 onChange={(e) => setThreadInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') void sendThread() }}
@@ -2173,7 +1988,7 @@ export default function MobileShell() {
           </div>
         ), () => { setShowThread(false); setThreadFor(null); setThreadId(null) })}
 
-        {/* PERFIL — mesmo `ProfileModal` do desktop, inclusive edição. */}
+        {}
         {profilePeer && (
           <ProfileModal
             fp={profilePeer.fp}
@@ -2187,7 +2002,7 @@ export default function MobileShell() {
           />
         )}
 
-        {/* ENCAMINHAR */}
+        {}
         {forwardFrom && sheetWrap(`Encaminhar de ${forwardFrom.name}`, (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' }}>
             <div style={{ fontSize: 12, color: t.muted, background: t.input, borderRadius: 8, padding: 8, borderLeft: `3px solid ${t.accent}` }}>{forwardFrom.body || '(anexo)'}</div>
@@ -2219,65 +2034,35 @@ export default function MobileShell() {
     )
   }
 
-  // UpdateGate (mesmo do desktop): só com versão nova; não trava o boot.
   const updateGate = useUpdateGate(true)
 
   if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen native={services.kind === 'native'} />} /><UpdateOverlay api={updateGate} /></>)
   if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 
-  /**
-   * Quadrados da chamada (mídia de verdade: `<audio>`/`<video>` por peer).
-   *
-   * Extraído para função porque DOIS lugares precisam dele: o painel de chamada
-   * e a tela do canal de voz/vídeo. Uma tela sem estes elementos conecta e fica
-   * muda — era o bug do canal de voz no celular.
-   */
-  const renderCallTilesMobile = (compact: boolean) => {
+  const renderCallTilesMobile = (_compact: boolean) => {
     if (callTilesMobile.length === 0) return null
-    const cols = pinnedTileId ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)'
     return (
-      <div style={{ display: 'grid', gridTemplateColumns: cols, gap: 8 }}>
-        {visibleCallTilesMobile.map((tile) => (
-          <div
-            key={tile.id}
-            style={{
-              // TELA CHEIA é overlay (ScreenStage), não quadrado maior.
-              height: compact ? 92 : tile.kind === 'screen' ? 168 : 124,
-              transition: 'height 180ms ease',
-            }}
-          >
-            <CallTileComponent
-              tile={tile}
-              pinned={tile.id === pinnedTileId}
-              onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
-              onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
-              callDeafened={!!activeCall?.deafened}
-              palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
-              minHeight={compact ? 92 : 124}
-              avatarColor={avatarColor}
-              avatarB64={mobileCallAvatars}
-              onOpenProfile={(fp) => setProfilePeer({ fp, name: resolveMemberName(fp) || fp.slice(0, 8) })}
-            />
-          </div>
-        ))}
-      </div>
+      <MobileCallStage
+        tiles={visibleCallTilesMobile}
+        pinnedId={pinnedTileId}
+        expandedId={expandedTileId}
+        onPin={(id) => setPinnedTileId((cur) => (cur === id ? null : id))}
+        onExpand={(id) => setExpandedTileId((cur) => (cur === id ? null : id))}
+        deafened={!!activeCall?.deafened}
+        palette={{ heading: t.heading, muted: t.muted, green: t.green, red: t.red, accent: t.accent, border: t.border }}
+        avatarColor={avatarColor}
+        avatarB64={mobileCallAvatars}
+        onOpenProfile={(fp) => setProfilePeer({ fp, name: resolveMemberName(fp) || fp.slice(0, 8) })}
+      />
     )
   }
 
-  // ---- conversa em tela cheia (lista FLAT, igual desktop) ----
   if (selConv) {
-    // CANAL DE VOZ/VÍDEO: a tela é a CHAMADA, não o histórico de texto.
-    // Antes o toque caía no compositor e não havia como entrar pelo celular.
     if (selCallChannel) {
       const st: any = activeCall
       const dentro = !!inCallChannelId && inCallChannelId === selCallChannel.id
       const ligando = dentro && (st?.phase === 'connecting' || st?.phase === 'outgoing' || st?.phase === 'reconnecting')
-      // QUEM ESTÁ NO CANAL: só quem o MANAGER registrou (igual ao desktop).
-      //
-      // Regra do dono: "não aparecer ninguém até o cara entrar e ficar na call".
-      // O `voiceStates` é anúncio de presença — quem abriu o canal e não
-      // negociou mídia (ou fechou o app) deixa linha lá. Anunciar não é estar.
       const porFp = new Map<string, { fp: string; nickname?: string; muted?: boolean; deafened?: boolean }>()
       const estadoMotor = new Map<string, { muted: boolean; deafened: boolean }>()
       for (const [fp, muted, deafened] of voiceStates) {
@@ -2295,7 +2080,6 @@ export default function MobileShell() {
           deafened: p?.deafened ?? motor?.deafened,
         })
       }
-      // Eu sempre apareço (sou eu que estou na chamada).
       const meuFp = identity?.fingerprint ?? ''
       if (dentro && meuFp && !porFp.has(meuFp)) {
         const motor = estadoMotor.get(meuFp)
@@ -2317,6 +2101,8 @@ export default function MobileShell() {
           deafened={isDeafened}
           cameraOn={!!st?.cameraOn}
           error={error}
+          canSwitchCamera={mostrarTrocaCameraMobile}
+          onSwitchCamera={() => { void trocarCameraMobile() }}
           onBack={() => { setSelConv(null); setSelPeerFp(null) }}
           onJoin={() => { if (!selCommunity || !selCallChannel) return; void enterCallChannel(selCommunity, selCallChannel.id) }}
           onLeave={() => { void leaveCallChannel() }}
@@ -2329,7 +2115,7 @@ export default function MobileShell() {
     const channelName = activeComm?.channels.find(([id]) => id === selConv)?.[1] ?? selConvObj?.title ?? peerTitle
     return (
       <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden' }}>
-        {/* barra superior da conversa */}
+        {}
         <div style={{ height: 48, display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 8, paddingRight: 8, paddingBottom: 0, paddingTop: 'env(safe-area-inset-top)', background: t.sidebar, borderBottom: `1px solid ${t.border}`, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
           <button aria-label="Voltar" className="m-iconbtn" onClick={() => { setSelConv(null); setSelPeerFp(null); setShowMembers(false) }}>
             <span style={{ display: 'flex', transform: 'rotate(90deg)' }}><Icon d={Icons.chevron} size={18} /></span>
@@ -2349,8 +2135,8 @@ export default function MobileShell() {
           </div>
           {!isChannel && (
             <>
-              {/* SALA EM ANDAMENTO: entra direto pelo cabeçalho (botão azul),
-                  igual ao PC. Antes só existia na lista de conversas. */}
+              {
+}
               {selConvRoom && !activeCall && (
                 <button
                   type="button"
@@ -2363,7 +2149,7 @@ export default function MobileShell() {
                   <Icon d={Icons.phone} size={13} /> Entrar
                 </button>
               )}
-              {/* Sem hard-disable: o clique mostra o diagnóstico real. */}
+              {}
               <span title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
                 <button aria-label="Chamada de voz" title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? undefined : { opacity: 0.75, color: t.red }} onClick={() => startCall('voice')}><Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" size={17} /></button>
               </span>
@@ -2407,10 +2193,9 @@ export default function MobileShell() {
           )}
         </div>
 
-        {/* drawer de membros do canal */}
+        {}
         {showMembers && isChannel && (() => {
-          // TETO NA ORIGEM: servidor com 300 mil membros montava 300 mil
-          // linhas com Avatar e o celular travava. Prioriza online e eu.
+          // Seção 13: janela
           const janela = windowMembers(
             activeComm?.members ?? [],
             LIMITE_MEMBROS,
@@ -2454,20 +2239,18 @@ export default function MobileShell() {
         <DownloadsPanel
           open={showDownloads}
           onClose={() => setShowDownloads(false)}
-          onDoneToast={(msg) => { try { setNotice(msg); window.setTimeout(() => setNotice(null), 6000) } catch { /* ignore */ } }}
+          onDoneToast={(msg) => { try { setNotice(msg); window.setTimeout(() => setNotice(null), 6000) } catch {  } }}
         />
 
         {activeCall && (
           <div data-testid="mobile-call-panel" style={{ margin: '10px 12px 0', background: t.panel, border: `1px solid ${t.green}55`, borderRadius: 12, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, maxHeight: callPanelSize === 'compact' ? 190 : callPanelSize === 'normal' ? '46vh' : '68vh', overflowY: 'auto', transition: 'max-height 180ms ease' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {/* O áudio remoto é do `CallTile` (um <audio> por participante).
-                  Este bloco montava um SEGUNDO <audio> com o mesmo stream:
-                  voz dobrada onde tocava, e volume/mute aplicado em dois
-                  elementos. Removido. */}
+              {
+}
               <span style={{ fontSize: 13, fontWeight: 800, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={15} /> : <Icon d={Icons.phone} size={15} />} Em chamada • {fmtCallDuration(callDuration)} • {(activeCall.participants ?? []).length} na sala</span>
               </span>
-              {/* QUEM ESTÁ NA CHAMADA — nomes, não só o número (roster real). */}
+              {}
               {callPanelSize !== 'compact' && (activeCall.participants ?? []).length > 0 && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                   {(activeCall.participants ?? []).map((p: any) => {
@@ -2497,16 +2280,18 @@ export default function MobileShell() {
                   })}
                 </div>
               )}
-              {/* HONESTIDADE (proxy/full): mídia WebRTC sai direto (UDP), fora do proxy. */}
+              {}
               {(privacyMode === 'proxy' || privacyMode === 'full') && (
                 <span
                   title="A mÃ­dia (Ã¡udio/vÃ­deo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes veem seu IP real. Mensagens e arquivos seguem protegidos."
                   style={{ fontSize: 9, fontWeight: 800, background: `${t.yellow}22`, color: t.yellow, padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', cursor: 'help', flexShrink: 0 }}
                 >nÃ£o anÃ´nima</span>
               )}
-              {/* v6: fase (chamando/conectando/reconectando…) com elapsed */}
+              {}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} ringing={activeCall.ringing} />
-              <button type="button" data-testid="call-settings" aria-label="Ajustes da chamada (microfone, câmera, resolução, FPS)" title="Ajustes: microfone, câmera, resolução e FPS" aria-expanded={showCallSettings} onClick={() => setShowCallSettings((v) => !v)} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${showCallSettings ? t.accent : t.border}`, background: t.input, color: showCallSettings ? t.accent : t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.gear} size={16} /></button>
+              {mostrarTrocaCameraMobile && (
+                <button type="button" data-testid="call-camera-switch" aria-label={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} title={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} onClick={() => { void trocarCameraMobile() }} style={{ width: 38, height: 38, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.camera} size={17} /></button>
+              )}
               <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'compact' ? t.muted : t.text, opacity: callPanelSize === 'compact' ? 0.5 : 1 }}>↑</button>
               <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'expanded' ? t.muted : t.text, opacity: callPanelSize === 'expanded' ? 0.5 : 1 }}>↓</button>
               <button aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} title={isMuted ? 'Ativar microfone' : 'Silenciar'} className="m-iconbtn" style={isMuted ? { background: t.red, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' } : { display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}>{isMuted ? <Icon d={Icons.micOff} size={16} /> : <Icon d={Icons.mic} size={16} />}</button>
@@ -2516,23 +2301,8 @@ export default function MobileShell() {
             {callPanelSize !== 'compact' && <div style={{ fontSize: 11, color: t.muted }} role="status">rota: {callManager.getRungSummary()}</div>}
             {callPanelSize !== 'compact' && <button onClick={() => setShowCallDiag((v) => !v)} aria-label="Diagnóstico da chamada" style={{ background: showCallDiag ? t.accent : t.input, border: `1px solid ${t.border}`, color: showCallDiag ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}>{showCallDiag ? 'Ocultar diagnóstico' : 'Diagnóstico'}</button>}
             {showCallDiag && <CallDiagnostics compact />}
-            {/* AJUSTES AO VIVO no celular: folha sobre o painel (tela estreita). */}
-            {showCallSettings && (
-              <div style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,.55)', display: 'flex', alignItems: 'flex-end' }} onClick={() => setShowCallSettings(false)}>
-                <div onClick={(e) => e.stopPropagation()} style={{ position: 'relative', width: '100%' }}>
-                  <CallSettingsPanel
-                    prefs={callMediaPrefsState}
-                    onApply={async (patch) => {
-                      const aplicado = await callManager.applyMediaPrefs(patch)
-                      setCallMediaPrefsState(aplicado)
-                      return aplicado
-                    }}
-                    onClose={() => setShowCallSettings(false)}
-                    onError={(m) => setError(m)}
-                  />
-                </div>
-              </div>
-            )}
+            {
+}
             {(activeCall as any)?.relayActive && (
               <div title="Áudio via relay pela sinalização — latência alta, WebRTC indisponível" style={{ fontSize: 11, fontWeight: 800, background: '#f0b232', color: '#000', padding: '4px 8px', borderRadius: 8, textAlign: 'center' }}>via relay (latência alta)</div>
             )}
@@ -2547,15 +2317,15 @@ export default function MobileShell() {
               {(((activeCall as any)?.qualityNotice as string | undefined) || qualityError) && (
                 <span role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }}>{qualityError ?? ((activeCall as any)?.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}</span>
               )}
-              {/* Sem `disabled`: no Android o clique explica a ausência de getDisplayMedia. */}
+              {}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>}
-            {/* Quadrados da chamada: mesmo modelo do desktop (`callTiles.ts`). */}
+            {}
             {renderCallTilesMobile(callPanelSize === 'compact')}
           </div>
         )}
 
-        {/* TELA CHEIA no mobile: mesmo overlay do desktop (áudio segue atrás). */}
+        {}
         {stageTileMobile && (
           <ScreenStage
             tile={stageTileMobile}
@@ -2571,7 +2341,7 @@ export default function MobileShell() {
           />
         )}
 
-        {/* mensagens — lista flat estilo desktop */}
+        {}
         <div style={{ flex: 1, overflowY: 'auto', padding: '14px 10px', display: 'flex', flexDirection: 'column', gap: 10 }}>
           {messages.length === 0 ? (
             isChannel ? (
@@ -2589,7 +2359,7 @@ export default function MobileShell() {
           <div ref={endRef} style={{ height: 1, flexShrink: 0 }} />
         </div>
 
-        {/* LINHA DE NÃO LIDAS */}
+        {}
         {unreadMarkTs > 0 && messages.some((x) => x.ts > unreadMarkTs) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 14px', background: t.main, flexShrink: 0 }}>
             <span style={{ flex: 1, height: 1, background: t.red }} />
@@ -2598,7 +2368,7 @@ export default function MobileShell() {
           </div>
         )}
 
-        {/* barra de mensagens fixadas */}
+        {}
         {pinnedMsgs.length > 0 && (
           <button
             onClick={() => setShowPins(true)}
@@ -2612,7 +2382,7 @@ export default function MobileShell() {
           </button>
         )}
 
-        {/* barra de resposta inline */}
+        {}
         {replyToMsg && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: t.sidebar, borderTop: `1px solid ${t.border}`, padding: '6px 12px', flexShrink: 0 }}>
             <span style={{ flex: 1, minWidth: 0, borderLeft: `3px solid ${t.accent}`, paddingLeft: 8 }}>
@@ -2623,7 +2393,7 @@ export default function MobileShell() {
           </div>
         )}
 
-        {/* compositor estilo desktop — textarea (Shift+Enter quebra linha de verdade) */}
+        {}
         <div style={{ padding: '8px 10px calc(10px + env(safe-area-inset-bottom))', background: t.main, borderTop: `1px solid ${t.border}`, flexShrink: 0, position: 'relative' }}>
           {Object.values(typingPeers).length > 0 && (
             <div role="status" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: t.muted, marginBottom: 6, paddingLeft: 2 }}>
@@ -2682,6 +2452,7 @@ export default function MobileShell() {
             <button aria-label="Anexar" title="Anexar arquivo (todos semeiam)" onClick={() => fileInputRef.current?.click()} style={{ width: 28, height: 28, borderRadius: '50%', background: t.accent, color: '#fff', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></button>
             <textarea
               ref={composerRef}
+              // Seção 14: value
               value={input}
               rows={1}
               onChange={e => {
@@ -2692,12 +2463,10 @@ export default function MobileShell() {
                 el.style.height = `${Math.min(140, el.scrollHeight)}px`
                 const caret = el.selectionStart ?? v.length
                 setActiveAutocomplete(activeToken(v, caret))
-                // avisa o outro lado que estou digitando (throttled 2s)
                 notifyTyping(v)
               }}
               onPaste={handleComposerPaste}
               onKeyDown={e => {
-                // navegação do autocompletar tem prioridade sobre o envio
                 if (autocompleteItems.length > 0) {
                   if (e.key === 'ArrowDown') { e.preventDefault(); setAutocompleteIdx(i => Math.min(i + 1, autocompleteItems.length - 1)); return }
                   if (e.key === 'ArrowUp') { e.preventDefault(); setAutocompleteIdx(i => Math.max(i - 1, 0)); return }
@@ -2728,11 +2497,10 @@ export default function MobileShell() {
     )
   }
 
-  // ---- shell principal ----
   return (
     <div className="m-root" style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden', position: 'relative' } as any}>
 
-      {/* header — fundo sidebar, título bold, pill de rede do desktop, avatar 32px */}
+      {}
       <div style={{ height: 48, display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 10, paddingRight: 10, paddingBottom: 0, paddingTop: 'env(safe-area-inset-top)', background: t.sidebar, borderBottom: `1px solid ${t.border}`, flexShrink: 0 }}>
         <button aria-label="Menu" className="m-iconbtn" onClick={() => setShowDrawer(v => !v)}>
           <span style={{ display: 'flex', flexDirection: 'column', gap: 3 }}><span style={{ width: 16, height: 2, background: 'currentColor', borderRadius: 99 }} /><span style={{ width: 16, height: 2, background: 'currentColor', borderRadius: 99 }} /><span style={{ width: 10, height: 2, background: 'currentColor', borderRadius: 99 }} /></span>
@@ -2756,7 +2524,7 @@ export default function MobileShell() {
         )}
       </div>
 
-      {/* drawer */}
+      {}
       {showDrawer && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 30, background: 'rgba(0,0,0,.5)', display: 'flex' }} onClick={() => setShowDrawer(false)}>
           <div style={{ width: 280, maxWidth: '84vw', background: t.sidebar, borderRight: `1px solid ${t.border}`, display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
@@ -2797,7 +2565,7 @@ export default function MobileShell() {
         </div>
       )}
 
-      {/* busca */}
+      {}
       <div style={{ padding: '8px 12px', flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '8px 10px' }}>
           <span style={{ color: t.muted, display: 'flex', flexShrink: 0 }}><Icon d={Icons.search} size={15} /></span>
@@ -2806,17 +2574,17 @@ export default function MobileShell() {
         </div>
       </div>
 
-      {/* banners de erro/aviso */}
+      {}
       {error && (
         <div className="m-err" style={{ margin: '0 12px 8px', flexShrink: 0 }}>
           {error}
-          {/* Mesma saída do desktop: destrava um estado de chamada preso. */}
+          {}
           {/chamada em andamento/i.test(error) && (
             <button
               type="button"
               data-testid="force-reset-call"
               onClick={async () => {
-                try { await callManager.forceReset() } catch { /* limpa o que der */ }
+                try { await callManager.forceReset() } catch {  }
                 setError(null)
                 setNotice('estado da chamada limpo — tente de novo')
               }}
@@ -2830,7 +2598,7 @@ export default function MobileShell() {
       )}
       {notice && <div className="m-ok" style={{ margin: '0 12px 8px', flexShrink: 0 }}>{notice}</div>}
 
-      {/* conteúdo */}
+      {}
       <div className="hide-scrollbar" style={{ flex: 1, overflowY: 'auto', padding: '0 12px', paddingBottom: 'calc(76px + env(safe-area-inset-bottom))' }}>
 
         {tab === 'home' && <>
@@ -2844,9 +2612,7 @@ export default function MobileShell() {
           </div>
 
           {(() => {
-            // ONLINE = qualquer peer com sessão viva (o filtro por vínculo
-            // escondia gente conectada — "3 online, aparece 2"). O motor só
-            // conecta a amigo aceito/membro de grupo ou servidor, então é seguro.
+            // Seção 15: amigos
             const amigos = new Set(friendsAccepted.map(f => f.fp))
             const vinculados = peers.filter(p => p.state === 'CONNECTED' && p.fp !== identity?.fingerprint)
             return (
@@ -2893,15 +2659,9 @@ export default function MobileShell() {
         </>}
 
         {tab === 'servers' && (() => {
-          // RESUMO por servidor com base no pareamento REAL (não em
-          // `c.members.length`, que é o roster sincronizado e não diz quem
-          // está online). Só o servidor aberto tem `memberPairing` carregado;
-          // os demais mostram o roster como total e 0 pareados até serem
-          // abertos — o que é honesto.
           const summaries: ServerSummary[] = filteredComms.map((c) => {
             const st = c.id === selCommunity ? memberPairing : []
             const s = summarize(st)
-            // ONLINE por sessão viva (qualquer membro com link agora).
             const vivos = (c.members ?? []).filter(([fp]) => onlineFps.has(fp)).length
             return {
               community: c,
@@ -2912,7 +2672,7 @@ export default function MobileShell() {
           })
           return (
             <>
-              {/* MOBILE É INVITE-ONLY: o assistente de criação só existe no desktop. */}
+              {}
               <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                 <button
                   onClick={() => { setInviteInput(''); setShowInvite(true) }}
@@ -2952,7 +2712,7 @@ export default function MobileShell() {
                 const c = activeComm
                 return (
                   <>
-                    {/* Abre o servidor em JANELA (canais + membros + convite). */}
+                    {}
                     <button
                       onClick={() => setShowServerDetails(true)}
                       aria-label={`Abrir o servidor ${c.name}`}
@@ -2966,8 +2726,8 @@ export default function MobileShell() {
                       <Icon d={Icons.chevronRight} size={16} />
                     </button>
                     <div className="m-sec">CANAIS</div>
-                    {/* Lista REAL por categoria, com voz/vídeo entrando na
-                        chamada e quem está falando agora. */}
+                    {
+}
                     <MobileServerPanel
                       community={c}
                       myFp={identity?.fingerprint ?? ''}
@@ -2982,8 +2742,8 @@ export default function MobileShell() {
                 )
               })()}
 
-              {/* JANELA do servidor: membros pareados + convite. Os canais
-                  vivem na lista acima (com tipo, categoria e voz ao vivo). */}
+              {
+}
               {activeComm && showServerDetails && (
                 <div
                   onClick={() => setShowServerDetails(false)}
@@ -3054,6 +2814,7 @@ export default function MobileShell() {
                   ref={friendInputRef}
                   className="m-input mono"
                   style={{ flex: 1, minWidth: 0, borderColor: friendErr ? t.red : undefined }}
+                  // Seção 16: value
                   value={friendFpInput}
                   inputMode="text"
                   autoComplete="off"
@@ -3136,7 +2897,7 @@ export default function MobileShell() {
 
         {tab === 'profile' && <>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '16px 4px 8px' }}>
-            {/* FOTO DO PRÓPRIO PERFIL — tocável, abre o `ProfileModal` do desktop. */}
+            {}
             {identity && <button
               type="button"
               aria-label="Editar meu perfil"
@@ -3221,6 +2982,10 @@ export default function MobileShell() {
               <AppearanceSettings T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} hideTheme />
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>MENSAGENS</div>
+              <MessageRetentionSettings inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} accent={t.accent} />
+            </div>
+            <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>COFRE &amp; BACKUP</div>
               <StormVaultPanel />
             </div>
@@ -3228,7 +2993,7 @@ export default function MobileShell() {
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
               Fechar o app
             </button>
-            {/* Sair da CONTA fica separado: fechar o app mantém a sessão. */}
+            {}
             <button className="nav-row" style={{ color: t.muted }} onClick={() => { if (confirm('Sair da conta? Será preciso destravar de novo para voltar.')) { setPhase('lock'); setIdentity(null as any); setSelConv(null); setSelPeerFp(null); setSelCommunity(null) } }}>
               <Icon d={Icons.user} size={16} />
               Sair da conta
@@ -3249,7 +3014,7 @@ export default function MobileShell() {
         </div>
       )}
 
-      {/* painel de privacidade — PRIVACY_MODES + privacyGet/privacySet (opções flat com radio, igual desktop) */}
+      {}
       <ScreenSharePicker open={showScreenPicker} onClose={() => setShowScreenPicker(false)} onError={setError} />
 
       {showPrivacy && (
@@ -3260,6 +3025,7 @@ export default function MobileShell() {
             <div style={{ fontSize: 12, color: t.muted, marginBottom: 12, lineHeight: 1.5 }}>Escolha como suas mensagens trafegam. Aplicado no motor em tempo real.</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
               {PRIVACY_MODES.map(pm => {
+                // Seção 17: active
                 const active = privacyMode === pm.mode
                 return (
                   <label key={pm.mode} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: active ? `${t.accent}14` : t.input, border: `1px solid ${active ? t.accent : t.border}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}
@@ -3274,7 +3040,7 @@ export default function MobileShell() {
               })}
             </div>
 
-            {/* Estado do proxy â€” sempre visÃ­vel, honesto: EFETIVO, nÃ£o sÃ³ o escolhido */}
+            {}
             <div style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: t.muted }}>
                 {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE â€” relay desligado (fail-closed)') : 'Proxy: Desativado'}
@@ -3288,7 +3054,7 @@ export default function MobileShell() {
               </div>
             </div>
 
-             {/* proxy flow: IP + test online + save */}
+             {}
             {proxyPendingMode && (
               <div style={{ background: t.input, border: `1px solid ${t.accent}66`, borderRadius: 10, padding: '12px', marginBottom: 12 }}>
                 <div style={{ fontWeight: 800, fontSize: 13, color: t.heading, marginBottom: 6 }}>
@@ -3339,8 +3105,8 @@ export default function MobileShell() {
         </div>
       )}
 
-      {/* modal de convite público — token pré-preenchido via ?invite=TOKEN */}
-      {/* SEM modal de criação no mobile: invite-only por decisão de UX. */}
+      {}
+      {}
 
       {showInvite && (
         <div className="m-overlay" onClick={() => setShowInvite(false)}>
@@ -3352,7 +3118,7 @@ export default function MobileShell() {
             <div style={{ fontSize: 12, color: t.muted, lineHeight: 1.5, marginBottom: 4 }}>
               Cole o token que você recebeu. Ele funciona em qualquer aparelho — o link é só um atalho.
             </div>
-            {/* Campo/colar/validação: o MESMO `JoinServerForm` do desktop. */}
+            {}
             <JoinServerForm
               autoToken={inviteInput || null}
               compact
@@ -3379,11 +3145,11 @@ export default function MobileShell() {
           startedAtMs={appStartedAt.current}
           onClose={() => setShowQuitConfirm(false)}
           onMinimize={async () => {
-            try { await callManager.leave() } catch { /* sem chamada */ }
-            try { await services.appHideToTray() } catch { /* melhor esforço */ }
+            try { await callManager.leave() } catch {  }
+            try { await services.appHideToTray() } catch {  }
           }}
           onQuit={async () => {
-            try { await callManager.leave() } catch { /* sem chamada */ }
+            try { await callManager.leave() } catch {  }
             try { await services.appQuit() } catch (e: any) { setError(String(e?.message ?? e)) }
           }}
         />
@@ -3415,7 +3181,7 @@ export default function MobileShell() {
         />
       )}
 
-      {/* bottom nav — 5 itens, fundo rail, ativo heading, inativo muted, badges vermelhas */}
+      {}
       <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: t.rail, borderTop: `1px solid ${t.border}`, display: 'flex', padding: '6px 0 calc(6px + env(safe-area-inset-bottom))', zIndex: 10 }}>
         {([
           { id: 'home', label: 'Início', icon: Icons.home },
@@ -3424,6 +3190,7 @@ export default function MobileShell() {
           { id: 'friends', label: 'Amigos', icon: Icons.users, badge: friendRequests.length },
           { id: 'profile', label: 'Você', icon: Icons.settings },
         ] as { id: Tab, label: string, icon: string, badge?: number }[]).map(it => {
+          // Seção 18: active
           const active = tab === it.id
           const badge = it.badge ?? 0
           return (
@@ -3444,4 +3211,3 @@ export default function MobileShell() {
     </div>
   )
 }
-
