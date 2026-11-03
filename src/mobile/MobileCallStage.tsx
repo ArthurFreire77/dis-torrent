@@ -15,6 +15,13 @@ export interface MobileCallStageProps {
   avatarB64?: Record<string, string | undefined>
   onOpenProfile?: (fp: string) => void
   maxHeight?: number
+  /**
+   * Tira horizontal de altura fixa, usada DENTRO da conversa (aba de amigos):
+   * os vídeos viram uma faixa e as mensagens continuam visíveis embaixo.
+   * Sem isto o palco pede a altura toda e espreme o histórico.
+   */
+  strip?: boolean
+  stripHeight?: number
 }
 
 export default function MobileCallStage({
@@ -28,6 +35,8 @@ export default function MobileCallStage({
   avatarColor,
   avatarB64,
   onOpenProfile,
+  strip = false,
+  stripHeight = 132,
 }: MobileCallStageProps) {
   const areaRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 0, height: 0 })
@@ -91,6 +100,36 @@ export default function MobileCallStage({
       onOpenProfile={onOpenProfile}
     />
   )
+
+  // Modo tira: dentro da conversa os vídeos ficam numa faixa e as mensagens
+  // continuam visíveis embaixo. Antes o palco pedia a altura toda e o
+  // histórico desaparecia.
+  if (strip) {
+    return (
+      <div
+        style={{
+          height: stripHeight,
+          flexShrink: 0,
+          display: 'flex',
+          gap: 6,
+          overflowX: 'auto',
+          overflowY: 'hidden',
+        }}
+      >
+        {tiles.map((t) => {
+          const largura = Math.round(stripHeight * (16 / 9))
+          return (
+            <div
+              key={t.id}
+              style={{ width: largura, height: stripHeight, flexShrink: 0, display: 'flex' }}
+            >
+              {tile(t, 0)}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
 
   if (destaque && destaqueSpec) {
     const altMain = destaqueSpec.main.height > 0 ? Math.round(destaqueSpec.main.height) : Math.round(size.height * 0.55)

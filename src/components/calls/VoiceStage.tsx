@@ -251,7 +251,7 @@ export function VoiceStage({
           {onSwitchCamera && !compact && (
             <ControlButton
               label={cameraSwitchLabel ?? 'Trocar de câmera'}
-              icon={Icons.camera}
+              icon={Icons.cameraSwitch}
               on={false}
               danger={false}
               disabled={cameraSwitchDisabled}

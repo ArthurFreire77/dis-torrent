@@ -512,9 +512,19 @@ async function getLocalMediaInner(constraints: MediaStreamConstraints): Promise<
           return await md.getUserMedia({ ...merged, video: false })
         } catch {  }
       }
+      if (merged.video && (e as Error)?.name === 'NotReadableError') {
+        for (const espera of [300, 700, 1200, 2000]) {
+          await new Promise((r) => setTimeout(r, espera))
+          try {
+            // Seção 3: s
+            const s = await md.getUserMedia(merged)
+            try { setLocalMediaNotice(null) } catch {  }
+            return s
+          } catch {  }
+        }
+      }
       if (merged.video && (e as Error)?.name !== 'OverconstrainedError') {
         try {
-          // Seção 3: s
           const s = await md.getUserMedia({ ...merged, video: false })
           const why = describeMediaError(e)
           try { localMediaNotice?.(`${why ? `${why.split(' — ')[0]} — ` : ''}seguindo só com voz`) } catch {  }
@@ -661,6 +671,7 @@ export function buildPeerDiagnostics(
             }
             if (typeof r.mimeType === 'string' && !codec) codec = r.mimeType.replace('video/', '').replace('audio/', '')
             if (typeof r.codecId === 'string' && byId.has(r.codecId)) {
+              // Seção 4: c
               const c = byId.get(r.codecId)
               if (c?.mimeType && !codec) codec = String(c.mimeType).replace('video/', '').replace('audio/', '')
             }
@@ -687,7 +698,6 @@ export function buildPeerDiagnostics(
   let camera = 'desligada'
   let microphone = 'desligado'
   try {
-    // Seção 4: mine
     const mine = fp === (st as any)?.participants?.[0]?.fp
     void mine
     const local = (st as any)
@@ -821,6 +831,7 @@ export function supportsRelayFallback(): boolean {
   } catch { return false }
 }
 export type CallsSupportLevel = 'full' | 'none'
+// Seção 5: nativeVoiceAvailable
 let nativeVoiceAvailable: boolean | null = null
 let nativeRoute: string | null = null
 
@@ -845,7 +856,6 @@ export function getCallsSupport(): CallsSupportLevel {
 }
 
 function readIceReport(pc: RTCPeerConnection, stats: RTCStatsReport): IceMediaReport {
-  // Seção 5: byId
   const byId = new Map<string, any>()
   try { stats.forEach((r: any) => { if (r && r.id) byId.set(String(r.id), r) }) } catch {  }
   let pair: any = null
@@ -919,6 +929,8 @@ export class CallManager {
   private acceptedCalls = new Set<string>()
   private lastRemoteOffer = new Map<string, string>()
   private iceRestarts = new Map<string, number>()
+  private ultimaTrocaDeRede = 0
+  private netOff: (() => void) | null = null
   private static readonly MAX_ICE_RESTARTS = 3
   private static readonly ICE_RESTART_BACKOFF_MS = [1000, 4000, 9000]
   private iceRestartTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -978,6 +990,7 @@ export class CallManager {
   public onScreenDebug: ((m: ScreenShareMetrics & { options: ScreenShareOptions; env: ScreenEnvironment; error: { code: ScreenShareErrorCode; message: string } | null }) => void) | null = null
   public onRoomsChanged: (() => void) | null = null
   private onUpdate: (s: CallState | null) => void = () => {}
+  // Seção 6: private
   private state: CallState | null = null
   private myFp = ''
   private lastPhase: CallPhase = 'idle'
@@ -998,7 +1011,6 @@ export class CallManager {
   private relayActive = false
   private relayReason: string | null = null
   private relaySeq = 0
-  // Seção 6: private
   private relayHeaderBytes: Uint8Array | null = null
   private relayRecorder: MediaRecorder | null = null
   private relayRecStream: MediaStream | null = null
@@ -1015,6 +1027,19 @@ export class CallManager {
   }
 
   bind(cb: (s: CallState | null) => void) {
+    try { this.netOff?.() } catch {  }
+    const aoMudarRede = () => this.onNetworkChanged('sem conexão')
+    const aoVoltar = () => this.onNetworkChanged('conexão de volta')
+    try {
+      window.addEventListener('online', aoVoltar)
+      window.addEventListener('offline', aoMudarRede)
+      this.netOff = () => {
+        try { window.removeEventListener('online', aoVoltar) } catch {  }
+        try { window.removeEventListener('offline', aoMudarRede) } catch {  }
+      }
+    } catch {
+      this.netOff = null
+    }
     this.onUpdate = (s) => {
       if (s) {
         try {
@@ -1235,6 +1260,8 @@ export class CallManager {
 
   unbind() {
     this.engineOff?.()
+    try { this.netOff?.() } catch {  }
+    this.netOff = null
     try { setLocalMediaNotice(null) } catch {  }
     try { this.iceFailOff?.() } catch {  }
     this.iceFailOff = null
@@ -2500,25 +2527,49 @@ export class CallManager {
 
     const camTrack = this.localStream?.getVideoTracks()[0] ?? null
     if (trocouCam && camTrack && camTrack.readyState === 'live') {
+      const fpAntigo = antes.videoInputId || camTrack.getSettings?.().deviceId || ''
       try {
+        try { this.localStream?.removeTrack(camTrack) } catch {  }
+        try { camTrack.stop() } catch {  }
+        await new Promise<void>((r) => setTimeout(r, 60))
         const novo = await getLocalMedia({ video: videoConstraintsFromPrefs(depois) })
         const track = novo?.getVideoTracks()[0]
-        if (track) {
-          if (this.localStream) {
-            try { this.localStream.addTrack(track) } catch {  }
-            try { this.localStream.removeTrack(camTrack); camTrack.stop() } catch {  }
-          }
-          for (const [fp, pc] of this.pcs) {
-            try {
-              const tr = this.findVideoTransceiver(pc)
-              if (tr) await tr.sender.replaceTrack(track)
-            } catch {  }
-            if (this.state) await this.sendOffer(fp, this.state.callId).catch(() => false)
-          }
+        if (!track) throw new Error('a câmera escolhida não entregou imagem')
+        if (!this.localStream) {
+          try { this.localStream = new MediaStream([track]) } catch { this.localStream = null }
+        } else {
+          try { this.localStream.addTrack(track) } catch {  }
+        }
+        try { novo?.getTracks().forEach((t) => { if (t !== track) t.stop() }) } catch {  }
+        setCameraContentHint(track)
+        for (const [fp, pc] of this.pcs) {
+          try {
+            const tr = this.findVideoTransceiver(pc)
+            if (tr) await tr.sender.replaceTrack(track)
+          } catch {  }
+          if (this.state) await this.sendOffer(fp, this.state.callId).catch(() => false)
         }
       } catch (e) {
         setCallMediaPrefs({ videoInputId: antes.videoInputId })
-        throw new Error(`não foi possível trocar a câmera: ${String((e as Error)?.message ?? e)}`)
+        try {
+          const volta = await getLocalMedia({
+            video: { ...videoConstraintsFromPrefs({ ...depois, videoInputId: fpAntigo }) },
+          })
+          const track = volta?.getVideoTracks()[0]
+          if (track) {
+            if (!this.localStream) this.localStream = new MediaStream([track])
+            else try { this.localStream.addTrack(track) } catch {  }
+            for (const pc of this.pcs.values()) {
+              try {
+                const tr = this.findVideoTransceiver(pc)
+                if (tr) await tr.sender.replaceTrack(track)
+              } catch {  }
+            }
+          }
+        } catch {  }
+        throw new Error(
+          `não foi possível trocar a câmera: ${describeMediaError(e) ?? String((e as Error)?.message ?? e)}`,
+        )
       }
     } else if (camTrack) {
       try {
@@ -2536,8 +2587,43 @@ export class CallManager {
       throw new Error('este aparelho não expõe as câmeras para alternância')
     }
     const lista = cameraDevices(await md.enumerateDevices())
+    // Android costuma devolver os dois `videoinput` com o mesmo deviceId vazio
+    // até a permissão ser concedida. Nesse caso não há id alternável: sorteia
+    // entre frontal/traseira pelo `facingMode`, que é o que o device entende.
     if (lista.length < 2) {
-      throw new Error('só há uma câmera disponível neste aparelho')
+      const brutos = (await md.enumerateDevices()).filter((d) => d.kind === 'videoinput')
+      if (brutos.length < 2) {
+        throw new Error('só há uma câmera disponível neste aparelho')
+      }
+      const atualFacing = getCallMediaPrefs().videoInputId === '__user' ? 'environment' : 'user'
+      const alvo = atualFacing === 'user' ? 'environment' : 'user'
+      setCallMediaPrefs({ videoInputId: alvo === 'user' ? '__user' : '__environment' })
+      if (this.state) {
+        const camLive = !!this.localStream?.getVideoTracks().some((t) => t.readyState === 'live')
+        if (camLive) {
+          const novo = await comFilaDeCaptura(() =>
+            md.getUserMedia({
+              video: { ...videoConstraintsFromPrefs(getCallMediaPrefs()), facingMode: { ideal: alvo } },
+            }),
+          )
+          const track = novo?.getVideoTracks()[0]
+          const antigo = this.localStream?.getVideoTracks()[0] ?? null
+          if (track) {
+            try { antigo?.stop() } catch {  }
+            if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
+            if (!this.localStream) this.localStream = new MediaStream([track])
+            else try { this.localStream.addTrack(track) } catch {  }
+            for (const pc of this.pcs.values()) {
+              try {
+                const tr = this.findVideoTransceiver(pc)
+                if (tr) await tr.sender.replaceTrack(track)
+              } catch {  }
+            }
+            if (this.state) this.onUpdate({ ...this.state })
+          }
+        }
+      }
+      return { deviceId: alvo, available: brutos.length }
     }
     const atual = getCallMediaPrefs().videoInputId
     const proximo = nextCameraId(lista, atual)
@@ -2600,6 +2686,7 @@ export class CallManager {
     } catch { this.statsTimer = null }
   }
 
+  // Seção 16: private
   private stopQualityMonitor() {
     try { if (this.statsTimer) clearInterval(this.statsTimer) } catch {  }
     this.statsTimer = null
@@ -2623,7 +2710,6 @@ export class CallManager {
           stats.forEach((r: any) => {
             if (r && r.type === 'inbound-rtp') {
               const lost = Number(r.packetsLost ?? 0)
-              // Seção 16: jitter
               const jitter = Number(r.jitter ?? 0)
               const key = `${fp}`
               const prev = this.prevLost.has(key) ? (this.prevLost.get(key) ?? lost) : lost
@@ -2659,7 +2745,7 @@ export class CallManager {
 
   private lastStats = new Map<string, RTCStatsReport>()
   private lastFailureCause: string | null = null
-  private setFailureCause(cause: string) {
+  private setFailureCause(cause: string | null) {
     try { this.lastFailureCause = cause } catch {  }
   }
   getFailureCause(): string | null {
@@ -2978,6 +3064,9 @@ export class CallManager {
       this.closeRoom()
       this.state = null
       this.lastPhase = 'ended'
+      this.leavingCalls.clear()
+      this.accepting.clear()
+      this.cameraBusy = false
       this.onUpdate(null as any)
     }
   }
@@ -4202,14 +4291,33 @@ export class CallManager {
     } catch {  }
   }
 
-  private restartIceAll(callId: string) {
+  private restartIceAll(callId: string, forceAll = false) {
     for (const [fp, pc] of this.pcs) {
       try {
-        const s = pc.iceConnectionState
-        if (s === 'connected' || s === 'completed') continue
+        if (!forceAll) {
+          const s = pc.iceConnectionState
+          if (s === 'connected' || s === 'completed') continue
+        }
       } catch {  }
       try { void this.tryIceRestart(fp, pc, callId, true) } catch {  }
     }
+  }
+
+  /**
+   * Troca de rede (Wi-Fi ↔ dados, troca de SSID, cabo): a rota ICE antiga morre
+   * mas o `iceConnectionState` demora a virar `failed`, então o app ficava
+   * "conectado" mudo. Aqui todo PC é renegociado de imediato.
+   */
+  private onNetworkChanged(motivo: string) {
+    const st = this.state
+    if (!st || !isCallPhaseActive(st.phase)) return
+    const agora = Date.now()
+    if (agora - this.ultimaTrocaDeRede < 4000) return
+    this.ultimaTrocaDeRede = agora
+    try { this.onCallNotice?.(`rede mudou (${motivo}) — refazendo a rota da chamada`) } catch {  }
+    this.setFailureCause(null)
+    this.restartIceAll(st.callId, true)
+    if (this.state) this.onUpdate({ ...this.state })
   }
 
   private async doIceRestart(fp: string, callId: string, force = false) {

@@ -214,7 +214,7 @@ export default function MobileCallChannel({
             onClick={onToggleCamera}
           />
           {canSwitchCamera && onSwitchCamera && (
-            <Botao label="Trocar de câmera" icon="camera" onClick={onSwitchCamera} />
+            <Botao label="Trocar de câmera" icon="cameraSwitch" onClick={onSwitchCamera} />
           )}
           <button
             type="button"

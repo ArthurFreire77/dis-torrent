@@ -834,7 +834,47 @@ export default function MobileShell() {
 
   const camerasMobile = useCallCameras(!!activeCall)
   const cameraSwitchLabelMobile = cameraCycleLabel(camerasMobile, callMediaPrefsState.videoInputId)
-  const mostrarTrocaCameraMobile = shouldShowCameraSwitch(camerasMobile)
+  // No Android o aparelho pode ter 2 câmeras e o navegador devolver os dois
+  // `videoinput` com o MESMO deviceId enquanto a permissão não foi dada. Com
+  // um único id não há o que alternar, mas o botão não pode simplesmente
+  // sumir: cai no "inverter" e o switchCamera resolve na hora do toque.
+  const [cameraCount, setCameraCount] = useState(0)
+  // Detecta as câmeras mesmo FORA da chamada: no Android os `videoinput`
+  // aparecem sem label antes da permissão, então contar dispositivos é o
+  // único sinal honesto de "existe frontal e traseira".
+  useEffect(() => {
+    let vivo = true
+    const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
+    const ler = async () => {
+      if (!md?.enumerateDevices) return
+      try {
+        const lista = await md.enumerateDevices()
+        const n = lista.filter((d) => d.kind === 'videoinput').length
+        if (vivo) setCameraCount((cur) => (cur === n ? cur : n))
+      } catch {
+        /* sem enumerateDevices */
+      }
+    }
+    void ler()
+    let off: (() => void) | null = null
+    try {
+      md?.addEventListener?.('devicechange', ler)
+      off = () => {
+        try {
+          md?.removeEventListener?.('devicechange', ler)
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* sem devicechange */
+    }
+    return () => {
+      vivo = false
+      off?.()
+    }
+  }, [activeCall, activeCall?.cameraOn])
+  const mostrarTrocaCameraMobile = shouldShowCameraSwitch(camerasMobile) || cameraCount > 1
   const trocarCameraMobile = async () => {
     try {
       setError(null)
@@ -2040,7 +2080,7 @@ export default function MobileShell() {
   if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
   if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 
-  const renderCallTilesMobile = (_compact: boolean) => {
+  const renderCallTilesMobile = (_compact: boolean, strip = false) => {
     if (callTilesMobile.length === 0) return null
     return (
       <MobileCallStage
@@ -2054,6 +2094,7 @@ export default function MobileShell() {
         avatarColor={avatarColor}
         avatarB64={mobileCallAvatars}
         onOpenProfile={(fp) => setProfilePeer({ fp, name: resolveMemberName(fp) || fp.slice(0, 8) })}
+        strip={strip}
       />
     )
   }
@@ -2243,7 +2284,7 @@ export default function MobileShell() {
         />
 
         {activeCall && (
-          <div data-testid="mobile-call-panel" style={{ margin: '10px 12px 0', background: t.panel, border: `1px solid ${t.green}55`, borderRadius: 12, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0, maxHeight: callPanelSize === 'compact' ? 190 : callPanelSize === 'normal' ? '46vh' : '68vh', overflowY: 'auto', transition: 'max-height 180ms ease' }}>
+          <div data-testid="mobile-call-panel" style={{ margin: '8px 12px 0', background: t.panel, border: `1px solid ${t.green}55`, borderRadius: 12, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0, maxHeight: callPanelSize === 'compact' ? 168 : callPanelSize === 'normal' ? '38vh' : '60vh', overflowY: 'auto', transition: 'max-height 180ms ease' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               {
 }
@@ -2290,7 +2331,7 @@ export default function MobileShell() {
               {}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} ringing={activeCall.ringing} />
               {mostrarTrocaCameraMobile && (
-                <button type="button" data-testid="call-camera-switch" aria-label={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} title={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} onClick={() => { void trocarCameraMobile() }} style={{ width: 38, height: 38, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.camera} size={17} /></button>
+                <button type="button" data-testid="call-camera-switch" aria-label={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} title={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} onClick={() => { void trocarCameraMobile() }} style={{ width: 38, height: 38, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.cameraSwitch} size={17} /></button>
               )}
               <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'compact' ? t.muted : t.text, opacity: callPanelSize === 'compact' ? 0.5 : 1 }}>↑</button>
               <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 34, height: 34, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: callPanelSize === 'expanded' ? t.muted : t.text, opacity: callPanelSize === 'expanded' ? 0.5 : 1 }}>↓</button>
@@ -2321,7 +2362,7 @@ export default function MobileShell() {
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
             </div>}
             {}
-            {renderCallTilesMobile(callPanelSize === 'compact')}
+            {renderCallTilesMobile(callPanelSize === 'compact', true)}
           </div>
         )}
 
