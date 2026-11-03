@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## [1.1.44-pre-alpha] - 2026-11-03
+
+### Tela de chamada unificada e conexão na primeira entrada
+
+Quatro defeitos com causa própria, todos no caminho da chamada:
+
+**A câmera não abria (`AbortError`).** `getUserMedia` concorrente **cancela**
+o pedido anterior. Entrar no canal (mic + câmera) e clicar na câmera no mesmo
+instante derrubava a captura. Agora uma fila global serializa as capturas.
+
+**A câmera não abria (aparelho salvo que sumiu).** O `deviceId: { exact }`
+gravado — câmera trocada, dock desconectado, outro aparelho — gera
+`OverconstrainedError`, e nenhuma das degradações existentes removia o
+deviceId: travava para sempre até alguém abrir as configurações. Agora a
+preferência morta é esquecida e a captura recomeça no aparelho padrão, com
+aviso honesto.
+
+**"Só conecta na segunda".** O `joinVoice` anuncia a entrada e só **depois**
+espera o prompt de permissão do microfone. O outro lado responde na hora, mas
+o `voice_joined` chegava aqui sem `this.state` e era descartado em silêncio. O
+catch-up também desistia em 8 s — menos que o tempo de clicar em "Permitir".
+Agora o roster adiantado fica guardado e é drenado quando o estado nasce, e as
+janelas de re-tentativa vão até 25 s.
+
+**Sair não saía (ou saía do servidor errado).** Desktop e celular guardavam o
+canal num estado paralelo que só era preenchido pelo clique na sidebar. Entrar
+pelo botão da tela do canal deixava esse estado vazio, e o "Sair" chamava
+`voiceLeave` no servidor errado — a sala continuava te vendo. O canal agora é
+derivado do próprio `callId`.
+
+### Um desenho só
+
+Havia **três** layouts para a mesma chamada: cartão de 520 px (fora), palco +
+painel de 300 px (canal) e painel de até 56vw (DM/grupo). O novo `VoiceStage`
+é um só — palco da mídia + coluna de controles, mesmo cabeçalho e mesmos
+botões nos dois estados. A regra é pura (`services/voiceLayout.ts`): dentro da
+chamada o palco preenche tudo, o painel é estreito e fixo, canal de chamada
+nunca mostra compositor, e a lista de membros some quando não cabe.
+
+No celular a mídia passa a dominar a tela, com barra de controles fixa (mic,
+áudio, câmera e Sair) em vez de quadrados de 124 px no topo de uma lista.
+
+**Verificação:** typecheck 0, lint 0, 394 unitários, build OK e
+`cargo check`/`test`/`fmt` nos dois crates. **Não** validado: áudio, vídeo e
+câmera reais — exige dois dispositivos.
+
 ## [1.1.43-pre-alpha] - 2026-11-02
 
 ### Barra de compartilhamento de tela: sem dependência nenhuma
