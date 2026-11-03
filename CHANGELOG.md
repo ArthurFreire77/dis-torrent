@@ -1,5 +1,47 @@
 # CHANGELOG
 
+## [1.1.47-pre-alpha] - 2026-11-03
+
+### Não cair da call, funcionar com muita gente e aguentar servidor gigante
+
+Três relatos do dono, com print: "depois de um tempo eu caio da call", "garanta
+que funcione com várias pessoas a chamada" e "um cara do server com 300 mil
+pessoas não entra — não deve aparecer ninguém, imagina 300 mil pessoas nessa
+tela, isso vale para todo server".
+
+**Cair da call.** O watchdog de reconexão encerrava a chamada após 30 s sem
+mídia. Numa ligação 1:1 isso é honesto; num **canal** a pessoa está **esperando
+alguém entrar**. Um par que caía levava a fase para `reconnecting` e, 30 s
+depois, o watchdog chamava `leave()` — a pessoa era expulsa da sala sozinha.
+Agora ele não arma em canal `voice-*` e, se disparar, também não encerra. Quem
+cuida da mídia do canal é o `startMeshRepair`, que refaz o par sem tirar
+ninguém.
+
+**Várias pessoas.** A grade do palco usava `ceil(sqrt(n))`, que olha só a
+quantidade e ignora a janela: dois participantes num monitor largo viravam duas
+colunas enormes com avatar minúsculo; seis numa janela estreita viravam cards
+ilegíveis. `services/callGrid.ts` decide as colunas pela **largura real**
+medida (`ResizeObserver`), com largura mínima confortável por card, teto de
+colunas e rolagem em vez de esmagar.
+
+**Servidor gigante.** O painel de membros fazia `filter(...)` em **todos** os
+membros e só depois o `maxVisible` cortava a renderização — com 300 mil o React
+tentava montar 300 mil linhas com Avatar e o app congelava antes de a chamada
+abrir. `services/memberWindow.ts` corta na **origem** (200 linhas), priorizando
+"eu" e quem está online, e mostra "+N não listados". Vale para PC (painel,
+cargos e lista de @menção) e celular.
+
+**Fantasma.** O "secura" aparecia numa chamada onde a pessoa não estava:
+`voice_states` era persistente e só perdia a linha no `VoiceLeave`, então app
+fechado/crash deixava o usuário na chamada para sempre. A tabela ganhou
+`announced_at` (migração v10) e a leitura expira quem parou de re-anunciar há
+mais de 90 s (o motor re-anuncia a cada 15 s). O filtro por sessões vivas
+continua como segunda barreira.
+
+**Verificação:** typecheck 0, lint 0, 436 unitários (20 novos), `cargo test`
+250 no WSL, `fmt` limpo nos dois crates. **Não** validado: chamada real com 3+
+dispositivos, áudio e vídeo — exige aparelhos.
+
 ## [1.1.46-pre-alpha] - 2026-11-03
 
 ### Atualização automática destravada para todos
