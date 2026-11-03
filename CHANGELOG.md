@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## [1.1.51-pre-alpha] - 2026-11-03
+
+### Histórico que não se perde, limpeza configurável e chamadas que se adaptam
+
+**Histórico zerado a cada abertura.** `migrate()` comparava `schema_version`
+como texto, e `"10" < "2"` é verdadeiro: o bloco v2 rodava **em todo boot**,
+copiava só as 8 colunas originais, `DROPava` a tabela `messages` e recriava.
+`bot_id` e `thread_id` de todo o histórico eram zerados. A comparação agora é
+numérica e há teste que reabre o banco três vezes e confere os valores.
+
+**Mensagens recentes que não vinham.** `list_messages` devolvia as N mais antigas
+(`ORDER BY ts ASC LIMIT`). Passou a devolver as mais novas, em ordem crescente.
+
+**Mensagem de servidor perdida em silêncio.** Quando o envio ao host falhava, a
+mensagem de canal ficava `sent` para sempre — o caminho de falha só reenfileirava
+DM/grupo, e canal não tem linha em `conversations`. Agora reenfileira com o tipo
+certo (`outbox.kind`) e o retry manda `ChannelMsg`, não `Msg` (que criava conversa
+fantasma do outro lado). A fila de grupo, que gravava `peer_fp=""` e nunca era
+drenada, também deixou de existir. Envios presos em `sending` voltam para a fila
+na abertura.
+
+**Limpeza automática do histórico.** Configuração individual em Ajustes: 7, 30,
+90, 180 dias ou Nunca; escopo independente para servidores, grupos e conversas
+individuais (padrão 30 dias, servidores e grupos ligados, DMs desligadas). É
+**sempre local**: grava uma lápide em `local_hidden` e o `insert_message` recusa
+um id já escondido, então a mensagem apagada não volta na sincronização — nada é
+enviado aos outros participantes.
+
+**Distribuição dos vídeos.** A grade escolhia colunas só pela largura com altura
+fixa 16:9: duas pessoas boiando num vazio, três deixando um card órfão na borda.
+Agora um motor puro maximiza a área do card olhando largura **e** altura,
+respeita um teto de colunas por plataforma e reorganiza em resize e ao girar o
+celular.
+
+**Fixação.** O card em destaque era localizado por `tiles[0]`, então qualquer
+reordenação — inclusive uma tela entrando na lista — desligava a fixação em
+silêncio. Agora é procurado pelo ID: o fixado ocupa a área principal e os demais
+viram uma faixa de miniaturas, à direita em tela larga e embaixo em área
+estreita. Vale para chamada individual, grupo e servidor.
+
+**Celular.** Palco próprio em vez de reaproveitar a grade do desktop. A altura
+fixa em px transformava cada card numa faixa 3:1, estourava o avatar e, com 3+
+pessoas, empurrava o primeiro vídeo para fora da tela. Agora o destaque ocupa o
+espaço e os outros ficam numa faixa; no máximo 2 colunas (3 em tela larga) e
+alvos de toque de 34px. A engrenagem de configurações da chamada saiu do celular.
+
+**Troca de câmera.** Um botão único na barra existente cicla entre as câmeras e
+volta à primeira; não aparece quando há só uma. Webcam plugada/removida é
+acompanhada por `devicechange`. Com a câmera desligada só a preferência muda
+(abrir o device acenderia o LED à toa) e falha restaura a preferência anterior.
+
+**Verificação:** typecheck 0, lint 0, **491 unitários** (31 novos), `cargo test`
+250 no WSL, `migrations` 7/7, `cargo check` do `src-tauri`, `cargo fmt --check`
+e build de produção. **Não** validado: chamadas reais com 2–4 pessoas, fixar e
+desafixar ao vivo, troca de câmera física, giro do celular e a limpeza em um
+banco grande de verdade — exige aparelho.
+
 ## [1.1.50-pre-alpha] - 2026-11-03
 
 ### Tela compartilhada sem sobrepor, reação notificada e 5 versões de compatibilidade
