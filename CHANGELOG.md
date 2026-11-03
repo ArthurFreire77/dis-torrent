@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## [1.1.45-pre-alpha] - 2026-11-03
+
+### Tela de chamada no estilo Meet — cinza, sem coluna preta e sem fantasma
+
+Três pedidos do dono, com print: "tá péssima", "deixa tudo cinza padrão tipo
+Google Meet", "não deve aparecer nenhum usuário do grupo que não está lá" e "eu
+posso ficar na call esperando alguém o tempo que eu quiser".
+
+**Visual.** A coluna preta da direita — lista de pessoas em cima, controles
+embaixo e um vazio gigante no meio — saiu. Os controles agora são uma barra
+arredondada flutuante no rodapé do palco (mic, áudio, câmera, tela, ajustes,
+sair). A lista de quem está na chamada e os extras (diagnóstico, adicionar
+amigo, arquivo) abrem num painel por cima, atrás do botão de pessoas, para o
+vídeo nunca ser espremido. Tudo cinza; vermelho só no que é estado ruim de
+verdade: microfone mudo, ensurdecido e Sair.
+
+**Cards.** `gridAutoRows: minmax(200px, 1fr)` esticava cada card até o rodapé e
+a chamada virava duas colunas compridas de avatar. Agora cada card tem
+proporção 16:9, teto de altura e a grade centraliza o conjunto.
+
+**As barras de servidores (esquerda) e de online/amigos (direita) continuam
+intactas** — a mudança é só no espaço do meio.
+
+**Fantasma.** `voice_states` é persistente e só perde a linha quando o
+`VoiceLeave` chega; quem fechava o app sem sair ficava na chamada para sempre
+(o "segura" do print) e o `joinVoice` abria par com um fingerprint morto. A
+regra nova (`services/voicePresence.ts`) cruza a lista do motor com as sessões
+vivas. Sem a lista de sessões ainda (boot/reconexão) ela **não filtra** — senão
+a chamada inteira pareceria vazia. Eu nunca sou filtrado, para poder entrar num
+canal vazio.
+
+**Espera.** O watchdog de conexão tinha teto de três postergações (~60 s) e
+parava de vigiar o canal vazio. Agora reagenda indefinidamente, e sozinho na
+chamada a tela diz **"Esperando alguém entrar"** em vez de "Conectando…" —
+não há nada para conectar.
+
+**Verificação:** typecheck 0, lint 0, 402 unitários (8 novos), build OK.
+**Não** validado: áudio, vídeo e câmera reais — exige dois dispositivos.
+
 ## [1.1.44-pre-alpha] - 2026-11-03
 
 ### Tela de chamada unificada e conexão na primeira entrada
