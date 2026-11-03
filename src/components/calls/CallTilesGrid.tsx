@@ -5,6 +5,8 @@
 // JSX fazia a tela do canal esquecer os tiles — chamada conectada e muda.
 
 import CallTileComponent from './CallTile'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { colunasQueCabem } from '../../services/callGrid'
 import type { CallTile } from '../../services/callTiles'
 
 export interface CallTilesGridProps {
@@ -53,6 +55,30 @@ export default function CallTilesGrid({
   fill = false,
 }: CallTilesGridProps) {
   const altura = minHeight ?? (compact ? 112 : 150)
+  // LARGURA REAL da área do palco: decide quantas colunas cabem sem esmagar os
+  // cards. Sem medir, `ceil(sqrt(n))` ignorava a janela (ver `callGrid.ts`).
+  const areaRef = useRef<HTMLDivElement | null>(null)
+  const [largura, setLargura] = useState(0)
+  const medir = useCallback(() => {
+    const el = areaRef.current
+    if (!el) return
+    const w = el.clientWidth
+    setLargura((cur) => (Math.abs(cur - w) < 8 ? cur : w))
+  }, [])
+  useEffect(() => {
+    medir()
+    let ro: ResizeObserver | null = null
+    try {
+      ro = new ResizeObserver(medir)
+      if (areaRef.current) ro.observe(areaRef.current)
+    } catch { /* engine sem ResizeObserver: fica no primeiro cálculo */ }
+    window.addEventListener('resize', medir)
+    return () => {
+      try { ro?.disconnect() } catch { /* ignore */ }
+      window.removeEventListener('resize', medir)
+    }
+  }, [medir])
+
   const renderTile = (t: CallTile) => (
     <CallTileComponent
       tile={t}
@@ -70,26 +96,29 @@ export default function CallTilesGrid({
   )
 
   if (fill) {
-    // PALCO do canal de voz: preenche a área toda (pedido do dono — "completar
-    // a tela como nos amigos, num espaço maior").
+    // PALCO do canal de voz: preenche a área toda.
     //
-    // BUG REAL (print do dono: "essa interface está péssima"): com
-    // `gridAutoRows: minmax(200px, 1fr)` os cards esticavam até o rodapé e
-    // viravam DUAS COLUNAS compridas de avatar no meio de um mar de vazio.
-    // Agora os quadrados têm proporção de vídeo (16:9), teto de altura e a
-    // grade centraliza o conjunto — como uma chamada de verdade.
-    const colunas = Math.max(1, Math.ceil(Math.sqrt(tiles.length)))
+    // BUGS REAIS corrigidos aqui (prints do dono):
+    // 1. `gridAutoRows: minmax(200px, 1fr)` esticava cada card até o rodapé —
+    //    dois participantes viravam duas COLUNAS compridas de avatar.
+    // 2. `ceil(sqrt(n))` fixava colunas pela contagem e ignorava a largura: com
+    //    6 pessoas num monitor largo ficavam 3 colunas estreitas; com 2 numa
+    //    janela pequena, 2 colunas apertadas. Chamada com VÁRIAS pessoas
+    //    precisa caber — é o caso normal de um servidor.
+    //
+    // Agora as colunas vêm da largura disponível: cada card tem um mínimo
+    // confortável (16:9) e a grade encolhe o número de colunas até caber.
+    const cols = colunasQueCabem(tiles.length, largura, 12, padding)
     return (
       <div
+        ref={areaRef}
         style={{
           flex: 1,
           minHeight: 0,
           display: 'grid',
           gap: 12,
           padding,
-          gridTemplateColumns: `repeat(${colunas}, minmax(0, 1fr))`,
-          // `minmax(0, 1fr)` na linha + teto por card: o card nunca estica
-          // além da proporção; o que sobra vira margem, não um retângulo.
+          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
           gridAutoRows: 'minmax(0, 1fr)',
           alignContent: 'center',
           justifyContent: 'center',

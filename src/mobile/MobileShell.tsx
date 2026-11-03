@@ -26,6 +26,7 @@ import ScreenSharePicker from '../components/ScreenSharePicker'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
+import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import { isCallableChannel } from '../app/channels'
 import {
   InvitePanel,
@@ -2382,11 +2383,19 @@ export default function MobileShell() {
         </div>
 
         {/* drawer de membros do canal */}
-        {showMembers && isChannel && (
+        {showMembers && isChannel && (() => {
+          // TETO NA ORIGEM: servidor com 300 mil membros montava 300 mil
+          // linhas com Avatar e o celular travava. Prioriza online e eu.
+          const janela = windowMembers(
+            activeComm?.members ?? [],
+            LIMITE_MEMBROS,
+            ([fp]) => fp === identity?.fingerprint || onlineFps.has(fp),
+          )
+          return (
           <div style={{ position: 'fixed', inset: 0, zIndex: 30, background: 'rgba(0,0,0,.5)' }} onClick={() => setShowMembers(false)}>
             <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 260, maxWidth: '80vw', background: t.sidebar, borderLeft: `1px solid ${t.border}`, padding: '14px 8px', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
               <div className="member-group-head">MEMBROS — {activeComm?.members?.length ?? 0}</div>
-              {(activeComm?.members ?? []).map(([fp, nick]) => (
+              {janela.visiveis.map(([fp, nick]) => (
                 <div key={fp} className="member-row">
                   <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                     <Avatar name={nick || fp} fp={fp} size={28} avatarB64={profilesByFp[fp]?.avatar_b64} />
@@ -2398,9 +2407,15 @@ export default function MobileShell() {
                   </div>
                 </div>
               ))}
+              {janela.restantes > 0 && (
+                <div style={{ fontSize: 10.5, color: t.muted, padding: '6px 4px', lineHeight: 1.5 }}>
+                  +{janela.restantes.toLocaleString('pt-BR')} membros não listados
+                </div>
+              )}
             </div>
           </div>
-        )}
+          )
+        })()}
 
         {error && (
           <div className="m-err" style={{ margin: '10px 12px 0' }}>

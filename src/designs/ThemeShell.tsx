@@ -23,6 +23,7 @@ import VoiceStage from '../components/calls/VoiceStage'
 import { resolveVoiceLayout, callScreenTitle } from '../services/voiceLayout'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
 import { filterLiveVoiceRows } from '../services/voicePresence'
+import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
@@ -1645,11 +1646,19 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [activeAutocomplete, setActiveAutocomplete] = useState<{ kind: 'mention' | 'emoji' | 'slash'; query: string; start: number; end: number } | null>(null)
   const [serverEmojiMap, setServerEmojiMap] = useState<Record<string, string>>({})
 
-  // Membros da comunidade atual (para @menção e lista de membros).
+  /**
+   * Membros da comunidade atual (para @menção e lista de membros).
+   *
+   * TETO NA ORIGEM: um servidor pode ter centenas de milhares de membros e o
+   * array inteiro virava estado do React (com um objeto por pessoa). O
+   * autocomplete de @menção não precisa de mais que uma janela — quem procura
+   * alguém específico digita o nome.
+   */
   const communityMembers = useMemo<{ fp: string; nickname: string }[]>(() => {
     if (!activeComm) return []
-    return (activeComm.members ?? []).map(([fp, nick]) => ({ fp, nickname: nick || nameOfFp(fp) }))
-  }, [activeComm, socialProfiles, peers])
+    const janela = windowMembers(activeComm.members ?? [], LIMITE_MEMBROS, ([fp]) => fp === identity?.fingerprint)
+    return janela.visiveis.map(([fp, nick]) => ({ fp, nickname: nick || nameOfFp(fp) }))
+  }, [activeComm, socialProfiles, peers, identity?.fingerprint])
 
   // Comandos de barra REAIS: rodam localmente, sem depender de servidor.
   const slashCommands = useMemo(() => [
@@ -3423,12 +3432,18 @@ export default function ThemeShell({ designId }: {designId:string}){
               </div>
             )}
             {roles.filter(r => r.hoist).sort((a, b) => b.position - a.position).map(role => {
-              const membersInRole = (activeComm?.members ?? []).filter(([fp]) => (memberRolesCache[fp] ?? []).includes(role.id))
-              if (membersInRole.length === 0) return null
+              // Com 300 mil membros este `filter` percorria a lista inteira uma
+              // vez POR CARGO a cada render. O teto vale aqui também.
+              const doCargo = windowMembers(
+                activeComm?.members ?? [],
+                LIMITE_MEMBROS,
+                ([fp]) => fp === identity?.fingerprint,
+              ).visiveis.filter(([fp]) => (memberRolesCache[fp] ?? []).includes(role.id))
+              if (doCargo.length === 0) return null
               return (
                 <div key={role.id} style={{ padding: '6px 8px' }}>
-                  <div className="member-group-head" style={{ color: role.color }}>{role.name} — {membersInRole.length}</div>
-                  {membersInRole.map(([fp, nick]) => (
+                  <div className="member-group-head" style={{ color: role.color }}>{role.name} — {doCargo.length}</div>
+                  {doCargo.map(([fp, nick]) => (
                     <div key={fp} className="member-row">
                       <Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} />
                       <div style={{ flex: 1, minWidth: 0 }}>
@@ -3464,15 +3479,30 @@ export default function ThemeShell({ designId }: {designId:string}){
               }
               const onlineMembers = nonHoisted.filter(([fp]) => isOnlineFp(fp))
               const offlineMembers = nonHoisted.filter(([fp]) => !isOnlineFp(fp))
+              // TETO NA ORIGEM: num servidor de 300 mil o React montava uma
+              // linha por membro e o app congelava antes de a chamada abrir.
+              // Corta ANTES do `map`, priorizando online e eu mesmo.
+              const janelaOnline = windowMembers(onlineMembers, LIMITE_MEMBROS)
+              const janelaOffline = windowMembers(offlineMembers, LIMITE_MEMBROS)
               return (
                 <div style={{ padding: '6px 8px' }}>
                   <Section variant="desktop" title={`ONLINE — ${onlineMembers.length}`} maxVisible={15}>
-                    {onlineMembers.map(memberRow)}
+                    {janelaOnline.visiveis.map(memberRow)}
                   </Section>
+                  {janelaOnline.restantes > 0 && (
+                    <div style={{ fontSize: 10.5, color: muted, padding: '2px 8px 6px' }}>
+                      +{janelaOnline.restantes.toLocaleString('pt-BR')} online não listados
+                    </div>
+                  )}
                   {offlineMembers.length > 0 && (
                     <Section variant="desktop" title={`OFFLINE — ${offlineMembers.length}`} maxVisible={15} defaultOpen={false}>
-                      {offlineMembers.map(memberRow)}
+                      {janelaOffline.visiveis.map(memberRow)}
                     </Section>
+                  )}
+                  {janelaOffline.restantes > 0 && (
+                    <div style={{ fontSize: 10.5, color: muted, padding: '2px 8px 6px' }}>
+                      +{janelaOffline.restantes.toLocaleString('pt-BR')} offline não listados
+                    </div>
                   )}
                   {bots.length === 0 && roles.filter(r => r.hoist).length === 0 && onlinePeers.length === 0 && (
                     <div style={{ fontSize: 11, color: muted, padding: '6px 8px', opacity: 0.7 }}>Nenhum membro extra — convide amigos com o token do servidor.</div>

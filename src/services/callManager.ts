@@ -1784,17 +1784,34 @@ export class CallManager {
     this.connectTimer = null
   }
 
-  /** Watchdog da reconexão: sem mídia viva em RECONNECT_TIMEOUT_MS, encerra com aviso honesto. */
+  /**
+   * Watchdog da reconexão: sem mídia viva em RECONNECT_TIMEOUT_MS, encerra com
+   * aviso honesto.
+   *
+   * EXCEÇÃO: CANAL DE VOZ NUNCA É ENCERRADO POR TEMPO.
+   *
+   * Relato do dono: "depois de um tempo eu caio da call". Numa chamada 1:1,
+   * 30 s sem rota significa que a ligação morreu — encerrar é honesto. Num
+   * CANAL o usuário está esperando gente entrar: `pcs` vazio ou um par que caiu
+   * não é motivo para expulsá-lo da sala. Antes este watchdog disparava no canal
+   * (o `ice-failed` do par levava a fase para `reconnecting`), e após 30 s ele
+   * chamava `leave()` — a pessoa era jogada para fora sozinha.
+   */
   private startReconnectWatchdog() {
     this.stopReconnectWatchdog()
     try {
       const callId = this.state?.callId
+      // Canal: não arma. Quem cuida da mídia do canal é o `startMeshRepair`,
+      // que refaz o par sem nunca tirar a pessoa da sala.
+      if (callId && callId.startsWith('voice-')) return
       this.reconnectTimer = setTimeout(() => {
         try {
           const st = this.state
           // Watchdog da chamada velha? Não mexe na nova.
           if (callId && (!st || st.callId !== callId)) return
           if (!st || !isCallPhaseActive(st.phase)) return
+          // Canal de voz: espera para sempre (ver comentário acima).
+          if (st.callId.startsWith('voice-')) return
           let anyAlive = false
           for (const pc of this.pcs.values()) {
             const s = pc.iceConnectionState

@@ -128,6 +128,11 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
         "audit_log",
         "reputation",
         "reports",
+        // v10: `announced_at` (prazo da presença de voz). Sem esta entrada o
+        // `column_exists` devolvia sempre `false` e a migração tentava
+        // adicionar a coluna de novo — "duplicate column name" em todo boot
+        // depois do primeiro.
+        "voice_states",
     ]
     .contains(&table)
     {
@@ -354,8 +359,29 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !column_exists(conn, "files", "seeded_at") {
         conn.execute_batch("ALTER TABLE files ADD COLUMN seeded_at INTEGER NOT NULL DEFAULT 0;")?;
     }
+    // v10: PRAZO DE VALIDADE DA PRESENÇA DE VOZ.
+    //
+    // `voice_states` só perdia a linha quando o `VoiceLeave` chegava. Quem
+    // fechava o app (ou travava) sem desligar ficava na chamada PARA SEMPRE —
+    // foi o "secura" que o dono viu aparecer numa call onde a pessoa não
+    // estava. O filtro do frontend (sessões vivas) cobre o caso comum, mas não
+    // o peer que está online no servidor e simplesmente não voltou à chamada.
+    //
+    // Aqui a tabela ganha `announced_at`, usado para EXPIRAR quem parou de
+    // re-anunciar (o motor re-anuncia a cada 15 s). Presença velha é removida
+    // na leitura, sem tocar no caminho quente de escrita.
+    if !column_exists(conn, "voice_states", "announced_at") {
+        conn.execute_batch(
+            "ALTER TABLE voice_states ADD COLUMN announced_at INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        // Linhas antigas (sem carimbo) começam a contar de agora: não expulsar
+        // quem está legitimamente numa chamada durante a migração.
+        conn.execute_batch(
+            "UPDATE voice_states SET announced_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE announced_at = 0;",
+        )?;
+    }
     conn.execute(
-        "INSERT INTO kv(key,value) VALUES('schema_version','9') ON CONFLICT(key) DO UPDATE SET value='9'",
+        "INSERT INTO kv(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO UPDATE SET value='10'",
         [],
     )?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -435,6 +461,16 @@ fn insert_bot_row(conn: &Connection, b: &BotRow) -> Result<()> {
 
 pub struct Store {
     conn: Mutex<Connection>,
+}
+
+impl Store {
+    /// Quanto tempo uma presença de voz sobrevive SEM re-anúncio.
+    ///
+    /// O motor re-anuncia a cada 15 s (`reannounce_voice_channels`). 90 s dá
+    /// seis janelas de folga — cobre um pico de rede sem nunca expulsar quem
+    /// está na chamada de verdade. Acima disso a linha só pode ser resto de app
+    /// fechado/crash sem `VoiceLeave`.
+    pub const VOICE_PRESENCE_TTL_MS: u64 = 90_000;
 }
 
 const SCHEMA_V1: &str = r#"
@@ -1884,9 +1920,11 @@ impl Store {
         muted: bool,
         deafened: bool,
     ) -> Result<()> {
+        // `announced_at` renova o prazo: o motor re-anuncia a cada 15 s e é
+        // isso que prova que a pessoa CONTINUA no canal (ver v10 em `migrate`).
         self.locked().execute(
-            "INSERT INTO voice_states(community_id,channel_id,fp,muted,deafened,speaking,joined_at) VALUES(?1,?2,?3,?4,?5,0,?6)
-             ON CONFLICT(community_id,channel_id,fp) DO UPDATE SET muted=excluded.muted, deafened=excluded.deafened",
+            "INSERT INTO voice_states(community_id,channel_id,fp,muted,deafened,speaking,joined_at,announced_at) VALUES(?1,?2,?3,?4,?5,0,?6,?6)
+             ON CONFLICT(community_id,channel_id,fp) DO UPDATE SET muted=excluded.muted, deafened=excluded.deafened, announced_at=excluded.announced_at",
             params![community_id, channel_id, fp, if muted {1} else {0}, if deafened {1} else {0}, crate::identity::now_ms()],
         )?;
         Ok(())
@@ -1900,12 +1938,26 @@ impl Store {
         Ok(())
     }
 
+    /// Quem está REALMENTE no canal.
+    ///
+    /// `announced_at` tem prazo: o motor re-anuncia a presença a cada 15 s, e
+    /// sem re-anúncio por `VOICE_PRESENCE_TTL_MS` a linha é considerada velha
+    /// (app fechado/crash sem `VoiceLeave`) e some da lista — e do banco.
+    /// Era o usuário fantasma que o dono viu numa chamada onde a pessoa não
+    /// estava.
     pub fn list_voice_states(
         &self,
         community_id: &str,
         channel_id: &str,
     ) -> Result<Vec<(String, bool, bool)>> {
+        let agora = crate::identity::now_ms();
+        let limite = agora - (Self::VOICE_PRESENCE_TTL_MS as i64);
         let conn = self.locked();
+        // Limpeza preguiçosa: só as linhas DESTE canal, e só as vencidas.
+        let _ = conn.execute(
+            "DELETE FROM voice_states WHERE community_id=?1 AND channel_id=?2 AND announced_at > 0 AND announced_at < ?3",
+            params![community_id, channel_id, limite],
+        );
         let mut st = conn.prepare(
             "SELECT fp,muted,deafened FROM voice_states WHERE community_id=?1 AND channel_id=?2",
         )?;
