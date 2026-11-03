@@ -19,14 +19,26 @@ import {
 const manager = readFileSync('src/services/callManager.ts', 'utf8')
 const stage = readFileSync('src/components/calls/VoiceStage.tsx', 'utf8')
 const peersHook = readFileSync('src/components/calls/ChannelVoicePeers.tsx', 'utf8')
+const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
 
 const row = (fp: string, muted = false): VoiceRow => ({ fp, muted, deafened: false })
 const online = (...fps: string[]) => new Set(fps)
 
-test('fantasma (na voz e offline) não aparece na chamada', () => {
-  const rows = [row('eu'), row('segura')]
-  const vis = filterLiveVoiceRows(rows, { myFp: 'eu', onlineFps: online('eu') })
-  assert.deepEqual(vis.map((r) => r.fp), ['eu'], '"segura" não está online: sai da lista')
+test('a tela só mostra quem o manager registrou na chamada', () => {
+  // Regra do dono: "não aparecer ninguém até o cara entrar e ficar na call".
+  // `voice_states` é ANÚNCIO de presença — quem anunciou e nunca negociou mídia
+  // (ou fechou o app) não pode virar card. `activeCall.participants` só ganha a
+  // pessoa quando ela oferece/responde/ICE, que é a prova de que entrou.
+  const bloco = shell.slice(shell.indexOf('const channelCallPeers'))
+  const trecho = bloco.slice(0, 2600)
+  assert.match(trecho, /activeCall\?\.participants/, 'a fonte dos cards é o roster do manager')
+  assert.doesNotMatch(
+    trecho,
+    /for \(const r of doMotor\)/,
+    'o voice_states não cria card por conta própria',
+  )
+  assert.match(trecho, /estadoMotor/, 'o motor só enriquece mudo/surdo')
+  assert.match(trecho, /if \(eu && !vistos\.has\(eu\)\)/, 'eu continuo na tela mesmo sem roster')
 })
 
 test('quem está online continua na chamada', () => {

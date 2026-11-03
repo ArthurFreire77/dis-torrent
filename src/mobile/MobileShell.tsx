@@ -2251,30 +2251,33 @@ export default function MobileShell() {
       const st: any = activeCall
       const dentro = !!inCallChannelId && inCallChannelId === selCallChannel.id
       const ligando = dentro && (st?.phase === 'connecting' || st?.phase === 'outgoing' || st?.phase === 'reconnecting')
-      // QUEM ESTÁ NO CANAL: o motor (`voiceStates`) é a fonte que enxerga quem
-      // entrou e ainda está abrindo o microfone; o roster do manager pode não
-      // ter a pessoa ainda. Antes o lobby dizia "ninguém na chamada" com gente
-      // dentro e ninguém entrava.
+      // QUEM ESTÁ NO CANAL: só quem o MANAGER registrou (igual ao desktop).
+      //
+      // Regra do dono: "não aparecer ninguém até o cara entrar e ficar na call".
+      // O `voiceStates` é anúncio de presença — quem abriu o canal e não
+      // negociou mídia (ou fechou o app) deixa linha lá. Anunciar não é estar.
       const porFp = new Map<string, { fp: string; nickname?: string; muted?: boolean; deafened?: boolean }>()
+      const estadoMotor = new Map<string, { muted: boolean; deafened: boolean }>()
       for (const [fp, muted, deafened] of voiceStates) {
         if (!fp) continue
-        porFp.set(fp, {
-          fp,
-          nickname: resolveMemberName(fp) || fp.slice(0, 8),
-          muted: !!muted,
-          deafened: !!deafened,
-        })
+        estadoMotor.set(fp, { muted: !!muted, deafened: !!deafened })
       }
       for (const p of ((st?.participants ?? []) as any[])) {
         const fp = String(p?.fp ?? '')
         if (!fp) continue
-        const antes = porFp.get(fp)
+        const motor = estadoMotor.get(fp)
         porFp.set(fp, {
           fp,
-          nickname: resolveMemberName(fp) || (typeof p?.nickname === 'string' ? p.nickname : undefined) || antes?.nickname,
-          muted: p?.muted ?? antes?.muted,
-          deafened: p?.deafened ?? antes?.deafened,
+          nickname: resolveMemberName(fp) || (typeof p?.nickname === 'string' ? p.nickname : undefined),
+          muted: p?.muted ?? motor?.muted,
+          deafened: p?.deafened ?? motor?.deafened,
         })
+      }
+      // Eu sempre apareço (sou eu que estou na chamada).
+      const meuFp = identity?.fingerprint ?? ''
+      if (dentro && meuFp && !porFp.has(meuFp)) {
+        const motor = estadoMotor.get(meuFp)
+        porFp.set(meuFp, { fp: meuFp, nickname: identity?.nickname ?? 'você', muted: motor?.muted, deafened: motor?.deafened })
       }
       const participantes = [...porFp.values()]
       return (

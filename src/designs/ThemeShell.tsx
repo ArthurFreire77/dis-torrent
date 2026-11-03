@@ -22,7 +22,6 @@ import CallTilesGrid from '../components/calls/CallTilesGrid'
 import VoiceStage from '../components/calls/VoiceStage'
 import { resolveVoiceLayout, callScreenTitle } from '../services/voiceLayout'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
-import { filterLiveVoiceRows } from '../services/voicePresence'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
@@ -2121,32 +2120,51 @@ export default function ThemeShell({ designId }: {designId:string}){
   const channelCallPeers = useMemo(() => {
     const eu = identity?.fingerprint ?? ''
     const vivos = new Set(onlinePeers.filter((p) => p.state === 'CONNECTED').map((p) => p.fp))
-    const vistos = new Map<string, { fp: string; nome: string; muted?: boolean; deafened?: boolean; eu?: boolean }>()
-    const doMotor = filterLiveVoiceRows(
-      voiceStates.map(([fp, muted, deafened]) => ({ fp, muted, deafened })),
-      { myFp: eu, onlineFps: vivos, filtrar: vivos.size > 0 },
+    const estadoMotor = new Map(
+      voiceStates.filter(([fp]) => !!fp).map(([fp, muted, deafened]) => [fp, { muted, deafened }]),
     )
-    for (const r of doMotor) {
-      const fp = r.fp
-      if (!fp) continue
-      vistos.set(fp, { fp, nome: nameOfFp(fp) || fp.slice(0, 8), muted: !!r.muted, deafened: !!r.deafened, eu: fp === eu })
-    }
+    const vistos = new Map<string, { fp: string; nome: string; muted?: boolean; deafened?: boolean; eu?: boolean }>()
+
+    // QUEM PODE APARECER: só quem o MANAGER registrou na chamada.
+    //
+    // Regra pedida pelo dono: "não aparecer ninguém até o cara entrar e ficar
+    // na call". O `voice_states` do motor é um ANÚNCIO de presença — quem
+    // abriu o canal, anunciou e nunca negociou mídia (ou fechou o app) deixa
+    // linha lá. Anunciar não é estar: o `activeCall.participants` só ganha a
+    // pessoa quando ela oferece/responde/ICE, que é a prova de que entrou.
+    //
+    // O motor continua útil para MUDO/SURDO (ele recebe o `VoiceState`), mas
+    // nunca para criar um card do nada — era o "secura" fantasma da tela.
     for (const p of (activeCall?.participants ?? []) as any[]) {
       const fp = String(p?.fp ?? '')
       if (!fp) continue
-      // Mesma regra do motor: participante fantasma não entra no palco.
+      // Sessão morta não vira card (o par caiu e não voltou).
       if (fp !== eu && vivos.size > 0 && !vivos.has(fp)) continue
-      const antes = vistos.get(fp)
+      const motor = estadoMotor.get(fp)
       vistos.set(fp, {
         fp,
         nome: nameOfFp(fp) || p?.nickname || fp.slice(0, 8),
-        muted: p?.muted ?? antes?.muted,
-        deafened: p?.deafened ?? antes?.deafened,
+        muted: p?.muted ?? motor?.muted,
+        deafened: p?.deafened ?? motor?.deafened,
         eu: fp === eu,
       })
     }
+    // EU sempre apareço, mesmo sem roster (sou eu que estou na chamada).
+    if (eu && !vistos.has(eu)) {
+      const motor = estadoMotor.get(eu)
+      vistos.set(eu, { fp: eu, nome: nameOfFp(eu) || 'você', muted: motor?.muted, deafened: motor?.deafened, eu: true })
+    }
     return [...vistos.values()].sort((a, b) => (a.eu === b.eu ? a.nome.localeCompare(b.nome) : a.eu ? -1 : 1))
   }, [voiceStates, activeCall?.participants, identity?.fingerprint, onlinePeers])
+
+  /**
+   * `true` quando a chamada do canal ficou VAZIA (só eu, ninguém para falar).
+   *
+   * O dono pediu: "ficar na call por tempo ilimitado e só fechar quando todos
+   * saírem". Com mais alguém, a chamada continua; sozinho, a tela diz que está
+   * esperando — e NUNCA encerra sozinha (ver o watchdog no callManager).
+   */
+  const canalVazio = inThisCall && channelCallPeers.filter((p) => !p.eu).length === 0
 
   async function createThreadFrom(m: StoredMessage) {
     if (!selCommunity || !selConv) { setError('threads são de servidor — abra um canal de comunidade'); return }
@@ -2676,13 +2694,13 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <span style={{ fontSize: 11, fontWeight: 800, color: t.green, flex: 1 }}>Voz conectada</span>
                 <span style={{ fontSize: 10, color: muted }}>/ {activeComm?.channels.find(([id])=>id===canalDaChamada.channelId)?.[1] ?? canalDaChamada.channelId.slice(0,8)}</span>
               </div>
-              <div style={{ fontSize: 10, color: muted }}>{voiceStates.length} na voz • {voiceStates.filter(([,m])=>!m).length} com mic aberto • todos semeiam</div>
+              <div style={{ fontSize: 10, color: muted }}>{channelCallPeers.length} na voz • {channelCallPeers.filter(p=>!p.muted).length} com mic aberto • todos semeiam</div>
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={() => { const nm=!isMuted; setIsMuted(nm); callManager.toggleMute(); services.voiceState(canalDaChamada.communityId, canalDaChamada.channelId, nm, isDeafened).catch(()=>{}) }} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ flex: 1, background: isMuted ? t.red : inputBg, color: isMuted ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={13} /> : <Icon d={Icons.mic} size={13} />}</button>
                 <button onClick={() => { const nd=!isDeafened; setIsDeafened(nd); if(nd) setIsMuted(true); callManager.toggleDeafen(); services.voiceState(canalDaChamada.communityId, canalDaChamada.channelId, isMuted || nd, nd).catch(()=>{}) }} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ flex: 1, background: isDeafened ? t.red : inputBg, color: isDeafened ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={13} /> : <Icon d={Icons.headphones} size={13} />}</button>
                 <button onClick={async () => { try { await callManager.leaveVoice(canalDaChamada.communityId, canalDaChamada.channelId) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceChannel(null); setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
               </div>
-              {voiceStates.length>0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{voiceStates.map(([fp,m,d]) => <span key={fp} title={fp} style={{ fontSize: 10, background: inputBg, border: `1px solid ${borderColor}`, padding: '2px 6px', borderRadius: 99, color: m? t.red : d? t.yellow : t.green }}>{fp.slice(0,6)} {m ? <Icon d={Icons.micOff} size={10} /> : d ? <Icon d={Icons.volumeX} size={10} /> : <Icon d={Icons.mic} size={10} />}</span>)}</div>}
+              {channelCallPeers.length>0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{channelCallPeers.map((p) => <span key={p.fp} title={p.nome} style={{ fontSize: 10, background: inputBg, border: `1px solid ${borderColor}`, padding: '2px 6px', borderRadius: 99, color: p.muted? t.red : p.deafened? t.yellow : t.green }}>{p.eu ? 'você' : p.nome} {p.muted ? <Icon d={Icons.micOff} size={10} /> : p.deafened ? <Icon d={Icons.volumeX} size={10} /> : <Icon d={Icons.mic} size={10} />}</span>)}</div>}
             </div>
           )}
           <div style={{ marginTop: 'auto', padding: 10, background: t.footer, borderTop: `1px solid ${borderColor}`, display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -3076,10 +3094,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 />
               }
               peers={channelCallPeers}
-              waitingAlone={
-                inThisCall &&
-                channelCallPeers.filter((p) => !p.eu).length === 0
-              }
+              waitingAlone={canalVazio}
               unavailable={!callsOk ? callsUnavailableDetail : null}
               busy={!!activeCall && !inThisCall}
               notice={notice}
