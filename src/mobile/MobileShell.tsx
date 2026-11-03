@@ -56,7 +56,7 @@ import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
-  notifyMessage, notifyIncomingCall, endCallNotice, markCallHandled,
+  notifyMessage, notifyIncomingCall, notifyReaction, endCallNotice, markCallHandled,
   setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
@@ -1000,6 +1000,28 @@ export default function MobileShell() {
       }
     }
     if (ev.type === 'message_status') patchStatus(ev.msg_id, ev.status)
+    // REAÇÃO em mensagem MINHA: mesmo caminho do desktop (aviso do sistema).
+    if (ev.type === 'reaction_changed') {
+      const minha = messages.some(
+        (m) => m.id === ev.msg_id && (m.direction === 'out' || m.author_fp === identity?.fingerprint),
+      )
+      if (minha) {
+        const cid = communities.find(c => c.channels.some(([id]) => id === ev.conv_id))?.id
+        const reactorNick = peers.find(p => p.fp === ev.reactor_fp)?.nickname
+          || friendsAccepted.find(f => f.fp === ev.reactor_fp)?.nickname
+        notifyReaction({
+          msgId: ev.msg_id,
+          conversationId: ev.conv_id,
+          emoji: ev.emoji,
+          reactorFp: ev.reactor_fp,
+          myFp: identity?.fingerprint,
+          reactorNome: reactorNick,
+          minhaMensagem: true,
+          add: ev.add,
+          serverId: cid,
+        })
+      }
+    }
     // "digitando…" — o desktop já mostrava; no mobile faltava (lacuna auditada).
     if (ev.type === 'typing') {
       const cid = (ev as unknown as { conv_id?: string; convId?: string }).conv_id ?? (ev as unknown as { convId?: string }).convId

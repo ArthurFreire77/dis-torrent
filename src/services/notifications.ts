@@ -11,7 +11,8 @@ import { avatarCacheGet, avatarCacheSet } from '../shared/avatar'
 import { isAndroidRuntime } from '../shared/runtime.ts'
 import { invoke } from '@tauri-apps/api/core'
 import {
-  createSeenTracker, decideMessageNotice, levelAllows, notificationIdFor, truncate,
+  createSeenTracker, decideMessageNotice, decideReactionNotice, levelAllows,
+  notificationIdFor, reactionNoticeBody, reactionNoticeKey, truncate,
 } from './notificationRules'
 
 /** Janela em uso? Quando ativa, quem avisa é a UI, não o sistema. */
@@ -102,6 +103,64 @@ export function notifyMessage(n: MessageNotice): boolean {
     id: notificationIdFor(`conv:${n.conversationId}`),
     title: n.title,
     body: decision.body,
+    conversation: n.conversationId,
+    silent: !prefs.notifySounds,
+  })
+}
+
+export interface ReactionNotice {
+  /** Id da mensagem reagida (dedupe por mensagem+emoji+pessoa). */
+  msgId: string
+  conversationId: string
+  emoji: string
+  /** Quem reagiu. */
+  reactorFp: string
+  /** MEU fingerprint (para ignorar a própria reação). */
+  myFp?: string
+  /** Nome de quem reagiu (o chamador resolve; fp é o fallback). */
+  reactorNome?: string
+  /** A mensagem reagida é MINHA? (sem isso não se avisa). */
+  minhaMensagem: boolean
+  /** Adicionou (`true`) ou removeu (`false`). */
+  add: boolean
+  serverId?: string
+}
+
+/**
+ * Notifica uma REAÇÃO recebida na minha mensagem.
+ *
+ * POR QUE EXISTE: reagir é uma resposta silenciosa ("curti", "concordo") e o
+ * app não dava nenhum sinal quando a janela estava minimizada — a pessoa só
+ * descobria abrindo a conversa. Segue as mesmas regras do resto: só na minha
+ * mensagem, nunca a minha própria reação, nunca remoção, respeita o nível do
+ * canal e não avisa com a conversa aberta em primeiro plano.
+ *
+ * Retorna `true` quando o aviso do SO foi realmente enviado.
+ */
+export function notifyReaction(n: ReactionNotice): boolean {
+  if (!n.conversationId || !n.msgId || !n.reactorFp) return false
+  const eu = n.myFp ?? ''
+  if (eu && n.reactorFp === eu) return false // minha própria reação
+  if (seen.seen(reactionNoticeKey(n.msgId, n.emoji, n.reactorFp))) return false
+
+  const level = levelFor(n.conversationId, n.serverId)
+  const mostrar = decideReactionNotice({
+    minhaMensagem: n.minhaMensagem,
+    euReagi: !!eu && n.reactorFp === eu,
+    add: n.add,
+    level,
+    activity: inForeground() ? 'active' : 'background',
+    openConversation,
+    conversationId: n.conversationId,
+    systemEnabled: getPrefs().notifySystem,
+  })
+  if (!mostrar) return false
+
+  const prefs = getPrefs()
+  return show({
+    id: notificationIdFor(`rx:${n.conversationId}`),
+    title: n.conversationId,
+    body: reactionNoticeBody(n.reactorNome ?? n.reactorFp.slice(0, 8), n.emoji),
     conversation: n.conversationId,
     silent: !prefs.notifySounds,
   })

@@ -220,8 +220,11 @@ export function ChannelEditor({
             {(
               [
                 { k: 'text', label: 'Texto', desc: 'Conversa por mensagem', ic: 'hash' },
-                { k: 'voice', label: 'Voz', desc: 'Chamada de áudio', ic: 'speaker' },
-                { k: 'video', label: 'Vídeo', desc: 'Chamada com câmera', ic: 'video' },
+                // SÓ TEXTO E VOZ. O canal de vídeo foi removido da criação: o
+                // canal de VOZ já é uma chamada com câmera (é um botão dentro
+                // da chamada), então ter os dois tipos duplicava a mesma coisa
+                // e confundia — o dono pediu para tirar.
+                { k: 'voice', label: 'Voz', desc: 'Chamada de áudio e vídeo', ic: 'speaker' },
               ] as const
             ).map((opt) => (
               <button

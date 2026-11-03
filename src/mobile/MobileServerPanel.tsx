@@ -319,7 +319,9 @@ export default function MobileServerPanel({
             style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, color: T.text, padding: '8px 10px', fontSize: 13 }}
           />
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {(['text', 'voice', 'video'] as const).map((k) => (
+            {/* Só texto e voz: o canal de VOZ já é uma chamada com câmera
+                (botão dentro da chamada). O tipo "vídeo" duplicava isso. */}
+            {(['text', 'voice'] as const).map((k) => (
               <button
                 key={k}
                 type="button"
@@ -334,7 +336,7 @@ export default function MobileServerPanel({
                 }}
               >
                 <Ic name={channelIcon(k)} size={12} />
-                {k === 'text' ? 'texto' : k === 'voice' ? 'voz' : 'vídeo'}
+                {k === 'text' ? 'texto' : 'voz'}
               </button>
             ))}
           </div>

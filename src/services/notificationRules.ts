@@ -96,6 +96,54 @@ export function decideMessageNotice(i: MessageDecisionInput): MessageDecision {
   return { show: true, body, counts: true }
 }
 
+/** Teto do dedupe de reações (uma por mensagem+emoji+pessoa). */
+export function reactionNoticeKey(msgId: string, emoji: string, reactorFp: string): string {
+  return `rx:${msgId}:${emoji}:${reactorFp}`
+}
+
+export interface ReactionDecisionInput {
+  /** A reação é numa mensagem MINHA? (só aí faz sentido avisar) */
+  minhaMensagem: boolean
+  /** Eu que reagi? (não se avisa a si mesmo) */
+  euReagi: boolean
+  /** Adicionou (`true`) ou removeu (`false`) — remoção nunca avisa. */
+  add: boolean
+  level: NivelNotif
+  activity: AppAtividade
+  openConversation: string | null
+  conversationId: string
+  systemEnabled: boolean
+}
+
+/**
+ * Decide o aviso de uma REAÇÃO recebida.
+ *
+ * Regras (as mesmas do resto das notificações, adaptadas):
+ * - só reação NA MINHA mensagem: reagir na mensagem de outra pessoa é conversa
+ *   entre elas, não me diz respeito;
+ * - nunca a minha própria reação (eu sei o que fiz);
+ * - nunca ao REMOVER uma reação;
+ * - silenciado/menções: canal em `mentions` não avisa reação (não é menção);
+ * - em primeiro plano com a conversa aberta eu já estou vendo.
+ */
+export function decideReactionNotice(i: ReactionDecisionInput): boolean {
+  if (!i.minhaMensagem || i.euReagi || !i.add) return false
+  if (i.level !== 'all') return false
+  if (i.activity === 'active') return false
+  if (i.openConversation === i.conversationId) return false
+  if (!i.systemEnabled) return false
+  return true
+}
+
+/** Corpo curto e honesto: "Fulano reagiu 👍 na sua mensagem". */
+export function reactionNoticeBody(nome: string, emoji: string): string {
+  const quem = (nome || '').trim() || 'alguém'
+  const e = (emoji || '').trim()
+  return e
+    ? `${quem} reagiu ${e} na sua mensagem`
+    : `${quem} reagiu na sua mensagem`
+}
+
 /**
  * Tracker de dedupe com teto (LRU simples). Evita o mesmo `id` de mensagem
  * gerar dois avisos (evento reaplicado, reconexão, replay do relay).
