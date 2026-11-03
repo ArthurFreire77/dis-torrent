@@ -176,7 +176,9 @@ import { cameraDevices, nextCameraId } from './callCameras'
 let mediaPrefs: CallMediaPrefs = (() => {
   try {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(CALL_MEDIA_PREFS_KEY) : null
-    return parseCallMediaPrefs(raw)
+    const p = parseCallMediaPrefs(raw)
+    try { localStorage.setItem(CALL_MEDIA_PREFS_KEY, JSON.stringify(p)) } catch {  }
+    return p
   } catch { return { ...DEFAULT_CALL_MEDIA_PREFS } }
 })()
 
@@ -488,9 +490,28 @@ async function getLocalMediaInner(constraints: MediaStreamConstraints): Promise<
     } catch (e) {
       const nome = (e as Error)?.name ?? ''
       const usaDeviceExato = !!mediaPrefs.videoInputId || !!mediaPrefs.audioInputId
-      if (usaDeviceExato && (nome === 'OverconstrainedError' || nome === 'NotFoundError')) {
+      // NotReadableError também entra: device salvo que não existe mais ou que
+      // está preso pelo sistema cai para o padrão em vez de deixar o usuário
+      // sem câmera até limpar a preferência na mão.
+      if (
+        usaDeviceExato &&
+        (nome === 'OverconstrainedError' || nome === 'NotFoundError' || nome === 'NotReadableError')
+      ) {
         try {
-          const s = await md.getUserMedia({ ...merged, audio: merged.audio ? { echoCancellation: mediaPrefs.echoCancellation, noiseSuppression: mediaPrefs.noiseSuppression, autoGainControl: mediaPrefs.autoGainControl, channelCount: 1 } : merged.audio, video: merged.video ? { ...videoConstraintsFromPrefs({ ...mediaPrefs, videoInputId: '' }) } : merged.video })
+          const s = await md.getUserMedia({
+            ...merged,
+            audio: merged.audio
+              ? {
+                  echoCancellation: mediaPrefs.echoCancellation,
+                  noiseSuppression: mediaPrefs.noiseSuppression,
+                  autoGainControl: mediaPrefs.autoGainControl,
+                  channelCount: 1,
+                }
+              : merged.audio,
+            video: merged.video
+              ? { ...videoConstraintsFromPrefs({ ...mediaPrefs, videoInputId: '' }) }
+              : merged.video,
+          })
           setCallMediaPrefs({ audioInputId: '', videoInputId: '' })
           try { localMediaNotice?.('o aparelho salvo não está mais disponível — usei o microfone/câmera padrão') } catch {  }
           return s
@@ -2587,30 +2608,28 @@ export class CallManager {
       throw new Error('este aparelho não expõe as câmeras para alternância')
     }
     const lista = cameraDevices(await md.enumerateDevices())
-    // Android costuma devolver os dois `videoinput` com o mesmo deviceId vazio
-    // até a permissão ser concedida. Nesse caso não há id alternável: sorteia
-    // entre frontal/traseira pelo `facingMode`, que é o que o device entende.
+    // Android devolve os dois `videoinput` com o mesmo deviceId vazio até a
+    // permissão ser dada. Nesse caso não há id alternável e a troca é feita
+    // por `facingMode`. O pseudo-id NUNCA entra na preferência: `deviceId`
+    // exato de um device inexistente faz o getUserMedia falhar sempre.
     if (lista.length < 2) {
       const brutos = (await md.enumerateDevices()).filter((d) => d.kind === 'videoinput')
       if (brutos.length < 2) {
         throw new Error('só há uma câmera disponível neste aparelho')
       }
-      const atualFacing = getCallMediaPrefs().videoInputId === '__user' ? 'environment' : 'user'
-      const alvo = atualFacing === 'user' ? 'environment' : 'user'
-      setCallMediaPrefs({ videoInputId: alvo === 'user' ? '__user' : '__environment' })
+      const alvo: 'user' | 'environment' =
+        getCallMediaPrefs().facingMode === 'user' ? 'environment' : 'user'
+      setCallMediaPrefs({ videoInputId: '', facingMode: alvo })
       if (this.state) {
         const camLive = !!this.localStream?.getVideoTracks().some((t) => t.readyState === 'live')
         if (camLive) {
-          const novo = await comFilaDeCaptura(() =>
-            md.getUserMedia({
-              video: { ...videoConstraintsFromPrefs(getCallMediaPrefs()), facingMode: { ideal: alvo } },
-            }),
-          )
-          const track = novo?.getVideoTracks()[0]
           const antigo = this.localStream?.getVideoTracks()[0] ?? null
+          try { antigo?.stop() } catch {  }
+          if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
+          await new Promise<void>((r) => setTimeout(r, 60))
+          const novo = await getLocalMedia({ video: videoConstraintsFromPrefs(getCallMediaPrefs()) })
+          const track = novo?.getVideoTracks()[0]
           if (track) {
-            try { antigo?.stop() } catch {  }
-            if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
             if (!this.localStream) this.localStream = new MediaStream([track])
             else try { this.localStream.addTrack(track) } catch {  }
             for (const pc of this.pcs.values()) {
@@ -2629,12 +2648,12 @@ export class CallManager {
     const proximo = nextCameraId(lista, atual)
     if (!proximo) throw new Error('não foi possível escolher a próxima câmera')
     if (!this.state) {
-      setCallMediaPrefs({ videoInputId: proximo })
+      setCallMediaPrefs({ videoInputId: proximo, facingMode: '' })
       return { deviceId: proximo, available: lista.length }
     }
     const camLive = !!this.localStream?.getVideoTracks().some((t) => t.readyState === 'live')
     if (!camLive) {
-      setCallMediaPrefs({ videoInputId: proximo })
+      setCallMediaPrefs({ videoInputId: proximo, facingMode: '' })
       try {
         this.onCallNotice?.('câmera trocada — a próxima transmissão já usa a nova')
       } catch {  }

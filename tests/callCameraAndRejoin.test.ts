@@ -55,6 +55,23 @@ test('sair do canal limpa o estado que impedia reentrar', () => {
   assert.match(bloco, /this\.state = null/)
 })
 
+test('pseudo-id de câmera nunca vira deviceId exato', () => {
+  const prefs = readFileSync('src/services/callMediaPrefs.ts', 'utf8')
+  assert.match(
+    prefs,
+    /videoInputId\.startsWith\('__'\)/,
+    'preferência envenenada por 1.1.51/1.1.52 é saneada na leitura',
+  )
+  assert.match(prefs, /facingMode/, 'frontal/traseira usa facingMode, não deviceId falso')
+  const mgr = readFileSync('src/services/callManager.ts', 'utf8')
+  assert.doesNotMatch(
+    mgr,
+    /videoInputId: alvo === 'user' \? '__user'/,
+    'gravar __user como deviceId deixa a câmera quebrada entre sessões',
+  )
+  assert.match(mgr, /setCallMediaPrefs\(\{ videoInputId: '', facingMode: alvo \}\)/)
+})
+
 test('a grade usa o stream local mesmo antes do primeiro quadro', () => {
   const tiles = readFileSync('src/services/callTiles.ts', 'utf8')
   assert.match(
