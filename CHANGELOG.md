@@ -1,5 +1,28 @@
 # CHANGELOG
 
+## [1.1.43-pre-alpha] - 2026-11-02
+
+### Barra de compartilhamento de tela: sem dependência nenhuma
+
+A correção da 1.1.42 escondia a barra, mas pagava com dependências que o app não
+tinha: `ToolHelp` no `windows-sys` para montar a árvore de PIDs, e `Gdi` +
+`LibraryLoader` só para um teste. Tudo isso saiu.
+
+Agora o processo dono da janela é identificado por `OpenProcess` +
+`QueryFullProcessImageNameW` (já em `Win32_System_Threading`, feature que o app
+já usava) comparando o sufixo do executável com `msedgewebview2.exe`. O PID do
+próprio app é aceito sem consulta — caminho quente.
+
+Resultado: o `Cargo.toml` do `src-tauri` ficou **idêntico** ao da 1.1.41 (três
+features) e o `Cargo.lock` só muda a linha de versão do app. Nenhum crate novo.
+
+O `hide` também virou tudo-ou-nada: se uma rodada não achar a barra, o estado é
+desfeito — uma janela escondida por engano nunca fica invisível para sempre.
+
+**Verificação:** 10 testes Rust em `sharebar.rs`, 378 unitários, typecheck e
+lint limpos. Provado ponta a ponta com um processo `msedgewebview2.exe` criando
+a janela (472x70, `ex=0x00200008`, `st=0x16080000`) e o vigia a escondendo.
+
 ## [1.1.42-pre-alpha] - 2026-11-02
 
 ### Barra de compartilhamento de tela escondida de verdade
@@ -15,8 +38,7 @@ janela real é `Chrome_WidgetWin_*`. E ela nasce no processo
 Agora a identificação é por **forma e estilo**: `Chrome_WidgetWin_*`, faixa
 fina e larga (proporção ≥ 3:1 — medida 472x70), TOPMOST e sem legenda. O
 critério é proporção, não pixel: a 150% de escala a mesma barra mede ~708x105.
-A varredura usa a árvore de PIDs (ToolHelp) e `EnumChildWindows` (a miniatura é
-owned). Um vigia nativo no Rust esconde a barra 4x/s enquanto o share durar — o
+Um vigia nativo no Rust esconde a barra 4x/s enquanto o share durar — o
 Chromium a recria ao trocar de fonte e não avisa.
 
 **Verificação:** 8 testes Rust em `sharebar.rs`, 375 testes unitários,
