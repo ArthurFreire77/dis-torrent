@@ -18,6 +18,7 @@
 import { useEffect, useState } from 'react'
 import { Ic } from '../../shared/icons'
 import { services } from '../../services'
+import { filterLiveVoiceRows, type VoiceRow } from '../../services/voicePresence'
 
 export interface VoicePeerRow {
   fp: string
@@ -31,9 +32,42 @@ export interface VoicePeerRow {
  * A fonte é o MOTOR (`voiceStates`), não o roster local: é o mesmo dado que a
  * barra de voz usa, então quem aparece aqui é quem realmente está conectado.
  * O poll é de 15 s + evento, para não martelar o SQLite numa lista de canais.
+ *
+ * FANTASMAS: `voice_states` é persistente e guarda quem fechou o app sem sair
+ * (o print do dono tinha um "segura" que não estava lá). Aqui a lista é
+ * cruzada com as sessões VIVAS — só fica quem está online, mais eu.
  */
-export function useChannelVoicePeers(communityId: string, channelId: string, enabled = true): VoicePeerRow[] {
+export function useChannelVoicePeers(
+  communityId: string,
+  channelId: string,
+  enabled = true,
+  myFp = '',
+): VoicePeerRow[] {
   const [rows, setRows] = useState<VoicePeerRow[]>([])
+  // Sessões vivas agora. `null` = o motor ainda não respondeu: aí NÃO se
+  // filtra (senão a lista inteira pisca vazia a cada reconexão).
+  const [online, setOnline] = useState<Set<string> | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const lerOnline = () => {
+      services.peersList()
+        .then((ps) => {
+          if (!alive) return
+          const vivos = new Set<string>()
+          for (const p of ps ?? []) if (p?.fp && p.state === 'CONNECTED') vivos.add(p.fp)
+          setOnline(vivos)
+        })
+        .catch(() => { /* motor ainda subindo: mantém o último conjunto */ })
+    }
+    lerOnline()
+    const t = window.setInterval(lerOnline, 10_000)
+    const un = services.subscribe((ev) => {
+      if (ev.type === 'peer_online' || ev.type === 'peer_offline' || ev.type === 'state_changed') lerOnline()
+    })
+    return () => { alive = false; window.clearInterval(t); un() }
+  }, [])
+
   useEffect(() => {
     if (!enabled) { setRows((cur) => (cur.length === 0 ? cur : [])); return }
     let alive = true
@@ -42,11 +76,17 @@ export function useChannelVoicePeers(communityId: string, channelId: string, ena
         .voiceStates(communityId, channelId)
         .then((v) => {
           if (!alive) return
-          const next = (v as Array<[string, boolean, boolean]>).map(([fp, muted, deafened]) => ({
+          const cru: VoiceRow[] = (v as Array<[string, boolean, boolean]>).map(([fp, muted, deafened]) => ({
             fp,
             muted,
             deafened,
           }))
+          const next = filterLiveVoiceRows(cru, {
+            myFp,
+            onlineFps: online ?? new Set<string>(),
+            // Sem a lista de sessões ainda: mostra o que o motor tem.
+            filtrar: online !== null,
+          })
           // Evita re-render quando nada mudou (a lista de canais inteira
           // re-renderiza junto, e são N canais × 15 s).
           setRows((cur) =>
@@ -71,7 +111,7 @@ export function useChannelVoicePeers(communityId: string, channelId: string, ena
       }
     })
     return () => { alive = false; window.clearInterval(t); un() }
-  }, [communityId, channelId, enabled])
+  }, [communityId, channelId, enabled, myFp, online])
   return rows
 }
 
@@ -91,7 +131,7 @@ export function ChannelVoicePeers({
   nameOf: (fp: string) => string
   palette: { muted: string; text: string; heading: string; green: string; red: string }
 }) {
-  const rows = useChannelVoicePeers(communityId, channelId)
+  const rows = useChannelVoicePeers(communityId, channelId, true, myFp)
   if (rows.length === 0) return null
   return (
     <div

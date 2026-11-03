@@ -22,6 +22,7 @@ import CallTilesGrid from '../components/calls/CallTilesGrid'
 import VoiceStage from '../components/calls/VoiceStage'
 import { resolveVoiceLayout, callScreenTitle } from '../services/voiceLayout'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
+import { filterLiveVoiceRows } from '../services/voicePresence'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
@@ -2098,23 +2099,34 @@ export default function ThemeShell({ designId }: {designId:string}){
   }
 
   /**
-   * QUEM ESTÁ NA CHAMADA, para o lobby e a coluna de controles.
+   * QUEM ESTÁ NA CHAMADA, para o palco e a lista de pessoas.
    *
    * Fonte dupla de propósito: o roster do manager (quem já trocou mídia) e o
    * `voiceStates` do motor (quem entrou e ainda está abrindo o microfone).
-   * Só o primeiro deixava o lobby dizer "ninguém na chamada" com gente dentro.
-   * Fica DEPOIS de `nameOfFp` porque os nomes reais são a razão de existir.
+   * Só o primeiro deixava o palco dizer "ninguém na chamada" com gente dentro.
+   *
+   * FANTASMAS: `voice_states` é persistente — quem fechou o app sem sair fica
+   * na tabela para sempre (o "segura" do print). O filtro cruza com as sessões
+   * VIVAS; a linha fantasma não vira card nem abre par.
    */
   const channelCallPeers = useMemo(() => {
-    const vistos = new Map<string, { fp: string; nome: string; muted?: boolean; deafened?: boolean; eu?: boolean }>()
     const eu = identity?.fingerprint ?? ''
-    for (const [fp, muted, deafened] of voiceStates) {
+    const vivos = new Set(onlinePeers.filter((p) => p.state === 'CONNECTED').map((p) => p.fp))
+    const vistos = new Map<string, { fp: string; nome: string; muted?: boolean; deafened?: boolean; eu?: boolean }>()
+    const doMotor = filterLiveVoiceRows(
+      voiceStates.map(([fp, muted, deafened]) => ({ fp, muted, deafened })),
+      { myFp: eu, onlineFps: vivos, filtrar: vivos.size > 0 },
+    )
+    for (const r of doMotor) {
+      const fp = r.fp
       if (!fp) continue
-      vistos.set(fp, { fp, nome: nameOfFp(fp) || fp.slice(0, 8), muted: !!muted, deafened: !!deafened, eu: fp === eu })
+      vistos.set(fp, { fp, nome: nameOfFp(fp) || fp.slice(0, 8), muted: !!r.muted, deafened: !!r.deafened, eu: fp === eu })
     }
     for (const p of (activeCall?.participants ?? []) as any[]) {
       const fp = String(p?.fp ?? '')
       if (!fp) continue
+      // Mesma regra do motor: participante fantasma não entra no palco.
+      if (fp !== eu && vivos.size > 0 && !vivos.has(fp)) continue
       const antes = vistos.get(fp)
       vistos.set(fp, {
         fp,
@@ -2125,7 +2137,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       })
     }
     return [...vistos.values()].sort((a, b) => (a.eu === b.eu ? a.nome.localeCompare(b.nome) : a.eu ? -1 : 1))
-  }, [voiceStates, activeCall?.participants, identity?.fingerprint])
+  }, [voiceStates, activeCall?.participants, identity?.fingerprint, onlinePeers])
 
   async function createThreadFrom(m: StoredMessage) {
     if (!selCommunity || !selConv) { setError('threads são de servidor — abra um canal de comunidade'); return }
@@ -3013,7 +3025,10 @@ export default function ThemeShell({ designId }: {designId:string}){
             <VoiceStage
               layout={voiceLayout}
               palette={{
-                stage: bg, panel: '#0f0f0f', input: inputBg, border: borderColor,
+                // GOOGLE MEET: cinza padrão em tudo. Antes o palco era `bg`
+                // (quase preto) com painel '#0f0f0f' — o print do dono mostrava
+                // um bloco preto ao lado da chamada.
+                stage: '#1f1f1f', panel: '#2a2a2a', input: '#333333', border: '#3c3c3c',
                 heading: t.heading, text, muted, green: t.green, red: t.red,
                 yellow: t.yellow, accent: t.accent,
               }}
@@ -3052,6 +3067,10 @@ export default function ThemeShell({ designId }: {designId:string}){
                 />
               }
               peers={channelCallPeers}
+              waitingAlone={
+                inThisCall &&
+                channelCallPeers.filter((p) => !p.eu).length === 0
+              }
               unavailable={!callsOk ? callsUnavailableDetail : null}
               busy={!!activeCall && !inThisCall}
               notice={notice}
@@ -3378,7 +3397,9 @@ export default function ThemeShell({ designId }: {designId:string}){
             </div>
           )}
         </div>
-        {/* Painel de membros à direita — estilo Discord original */}
+        {/* Painel de membros à direita — estilo Discord original.
+            SEMPRE visível, inclusive na chamada: o pedido do dono é manter a
+            barra de servidores e a de online, e mexer só no espaço do MEIO. */}
         {view === 'servidores' && selCommunity && (
           <div style={{ width: 240, background: sidebarBg, borderLeft: `1px solid ${borderColor}`, display: 'flex', flexDirection: 'column', overflowY: 'auto', flexShrink: 0 }} className="hide-mobile">
             {bots.length > 0 && (

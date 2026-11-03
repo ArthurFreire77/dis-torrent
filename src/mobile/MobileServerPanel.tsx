@@ -51,7 +51,7 @@ function ChannelRow({
   // Só canais de chamada consultam: um poll por canal de TEXTO era N×15 s de
   // SQLite à toa numa lista longa.
   const callable = channel.kind === 'voice' || channel.kind === 'video'
-  const peers = useChannelVoicePeers(communityId, channel.id, callable)
+  const peers = useChannelVoicePeers(communityId, channel.id, callable, myFp)
   const isCall = callable
 
   return (

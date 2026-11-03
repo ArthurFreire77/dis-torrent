@@ -1,27 +1,30 @@
-// VoiceStage — a TELA ÚNICA de chamada (canal de voz/vídeo, DM e grupo).
+// VoiceStage — a TELA ÚNICA de chamada (canal de voz/vídeo).
 //
 // ## Por que existe
 //
 // Relato do dono (com print): "a interface tá uma merda na tela de servidores,
-// unifica; faz um padrão que pega a tela do lado direito mais completa, tudo
-// completo unificado". Antes existiam TRÊS desenhos para a mesma chamada:
+// unifica; faz um padrão que pega a tela do lado direito mais completa".
 //
-//   1. `CallChannelStage` — cartão de 520 px no centro, fora da chamada;
-//   2. palco de quadrados no centro + painel lateral fixo de 300 px (com
-//      cabeçalho próprio, diagnóstico, qualidade, botões) — dentro da chamada
-//      de canal;
-//   3. painel lateral de até 56vw com OUTRO cabeçalho — chamada de DM/grupo.
+// A primeira versão ainda tinha uma COLUNA preta fixa à direita: em cima a
+// lista "NA CHAMADA" e três botões, embaixo os controles, e no meio um vazio
+// gigante. O palco ficava espremido à esquerda e os cards viravam duas
+// colunas compridas de avatar.
 //
-// A mesma chamada mudava de forma ao entrar/sair, os controles pulavam de
-// lugar e a mídia aparecia em dois tamanhos diferentes. Aqui há UM componente:
-// palco (mídia) + coluna de controles, sempre com o mesmo cabeçalho e os
-// mesmos botões. A regra de layout é pura (`services/voiceLayout.ts`).
+// ## Desenho atual (pedido do dono: "tipo um Google Meet")
+//
+// - fundo CINZA padrão em tudo (nada de preto);
+// - barra fina no topo: nome do canal, tempo e rota;
+// - a mídia ocupa o MEIO, em cards 16:9 centralizados;
+// - os CONTROLES ficam numa barra flutuante no rodapé do meio (mic, câmera,
+//   tela, ajustes, sair) — sem coluna lateral;
+// - quem está na chamada e os extras (diagnóstico/arquivo) ficam num painel
+//   que ABRE por cima, atrás de um botão — o palco nunca é espremido por ele.
 //
 // IMPORTANTE: os `<audio>` remotos vivem nos `CallTile` (via `CallTilesGrid`).
 // Este componente NUNCA deve ser renderizado sem eles quando já há chamada —
 // uma tela de chamada sem os tiles conecta, conta o tempo e fica muda.
 
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Icon, Icons } from '../../shared/icons'
 import CallPhaseBadge from '../CallPhaseBadge'
 import type { CallPhase } from '../../services/callPhases'
@@ -30,7 +33,7 @@ import { participantsLabel, type VoiceLayout } from '../../services/voiceLayout'
 export interface VoiceStagePalette {
   /** Fundo do palco (área da mídia). */
   stage: string
-  /** Fundo da coluna de controles. */
+  /** Fundo das barras (topo/controles). */
   panel: string
   /** Fundo de campos/botões secundários. */
   input: string
@@ -72,9 +75,16 @@ export interface VoiceStageProps {
   ringing?: boolean
   /** Rota ICE resumida (LAN/STUN/TURN/sem rota). */
   route?: string
+  /**
+   * Estou sozinho no canal, esperando alguém entrar.
+   *
+   * Muda o texto de "Conectando…" para "Esperando alguém entrar": sozinho não
+   * existe negociação em andamento, e prometer conexão seria mentira.
+   */
+  waitingAlone?: boolean
   /** Quadrados da chamada — obrigatórios dentro da chamada. */
   media?: ReactNode
-  /** Quem está na chamada (lista lateral enquanto NÃO entrou). */
+  /** Quem está na chamada (lista do painel). */
   peers?: VoiceStagePeer[]
   /** Motivo honesto de não poder entrar (null = pode). */
   unavailable?: string | null
@@ -82,7 +92,7 @@ export interface VoiceStageProps {
   busy?: boolean
   /** Aviso transitório (erro/qualidade) acima dos controles. */
   notice?: string | null
-  /** Conteúdo extra no topo da coluna de controles (diagnóstico etc.). */
+  /** Conteúdo extra no painel de pessoas (diagnóstico, adicionar amigo…). */
   extra?: ReactNode
   muted: boolean
   deafened: boolean
@@ -99,9 +109,9 @@ export interface VoiceStageProps {
   screenAvailable?: boolean
   screenUnavailableReason?: string | null
   onOpenSettings?: () => void
-  /** Painel de ajustes (já renderizado pelo shell) — aparece dentro da coluna. */
+  /** Painel de ajustes (já renderizado pelo shell) — abre por cima do palco. */
   settings?: ReactNode
-  /** `true` no celular: controles viram barra inferior e o palco sobe. */
+  /** `true` no celular: barra de controles simplificada. */
   compact?: boolean
 }
 
@@ -115,7 +125,7 @@ function fmtDuracao(ms: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
-/** Botão redondo dos controles (o mesmo desenho em PC e celular). */
+/** Botão redondo dos controles (Google Meet: cinza; desligado = vermelho). */
 function ControlButton({
   label,
   icon,
@@ -123,7 +133,7 @@ function ControlButton({
   danger,
   disabled,
   onClick,
-  size = 44,
+  size = 46,
   children,
 }: {
   label: string
@@ -151,16 +161,18 @@ function ControlButton({
         border: 'none',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.45 : 1,
-        // Vermelho só quando é estado RUIM (mudo, surdo, sair). Ligado = verde.
-        background: danger ? '#f23f42' : ativo ? '#23a559' : 'rgba(255,255,255,.12)',
+        // Cinza = estado neutro/ligado (padrão do Meet). Vermelho só quando é
+        // estado RUIM de verdade: microfone mudo, ensurdecido ou Sair.
+        background: danger ? '#ea4335' : on ? 'rgba(255,255,255,.16)' : 'rgba(255,255,255,.10)',
         color: '#fff',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         flexShrink: 0,
+        transition: 'background 120ms ease',
       }}
     >
-      {children ?? (icon ? <Icon d={icon} size={Math.round(size * 0.42)} /> : null)}
+      {children ?? (icon ? <Icon d={icon} size={Math.round(size * 0.44)} /> : null)}
     </button>
   )
 }
@@ -178,6 +190,7 @@ export function VoiceStage({
   mediaLive,
   ringing,
   route,
+  waitingAlone,
   media,
   peers = [],
   unavailable,
@@ -203,8 +216,10 @@ export function VoiceStage({
 }: VoiceStageProps) {
   const entrarBloqueado = !inCall && (busy || !!unavailable)
   const duracao = inCall ? fmtDuracao(Math.max(0, nowMs - startAt)) : ''
+  /** Painel de pessoas/extras: fecha por padrão para o palco ficar limpo. */
+  const [painelAberto, setPainelAberto] = useState(false)
 
-  const listaPeers = peers.length > 0 && (
+  const listaPeers = (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
       {peers.map((p) => {
         const mudo = !!(p.muted || p.deafened)
@@ -213,26 +228,29 @@ export function VoiceStage({
             key={p.fp}
             title={p.deafened ? `${p.nome} — surdo` : p.muted ? `${p.nome} — microfone mudo` : p.nome}
             style={{
-              display: 'flex', alignItems: 'center', gap: 7, minWidth: 0,
-              fontSize: 12.5, fontWeight: 600, lineHeight: 1.5,
+              display: 'flex', alignItems: 'center', gap: 8, minWidth: 0,
+              padding: '7px 6px', borderRadius: 8,
+              fontSize: 13, fontWeight: 500, lineHeight: 1.4,
               color: mudo ? c.muted : c.text,
             }}
           >
-            <span style={{ display: 'flex', flexShrink: 0, color: mudo ? c.red : c.green }}>
-              <Icon d={p.deafened ? Icons.volumeX : p.muted ? Icons.micOff : Icons.mic} size={12} />
+            <span style={{ display: 'flex', flexShrink: 0, color: mudo ? c.red : c.muted }}>
+              <Icon d={p.deafened ? Icons.volumeX : p.muted ? Icons.micOff : Icons.mic} size={14} />
             </span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
               {p.eu ? 'você' : p.nome}
             </span>
+            {p.eu && (
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.4, color: c.muted }}>EU</span>
+            )}
           </span>
         )
       })}
     </div>
   )
 
-  // ── Controles ───────��────────────────────────────────────────────────────
-  // Sempre os MESMOS botões, na MESMA ordem, nos dois estados: entrar (verde)
-  // ou sair (vermelho) no fim. Antes o "Sair" morava em três lugares distintos.
+  // ── Controles: barra ARREDONDADA flutuante no rodapé do meio ─────────────
+  // (pedido do dono: "joga tudo isso lá pro meio, tipo Google Meet").
   const controles = (
     <div
       style={{
@@ -240,12 +258,17 @@ export function VoiceStage({
         alignItems: 'center',
         justifyContent: 'center',
         gap: 10,
-        flexWrap: 'wrap',
-        padding: compact ? '10px 8px' : 12,
-        paddingBottom: compact ? 'calc(10px + env(safe-area-inset-bottom))' : 12,
+        flexWrap: compact ? 'nowrap' : 'wrap',
+        padding: compact ? '8px 10px' : '10px 16px',
+        paddingBottom: compact ? 'calc(8px + env(safe-area-inset-bottom))' : 10,
         background: c.panel,
-        borderTop: `1px solid ${c.border}`,
-        flexShrink: 0,
+        border: `1px solid ${c.border}`,
+        borderRadius: compact ? 0 : 999,
+        boxShadow: compact ? 'none' : '0 6px 24px rgba(0,0,0,.45)',
+        // A barra flutua sobre o palco, como no Meet.
+        ...(compact
+          ? { flexShrink: 0 }
+          : { position: 'absolute' as const, left: '50%', bottom: 20, transform: 'translateX(-50%)', zIndex: 3 }),
       }}
     >
       {inCall ? (
@@ -272,10 +295,13 @@ export function VoiceStage({
             }
             icon={Icons.video}
             on={cameraOn}
+            // Câmera desligada NÃO é erro (o Meet pinta de cinza): só o mic
+            // mudo e o surdo usam vermelho, que aí sim é um estado ruim.
+            danger={false}
             disabled={cameraDisabled}
             onClick={onToggleCamera}
           />
-          {onToggleScreen && (
+          {onToggleScreen && !compact && (
             <ControlButton
               label={
                 sharing
@@ -291,37 +317,40 @@ export function VoiceStage({
               onClick={onToggleScreen}
             />
           )}
-          {onOpenSettings && (
+          {onOpenSettings && !compact && (
             <ControlButton
               label="Configurações da chamada (mic, câmera, resolução, FPS)"
               icon={Icons.gear}
+              on={false}
+              danger={false}
               onClick={onOpenSettings}
             />
           )}
+          <span style={{ width: 1, height: 32, background: c.border, margin: '0 2px' }} />
           <button
             type="button"
             onClick={onLeave}
             aria-label="Sair da chamada"
             title="Sair da chamada"
             style={{
-              height: 44,
-              minWidth: compact ? 96 : 104,
-              padding: '0 18px',
-              borderRadius: 22,
+              height: 46,
+              minWidth: 84,
+              padding: '0 20px',
+              borderRadius: 23,
               border: 'none',
-              background: c.red,
+              background: '#ea4335',
               color: '#fff',
               cursor: 'pointer',
-              fontSize: 13.5,
-              fontWeight: 800,
+              fontSize: 14,
+              fontWeight: 700,
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: 7,
+              gap: 8,
               flexShrink: 0,
             }}
           >
-            <Icon d={Icons.phone} size={16} rotate={135} /> Sair
+            <Icon d={Icons.phone} size={17} rotate={135} /> Sair
           </button>
         </>
       ) : (
@@ -337,12 +366,12 @@ export function VoiceStage({
             padding: '0 26px',
             borderRadius: 24,
             border: 'none',
-            background: unavailable ? c.border : c.green,
+            background: unavailable ? c.border : '#1a73e8',
             color: '#fff',
             cursor: entrarBloqueado ? 'not-allowed' : 'pointer',
             opacity: entrarBloqueado ? 0.7 : 1,
             fontSize: 14.5,
-            fontWeight: 800,
+            fontWeight: 700,
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -356,43 +385,58 @@ export function VoiceStage({
     </div>
   )
 
-  // ── Cabeçalho (um só desenho nos dois estados) ───────────────────────────
+  // ── Barra do topo: nome, tempo/fase, rota e o botão de pessoas ───────────
   const cabecalho = (
     <div
       style={{
         display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-        padding: compact ? '8px 12px' : '10px 16px',
-        paddingTop: compact ? 'calc(8px + env(safe-area-inset-top))' : 10,
+        padding: compact ? '8px 12px' : '8px 16px',
+        paddingTop: compact ? 'calc(8px + env(safe-area-inset-top))' : 8,
         background: c.panel,
         borderBottom: `1px solid ${c.border}`,
         flexShrink: 0,
+        minHeight: 52,
       }}
     >
       <span
         style={{
-          width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-          background: `${c.accent}22`, color: c.accent,
+          width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+          background: 'rgba(255,255,255,.1)', color: c.text,
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         }}
       >
-        <Icon d={kind === 'video' ? Icons.video : Icons.phone} size={17} />
+        <Icon d={kind === 'video' ? Icons.video : Icons.phone} size={16} />
       </span>
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={{
-          display: 'block', fontSize: compact ? 14.5 : 15, fontWeight: 800, color: c.heading,
+          display: 'block', fontSize: compact ? 14 : 14.5, fontWeight: 600, color: c.heading,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{title}</span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2, flexWrap: 'wrap' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 1, flexWrap: 'wrap' }}>
           {inCall ? (
             <>
-              <CallPhaseBadge
-                phase={phase}
-                startAt={startAt}
-                nowMs={nowMs}
-                mediaLive={mediaLive}
-                ringing={ringing}
-              />
-              <span style={{ fontSize: 11, color: c.muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>
+              {waitingAlone ? (
+                // SOZINHO no canal: não há negociação em curso. Prometer
+                // "Conectando…" aqui era o que parecia travado para sempre.
+                <span
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    fontSize: 11.5, fontWeight: 600, color: c.muted,
+                  }}
+                >
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: c.yellow ?? '#fdd663' }} />
+                  Esperando alguém entrar
+                </span>
+              ) : (
+                <CallPhaseBadge
+                  phase={phase}
+                  startAt={startAt}
+                  nowMs={nowMs}
+                  mediaLive={mediaLive}
+                  ringing={ringing}
+                />
+              )}
+              <span style={{ fontSize: 11, color: c.muted, fontVariantNumeric: 'tabular-nums' }}>
                 {duracao}
               </span>
             </>
@@ -405,26 +449,59 @@ export function VoiceStage({
             <span
               title="Rota real da mídia (ICE)"
               style={{
-                fontSize: 10, fontWeight: 800, letterSpacing: 0.4,
-                background: `${c.green}22`, color: c.green,
-                padding: '2px 8px', borderRadius: 99,
+                fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+                color: c.muted, border: `1px solid ${c.border}`,
+                padding: '1px 7px', borderRadius: 99,
               }}
             >rota {route}</span>
           )}
         </span>
       </span>
+
       {inCall && (
-        <span style={{ fontSize: 11.5, color: c.muted, whiteSpace: 'nowrap' }}>
-          {participantsLabel(peers.length)}
-        </span>
+        <button
+          type="button"
+          onClick={() => setPainelAberto((v) => !v)}
+          aria-label={`Quem está na chamada (${peers.length})`}
+          aria-expanded={painelAberto}
+          title="Pessoas na chamada"
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 7, flexShrink: 0,
+            height: 36, padding: '0 12px', borderRadius: 18,
+            background: painelAberto ? 'rgba(255,255,255,.18)' : 'rgba(255,255,255,.08)',
+            border: `1px solid ${c.border}`,
+            color: c.text, cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
+          }}
+        >
+          <Icon d={Icons.users} size={15} />
+          {peers.length}
+        </button>
       )}
     </div>
   )
 
-  // ── Palco ────────────────────────────────────────────────────────────────
+  // ── Palco: a mídia ocupa o meio; os controles flutuam embaixo ────────────
   const palco = inCall && layout.stageFill ? (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: c.stage }}>
-      {media}
+    <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: c.stage }}>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', paddingBottom: compact ? 0 : 92 }}>
+        {media}
+      </div>
+      {waitingAlone && (
+        // Chamada vazia: uma frase no meio do palco, sem card fantasma.
+        <div
+          style={{
+            position: 'absolute', left: 0, right: 0, top: 0, bottom: compact ? 0 : 92,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            pointerEvents: 'none', padding: 24,
+          }}
+        >
+          <span style={{ fontSize: 13.5, color: c.muted, textAlign: 'center', lineHeight: 1.6, maxWidth: 360 }}>
+            Você está na chamada. Quando alguém entrar, o áudio e o vídeo
+            aparecem aqui — pode ficar o tempo que quiser.
+          </span>
+        </div>
+      )}
+      {!compact && controles}
     </div>
   ) : null
 
@@ -434,19 +511,20 @@ export function VoiceStage({
       style={{
         flex: 1, minHeight: 0, overflowY: 'auto', background: c.stage,
         display: 'flex', alignItems: 'center', justifyContent: 'center', padding: compact ? 16 : 24,
+        position: 'relative',
       }}
     >
       <div style={{ width: '100%', maxWidth: compact ? 460 : 560, display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center' }}>
           <span style={{
-            width: 72, height: 72, borderRadius: 22,
+            width: 72, height: 72, borderRadius: 24,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: `${c.accent}22`, color: c.accent,
+            background: 'rgba(255,255,255,.1)', color: c.text,
           }}>
             <Icon d={kind === 'video' ? Icons.video : Icons.speaker} size={32} />
           </span>
-          <div style={{ fontSize: 19, fontWeight: 900, color: c.heading }}>{title}</div>
-          <div style={{ fontSize: 12.5, color: c.muted, lineHeight: 1.6, maxWidth: 420 }}>
+          <div style={{ fontSize: 20, fontWeight: 500, color: c.heading }}>{title}</div>
+          <div style={{ fontSize: 13, color: c.muted, lineHeight: 1.6, maxWidth: 420 }}>
             {kind === 'video'
               ? 'Canal de vídeo é uma chamada como a de voz. A câmera é opcional e liga no botão da chamada.'
               : 'Entre para falar com quem já está aqui. A mídia vai direto entre os membros (P2P).'}
@@ -462,76 +540,78 @@ export function VoiceStage({
               width: 9, height: 9, borderRadius: '50%', flexShrink: 0,
               background: peers.length > 0 ? c.green : c.muted,
             }} />
-            <span style={{ flex: 1, fontSize: 12.5, fontWeight: 800, color: c.text }}>
+            <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: c.text }}>
               {participantsLabel(peers.length)}
             </span>
           </div>
           {peers.length === 0 ? (
-            <div style={{ fontSize: 12, color: c.muted, lineHeight: 1.6 }}>
-              Ninguém no canal agora. Entrar abre a chamada para quem chegar depois —
-              todos os membros pareiam direto entre si (mesh), sem servidor de mídia.
+            <div style={{ fontSize: 12.5, color: c.muted, lineHeight: 1.6 }}>
+              Ninguém no canal agora. Entre e fique à vontade: quando alguém
+              chegar, a chamada conecta sozinha — todos pareiam direto entre si
+              (mesh), sem servidor de mídia.
             </div>
           ) : listaPeers}
-          {peers.length > 0 && (
-            <div style={{ fontSize: 11.5, color: c.muted, lineHeight: 1.5 }}>
-              Todos pareiam direto entre si (mesh). Sem rota direta, o app tenta relay;
-              se nada funcionar a chamada avisa em vez de ficar “conectada” sem áudio.
-            </div>
-          )}
           {notice && (
-            <div role="status" style={{ fontSize: 11.5, color: c.yellow ?? '#ffe0a3', lineHeight: 1.5 }}>
+            <div role="status" style={{ fontSize: 11.5, color: c.yellow ?? '#fdd663', lineHeight: 1.5 }}>
               {notice}
             </div>
           )}
           {!inCall && unavailable && (
-            <div role="alert" style={{ fontSize: 11.5, color: '#ff9c9c', lineHeight: 1.5 }}>
+            <div role="alert" style={{ fontSize: 11.5, color: '#f28b82', lineHeight: 1.5 }}>
               {unavailable}
             </div>
           )}
         </div>
       </div>
+      {!compact && controles}
     </div>
   )
 
-  // ── Coluna de controles (só no PC, dentro da chamada) ─────────────────────
-  const colunaControles = !compact && inCall && (
-    <div
-      style={{
-        width: layout.controlsWidthPx,
-        maxWidth: '46vw',
-        flexShrink: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
-        background: c.panel,
-        borderLeft: `1px solid ${c.border}`,
-        // Âncora dos painéis absolutos (ajustes/diagnóstico): sem isto eles se
-        // posicionavam pela janela e cobriam o palco.
-        position: 'relative',
-      }}
-    >
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {notice && (
-          <div role="status" style={{
-            fontSize: 11.5, lineHeight: 1.5, color: '#ffe0a3',
-            background: `${c.yellow ?? '#f0b232'}18`,
-            border: `1px solid ${(c.yellow ?? '#f0b232')}55`,
-            borderRadius: 8, padding: '8px 10px',
-          }}>{notice}</div>
-        )}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span style={{ fontSize: 10.5, fontWeight: 900, letterSpacing: 0.8, color: c.accent }}>
-            NA CHAMADA
+  // ── Painel de pessoas (abre por cima; não espreme o palco) ───────────────
+  const painelPessoas = painelAberto && inCall && (
+    <>
+      <div
+        onClick={() => setPainelAberto(false)}
+        style={{ position: 'absolute', inset: 0, zIndex: 4 }}
+        aria-hidden
+      />
+      <div
+        role="dialog"
+        aria-label="Pessoas na chamada"
+        style={{
+          position: 'absolute', top: compact ? 0 : 60, right: 12, zIndex: 5,
+          width: compact ? 'calc(100% - 24px)' : 300,
+          maxHeight: compact ? '70%' : 'calc(100% - 150px)',
+          overflowY: 'auto',
+          background: c.panel,
+          border: `1px solid ${c.border}`,
+          borderRadius: 12,
+          boxShadow: '0 12px 32px rgba(0,0,0,.55)',
+          padding: 12,
+          display: 'flex', flexDirection: 'column', gap: 10,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: c.heading }}>
+            Na chamada · {peers.length}
           </span>
-          {listaPeers}
+          <button
+            type="button"
+            onClick={() => setPainelAberto(false)}
+            aria-label="Fechar pessoas"
+            style={{ background: 'transparent', border: 'none', color: c.muted, cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
+          >✕</button>
         </div>
-        {extra}
-        {settings}
+        {peers.length === 0 ? (
+          <span style={{ fontSize: 12, color: c.muted }}>Só você por aqui.</span>
+        ) : listaPeers}
+        {extra && (
+          <div style={{ borderTop: `1px solid ${c.border}`, paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {extra}
+          </div>
+        )}
       </div>
-      {/* Os controles ficam SEMPRE na mesma posição (rodapé da coluna), em
-          qualquer entrada — é o "unificado" do pedido. */}
-      {controles}
-    </div>
+    </>
   )
 
   return (
@@ -542,6 +622,8 @@ export function VoiceStage({
         flex: 1,
         minWidth: 0,
         minHeight: 0,
+        // Âncora do painel de pessoas e da barra flutuante.
+        position: 'relative',
         display: 'flex',
         flexDirection: 'column',
         background: c.stage,
@@ -550,24 +632,13 @@ export function VoiceStage({
       }}
     >
       {layout.showChannelHeader && cabecalho}
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: compact ? 'column' : 'row' }}>
-        {compact ? (
-          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-            {palco}
-            {lobby}
-          </div>
-        ) : (
-          <>
-            <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-              {palco}
-              {lobby}
-            </div>
-            {colunaControles}
-          </>
-        )}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {palco}
+        {lobby}
       </div>
-      {compact && controles}
-      {!compact && !inCall && controles}
+      {compact && inCall && controles}
+      {painelPessoas}
+      {settings}
     </div>
   )
 }

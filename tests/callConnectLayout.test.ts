@@ -99,9 +99,10 @@ test('palco do canal de voz PREENCHE a área toda (relato do dono: "completar a 
   // O `fill` é EXCLUSIVO do centro do canal: painel lateral e mobile
   // continuam com quadrados com teto (o esticamento de antes era lá).
   assert.match(grid, /fill\?: boolean/, 'prop fill existe')
-  assert.equal(grid.split('gridAutoRows').length - 1, 1, 'só o palco usa linhas de grid')
-  const primeiroUso = shell.indexOf('<CallTilesGrid')
-  assert.match(shell.slice(primeiroUso, primeiroUso + 800), /\bfill\b/, 'a grade do canal recebe o modo palco')
+  // Um `gridAutoRows` para o palco e um para a grade normal (wrap não usa).
+  assert.equal(grid.split('gridAutoRows').length - 1, 2, 'cada modo de grade define as próprias linhas')
+  const primeiroUso = shell.indexOf('<VoiceStage')
+  assert.match(shell.slice(primeiroUso, primeiroUso + 4000), /\bfill\b/, 'a grade do canal recebe o modo palco')
 })
 
 test('em chamada de canal o painel lateral fica fora da tela unificada', () => {

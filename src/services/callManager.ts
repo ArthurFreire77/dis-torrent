@@ -1727,16 +1727,16 @@ export class CallManager {
         }
       }
       if (anyAlive) return
-      // CANAL VAZIO NÃO É FALHA: sala ociosa não é ICE travado — reagenda (teto de 3 postergações).
+      // CANAL VAZIO NÃO É FALHA — ESPERA PARA SEMPRE.
+      //
+      // Decisão do dono: "eu posso ficar lá na call esperando alguém conectar,
+      // o tempo que eu quiser". Antes havia um teto de 3 postergações (~60 s):
+      // depois dele o watchdog parava de vigiar e o canal ficava sem ninguém
+      // observando a mídia. Agora, enquanto NÃO houver par, ele só reagenda —
+      // quem entra depois ainda é vigiado quando o par nascer.
       if (this.pcs.size === 0 && st.callId.startsWith('voice-')) {
-        if (this.connectWatchdogGrants < 3) {
-          this.connectWatchdogGrants++
-          this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
-          return
-        }
-        // Mesmo teto atingido: avisa, mas NÃO sai do canal sozinho. Sair é
-        // decisão do usuário; a sala continua disponível para quem chegar.
-        this.setFailureCause('ninguém conectou a mídia ainda — o canal segue aberto aguardando participantes')
+        this.connectWatchdogGrants = 0
+        this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
         return
       }
       // ICE ainda COLETANDO: não force restart (jogaria fora o gathering) — dá mais uma janela.

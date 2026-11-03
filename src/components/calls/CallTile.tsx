@@ -56,6 +56,15 @@ function readAspect(el: HTMLVideoElement | null): string | null {
   }
 }
 
+/**
+ * Proporção do card de PESSOA (não da tela).
+ *
+ * Sem isto o quadrado era esticado pela linha da grade até o rodapé: no print
+ * do dono apareciam duas colunas de 800 px de altura com um avatar de 104 px
+ * no meio do vazio. Vídeo de chamada é 16:9; o card segue a mesma forma.
+ */
+const PARTICIPANT_ASPECT = '16 / 9'
+
 export function CallTile({
   tile,
   pinned = false,
@@ -161,6 +170,23 @@ export function CallTile({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
+        // CARD DE PESSOA: proporção de vídeo + teto. Sem o `aspectRatio` o card
+        // era esticado pela linha da grade e virava uma coluna comprida de
+        // avatar (o print do dono). Expandido/miniatura e TELA têm regra
+        // própria abaixo/antes.
+        ...(isScreen || expanded || thumbnail
+          ? null
+          : {
+              aspectRatio: PARTICIPANT_ASPECT,
+              // Teto de 420px: numa sala de 2 pessoas em 1600px de largura um
+              // card de 1200px de largura teria 675px de altura e ainda
+              // pareceria um retângulo vazio.
+              maxHeight: 420,
+              width: '100%',
+              maxWidth: 760,
+              alignSelf: 'center',
+              justifySelf: 'center',
+            }),
         border: `2px solid ${
           tile.speaking && !isScreen ? c.green : tile.muted ? `${c.red}55` : isScreen ? `${c.accent}66` : 'transparent'
         }`,
@@ -261,7 +287,11 @@ export function CallTile({
                   ? 'câmera ativa no motor nativo — prévia indisponível nesta tela'
                   : tile.isLocal
                     ? 'sua câmera está desligada'
-                    : 'aguardando o vídeo…'}
+                    // Remoto sem vídeo: NÃO é "aguardando o vídeo" (parecia travado).
+                    // Pode estar com a câmera desligada de propósito.
+                    : tile.cameraOn === false
+                      ? 'câmera desligada'
+                      : 'conectando o vídeo…'}
             </div>
           </div>
         )}

@@ -71,8 +71,13 @@ export default function CallTilesGrid({
 
   if (fill) {
     // PALCO do canal de voz: preenche a área toda (pedido do dono — "completar
-    // a tela como nos amigos, num espaço maior"). Colunas por raiz quadrada:
-    // 1→1, 2→2, 3-4→2, 5-6→3…
+    // a tela como nos amigos, num espaço maior").
+    //
+    // BUG REAL (print do dono: "essa interface está péssima"): com
+    // `gridAutoRows: minmax(200px, 1fr)` os cards esticavam até o rodapé e
+    // viravam DUAS COLUNAS compridas de avatar no meio de um mar de vazio.
+    // Agora os quadrados têm proporção de vídeo (16:9), teto de altura e a
+    // grade centraliza o conjunto — como uma chamada de verdade.
     const colunas = Math.max(1, Math.ceil(Math.sqrt(tiles.length)))
     return (
       <div
@@ -80,17 +85,29 @@ export default function CallTilesGrid({
           flex: 1,
           minHeight: 0,
           display: 'grid',
-          gap: 10,
+          gap: 12,
           padding,
           gridTemplateColumns: `repeat(${colunas}, minmax(0, 1fr))`,
-          // Piso de 200px: com muita gente as linhas rolam em vez de colapsar.
-          gridAutoRows: 'minmax(200px, 1fr)',
+          // `minmax(0, 1fr)` na linha + teto por card: o card nunca estica
+          // além da proporção; o que sobra vira margem, não um retângulo.
+          gridAutoRows: 'minmax(0, 1fr)',
+          alignContent: 'center',
+          justifyContent: 'center',
           overflowY: 'auto',
           background,
         }}
       >
         {tiles.map((t) => (
-          <div key={t.id} style={{ minWidth: 0, minHeight: 0, display: 'flex' }}>
+          <div
+            key={t.id}
+            style={{
+              minWidth: 0,
+              minHeight: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
             {renderTile(t)}
           </div>
         ))}
