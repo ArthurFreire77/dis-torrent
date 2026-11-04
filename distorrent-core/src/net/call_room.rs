@@ -1,7 +1,3 @@
-// Salas de chamada anunciadas (grupo/DM).
-// O `CallInvite` só chega a quem foi chamado; esta sala é anunciada para toda
-// a conversa, para os outros verem a chamada e poderem entrar.
-
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -9,7 +5,6 @@ pub struct Room {
     pub call_id: String,
     pub conv_id: String,
     pub kind: String,
-    /// Quem publicou; não troca enquanto a sala viver.
     pub host_fp: String,
     pub participants: Vec<String>,
     pub updated_ms: i64,
@@ -21,8 +16,6 @@ pub struct Rooms {
 }
 
 impl Rooms {
-    /// Abre/atualiza. A primeira publicação define o host, e só ele atualiza
-    /// a lista de participantes.
     pub fn open(
         &mut self,
         call_id: &str,
@@ -34,9 +27,6 @@ impl Rooms {
     ) -> Room {
         match self.map.get_mut(conv_id) {
             Some(r) if r.call_id == call_id => {
-                // Só o HOST renova o TTL. Antes qualquer publish renovava: com
-                // o host morto, os joiners mantinham a sala viva para sempre e
-                // o "Entrar" aparecia numa chamada que não existe mais.
                 if r.host_fp == publisher_fp {
                     r.participants = participants;
                     r.updated_ms = now_ms;
@@ -62,13 +52,28 @@ impl Rooms {
         self.map.remove(conv_id)
     }
 
-    /// Troca a lista de participantes SEM mexer no host nem no `call_id`.
-    /// Usado quando alguém SAI e a chamada continua (ver `leave_room`).
     pub fn set_participants(&mut self, conv_id: &str, participants: Vec<String>) {
         if let Some(r) = self.map.get_mut(conv_id) {
             r.participants = participants;
             r.updated_ms = crate::identity::now_ms();
         }
+    }
+
+    /// Tira um participante e, se ele era o host, passa o comando adiante.
+    /// Sem a troca de host a sala fica presa num anúncio que ninguém renova.
+    pub fn remove_member(&mut self, conv_id: &str, fp: &str) -> Option<Room> {
+        let r = self.map.get_mut(conv_id)?;
+        r.participants.retain(|p| p != fp);
+        if r.host_fp == fp {
+            r.host_fp = r.participants.first().cloned().unwrap_or_default();
+        }
+        r.updated_ms = crate::identity::now_ms();
+        let vazio = r.participants.is_empty();
+        let clone = r.clone();
+        if vazio {
+            self.map.remove(conv_id);
+        }
+        Some(clone)
     }
 
     pub fn get(&self, conv_id: &str) -> Option<&Room> {
@@ -81,7 +86,6 @@ impl Rooms {
         v
     }
 
-    /// Fecha salas sem renovação (peer caiu sem mandar `closed`).
     pub fn reap(&mut self, older_than_ms: i64, now_ms: i64) -> Vec<Room> {
         let dead: Vec<String> = self
             .map
@@ -115,8 +119,6 @@ mod tests {
         assert!(r.get("conv").is_none());
     }
 
-    /// Sair de um participante não pode apagar a sala dos outros: só troca a
-    /// lista. Era o bug "um convidado sai e o botão Entrar some para todos".
     #[test]
     fn set_participants_nao_troca_host_nem_call_id() {
         let mut r = Rooms::default();
@@ -139,6 +141,63 @@ mod tests {
     fn set_participants_em_sala_inexistente_nao_faz_nada() {
         let mut r = Rooms::default();
         r.set_participants("nao-existe", vec!["x".into()]);
+        assert!(r.get("nao-existe").is_none());
+    }
+
+    #[test]
+    fn convidado_sair_tira_ele_da_lista_sem_fechar_a_sala() {
+        // Relato de campo: sair da chamada e o botão "Entrar" continuava
+        // aparecendo. `leave_room` saía cedo quando quem saía não era host,
+        // então a lista continuava com ele para sempre.
+        let mut r = Rooms::default();
+        r.open(
+            "call-1",
+            "conv",
+            "voice",
+            "host",
+            vec!["host".into(), "guest".into()],
+            1,
+        );
+        let depois = r.remove_member("conv", "guest").expect("sala viva");
+        assert_eq!(depois.participants, vec!["host".to_string()]);
+        assert_eq!(
+            depois.host_fp, "host",
+            "quem não era host não assume a sala"
+        );
+        assert!(r.get("conv").is_some(), "ainda tem gente: a sala continua");
+    }
+
+    #[test]
+    fn sair_o_host_passa_o_comando_para_quem_ficou() {
+        // Sem a troca de host ninguém renova o anúncio e a sala morre no TTL
+        // com gente ainda dentro.
+        let mut r = Rooms::default();
+        r.open(
+            "call-1",
+            "conv",
+            "voice",
+            "host",
+            vec!["host".into(), "guest".into()],
+            1,
+        );
+        let depois = r.remove_member("conv", "host").expect("sala viva");
+        assert_eq!(depois.host_fp, "guest", "o comando passa adiante");
+        assert_eq!(depois.participants, vec!["guest".to_string()]);
+    }
+
+    #[test]
+    fn ultimo_sair_fecha_a_sala() {
+        let mut r = Rooms::default();
+        r.open("call-1", "conv", "voice", "host", vec!["host".into()], 1);
+        let depois = r.remove_member("conv", "host").expect("sala existia");
+        assert!(depois.participants.is_empty());
+        assert!(r.get("conv").is_none(), "sem ninguém a sala precisa fechar");
+    }
+
+    #[test]
+    fn sair_de_sala_inexistente_nao_cria_nada() {
+        let mut r = Rooms::default();
+        assert!(r.remove_member("nao-existe", "x").is_none());
         assert!(r.get("nao-existe").is_none());
     }
 }

@@ -1,8 +1,3 @@
-// Anúncio de sala PONTA A PONTA: dois motores, entrega real do frame.
-//
-// Este teste existe porque "o celular não mostra o botão Entrar" não tinha
-// prova nenhuma: os testes anteriores só checavam as estruturas internas, nunca
-// se o frame SAÍA e CHEGAVA no outro lado.
 use super::*;
 use crate::protocol::SecureFrame;
 use crate::storage::Store;
@@ -16,10 +11,6 @@ fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     (e, dir)
 }
 
-/// Monta a conversa de grupo com os dois fps e devolve o conv_id.
-///
-/// `create_group` exige amizade ACEITA (é o gate do core), então o teste
-/// registra os dois como amigos antes — sem isso o cenário nem chega a existir.
 fn grupo_com(a: &Arc<NetworkEngine>, b: &Arc<NetworkEngine>) -> String {
     a.store
         .set_friend(&b.identity.fingerprint, "B", "accepted")
@@ -30,8 +21,6 @@ fn grupo_com(a: &Arc<NetworkEngine>, b: &Arc<NetworkEngine>) -> String {
     conv.id
 }
 
-/// Espelha no outro motor a amizade e a conversa de grupo (o receptor precisa
-/// conhecer o grupo para aceitar o anúncio de sala).
 fn espelhar_grupo(a: &Arc<NetworkEngine>, b: &Arc<NetworkEngine>, conv_id: &str) {
     b.store
         .set_friend(&a.identity.fingerprint, "A", "accepted")
@@ -52,14 +41,12 @@ fn publish_room_gera_frame_para_os_membros_do_grupo() {
     let conv = grupo_com(&a, &b);
     let fp_b = b.identity.fingerprint.clone();
 
-    // O alvo do anúncio TEM de incluir o outro membro do grupo.
     let alvos = a.room_targets(&conv);
     assert!(
         alvos.contains(&fp_b),
         "o membro do grupo precisa receber a sala"
     );
 
-    // E o frame montado carrega conv/call/participantes corretos.
     a.publish_room(
         "call-x",
         &conv,
@@ -84,14 +71,12 @@ fn convidado_sair_nao_encerra_a_chamada_do_grupo() {
     let fp_host = host.identity.fingerprint.clone();
     let fp_guest = guest.identity.fingerprint.clone();
 
-    // Host abre com os dois dentro.
     host.publish_room(
         "call-g",
         &conv,
         "voice",
         vec![fp_host.clone(), fp_guest.clone()],
     );
-    // O convidado recebe o anúncio e entra.
     guest.room_receive(
         &fp_host,
         "call-g",
@@ -101,10 +86,8 @@ fn convidado_sair_nao_encerra_a_chamada_do_grupo() {
         vec![fp_host.clone(), fp_guest.clone()],
     );
 
-    // CONVIDADO sai: a sala TEM de continuar viva para quem ficou.
     guest.leave_room(&conv);
     let do_guest = guest.rooms_snapshot();
-    // O convidado não pode anunciar "closed" (isso apagava o botão Entrar dos outros).
     assert!(
         !do_guest.iter().any(|ev| matches!(
             ev,
@@ -113,7 +96,6 @@ fn convidado_sair_nao_encerra_a_chamada_do_grupo() {
         "quem só entrou não encerra a chamada dos outros"
     );
 
-    // E a sala do host segue aberta com ele dentro.
     let sala_host = host
         .rooms_snapshot()
         .into_iter()
@@ -126,13 +108,69 @@ fn convidado_sair_nao_encerra_a_chamada_do_grupo() {
 }
 
 #[test]
+fn convidado_sair_tira_ele_do_proprio_snapshot() {
+    // Relato de campo: "saio da chamada e o Entrar continua aparecendo".
+    // `leave_room` só agia para o host; quem entrou ficava na própria lista.
+    let (host, _dh) = mk_engine("sala-snap-host");
+    let (guest, _dg) = mk_engine("sala-snap-guest");
+    let conv = grupo_com(&host, &guest);
+    espelhar_grupo(&host, &guest, &conv);
+    let fp_host = host.identity.fingerprint.clone();
+    let fp_guest = guest.identity.fingerprint.clone();
+
+    host.publish_room(
+        "call-snap",
+        &conv,
+        "voice",
+        vec![fp_host.clone(), fp_guest.clone()],
+    );
+    guest.room_receive(
+        &fp_host,
+        "call-snap",
+        &conv,
+        "voice",
+        "open",
+        vec![fp_host.clone(), fp_guest.clone()],
+    );
+    let antes = guest
+        .rooms_snapshot()
+        .into_iter()
+        .find_map(|ev| match ev {
+            EngineEvent::CallRoom {
+                conv_id,
+                participants,
+                ..
+            } if conv_id == conv => Some(participants),
+            _ => None,
+        })
+        .expect("o convidado vê a sala");
+    assert!(antes.contains(&fp_guest), "pré-condição: ele está na lista");
+
+    guest.leave_room(&conv);
+
+    let depois = guest.rooms_snapshot().into_iter().find_map(|ev| match ev {
+        EngineEvent::CallRoom {
+            conv_id,
+            participants,
+            ..
+        } if conv_id == conv => Some(participants),
+        _ => None,
+    });
+    match depois {
+        Some(lista) => assert!(
+            !lista.contains(&fp_guest),
+            "ao sair ele precisa sumir da própria lista: {lista:?}"
+        ),
+        None => {} // sala fechada também serve
+    }
+}
+
+#[test]
 fn host_sozinho_encerra_a_sala_de_verdade() {
     let (host, _dh) = mk_engine("sala-fecha-host");
     let fp = host.identity.fingerprint.clone();
     host.publish_room("call-solo", "conv-solo", "voice", vec![fp]);
     host.leave_room("conv-solo");
-    // `rooms_snapshot` lista só salas ABERTAS: ficar vazio prova o fechamento
-    // (o evento `closed` sai pelo canal de eventos, não pelo snapshot).
     assert!(
         host.rooms_snapshot().is_empty(),
         "host sozinho fecha a sala"
@@ -147,7 +185,6 @@ fn receber_sala_do_outro_lado_aparece_na_ui() {
     espelhar_grupo(&a, &b, &conv);
     let fp_a = a.identity.fingerprint.clone();
 
-    // Simula o frame chegando em B (mesmo caminho do handle_frame).
     b.room_receive(&fp_a, "call-y", &conv, "voice", "open", vec![fp_a.clone()]);
 
     let snap = b.rooms_snapshot();
@@ -184,7 +221,6 @@ fn membro_de_fora_nao_consegue_anunciar_na_conversa() {
     let conv = grupo_com(&a, &b);
     espelhar_grupo(&a, &b, &conv);
 
-    // "intruso" não está no grupo: o anúncio dele tem de ser descartado.
     a.room_receive(
         "intruso",
         "call-z",
@@ -199,6 +235,7 @@ fn membro_de_fora_nao_consegue_anunciar_na_conversa() {
     );
 }
 
+// Seção 1: test
 #[test]
 fn dm_anuncia_para_o_par_certo() {
     let (a, _da) = mk_engine("sala-dm-a");
@@ -209,7 +246,6 @@ fn dm_anuncia_para_o_par_certo() {
     let alvos = a.room_targets(&conv.id);
     assert_eq!(alvos, vec![fp_b], "a DM precisa anunciar só para o par");
 
-    // E o parceiro aceita a sala vinda de A nessa conversa.
     b.store
         .set_friend(&a.identity.fingerprint, "A", "accepted")
         .unwrap();
@@ -229,8 +265,6 @@ fn dm_anuncia_para_o_par_certo() {
 
 #[test]
 fn frame_call_room_serializa_com_o_nome_que_o_frontend_espera() {
-    // O frontend escuta `ev.type === 'call_room'`. Se o serde mudar o nome, o
-    // botão Entrar some sem erro nenhum — foi o relato do Android.
     let ev = EngineEvent::CallRoom {
         call_id: "c1".into(),
         conv_id: "conv1".into(),
@@ -243,7 +277,6 @@ fn frame_call_room_serializa_com_o_nome_que_o_frontend_espera() {
     assert_eq!(json["type"], "call_room", "o tipo do evento mudou de nome");
     assert_eq!(json["conv_id"], "conv1");
     assert_eq!(json["state"], "open");
-    // O frame do fio também precisa usar snake_case nos campos.
     let frame = SecureFrame::CallRoom {
         call_id: "c1".into(),
         conv_id: "conv1".into(),

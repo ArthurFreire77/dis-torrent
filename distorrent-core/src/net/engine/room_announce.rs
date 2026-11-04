@@ -1,7 +1,3 @@
-// Publicação/recepção da sala de chamada (grupo/DM).
-// Quem entra na chamada anuncia a sala para os membros da conversa; quem
-// recebe mostra "chamada em andamento" e pode entrar pelo botão.
-
 use std::sync::Arc;
 
 use crate::protocol::SecureFrame;
@@ -9,11 +5,9 @@ use crate::{DistorrentError, Result};
 
 use super::{EngineCmd, EngineEvent, NetworkEngine};
 
-/// Sala sem renovação por este tempo morre (2 tiques de 15 s perdidos).
 pub const ROOM_TTL_MS: i64 = 35_000;
 
 impl NetworkEngine {
-    /// Publica/renova a sala e manda o anúncio aos membros da conversa.
     pub fn publish_room(
         &self,
         call_id: &str,
@@ -40,7 +34,6 @@ impl NetworkEngine {
         );
     }
 
-    /// Encerra a sala e avisa os membros.
     pub fn unpublish_room(&self, conv_id: &str) {
         if self.room_close(conv_id).is_empty() {
             return;
@@ -48,7 +41,6 @@ impl NetworkEngine {
         self.room_announce(
             conv_id,
             SecureFrame::CallRoom {
-                // O `closed` vale pela conversa: o call_id pode ter mudado.
                 call_id: String::new(),
                 conv_id: conv_id.to_string(),
                 kind: String::new(),
@@ -59,43 +51,19 @@ impl NetworkEngine {
         );
     }
 
-    /// SAÍDA de um participante da sala (não necessariamente o fim da chamada).
-    ///
-    /// BUG REAL que isto corrige: `leave()` chamava `unpublish_room`, que apaga a
-    /// sala e anuncia `closed` para TODO MUNDO. Quem só tinha ENTRADO (convidado)
-    /// derrubava o aviso da chamada para os outros — o botão "Entrar" sumia. A
-    /// sala pertence a quem a ABRIU (host): sair é atualizar a lista, não
-    /// encerrar a chamada dos outros.
     pub fn leave_room(&self, conv_id: &str) {
         let me = self.identity.fingerprint.clone();
-        let (restantes, room) = {
+        // Sai da sala mesmo quando NÃO sou o host. Antes o early-return em
+        // `host_fp != me` deixava a minha entrada na lista (e o meu próprio
+        // registro local) viva para sempre — era o "sai da chamada e o botão
+        // Entrar continua aparecendo".
+        let Some(room) = ({
             let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(r) = rooms.get(conv_id).cloned() else {
-                return;
-            };
-            // Não sou o host: a sala continua valendo e eu só saio (o host
-            // reanuncia a lista sem mim no tique de 15 s).
-            if r.host_fp != me {
-                return;
-            }
-            // Host: tiro meu fp da lista. Se sobrar gente na chamada, a sala
-            // continua (o host segue dentro ouvindo) — só reanuncio a lista.
-            let novos: Vec<String> = r
-                .participants
-                .iter()
-                .cloned()
-                .filter(|fp| fp != &me)
-                .collect();
-            rooms.set_participants(conv_id, novos);
-            (r.participants.iter().filter(|fp| *fp != &me).count(), r)
+            rooms.remove_member(conv_id, &me)
+        }) else {
+            return;
         };
-        if restantes == 0 {
-            // Host sozinho: encerra de verdade.
-            let fechada = {
-                let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
-                rooms.close(conv_id)
-            };
-            let Some(room) = fechada else { return };
+        if room.participants.is_empty() {
             let _ = self.events.send(EngineEvent::CallRoom {
                 call_id: room.call_id,
                 conv_id: room.conv_id,
@@ -117,7 +85,9 @@ impl NetworkEngine {
             );
             return;
         }
-        // Sala viva sem o host: os que ficaram continuam na chamada entre si.
+        // Ainda tem gente na chamada: a lista sem mim vai para todos e, se eu
+        // era o host, `remove_member` já passou o comando para quem ficou —
+        // senão a sala morreria no TTL de 35 s sem ninguém renovar.
         let atual = self
             .call_rooms
             .lock()
@@ -146,8 +116,6 @@ impl NetworkEngine {
         );
     }
 
-    /// Entra numa sala anunciada: avisa quem já está dentro. A mídia segue o
-    /// fluxo normal de invite/offer.
     pub fn room_join(self: &Arc<Self>, conv_id: &str, kind: &str) -> Result<(String, Vec<String>)> {
         let room = {
             let rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
@@ -173,27 +141,14 @@ impl NetworkEngine {
                 "ninguém na sala para entrar".into(),
             ));
         }
-        // O `kind` da UI não manda aqui: a sala já carrega o seu, e é ele que
-        // vale para todos os que estão dentro (entrar num anúncio de voz como
-        // vídeo trocaria a mídia só para quem entrou).
         let _ = kind;
-        // MÍDIA NATIVA: entrar numa sala em andamento precisa criar a sessão
-        // com cada participante — a offer que o host manda NÃO é retida (é um
-        // "hold para o aceite" que aqui nunca vem, porque a sala já está no
-        // ar): sem registrar, `voice_is_native` era falso e a offer ia para o
-        // JS de um WebView sem RTCPeerConnection, morrendo em silêncio. Era o
-        // "clico em Entrar e fica em Conectando" no Linux.
         #[cfg(target_os = "linux")]
         for fp in &alvos {
             self.native_pair_begin(&room.call_id, fp);
         }
         for fp in &alvos {
+            // Seção 1: _
             let _ = self.store.join_call(&room.call_id, fp);
-            // AVISO DE ROSTER, não ring: o host já está numa chamada. Um
-            // `CallInvite` fazia o app dele tocar o telefone, e como já havia
-            // chamada em andamento o aceite era recusado — quem clicou
-            // "Entrar" ficava esperando para sempre. `CallAddParticipant` sem
-            // `kind` é o aviso que a malha já usa (não toca, só abre o par).
             self.queue_or_send_call_frame(
                 fp,
                 SecureFrame::CallAddParticipant {
@@ -209,19 +164,12 @@ impl NetworkEngine {
         Ok((room.call_id, alvos))
     }
 
-    /// O id da conversa é uma DM entre `peer_fp` e mim?
-    ///
-    /// O id NÃO é legível: é `blake3("distorrent/v1|dm|<menor>|<maior>")[..24]`
-    /// (ver `storage::dm_conversation_id`). Comparar por `contains(fp)` nunca
-    /// casava — era o anúncio de sala descartado no celular e o botão Entrar
-    /// que nunca aparecia. Calculamos o id canônico dos dois lados.
     fn room_dm_matches(&self, conv_id: &str, peer_fp: &str) -> bool {
         peer_fp != self.identity.fingerprint
             && crate::storage::Store::dm_conversation_id(&self.identity.fingerprint, peer_fp)
                 == conv_id
     }
 
-    /// Abre/renova a sala e devolve os destinatários do anúncio.
     pub fn room_open(
         &self,
         call_id: &str,
@@ -293,7 +241,6 @@ impl NetworkEngine {
             .collect()
     }
 
-    /// Tique: descarta salas vencidas e renova as minhas.
     pub fn room_tick(&self) {
         let me = self.identity.fingerprint.clone();
         let now = crate::identity::now_ms();
@@ -321,7 +268,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Alvos do anúncio: membros do grupo ou o par da DM, nunca eu.
     pub fn room_targets(&self, conv_id: &str) -> Vec<String> {
         let me = &self.identity.fingerprint;
         let mut out: Vec<String> = self
@@ -356,7 +302,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Recebeu `CallRoom`. Só aceita de quem participa da conversa.
     pub fn room_receive(
         &self,
         peer_fp: &str,
@@ -369,12 +314,7 @@ impl NetworkEngine {
         if conv_id.is_empty() {
             return;
         }
-        // `membro` = peer é da conversa. Em DM o receptor pode ainda não ter a
-        // conversa criada localmente (o outro lado abriu a chamada antes do
-        // primeiro `dm_open` dele) — nesse caso o `peer_fp` da conversa não
-        // existe e a sala era descartada em silêncio: era o "botão Entrar não
-        // aparece no outro aparelho". Confiamos no REMETENTE da sessão
-        // autenticada e criamos a linha local (INSERT OR IGNORE) ao receber.
+        // Seção 2: membro
         let membro = self
             .store
             .list_group_members(conv_id)
@@ -387,35 +327,33 @@ impl NetworkEngine {
                 .flatten()
                 .map(|c| c.kind == "dm" && (c.peer_fp == peer_fp || c.peer_fp.is_empty()))
                 .unwrap_or(false)
-            // DM ainda inexistente aqui: deriva do id (`dm-<a>-<b>` é o formato
-            // do core) ou aceita porque o frame veio pela sessão autenticada.
             || self.room_dm_matches(conv_id, peer_fp);
         if !membro {
             return;
         }
-        // Garante a linha local da conversa para a UI achar o botão (idempotente,
-        // sem trocar título nem falhar se já existe).
         let _ = self
             .store
             .ensure_dm_conversation(&self.identity.fingerprint, peer_fp, "");
         if state == "closed" {
-            // SÓ O HOST encerra a sala. Qualquer participante que saía mandava
-            // `closed` e a sala sumia para todos — mesmo com a chamada viva
-            // entre os que ficaram (ninguém mais conseguia entrar).
-            // Sala desconhecida aceita o fechamento, senão ficaria órfã na UI.
             let existe = {
                 let rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
                 rooms.get(conv_id).is_some()
             };
             if existe {
-                let eh_host = {
+                // Aceita o fechamento de quem é host OU de quem está na sala:
+                // os dois lados podem ter aberto a MESMA sala (cada um se
+                // achando host), e recusar o "closed" do outro deixava o
+                // "Entrar" na conversa para sempre.
+                let pode_fechar = {
                     let rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
                     rooms
                         .get(conv_id)
-                        .map(|r| r.host_fp == peer_fp)
+                        .map(|r| {
+                            r.host_fp == peer_fp || r.participants.iter().any(|f| f == peer_fp)
+                        })
                         .unwrap_or(false)
                 };
-                if !eh_host {
+                if !pode_fechar {
                     return;
                 }
             }
@@ -456,7 +394,6 @@ impl NetworkEngine {
         });
     }
 
-    /// Envia a um peer recém-online as salas das conversas em que ele está.
     pub fn flush_rooms_to(&self, peer_fp: &str) {
         for room in self
             .call_rooms
