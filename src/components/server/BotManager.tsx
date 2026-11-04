@@ -1,17 +1,10 @@
-// Gestão de bots do servidor.
-//
-// Antes: um formulário de uma linha (nome + 8 avatares-emoji + cargo + botão)
-// colado acima da lista, sem validação, com o token do bot exposto em texto
-// plano e `window.confirm` para remover.
-//
-// Agora: diálogo próprio e validado para criar, edição inline na lista, token
-// mascarado, e confirmação que explica as consequências.
-
 import { useState } from 'react'
 import type { BotView, RoleView } from '../../services/models'
 import { Tooltip } from '../../shared/Tooltip'
 import { validateBotEntryName } from './botModel'
 import { BotDocsAccordion } from './BotDocsAccordion'
+import { BOT_DOCS_FILE_NAME, botDocsMarkdown } from './botDocs'
+import { baixarTexto } from './botDocsDownload'
 import {
   Button,
   EmptyState,
@@ -56,6 +49,7 @@ export function BotManager({
   const [editandoId, setEditandoId] = useState<string | null>(null)
   const [paraRemover, setParaRemover] = useState<BotView | null>(null)
   const [copiado, setCopiado] = useState<string | null>(null)
+  const [falhaDownload, setFalhaDownload] = useState(false)
 
   function copiar(id: string, token: string) {
     navigator.clipboard
@@ -77,8 +71,30 @@ export function BotManager({
         </Notice>
       </div>
 
-      {/* DOCUMENTAÇÃO aqui, não só no docs/bots.md: quem está configurando
-          precisa saber que o bot só responde com o app do dono aberto. */}
+      <div style={{ display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Button
+          variant="secondary"
+          icon="download"
+          onClick={() => {
+            const ok = baixarTexto(BOT_DOCS_FILE_NAME, botDocsMarkdown())
+            if (!ok) setFalhaDownload(true)
+          }}
+        >
+          Baixar documentação (.md)
+        </Button>
+        <span style={{ fontSize: 11.5, color: ui.muted, flex: '1 1 220px', minWidth: 0 }}>
+          Guia completo para criar e integrar bots, pronto para repassar. Vai sem token —
+          pode compartilhar.
+        </span>
+      </div>
+
+      {falhaDownload && (
+        <Notice tone="warning" icon="warn">
+          O navegador embutido bloqueou o download. Copie o texto do acordeão abaixo ou abra pelo
+          app do desktop.
+        </Notice>
+      )}
+
       <BotDocsAccordion />
 
       {ehDono && (
@@ -174,6 +190,7 @@ export function BotManager({
   )
 }
 
+// Seção 1: BotRow
 function BotRow({
   bot,
   cargo,
@@ -339,6 +356,7 @@ function BotRow({
         {isEditing ? (
           <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
             <select
+              // Seção 2: value
               value={roleId}
               onChange={(e) => setRoleId(e.target.value)}
               aria-label="Cargo do bot"
@@ -497,6 +515,7 @@ function BotCreateModal({
 
       <Select
         label="Cargo"
+        // Seção 3: value
         value={roleId}
         onChange={setRoleId}
         options={[

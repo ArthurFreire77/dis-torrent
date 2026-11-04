@@ -1,10 +1,3 @@
-// Acordeão da documentação de bots — o MESMO componente no passo "Bots" do
-// assistente de criação e no painel de Bots do servidor.
-//
-// Um lugar só porque a frase "o bot não responde com o app fechado" não pode
-// existir em duas versões. O conteúdo vem de `botDocs.ts` (dados puros, sem
-// JSX) para continuar testável em Node.
-
 import { useState } from 'react'
 import { Ic } from '../../shared/icons'
 import { ui } from '../../shared/ui'

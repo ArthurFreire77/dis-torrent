@@ -1,8 +1,3 @@
-// BotRuntime — conecta os bots configurados à web (HTTP GET/POST + webhook).
-// Executa SOMENTE no dispositivo do DONO do servidor (owner_fp === identidade
-// local): em mesh cada dono responde pelos próprios bots, sem duplicar.
-// Nunca derruba o app: toda rede/parse é best-effort com try/catch.
-
 import {
   parseBotConfig,
   parseBotCommand,
@@ -10,6 +5,7 @@ import {
   findCommand,
   renderTemplate,
   renderBotReply,
+  botIsActive,
   type BotCommandDef,
 } from './botCommands'
 import { services } from './index'
@@ -21,7 +17,7 @@ export interface BotRuntimeIdentity {
 interface BotRuntimeDeps {
   subscribe: (cb: (ev: any) => void) => () => void
   communitiesList: () => Promise<{ id: string; owner_fp: string }[]>
-  botsList: (cid: string) => Promise<{ id: string; name: string; config?: string }[]>
+  botsList: (cid: string) => Promise<{ id: string; name: string; online?: boolean; config?: string }[]>
   channelList: (cid: string) => Promise<{ id: string }[]>
   httpFetch: (
     url: string,
@@ -41,7 +37,6 @@ export class BotRuntime {
     private getIdentity: () => BotRuntimeIdentity | null,
   ) {}
 
-  /** Assina eventos de mensagem; retorna stop(). */
   start(): () => void {
     return this.deps.subscribe((ev: any) => {
       void this.handleEvent(ev)
@@ -51,7 +46,6 @@ export class BotRuntime {
   private async handleEvent(ev: any): Promise<void> {
     try {
       if (!ev || ev.type !== 'message_new') return
-      // só mensagens que chegaram (não as que eu/bots postaram) — evita loop
       if (ev.direction !== 'in') return
       if (ev.bot_id) return
       const body = typeof ev.body === 'string' ? ev.body : ''
@@ -68,21 +62,16 @@ export class BotRuntime {
         return
       }
       for (const community of communities) {
-        // SOMENTE dono responde (evita resposta duplicada em mesh)
         if (community.owner_fp !== me.fingerprint) continue
         try {
           await this.handleCommunity(community.id, convId, ev)
-        } catch {
-          /* honesto e silencioso: nunca crasha o app */
-        }
+        } catch {}
       }
-    } catch {
-      /* nunca crasha o app */
-    }
+    } catch {}
   }
 
   private async handleCommunity(cid: string, convId: string, ev: any): Promise<void> {
-    let bots: { id: string; name: string; config?: string }[]
+    let bots: { id: string; name: string; online?: boolean; config?: string }[]
     try {
       bots = await this.deps.botsList(cid)
     } catch {
@@ -96,17 +85,16 @@ export class BotRuntime {
     } catch {
       channelIds = new Set()
     }
-    // conversa fora deste servidor → não é daqui
     if (channelIds.size > 0 && !channelIds.has(convId)) return
 
     const body: string = ev.body
     for (const bot of bots) {
       if (!bot.config) continue
+      if (!botIsActive(bot.online)) continue
       const config = parseBotConfig(bot.config)
       if (!config) continue
       if (!channelInScope(config, convId)) continue
       try {
-        // webhook de saída: recebe CADA mensagem do escopo (comando ou não)
         if (config.webhook?.url) {
           await this.fireWebhook(config.webhook.url, ev, convId)
         }
@@ -115,9 +103,7 @@ export class BotRuntime {
         const cmd = findCommand(config, parsed.name)
         if (!cmd) continue
         await this.runCommand(cid, convId, bot.id, cmd, parsed.args)
-      } catch {
-        /* um bot quebrado não cala os outros */
-      }
+      } catch {}
     }
   }
 
@@ -131,9 +117,7 @@ export class BotRuntime {
         ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
       })
       await this.deps.httpFetch(url, 'POST', { 'content-type': 'application/json' }, payload, HTTP_TIMEOUT_MS)
-    } catch {
-      /* webhook é best-effort */
-    }
+    } catch {}
   }
 
   private async runCommand(
@@ -157,23 +141,19 @@ export class BotRuntime {
     if (!reply) return
     try {
       await this.deps.botPostMessage(cid, channelId, botId, reply)
-    } catch {
-      /* post falhou: sem retry (evita flood) */
-    }
+    } catch {}
   }
 }
 
-// Identidade síncrona para o singleton: cache atualizado de forma best-effort.
 let cachedFingerprint: string | null = null
 function refreshIdentityCache(): void {
   services.identityGet().then(
     (id) => { cachedFingerprint = id?.fingerprint ?? null },
-    () => { /* mantém o cache anterior */ },
+    () => {  },
   )
 }
 refreshIdentityCache()
 
-/** Singleton ligado aos services reais. Chame botRuntime.start() uma vez no boot. */
 export const botRuntime = new BotRuntime(
   {
     subscribe: (cb) => services.subscribe(cb),
@@ -190,3 +170,4 @@ export const botRuntime = new BotRuntime(
     return cachedFingerprint ? { fingerprint: cachedFingerprint } : null
   },
 )
+// Seção 1: fim

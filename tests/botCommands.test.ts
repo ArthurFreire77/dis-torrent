@@ -8,6 +8,7 @@ import {
   channelInScope,
   findCommand,
   renderBotReply,
+  botIsActive,
   type BotConfig,
   type BotCommandDef,
 } from '../src/services/botCommands.ts'
@@ -21,9 +22,9 @@ test('parseBotCommand: "!ping" → args vazio', () => {
 })
 
 test('parseBotCommand: não-comandos → null', () => {
-  assert.equal(parseBotCommand('!', 'oi !ping'), null) // não começa com prefixo
-  assert.equal(parseBotCommand('!', '!'), null) // só o prefixo
-  assert.equal(parseBotCommand('!', '!!duplo'), null) // nome inválido após o prefixo
+  assert.equal(parseBotCommand('!', 'oi !ping'), null)
+  assert.equal(parseBotCommand('!', '!'), null)
+  assert.equal(parseBotCommand('!', '!!duplo'), null)
   assert.equal(parseBotCommand('!', ''), null)
 })
 
@@ -41,7 +42,6 @@ test('renderTemplate: URL com {{query}} usa "+" como separador', () => {
     renderTemplate('https://api.exemplo.com/x?q={{query}}', { args: ['a', 'b'] }),
     'https://api.exemplo.com/x?q=a+b',
   )
-  // um único argumento com espaço é encodeURIComponent → %20 (sem "+" de separação)
   assert.equal(
     renderTemplate('https://api.exemplo.com/x?q={{query}}', { args: ['a b'] }),
     'https://api.exemplo.com/x?q=a%20b',
@@ -121,6 +121,12 @@ test('channelInScope: [] = todos; lista = só os listados', () => {
   assert.equal(channelInScope(scoped, 'c2'), false)
 })
 
+test('botIsActive: só o false EXPLÍCITO desliga (payload antigo sem online segue ligado)', () => {
+  assert.equal(botIsActive(false), false)
+  assert.equal(botIsActive(true), true)
+  assert.equal(botIsActive(undefined), true)
+})
+
 test('findCommand: acha por nome (nomes normalizados em minúsculas pelo parse)', () => {
   const cfg = parseBotConfig(JSON.stringify({
     prefix: '!',
@@ -130,9 +136,7 @@ test('findCommand: acha por nome (nomes normalizados em minúsculas pelo parse)'
     ],
   }))
   assert.ok(cfg)
-  // definição digitada em maiúsculas é normalizada para 'clima'
   assert.equal(findCommand(cfg, 'clima')?.url, 'https://api.exemplo.com/x')
-  // usuário digita o comando em qualquer caixa → parseBotCommand rebaixa → acha
   const parsed = parseBotCommand('!', '!ClimA Sao')
   assert.ok(parsed)
   assert.equal(findCommand(cfg, parsed.name)?.name, 'clima')
@@ -173,3 +177,29 @@ test('renderBotReply: sem template e sem responsePath → corpo JSON bruto', () 
   const cmd: BotCommandDef = { name: 'raw', method: 'GET', url: 'https://x' }
   assert.equal(renderBotReply(cmd, [], '{"a":1}'), '{"a":1}')
 })
+
+test('parseBotConfig: webhook só http(s) — igual à regra dos comandos', () => {
+  const ok = parseBotConfig(JSON.stringify({ prefix: '!', commands: [], webhook: { url: 'https://x.hook/y' } }))
+  assert.equal(ok?.webhook?.url, 'https://x.hook/y')
+  const ruas = parseBotConfig(JSON.stringify({ prefix: '!', commands: [], webhook: { url: 'file:///c:/boom' } }))
+  assert.equal(ruas?.webhook, undefined, 'esquema inválido não vira webhook ativo')
+  const vazio = parseBotConfig(JSON.stringify({ prefix: '!', commands: [], webhook: { url: '   ' } }))
+  assert.equal(vazio?.webhook, undefined)
+})
+
+test('renderBotReply: texto vindo da API é sanitizado (bidi/zero-width/controle)', () => {
+  const cmd: BotCommandDef = {
+    name: 'x',
+    method: 'GET',
+    url: 'https://x',
+    responsePath: 'v',
+    template: '{{value}}',
+  }
+  const out = renderBotReply(cmd, [], JSON.stringify({ v: 'seguro\u202Egnp.exe\u200B\x07' }))
+  assert.ok(out)
+  assert.ok(!out!.includes('\u202E'), 'override bidi forjaria o texto exibido')
+  assert.ok(!out!.includes('\u200B'), 'zero-width esconderia conteúdo')
+  assert.ok(!out!.includes('\x07'), 'controle não pode virar mensagem')
+  assert.match(out!, /gnp\.exe/)
+})
+// Seção 1: fim

@@ -1,40 +1,28 @@
-// BotCommands — parsing/rendering PURO para bots conectados à web.
-// Um bot tem: prefixo (ex.: '!'), comandos (REST GET/POST com template),
-// escopos (canais onde atua) e webhook de saída opcional.
-// O runtime (src/services/botRuntime.ts) usa estas funções sobre eventos de
-// mensagem reais; aqui é testável sem DOM/rede.
+import { sanitizeText } from '../core/security/sanitize.ts'
 
 export interface BotCommandDef {
-  /** palavra que dispara (sem o prefixo), ex.: 'clima'. */
   name: string
   method: 'GET' | 'POST'
-  /** URL com {{args}} / {{arg0}} / {{query}} placeholders. */
   url: string
   headers?: Record<string, string>
-  /** Corpo POST com placeholders (JSON string). */
   body?: string
-  /** Caminho pontilhado no JSON de resposta: 'data.temp'. */
   responsePath?: string
-  /** Template da resposta final com {{value}} / {{json.*}} / {{args}}. */
   template?: string
 }
 
 export interface BotWebhookDef {
-  /** POST {author, nickname, channel, body, ts} a cada mensagem do escopo. */
   url: string
 }
 
 export interface BotConfig {
   prefix: string
   commands: BotCommandDef[]
-  /** IDs de canais onde o bot atua — [] = todos os canais do servidor. */
   channels: string[]
   webhook?: BotWebhookDef
 }
 
 export const BOT_CONFIG_MAX_JSON = 16 * 1024
 
-/** Parse+sanitize da config JSON vinda do painel/storage (hostil por padrão). */
 export function parseBotConfig(raw: unknown): BotConfig | null {
   if (!raw) return null
   let obj: any
@@ -48,12 +36,14 @@ export function parseBotConfig(raw: unknown): BotConfig | null {
   }
   if (!obj || typeof obj !== 'object') return null
   const prefix = typeof obj.prefix === 'string' && obj.prefix.trim() ? obj.prefix.trim().slice(0, 4) : '!'
-  if (!/^[!/.$@#%-]$/.test(prefix)) return null // 1 char, sem espaço
+  if (!/^[!/.$@#%-]$/.test(prefix)) return null
   const commands: BotCommandDef[] = Array.isArray(obj.commands) ? (obj.commands as unknown[]).slice(0, 16).map(parseCommand).filter((c): c is BotCommandDef => !!c) : []
   const channels: string[] = Array.isArray(obj.channels) ? obj.channels.filter((c: unknown) => typeof c === 'string' && c.length > 0 && c.length < 128).slice(0, 64) : []
-  const webhook = typeof obj.webhook === 'object' && obj.webhook && typeof (obj.webhook as any).url === 'string' && (obj.webhook as any).url.trim()
-    ? { url: (obj.webhook as any).url.trim().slice(0, 512) }
-    : undefined
+  const hookRaw = typeof obj.webhook === 'object' && obj.webhook && typeof (obj.webhook as any).url === 'string'
+    ? (obj.webhook as any).url.trim().slice(0, 512)
+    : ''
+  // Mesma regra dos comandos: o webhook era aceito com qualquer esquema e a doc prometia http(s).
+  const webhook = hookRaw && /^https?:\/\//i.test(hookRaw) ? { url: hookRaw } : undefined
   return { prefix, commands, channels, webhook }
 }
 
@@ -84,10 +74,6 @@ function parseCommand(c: any): BotCommandDef | null {
   }
 }
 
-/**
- * Reconhece "`` !clima são paulo`` " → { name: 'clima', args: ['são','paulo'] }.
- * Prefixo + nome imediato (sem espaço entre eles). null = não é comando.
- */
 export function parseBotCommand(prefix: string, body: string): { name: string; args: string[] } | null {
   if (typeof body !== 'string' || !body) return null
   const trimmed = body.trim()
@@ -101,16 +87,10 @@ export function parseBotCommand(prefix: string, body: string): { name: string; a
   return { name, args }
 }
 
-/** Escapa um valor para uso seguro dentro de URL query (?/encodeURIComponent). */
 function encodeForUrl(v: string): string {
   try { return encodeURIComponent(v) } catch { return '' }
 }
 
-/**
- * Renderiza templates de URL/corpo: {{args}} (junto, encoded), {{arg0}}..
- * {{argN}} (encoded), {{query}} (args unidos por '+' encoded), {{raw.args}}
- * (sem encode — NÃO use em URL; só em corpo).
- */
 export function renderTemplate(tpl: string, vars: { args: string[]; value?: string; json?: unknown }): string {
   return tpl
     .replace(/\{\{\s*args\s*\}\}/g, () => vars.args.map(encodeForUrl).join('/'))
@@ -127,7 +107,6 @@ export function renderTemplate(tpl: string, vars: { args: string[]; value?: stri
     })
 }
 
-/** Extrai caminho pontilhado de objeto/array: 'data.items[0].name' ou 'data.items.0.name'. */
 export function extractPath(obj: unknown, path: string): string | null {
   if (!obj || !path) return null
   const parts = path.replace(/\[(\d+)\]/g, '.$1').split('.').filter(Boolean)
@@ -149,17 +128,20 @@ export function extractPath(obj: unknown, path: string): string | null {
   try { return JSON.stringify(cur) } catch { return null }
 }
 
-/** Escopo: [] = todos os canais; senão só os listados. */
 export function channelInScope(config: BotConfig, channelId: string): boolean {
   if (!config.channels || config.channels.length === 0) return true
   return config.channels.includes(channelId)
+}
+
+// `online` ausente em payload antigo conta como ligado; só o `false` explícito desliga.
+export function botIsActive(online: boolean | undefined): boolean {
+  return online !== false
 }
 
 export function findCommand(config: BotConfig, name: string): BotCommandDef | undefined {
   return config.commands.find((c) => c.name === name)
 }
 
-/** Monta a resposta final do comando a partir do corpo retornado. */
 export function renderBotReply(cmd: BotCommandDef, args: string[], bodyText: string, json?: unknown): string | null {
   let jsonParsed: unknown = json
   if (jsonParsed === undefined) {
@@ -168,12 +150,13 @@ export function renderBotReply(cmd: BotCommandDef, args: string[], bodyText: str
   let value: string | null = null
   if (cmd.responsePath) {
     value = extractPath(jsonParsed, cmd.responsePath)
-    if (value === null) return null // caminho não existe → comando falha honesto
+    if (value === null) return null
   }
   const tpl = cmd.template ?? (value !== null ? '{{value}}' : '{{json}}')
   const out = renderTemplate(tpl, { args, value: value ?? undefined, json: jsonParsed })
     .replace(/\{\{\s*json\s*\}\}/g, () => (jsonParsed !== undefined ? bodyText : ''))
-  const trimmed = out.trim()
+  // O texto vem de uma API de terceiro: bidi/zero-width aqui forjaria o que a mensagem diz.
+  const trimmed = sanitizeText(out, 1900)
   if (!trimmed) return null
-  return trimmed.slice(0, 1900) // cabe no limite de 64KB com folga; evita flood
+  return trimmed
 }

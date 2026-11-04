@@ -30,13 +30,33 @@ Consequências importantes:
 
 1. Abra o servidor → menu do servidor → **Bots** (só o dono vê a entrada).
 2. **Novo bot**: nome (sem espaços no fim), discriminador, avatar.
-3. O bot nasce **offline**. Ligue-o no cartão dele (**Ativar**) antes de esperar
-   resposta — postar com ele desligado devolve
-   `bot está offline — ative-o no painel`.
+3. O bot nasce **online** (`online: true` no core e no modo navegador). Se você
+   desligar no cartão dele, ligue de novo (**Ativar**) antes de esperar resposta —
+   postar com ele desligado devolve `bot está offline — ative-o no painel`.
 4. **Copiar token** quando precisar integrar um serviço externo. **Gerar novo
    token** invalida o anterior na hora (é o mesmo `credential` do bot).
 
 O bot pode ter um **cargo** (`role_id`) para aparecer na cor/lista certa.
+
+### Baixar a documentação em Markdown
+
+O painel tem o botão **Baixar documentação (.md)**. Ele gera
+`distorrent-bots.md` na hora, a partir de `src/components/server/botDocs.ts`
+(`botDocsMarkdown()`), e entrega pelo WebView com `Blob` +
+`URL.createObjectURL` + `<a download>`; a URL é revogada logo depois do clique.
+
+- O arquivo é **gerado em memória**: não existe `.md` binário no repositório, e
+  não há como o texto divergir do painel (mesma fonte do acordeão e do
+  assistente).
+- **Não contém token** nem dado pessoal — é seguro repassar para quem for criar
+  bots.
+- Se o WebView bloquear o download, o painel mostra um aviso honesto em vez de
+  fingir que baixou.
+- Conteúdo: o que é um bot, quem executa, o formato completo do config com os
+  limites reais, placeholders, os modelos prontos, exemplos prontos para copiar
+  (ViaCEP, cotação, POST para API própria), webhook, gatilhos, **"O que um bot
+  NÃO pode fazer"**, **"Por que um bot não vira vírus"**, solução de problemas e
+  a referência rápida (o mesmo texto do acordeão).
 
 ## 3. Configuração (JSON) — o que o runtime entende
 
@@ -79,7 +99,7 @@ não gera erro silencioso de rede.
 | `responsePath` | caminho pontilhado (`data.temp`, `items[0].name`). |
 | `template` | até **512**; sem `responsePath`, o padrão é `{{json}}`. |
 | `channels` | ids de canais onde o bot atua. **`[]` = todos os canais**, inclusive os criados depois. |
-| `webhook.url` | http/https, ≤512. Recebe **toda** mensagem do escopo (comando ou não). |
+| `webhook.url` | http/https, ≤512 (fora disso o webhook é descartado). Recebe **toda** mensagem do escopo (comando ou não). |
 
 ### Placeholders (só em `url`, `body` e `template`)
 
@@ -109,9 +129,11 @@ não gera erro silencioso de rede.
    **15 s** e resposta a **256 KB**);
 2. se `responsePath` existir e não resolver, **não responde** (falha honesta);
 3. renderiza `template` (ou `{{json}}`);
-4. corta em **1900** caracteres e posta no **mesmo canal** da mensagem;
-5. se o bot está desligado ou o canal não existe, o post falha e **não há
-   retry** (evita flood).
+4. **sanitiza** o texto (`sanitizeText`: fora controles, zero-width e bidi — a
+   resposta vem de uma API de terceiro) e corta em **1900** caracteres;
+5. posta no **mesmo canal** da mensagem;
+6. se o bot está desligado (`online = false`), ele nem chega a chamar a URL; se o
+   canal não existe, o post falha e **não há retry** (evita flood).
 
 ### Webhook de saída
 
@@ -201,3 +223,51 @@ JSON do painel:
 - cabeçalhos limitados (16 pares) e corpo limitado (16 KB de config);
 - mensagem de bot é **assinada pelo dono** (o `bot_id` é só display) — um
   membro não consegue se passar pelo bot.
+
+## 8. Por que um bot não vira vírus
+
+Não é promessa de marketing: são as barreiras que o código aplica hoje, com o
+arquivo onde cada uma mora. Se uma delas cair, o teste correspondente tem de
+cair junto.
+
+| # | Barreira | Onde está no código |
+|---|---|---|
+| 1 | **Config é dado, não código.** O app lê JSON com campos conhecidos e descarta o resto. Não existe `eval`, `Function` nem script. | `src/services/botCommands.ts` (`parseBotConfig`, `parseCommand`) |
+| 2 | **Nenhum processo do SO.** O caminho do bot não cria processo: não há `Command::new` em `distorrent-core/src` e o runtime só chama `httpFetch` e `botPostMessage`. | `src/services/botRuntime.ts`; `distorrent-core/src` (sem `Command::new`) |
+| 3 | **Tamanho limitado duas vezes.** Painel recusa > 16 KB antes de salvar; o core recusa de novo. Mensagem tem teto de 64 KB; a resposta do bot é cortada em 1900. | `storage.rs::bot_update_patch`, `src/components/server/botModel.ts`, `engine.rs::bot_post_message`, `renderBotReply` |
+| 4 | **Só http/https, com teto.** Esquema e host vazios recusados, 16 cabeçalhos, 256 KB de resposta, timeout (10 s no bot / 15 s no teto do comando). A mesma regra vale para o webhook. | `src-tauri/src/lib.rs::http_fetch`, `src/services/botCommands.ts` (`parseCommand`, `parseBotConfig`) |
+| 5 | **Saída sanitizada.** A resposta de uma API de terceiro passa por `sanitizeText` (remove controles, zero-width e bidi) antes de virar mensagem; a UI renderiza como texto, nunca HTML, e só `http/https/mailto` viram link. | `renderBotReply` → `src/core/security/sanitize.ts`; `src/shared/markdown.tsx` (`safeUrl`) |
+| 6 | **Assinatura, não confiança.** Cada mensagem é um envelope assinado; o destinatário rejeita assinatura inválida e `author_fp` diferente do peer da conexão. | `protocol.rs::MessageEnvelope::verify_with_pubkey`; `engine.rs` (~10239, ~10292) |
+| 7 | **Só o dono executa e só o host posta.** O runtime filtra comunidades com `owner_fp == meu fp`; o core recusa `ChannelMsg` com `bot_id` vindo de quem não é host e exige que o bot exista e esteja `online`. Bot `offline` não faz chamada de rede nenhuma. | `botRuntime.ts` (`handleEvent`, `botIsActive`); `engine.rs` (~10205-10219, ~3345) |
+| 8 | **Sem escrita em disco.** O runtime não tem API de arquivo; quem grava arquivo é o swarm de arquivos, com extensões de executável bloqueadas e strip de metadados — fora do caminho do bot. | `botRuntime.ts`; `src-tauri/src/lib.rs::save_file*` |
+
+### O que um bot malicioso AINDA pode fazer
+
+O bot não vira vírus, mas **a config é uma escolha de quem instala**. Um JSON
+mal-intencionado pode:
+
+- fazer o **seu** app chamar uma URL arbitrária (inclusive da sua rede local),
+  porque a URL vem da config e a allowlist é de esquema, não de host;
+- postar mensagens em excesso no canal enquanto estiver online;
+- publicar um link malicioso como **texto** (não vira execução; quem clicar sai
+  do app pelo navegador).
+
+Regra prática: **trate a config de um bot como um script que alguém pediu para
+você rodar.** Leia a URL, o corpo e o template antes de salvar. O token é a
+senha do bot e não deve ser compartilhado.
+
+Três brechas reais foram encontradas e fechadas nesta rodada — todas com teste
+travando a regressão em `tests/botCommands.test.ts`:
+
+1. **Saída sem sanitização.** `renderBotReply` cortava o texto mas não
+   sanitizava: uma API de terceiro podia devolver `\u202E`/zero-width e forjar
+   visualmente o que a mensagem dizia (ex.: `foto.png` exibido como
+   `foto.exe`). Hoje a saída passa por `sanitizeText` antes de virar mensagem.
+2. **Webhook aceitava qualquer esquema.** `parseBotConfig` validava a URL dos
+   comandos (`^https?://`) mas copiava `webhook.url` como viesse — a doc
+   prometia `http/https`. Agora a regra é a mesma dos comandos: fora de
+   `http(s)`, o webhook é descartado.
+3. **Bot offline continuava disparando rede.** O `online = false` só impedia o
+   *post* no core; o runtime ainda chamava a URL do comando e o webhook. Agora
+   `botIsActive(online)` corta o bot antes de qualquer chamada — desligar no
+   painel significa mesmo **zero rede**.
