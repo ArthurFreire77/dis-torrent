@@ -2512,6 +2512,14 @@ fn messages_around(
         .map_err(err)
 }
 
+#[tauri::command]
+fn message_receipts(
+    msg_ids: Vec<String>,
+    state: State<AppState>,
+) -> Result<Vec<(String, String, i64)>, String> {
+    open_store(&state)?.receipts_for(&msg_ids).map_err(err)
+}
+
 // Seção 15: tauri
 #[tauri::command]
 fn thread_create(
@@ -4610,6 +4618,7 @@ fn main() {
             nickname_get,
             message_search,
             messages_around,
+            message_receipts,
             thread_create,
             thread_list,
             thread_messages,

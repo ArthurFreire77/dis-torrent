@@ -1,8 +1,3 @@
-// Lista de mensagens com a camada social completa: reações, respostas,
-// edição, exclusão, fixar, encaminhar, thread, enquetes, markdown, spoiler,
-// links, divisores de data e barra de não-lidas.
-// O motor valida tudo; aqui só refletimos o resultado real.
-
 import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { services } from '../../services'
 import { FILE_PREFIX } from '../../services/fileSwarm'
@@ -28,19 +23,20 @@ import {
 } from './Social'
 import { Icon, Icons } from '../../shared/icons'
 import { EmojiPicker } from '../../shared/EmojiPicker'
-import { statusGlyph, statusTitle } from './messageStatus'
-
+import {
+  buildReceipts, groupStatus, receiptsHeadline, statusGlyph, statusTitle, statusTitleFor,
+  type ReceiptsView,
+} from './messageStatus'
+import { ReceiptsPanel } from './Social'
+import { useConversationRoster, useMessageReceipts } from './socialHooks'
 
 export interface MessageListProps {
   messages: StoredMessage[]
   convId: string
   myFp: string
-  /** nome de exibição resolvido pelo shell (apelido do grupo / bot) */
   nameOf: (fp: string) => string
   profiles: Record<string, ProfileView>
   presence: Record<string, string>
-  /** DM: o contato desta conversa está ONLINE agora (sessão viva)? Sem esse
-   *  dado o rótulo "aguardando conexão" mentiria para quem está conectado. */
   peerOnline?: boolean
   emptyBlock: React.ReactNode
   onReply: (m: StoredMessage) => void
@@ -48,10 +44,8 @@ export interface MessageListProps {
   onForward: (m: StoredMessage) => void
   onThread: (m: StoredMessage) => void
   onToast: (s: string) => void
-  /** reenvia mensagem que falhou (o motor re-tenta pela outbox, isto força já) */
   onResend?: (m: StoredMessage) => void
   renderFile?: (m: StoredMessage, grouped: boolean) => React.ReactNode
-  /** enquetes do canal (nativo; vazio no browser até criar) */
   pollChannel?: { communityId: string; channelId: string }
   pollHighlight?: string
   compact?: boolean
@@ -59,12 +53,9 @@ export interface MessageListProps {
 }
 
 export interface MessageListHandle {
-  /** força a recarga de enquetes/emojis do canal (após criar enquete no shell) */
   reloadPolls: () => void
 }
 
-// `export default const ...` não é sintaxe válida — o default export só aceita
-// a declaração ou a expressão diretamente. Declara e exporta em separado.
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageListInner(props, ref) {
   const {
     messages, convId, myFp, nameOf, profiles, presence, emptyBlock,
@@ -72,6 +63,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     compact, fontScale, peerOnline,
   } = props
   const fs = fontScale && fontScale > 0 ? fontScale : 1
+
+  const roster = useConversationRoster(convId, myFp)
+  // Recibos reais por membro (tabela `read_receipts` do core).
+  const recibos = useMessageReceipts(convId, messages as never)
+
+  const receiptsOf = (m: StoredMessage): ReceiptsView => buildReceipts({
+    kind: roster.kind,
+    members: roster.members,
+    membersKnown: !roster.loading,
+    myFp,
+    status: m.status,
+    receipts: recibos[m.id] ?? [],
+    receiptsKnown: !!recibos[m.id],
+  })
 
   const [metas, setMetas] = useState<Record<string, MsgMetaView>>({})
   const [bodies, setBodies] = useState<Record<string, string>>({})
@@ -83,8 +88,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const [emojis, setEmojis] = useState<EmojiView[]>([])
   const [unreadBefore, setUnreadBefore] = useState<number | null>(null)
   const [picker, setPicker] = useState<string | null>(null)
-  /** `${msgId}:${emoji}` do popover "quem reagiu" aberto (paridade com o mobile). */
   const [whoReagiu, setWhoReagiu] = useState<string | null>(null)
+  const [quemViu, setQuemViu] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ id: string; body: string } | null>(null)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -92,7 +97,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
   const ids = useMemo(() => messages.map(m => m.id), [messages])
 
-  // carga de meta + reações + corpos efetivos (1 chamada cada, em lote)
   useEffect(() => {
     if (ids.length === 0) { setMetas({}); setReactions({}); setBodies({}); return }
     let alive = true
@@ -127,11 +131,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     }
     load()
     return () => { alive = false }
-    // messages.length é o gatilho de "chegou mensagem nova". Criar/votar numa
-    // enquete NÃO muda esse número, então a lista ficava congelada e a enquete
-    // recém-criada não aparecia — depende também do evento de enquete do motor.
-    // (sem diretiva eslint-disable: o plugin react-hooks não está instalado;
-    // a diretiva morta quebrava o lint com "rule not found".)
   }, [pollChannel?.communityId, pollChannel?.channelId, messages.length, pollNonce])
 
   useEffect(() => {
@@ -147,14 +146,12 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     services.emojiList(pollChannel.communityId).then(setEmojis).catch(() => setEmojis([]))
   }, [pollChannel?.communityId])
 
-  // cursor de leitura: onde estavam as não-lidas quando entrou na conversa
   useEffect(() => {
     let alive = true
     services.readSet(convId, 0).catch(() => {})
     services.unreadCount(convId).then(n => {
       if (!alive) return
       if (n > 0) {
-        // procura a 1ª mensagem acima do cursor
         services.readAll().then(cur => {
           const last = cur.find(c => c.conv_id === convId)?.last_read_ts ?? 0
           if (last > 0) setUnreadBefore(last)
@@ -165,14 +162,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }, [convId])
 
   useEffect(() => {
-    // Fecha menu/seletor ao clicar fora.
-    //
-    // Isto era um `click` cego: qualquer clique fechava o seletor — inclusive o
-    // clique no botão que ACABOU de abri-lo (React aplica o estado e o listener
-    // nativo roda logo depois, anulando na mesma batida). Era por isso que o
-    // botão "reagir" do desktop simplesmente não funcionava, enquanto os
-    // botões da barra de hover funcionavam (eles fazem `stopPropagation`).
-    // Agora um clique dentro de um popover não fecha nada.
     const close = (e: MouseEvent) => {
       const el = e.target as Element | null
       if (el && typeof el.closest === 'function' && el.closest('[data-popover]')) return
@@ -191,11 +180,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     } catch (e: any) { onToast(String(e?.message ?? e)) }
   }
 
-  // Reação do OUTRO lado chegando: o motor emite `reaction_changed` (inclui o
-  // eco local). Sem esta escuta, a reação remota só aparecia ao reabrir a
-  // conversa — "reações não transmitidas". Re-lê só a mensagem afetada.
   useEffect(() => {
     if (!convId) return
+    // Seção 1: un
     const un = services.subscribe((ev: any) => {
       try {
         if (ev?.type !== 'reaction_changed' || ev?.conv_id !== convId) return
@@ -204,9 +191,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         services.reactions(mid)
           .then(r => { setReactions(s => ({ ...s, [mid]: r })) })
           .catch(() => {})
-      } catch { /* evento nunca derruba a lista */ }
+      } catch {  }
     })
-    return () => { try { un() } catch { /* ignore */ } }
+    return () => { try { un() } catch {  } }
   }, [convId])
 
   async function doEdit(id: string) {
@@ -237,14 +224,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   }
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  /**
-   * Para onde abrir o seletor de emoji desta mensagem.
-   *
-   * O `EmojiPicker` é `position: absolute` e tem ~330px de altura. Abrir sempre
-   * para cima fazia o painel cobrir o cabeçalho do canal quando a mensagem
-   * estava no topo; abrir sempre para baixo fazia ele sair pela borda inferior
-   * nas últimas mensagens. Decide pela posição real da mensagem na viewport.
-   */
   const pickerAnchor = (msgId: string): 'up' | 'down' => {
     try {
       const el = scrollRef.current?.querySelector(`[data-mid="${msgId}"]`)
@@ -283,6 +262,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         const pres = presence[authorFp] as never
         const showUnread = unreadBefore !== null && m.ts >= unreadBefore
         const wantsUnfurl = body.includes('<@') || body.includes('http://') || body.includes('https://')
+        const vistos = mine ? receiptsOf(m) : null
+        const statusMostrado = vistos && m.status !== 'ok' ? groupStatus(m.status, vistos) : m.status
 
         return (
           <React.Fragment key={m.id}>
@@ -315,7 +296,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     )}
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }}> (editado)</span> : null}
                     {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED, verticalAlign: 'middle' }}><Icon d={Icons.pin} size={11} /></span> : null}
-                    {mine && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={m.status} peerOnline={peerOnline} /></span>}
+                    {mine && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={statusMostrado} peerOnline={peerOnline} titulo={vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined} /></span>}
                   </div>
                 ) : !grouped && (
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -326,7 +307,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }} title={new Date(meta.edited_at).toLocaleString('pt-BR')}>(editado)</span> : null}
                     {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED }}><Icon d={Icons.pin} size={11} /></span> : null}
                     {meta?.forwarded_from ? <span style={{ fontSize: 10, color: T_MUTED }}>↪ encaminhada de {meta.forwarded_from}</span> : null}
-                    {mine && m.status !== 'ok' && <StatusGlyph status={m.status} peerOnline={peerOnline} />}
+                    {mine && m.status !== 'ok' && <StatusGlyph status={statusMostrado} peerOnline={peerOnline} titulo={vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined} />}
                   </div>
                 )}
 
@@ -361,18 +342,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   </>
                 )}
 
-                {/* Reações IDÊNTICAS ao app do celular (MobileMessage): mesmas
-                    pílulas, mesmo botão "?" de quem reagiu (com 2+ pessoas),
-                    mesmo ícone de carinha ao lado das pílulas e mesma pílula
-                    "reagir" quando a mensagem ainda não tem reação. O seletor é
-                    o EmojiPicker compartilhado (o do compositor), não o
-                    ReactionPicker antigo — é o que o mobile usa. */}
+                {
+}
                 <div style={{ position: 'relative' }} data-popover>
                   {rx.length > 0 && (
                     <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 6 }}>
                       {rx.map(r => (
                         <div key={r.emoji} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-                          {/* clique = alterna a MINHA reação (como o Discord) */}
+                          {}
                           <button
                             onClick={() => toggleReact(m.id, r.emoji)}
                             aria-label={`${r.emoji}, ${r.count} reações. Clique para alternar a sua`}
@@ -388,7 +365,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                             <span style={{ fontSize: 14 }}>{r.emoji}</span>
                             <span style={{ fontSize: 12 }}>{r.count}</span>
                           </button>
-                          {/* com 2+ pessoas, o separador mostra QUEM reagiu */}
+                          {}
                           {r.count > 1 && (
                             <button
                               onClick={() => setWhoReagiu(w => w === `${m.id}:${r.emoji}` ? null : `${m.id}:${r.emoji}`)}
@@ -431,6 +408,29 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     ><Icon d={Icons.smile} size={12} /> reagir</button>
                   )}
 
+                  {mine && vistos && roster.kind !== 'dm' && (
+                    <div style={{ position: 'relative', display: 'inline-flex', marginTop: 3 }}>
+                      <button
+                        onClick={() => setQuemViu(quemViu === m.id ? null : m.id)}
+                        aria-label="Ver quem visualizou"
+                        title="Ver quem visualizou"
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 4,
+                          background: quemViu === m.id ? 'rgba(88,101,242,.22)' : 'transparent',
+                          border: `1px solid ${T_BORDER}`, color: T_MUTED,
+                          borderRadius: 99, padding: '1px 8px', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                        }}
+                      >⋯</button>
+                      {quemViu === m.id && (
+                        <ReceiptsPanel
+                          view={vistos}
+                          headline={receiptsHeadline(vistos)}
+                          onClose={() => setQuemViu(null)}
+                        />
+                      )}
+                    </div>
+                  )}
+
                   {picker === m.id && (
                     <EmojiPicker
                       open
@@ -442,12 +442,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   )}
                 </div>
 
-                {/* Enquetes ancoradas nas últimas mensagens. A âncora é
-                    distribuída: a i-ésima enquete (das N mais recentes) fica na
-                    mensagem `len-1-(N-1-i)`. A conta antiga usava um índice fixo
-                    que dava negativo quando havia menos mensagens que enquetes
-                    — aí NENHUMA aparecia, mesmo com a enquete criada no motor. */}
+                {
+}
                 {polls.map((p, pi) => {
+                  // Seção 2: n
                   const n = polls.length
                   const anchor = n <= visible.length ? visible.length - 1 - (n - 1 - pi) : visible.length - 1
                   if (idx !== anchor) return null
@@ -466,9 +464,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 })}
               </div>
 
-              {/* Ações no hover/foco (CSS .msg-tools). Antes eram 4 emojis fixos
-                  sempre visíveis: cobriam o texto e não pareciam com o mobile.
-                  Agora é UM ícone de reação, igual ao app do celular. */}
+              {
+}
               <div className="msg-tools" style={{ position: 'absolute', top: -14, right: 12, display: 'flex', gap: 2, background: T_MAIN, border: `1px solid ${T_BORDER}`, borderRadius: 8, padding: 2, boxShadow: '0 4px 12px rgba(0,0,0,.4)', zIndex: 5 }}>
                 <button title="Reagir" aria-label="Reagir" onClick={e2 => { e2.stopPropagation(); setPicker(picker === m.id ? null : m.id) }} style={{ ...TOOL_BTN, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.smile} size={15} /></button>
                 <button title="Responder" onClick={e2 => { e2.stopPropagation(); onReply(m) }} style={{ ...TOOL_BTN, width: 'auto', padding: '0 8px', fontSize: 11, fontWeight: 800 }}>Responder</button>
@@ -486,14 +483,15 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               <MenuItem label="Encaminhar" icon={Icons.externalLink} onClick={() => { onForward(m); setMenu(null) }} />
               <MenuItem label="Criar thread" icon={Icons.hash} onClick={() => { onThread(m); setMenu(null) }} />
               {(mine || meta) && <MenuItem label="Editar" icon={Icons.edit} onClick={() => { setEditing({ id: m.id, body }); setMenu(null) }} />}
-              {/* Reenviar: só faz sentido quando o envio realmente falhou. O
-                  glyph já aparece na linha (StatusGlyph), aqui damos o botão. */}
+              {
+}
               {mine && m.status === 'failed' && onResend && (
                 <MenuItem label="Reenviar" icon={Icons.refresh} onClick={() => { onResend(m); setMenu(null) }} />
               )}
+              {mine && roster.kind !== 'dm' && (
+                <MenuItem label="Quem visualizou" icon={Icons.eye} onClick={() => { setQuemViu(m.id); setMenu(null) }} />
+              )}
               <MenuItem label="Marcar como não lida" icon={Icons.eye} onClick={() => {
-                // Cursor de leitura falso logo abaixo desta msg = tudo acima
-                // volta a contar como não lida (mesma semântica do Discord).
                 services.readSet(convId, Math.max(0, m.ts - 1)).catch(() => {})
                 setUnreadBefore(m.ts)
                 onToast('marcada como não lida')
@@ -556,11 +554,7 @@ function MenuItem({ label, icon, onClick, danger }: { label: string; icon?: stri
   )
 }
 
-function StatusGlyph({ status, peerOnline }: { status: string; peerOnline?: boolean }) {
-  // Estilo WhatsApp: relógio (aguardando rede) → ✓ (saiu daqui) → ✓✓ cinza
-  // (entregue) → ✓✓ azul (lido); ✕ = falhou (clique reenvia).
-  // O texto da dica vem de `messageStatus`: com o contato ONLINE o relógio não
-  // significa "sem conexão", significa "fila sem confirmação".
+function StatusGlyph({ status, peerOnline, titulo }: { status: string; peerOnline?: boolean; titulo?: string }) {
   const g = statusGlyph(status)
   if (!g) return null
   const cor =
@@ -569,7 +563,7 @@ function StatusGlyph({ status, peerOnline }: { status: string; peerOnline?: bool
     : T_MUTED
   return (
     <span
-      title={statusTitle(status, peerOnline)}
+      title={titulo ?? statusTitle(status, peerOnline)}
       style={{ fontSize: 11, color: cor, fontFamily: 'monospace', fontWeight: 700, letterSpacing: -2 }}
     >
       {g}
@@ -581,7 +575,6 @@ function emptyMeta(id: string, convId: string): MsgMetaView {
   return { msg_id: id, conv_id: convId, reply_to: '', forwarded_from: '', edited_body: '', edited_at: 0, deleted: false, pinned: false, pinned_by: '', pinned_at: 0, mentioned: false }
 }
 
-// paleta local (espelha o DisTorrent do shell)
 const T_MAIN = '#313338'
 const T_INPUT = '#1e1f22'
 const T_BORDER = '#3f4147'

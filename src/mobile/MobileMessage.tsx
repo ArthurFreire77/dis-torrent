@@ -1,19 +1,15 @@
-// Linha de mensagem do shell MOBILE com a camada social completa (paridade
-// Discord): resposta inline, markdown/spoiler/links, reações, editar, apagar,
-// fixar, encaminhar, copiar, denunciar, preview de arquivo e edição no lugar.
-//
-// Toque longo (500ms) ou botão "..." abre a folha de ações; tocar em uma
-// reação alterna (o motor valida e difunde). Tudo passa por `services`.
-
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { MsgMetaView, ReactionSummary, StoredMessage } from '../services/models'
 import { Icon, Icons } from '../shared/icons'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import { QUICK_REACTIONS } from '../shared/emojiSet'
-import { ReactionWhoPopover, LinkUnfurl } from '../components/social/Social'
+import { ReactionWhoPopover, LinkUnfurl, ReceiptsPanel } from '../components/social/Social'
 import { FILE_PREFIX } from '../services/fileSwarm'
-import { statusGlyph, statusTitle } from '../components/social/messageStatus'
+import {
+  buildReceipts, groupStatus, receiptsHeadline, statusGlyph, statusTitle, statusTitleFor,
+} from '../components/social/messageStatus'
+import { useConversationRoster, useMessageReceipts } from '../components/social/socialHooks'
 
 const T = {
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
@@ -24,14 +20,13 @@ const T = {
 }
 const MONO = 'JetBrains Mono, monospace'
 
-/** Visto estilo WhatsApp no celular: relógio → ○ → ✓ → ✓✓ → ✓✓ azul → ✕. */
-function Tick({ status, peerOnline }: { status: string; peerOnline?: boolean }) {
+function Tick({ status, peerOnline, titulo }: { status: string; peerOnline?: boolean; titulo?: string }) {
   const g = statusGlyph(status)
   if (!g) return null
   const cor = status === 'read' ? '#53bdeb' : status === 'failed' ? '#ff9c9c' : T.muted
   return (
     <span
-      title={statusTitle(status, peerOnline)}
+      title={titulo ?? statusTitle(status, peerOnline)}
       style={{ fontSize: 11, color: cor, fontFamily: MONO, fontWeight: 700, letterSpacing: -2, flexShrink: 0 }}
     >
       {g}
@@ -51,16 +46,13 @@ function Avatar({ name, fp, size = 36, avatarB64, accent }: {
   fp: string
   size?: number
   avatarB64?: string
-  /** cor de destaque do perfil (personalização do usuário, paridade Discord). */
   accent?: string
 }) {
   const [err, setErr] = useState(false)
   const initial = (name || '?').trim().charAt(0).toUpperCase()
   const ring = accent ? `2px solid ${accent}` : undefined
-  // Avatar salvo pelo usuário tem precedência sobre a cor gerada por fp.
   if (avatarB64 && !err) {
     return (
-      // JPEG: é o formato que `compressImage` produz (shared/avatar.ts).
       <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
         style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring }} />
     )
@@ -77,19 +69,14 @@ export interface MobileMessageProps {
   mine: boolean
   authorName: string
   authorFp: string
-  /** avatar salvo no perfil (paridade Discord: respeita upload do usuário). */
   authorAvatar?: string
-  /** cor de destaque do perfil, aplicada em avatar e nome. */
   authorAccent?: string
-  /** corpo efetivo (edição aplicada pelo motor) */
   body: string
   meta: MsgMetaView | undefined
   reactions: ReactionSummary[]
   grouped: boolean
   ctx: InlineCtx
-  /** fp → nome, para o popover "quem reagiu" no chip de reação. */
   resolveName?: (fp: string) => string
-  /** mensagem citada (para o preview da resposta) */
   replyTo: { name: string; body: string } | null
   onJumpToReply?: (msgId: string) => void
   onReact: (emoji: string) => void
@@ -107,7 +94,6 @@ export interface MobileMessageProps {
   highlighted?: boolean
   renderFile?: (m: StoredMessage) => React.ReactNode
   fontSize?: number
-  /** DM: o contato está ONLINE agora? Muda a dica do relógio (ver messageStatus). */
   peerOnline?: boolean
 }
 
@@ -129,12 +115,28 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   const [emojiOpen, setEmojiOpen] = useState(false)
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
-  // Mensagem de arquivo tem TEXTO no corpo (o marker __DISTORRENT_FILE__:base64).
-  // Checar `!body` nunca era verdadeiro, entao o card nunca aparecia e o
-  // RichText imprimia o marker cru. Detecta pelo prefixo, como o desktop.
   const isFile = !!renderFile && body.startsWith(FILE_PREFIX)
   const deleted = !!meta?.deleted
   const edited = !!meta?.edited_at && !deleted
+
+  const roster = useConversationRoster(m.conv_id, ctx.myFp)
+  const [quemViu, setQuemViu] = useState(false)
+  // Recibos reais por membro: o azul só acende com TODOS, e o painel mostra nomes.
+  const recibos = useMessageReceipts(m.conv_id, useMemo(() => [m], [m.id, m.status]))
+  const vistos = mine
+    ? buildReceipts({
+        kind: roster.kind,
+        members: roster.members,
+        membersKnown: !roster.loading,
+        myFp: ctx.myFp,
+        status: m.status,
+        receipts: recibos[m.id] ?? [],
+        receiptsKnown: !!recibos[m.id],
+      })
+    : null
+  const statusMostrado = vistos && m.status !== 'ok' ? groupStatus(m.status, vistos) : m.status
+  const tituloStatus = vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined
+  const mostrarRecibos = mine && !!vistos && roster.kind !== 'dm'
 
   useEffect(() => { setDraft(body) }, [body])
   useEffect(() => { if (editing) setTimeout(() => textareaRef.current?.focus(), 40) }, [editing])
@@ -162,6 +164,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
     { id: 'react-more', label: 'Mais reações', svg: Icons.smile },
     { id: 'reply', label: 'Responder', svg: Icons.send },
     ...(mine ? [{ id: 'edit', label: 'Editar', svg: Icons.edit }] : []),
+    ...(mostrarRecibos ? [{ id: 'receipts', label: 'Quem visualizou', svg: Icons.eye }] : []),
     { id: 'copy', label: 'Copiar texto', svg: Icons.copy },
     { id: 'pin', label: meta?.pinned ? 'Desafixar' : 'Fixar mensagem', svg: Icons.pin },
     { id: 'forward', label: 'Encaminhar', svg: Icons.externalLink },
@@ -176,6 +179,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
       case 'react-more': setEmojiOpen((v) => !v); break
       case 'reply': onReply(); break
       case 'edit': setEditing(true); break
+      case 'receipts': setQuemViu(true); break
       case 'copy': onCopy(); break
       case 'pin': onPin(); break
       case 'forward': onForward(); break
@@ -210,7 +214,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
             {isBot && <span style={{ fontSize: 9, background: T.accent, color: '#fff', padding: '1px 4px', borderRadius: 4, fontWeight: 800 }}>BOT</span>}
             <span style={{ fontSize: 10, color: T.muted, fontFamily: MONO }}>{authorFp.slice(0, 8)}</span>
             <span style={{ fontSize: 11, color: T.muted }}>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-            {mine && m.status !== 'ok' && <Tick status={m.status} peerOnline={peerOnline} />}
+            {mine && m.status !== 'ok' && <Tick status={statusMostrado} peerOnline={peerOnline} titulo={tituloStatus} />}
           </div>
         )}
 
@@ -239,6 +243,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
           <div style={{ margin: '4px 0' }}>
             <textarea
               ref={textareaRef}
+              // Seção 1: value
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               rows={Math.min(8, Math.max(2, draft.split('\n').length))}
@@ -270,11 +275,11 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
               <RichText body={body} ctx={ctx} color={T.text} fontSize={fs} />
               {edited && <span style={{ fontSize: 10, color: T.muted, marginLeft: 4 }} title={new Date(meta!.edited_at).toLocaleString()}>(editado)</span>}
             </div>
-            {mine && m.status !== 'ok' && <Tick status={m.status} peerOnline={peerOnline} />}
+            {mine && m.status !== 'ok' && <Tick status={statusMostrado} peerOnline={peerOnline} titulo={tituloStatus} />}
           </div>
         )}
 
-        {/* Preview de link — paridade com o desktop (que usa LinkUnfurl). */}
+        {}
         {!editing && !deleted && <LinkUnfurl body={body} />}
 
         {onOpenThread && (
@@ -286,11 +291,33 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
           </button>
         )}
 
+        {mostrarRecibos && vistos && (
+          <div style={{ position: 'relative', display: 'inline-flex', marginTop: 6 }}>
+            <button
+              onClick={() => setQuemViu((v) => !v)}
+              aria-label="Ver quem visualizou"
+              title="Ver quem visualizou"
+              style={{
+                background: quemViu ? 'rgba(88,101,242,0.22)' : T.input,
+                border: `1px solid ${T.border}`, color: T.muted, borderRadius: 99,
+                padding: '3px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer',
+              }}
+            >⋯</button>
+            {quemViu && (
+              <ReceiptsPanel
+                view={vistos}
+                headline={receiptsHeadline(vistos)}
+                onClose={() => setQuemViu(false)}
+              />
+            )}
+          </div>
+        )}
+
         {reactions.length > 0 && (
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginTop: 6 }}>
             {reactions.map((r) => (
               <div key={r.emoji} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-                {/* toque = alterna a MINHA reação (como o Discord) */}
+                {}
                 <button
                   onClick={() => onReact(r.emoji)}
                   aria-label={`${r.emoji}, ${r.count} reações. Toque para alternar a sua`}
@@ -305,7 +332,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
                   <span style={{ fontSize: 14 }}>{r.emoji}</span>
                   <span style={{ fontSize: 12 }}>{r.count}</span>
                 </button>
-                {/* com 2+ pessoas, o separador mostra QUEM reagiu */}
+                {}
                 {r.count > 1 && resolveName && (
                   <button
                     onClick={() => setWhoEmoji(w => w === r.emoji ? null : r.emoji)}
@@ -406,4 +433,5 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   )
 })
 
+// Seção 2: MobileMessage
 export default MobileMessage

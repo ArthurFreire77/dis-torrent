@@ -463,6 +463,8 @@ export const tauriServices: DisTorrentServices = {
 
   searchMessages: (q) => invoke<SearchHit[]>('message_search', { q }),
   messagesAround: (convId, ts, limit) => invoke<StoredMessage[]>('messages_around', { convId, ts, limit }),
+  messageReceipts: (msgIds) =>
+    invoke<Array<[string, string, number]>>('message_receipts', { msgIds }).catch(() => []),
 
   threadCreate: (communityId, parentChannel, name, kind = 'thread', tags = '') =>
     invoke<ThreadView>('thread_create', { communityId, parentChannel, name, kind, tags }),

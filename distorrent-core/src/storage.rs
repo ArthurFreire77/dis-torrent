@@ -354,8 +354,19 @@ fn migrate(conn: &Connection) -> Result<()> {
             "UPDATE voice_states SET announced_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE announced_at = 0;",
         )?;
     }
+    // Recibo POR MEMBRO. O `status` da mensagem é agregado e, num grupo,
+    // `read` de um só já virava "lida por todos" na tela.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS read_receipts (
+           msg_id TEXT NOT NULL,
+           fp TEXT NOT NULL,
+           read_at INTEGER NOT NULL,
+           PRIMARY KEY(msg_id, fp)
+         );
+         CREATE INDEX IF NOT EXISTS idx_receipts_msg ON read_receipts(msg_id);",
+    )?;
     conn.execute(
-        "INSERT INTO kv(key,value) VALUES('schema_version','12') ON CONFLICT(key) DO UPDATE SET value='12'",
+        "INSERT INTO kv(key,value) VALUES('schema_version','13') ON CONFLICT(key) DO UPDATE SET value='13'",
         [],
     )?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -1013,6 +1024,99 @@ impl Store {
             conn.execute("UPDATE messages SET status='read' WHERE id=?1", params![id])?;
         }
         Ok(ids)
+    }
+
+    /// Grava o recibo de UM membro e devolve as mensagens que ficaram lidas por
+    /// TODOS os outros. Sem isso um `read` de um participante já pintava o
+    /// duplo check azul para o grupo inteiro.
+    pub fn record_read_receipt(
+        &self,
+        conv_id: &str,
+        reader_fp: &str,
+        up_to_ts: i64,
+    ) -> Result<Vec<String>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT id FROM messages
+             WHERE conv_id=?1 AND direction='out'
+               AND ts<=?2 AND status<>'failed'",
+        )?;
+        let ids = st
+            .query_map(params![conv_id, up_to_ts], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(st);
+        let now = crate::identity::now_ms();
+        for id in &ids {
+            conn.execute(
+                "INSERT INTO read_receipts(msg_id,fp,read_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(msg_id,fp) DO UPDATE SET read_at=?3",
+                params![id, reader_fp, now],
+            )?;
+        }
+        Ok(ids)
+    }
+
+    /// Mensagens da conversa que já foram lidas por todos os membros esperados.
+    pub fn messages_read_by_all(
+        &self,
+        conv_id: &str,
+        up_to_ts: i64,
+        expected: &[String],
+    ) -> Result<Vec<String>> {
+        if expected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT m.id,
+                    (SELECT COUNT(DISTINCT r.fp) FROM read_receipts r
+                      WHERE r.msg_id = m.id) AS n
+             FROM messages m
+             WHERE m.conv_id=?1 AND m.direction='out'
+               AND m.ts<=?2 AND m.status<>'failed'",
+        )?;
+        let pares = st
+            .query_map(params![conv_id, up_to_ts], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(st);
+        let faltando = expected.len() as i64;
+        Ok(pares
+            .into_iter()
+            .filter(|(_, n)| *n >= faltando)
+            .map(|(id, _)| id)
+            .collect())
+    }
+
+    /// Quem visualizou cada mensagem pedida (fp → instante mais recente).
+    pub fn receipts_for(&self, msg_ids: &[String]) -> Result<Vec<(String, String, i64)>> {
+        if msg_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.locked();
+        let mut out = Vec::new();
+        // Em lotes: o SQLite tem teto de parâmetros por consulta.
+        for bloco in msg_ids.chunks(400) {
+            let marca = std::iter::repeat("?")
+                .take(bloco.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql =
+                format!("SELECT msg_id, fp, read_at FROM read_receipts WHERE msg_id IN ({marca})");
+            let mut st = conn.prepare(&sql)?;
+            let rows = st.query_map(rusqlite::params_from_iter(bloco.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
     }
 
     pub fn list_messages_window(
@@ -3387,6 +3491,80 @@ mod tests {
         let env = MessageEnvelope::new(&kp, "canal-fake-1", "oi canal");
         store.insert_message(&env, "out", "sent").unwrap();
         assert_eq!(store.list_messages("canal-fake-1", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recibo_de_um_membro_nao_marca_lida_para_o_grupo_todo() {
+        // O `status` é agregado: com 3 pessoas, o "lida" de uma só já virava
+        // duplo check azul para todo mundo.
+        let store = Store::open_in_memory().unwrap();
+        let kp = crate::identity::Keypair::generate();
+        let env = MessageEnvelope::new(&kp, "grupo-1", "oi grupo");
+        store.insert_message(&env, "out", "sent").unwrap();
+        let ts = env.ts;
+        let esperados = vec!["peer-a".to_string(), "peer-b".to_string()];
+
+        store.record_read_receipt("grupo-1", "peer-a", ts).unwrap();
+        let todos = store
+            .messages_read_by_all("grupo-1", ts, &esperados)
+            .unwrap();
+        assert!(
+            todos.is_empty(),
+            "com um membro faltando a mensagem NÃO está lida por todos: {todos:?}"
+        );
+
+        store.record_read_receipt("grupo-1", "peer-b", ts).unwrap();
+        let todos = store
+            .messages_read_by_all("grupo-1", ts, &esperados)
+            .unwrap();
+        assert_eq!(todos, vec![env.id.clone()], "agora todos visualizaram");
+    }
+
+    #[test]
+    fn recibos_listam_quem_visualizou_com_horario() {
+        let store = Store::open_in_memory().unwrap();
+        let kp = crate::identity::Keypair::generate();
+        let env = MessageEnvelope::new(&kp, "grupo-2", "oi");
+        store.insert_message(&env, "out", "sent").unwrap();
+        store
+            .record_read_receipt("grupo-2", "peer-z", env.ts)
+            .unwrap();
+
+        let linhas = store.receipts_for(&[env.id.clone()]).unwrap();
+        assert_eq!(linhas.len(), 1);
+        assert_eq!(linhas[0].0, env.id);
+        assert_eq!(linhas[0].1, "peer-z");
+        assert!(linhas[0].2 > 0, "o instante precisa ser real, não zero");
+    }
+
+    #[test]
+    fn recibo_nao_duplica_por_membro() {
+        let store = Store::open_in_memory().unwrap();
+        let kp = crate::identity::Keypair::generate();
+        let env = MessageEnvelope::new(&kp, "grupo-3", "oi");
+        store.insert_message(&env, "out", "sent").unwrap();
+        store
+            .record_read_receipt("grupo-3", "peer-a", env.ts)
+            .unwrap();
+        store
+            .record_read_receipt("grupo-3", "peer-a", env.ts)
+            .unwrap();
+        assert_eq!(store.receipts_for(&[env.id.clone()]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sem_membros_esperados_ninguem_esta_lido() {
+        let store = Store::open_in_memory().unwrap();
+        let kp = crate::identity::Keypair::generate();
+        let env = MessageEnvelope::new(&kp, "grupo-4", "oi");
+        store.insert_message(&env, "out", "sent").unwrap();
+        store
+            .record_read_receipt("grupo-4", "peer-a", env.ts)
+            .unwrap();
+        assert!(store
+            .messages_read_by_all("grupo-4", env.ts, &[])
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

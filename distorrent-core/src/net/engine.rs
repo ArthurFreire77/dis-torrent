@@ -9828,7 +9828,15 @@ async fn handle_frame(
                     "Read de peer não autorizado".into(),
                 ));
             }
-            let ids = engine.store.mark_read_outgoing(&conv_id, up_to_ts)?;
+            // Recibo POR MEMBRO: num grupo/canal, o `read` de um participante
+            // não pode marcar a mensagem como lida para todos.
+            let _ = engine
+                .store
+                .record_read_receipt(&conv_id, peer_fp, up_to_ts)?;
+            let esperados = engine.social_peers_of(&conv_id);
+            let ids = engine
+                .store
+                .messages_read_by_all(&conv_id, up_to_ts, &esperados)?;
             for msg_id in ids {
                 let _ = engine.events.send(EngineEvent::MessageStatus {
                     msg_id,

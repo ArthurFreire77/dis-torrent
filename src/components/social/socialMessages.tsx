@@ -1,16 +1,10 @@
-// Divisores de data/não-lidas e mensagens salvas.
-//
-// Extraído de `Social.tsx` (1508 linhas, 27 exports). O conteúdo é o MESMO — a
-// divisão é só de responsabilidade, e `Social.tsx` reexporta tudo para nenhum
-// importador precisar mudar.
-
 import React, { useEffect, useMemo, useState } from 'react'
 import type { StoredMessage } from '../../services/models'
 import { services } from '../../services'
 import { T, fmtClock, fmtDay } from './socialTheme'
 import { btnGhost } from './socialPrimitives'
-
-// ============================== DIVISOR DE DATA ==============================
+import type { ReceiptPerson, ReceiptsView } from './messageStatus'
+import { receiptGroups } from './messageStatus'
 
 export function DayDivider({ ts }: { ts: number }) {
   return (
@@ -32,13 +26,60 @@ export function UnreadDivider({ onClick }: { onClick: () => void }) {
   )
 }
 
-// ============================== BOOKMARKS ==============================
+export function ReceiptsPanel({ view, headline, onClose }: {
+  view: ReceiptsView
+  headline: string
+  onClose: () => void
+}) {
+  return (
+    <div data-popover style={{
+      position: 'absolute', bottom: 'calc(100% + 6px)', right: 0, zIndex: 60,
+      background: T.rail, border: `1px solid ${T.border}`, borderRadius: 8, padding: 10,
+      boxShadow: '0 10px 30px rgba(0,0,0,.55)', minWidth: 210, maxWidth: 290,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <span style={{ flex: 1, fontSize: 10, fontWeight: 800, letterSpacing: .6, color: T.muted, textTransform: 'uppercase' }}>
+          quem visualizou
+        </span>
+        <button onClick={onClose} aria-label="Fechar" style={{ background: 'transparent', border: 'none', color: T.muted, cursor: 'pointer', fontSize: 15, lineHeight: 1 }}>×</button>
+      </div>
+      <div style={{ fontSize: 11, color: view.allRead ? '#53bdeb' : T.muted, marginBottom: 8 }}>{headline}</div>
+      {view.total === 0 ? (
+        <div style={{ fontSize: 11, color: T.muted }}>sem outros membros nesta conversa</div>
+      ) : (
+        receiptGroups(view).map((g) => (
+          <ReceiptGroup key={g.titulo} titulo={g.titulo} pessoas={g.pessoas} tom={g.tom} />
+        ))
+      )}
+    </div>
+  )
+}
 
-/**
- * Mensagens salvas pelo usuário (`bookmarkSet` no motor). O Discord trata
- * isto como recurso Nitro; aqui é de graça — a chave é a conversa, então o
- * marcador atravessa reinstalação sem servidor.
- */
+function ReceiptGroup({ titulo, pessoas, tom }: { titulo: string; pessoas: ReceiptPerson[]; tom: 'read' | 'missing' | 'unknown' }) {
+  if (pessoas.length === 0) return null
+  const cor = tom === 'read' ? '#53bdeb' : T.muted
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: .6, color: T.muted, textTransform: 'uppercase', marginBottom: 4 }}>
+        {titulo} · {pessoas.length}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 170, overflowY: 'auto' }}>
+        {pessoas.map((p) => (
+          <div key={p.fp} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: T.text }}>
+            <span style={{ width: 16, height: 16, borderRadius: '50%', background: cor, color: '#fff', fontSize: 9, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              {(p.name || '?').slice(0, 1).toUpperCase()}
+            </span>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+            <span style={{ fontSize: 10, color: T.muted, fontFamily: 'JetBrains Mono' }}>
+              {p.read && p.readAt > 0 ? fmtClock(p.readAt) : '—'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function BookmarksPanel({ convId, onClose, onJump, messages }: {
   convId: string
   onClose: () => void
@@ -63,7 +104,6 @@ export function BookmarksPanel({ convId, onClose, onJump, messages }: {
       .map(([id, payload]) => {
         let msg = byId.get(id)
         if (!msg) {
-          // marcador de mensagem que saiu da janela: mostra o que foi salvo
           try { msg = JSON.parse(payload) as StoredMessage } catch { msg = undefined }
         }
         return msg ? { id, msg } : null

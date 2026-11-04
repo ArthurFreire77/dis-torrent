@@ -1,16 +1,8 @@
-// Atalhos de teclado e paleta de comandos.
-//
-// Extraído de `Social.tsx` (que tinha 1508 linhas e 27 exports) por
-// `scripts/split-social.mjs`. O conteúdo é o MESMO — a divisão é só de
-// responsabilidade: um arquivo por assunto, para achar e revisar sem rolar
-// 1,5 mil linhas. `Social.tsx` continua reexportando tudo, então nenhum
-// importador precisou mudar.
-
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Ic } from '../../shared/icons'
+import { services } from '../../services'
+import { conversationKindOf, type ConversationKind, type ReadReceipt } from './messageStatus'
 import { T } from './socialTheme'
-
-// ============================== ATALHOS ==============================
 
 export const SHORTCUTS: [string, string][] = [
   ['Ctrl + K', 'Paleta de comandos'],
@@ -25,7 +17,6 @@ export const SHORTCUTS: [string, string][] = [
   ['Shift + Enter', 'Quebra de linha'],
 ]
 
-/** Hook de atalhos globais (ignora campos de texto). */
 export function useShortcuts(handlers: Record<string, (e: KeyboardEvent) => void>) {
   const ref = useRef(handlers)
   ref.current = handlers
@@ -38,8 +29,6 @@ export function useShortcuts(handlers: Record<string, (e: KeyboardEvent) => void
       if (key && !e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); ref.current.search?.(e); return }
       if (key && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); ref.current.pins?.(e); return }
       if (key && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); ref.current.mute?.(e); return }
-      // Inbox (menções + não-lidas) e salvas — atalhos do próprio Discord
-      // (Ctrl+I e Ctrl+Shift+D). Não colidem com nada acima.
       if (key && !e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); ref.current.inbox?.(e); return }
       if (key && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); ref.current.bookmarks?.(e); return }
       if (e.key === 'Escape') { ref.current.escape?.(e); return }
@@ -50,7 +39,159 @@ export function useShortcuts(handlers: Record<string, (e: KeyboardEvent) => void
   }, [])
 }
 
-// ============================== PALETA DE COMANDOS ==============================
+export interface ConversationRoster {
+  kind: ConversationKind | null
+  members: [string, string][]
+  loading: boolean
+}
+
+interface RosterCacheEntry {
+  kind: ConversationKind | null
+  members: [string, string][]
+  at: number
+}
+
+const ROSTER_TTL_MS = 30_000
+const rosterCache = new Map<string, RosterCacheEntry>()
+const rosterInflight = new Map<string, Promise<RosterCacheEntry>>()
+const rosterListeners = new Set<() => void>()
+let rosterSubscribed = false
+
+// Uma assinatura para todas as linhas: N mensagens não podem virar N listeners.
+function garantirAssinatura() {
+  if (rosterSubscribed) return
+  rosterSubscribed = true
+  try {
+    services.subscribe((ev) => {
+      if (ev.type !== 'group_synced') return
+      invalidateRoster(ev.conv_id || undefined)
+      for (const avisar of [...rosterListeners]) avisar()
+    })
+  } catch { rosterSubscribed = false }
+}
+
+// Cache por conversa: cada mensagem monta o hook e não pode disparar N consultas.
+export function invalidateRoster(convId?: string) {
+  if (convId) rosterCache.delete(convId)
+  else rosterCache.clear()
+}
+
+function loadRoster(convId: string): Promise<RosterCacheEntry> {
+  const pronto = rosterCache.get(convId)
+  if (pronto && Date.now() - pronto.at < ROSTER_TTL_MS) return Promise.resolve(pronto)
+  const emCurso = rosterInflight.get(convId)
+  if (emCurso) return emCurso
+  const p = montarRoster(convId)
+    .then((entry) => {
+      rosterCache.set(convId, entry)
+      return entry
+    })
+    .finally(() => { rosterInflight.delete(convId) })
+  rosterInflight.set(convId, p)
+  return p
+}
+
+async function montarRoster(convId: string): Promise<RosterCacheEntry> {
+  let kind: ConversationKind | null = null
+  let communities: { id: string; channels: [string, string][] }[] = []
+  try {
+    const convs = await services.conversationsList()
+    if (convs.some((c) => c.id === convId)) {
+      kind = conversationKindOf(convId, convs, [])
+    } else {
+      communities = await services.communitiesList()
+      kind = conversationKindOf(convId, convs, communities)
+    }
+  } catch { kind = null }
+  let members: [string, string][] = []
+  if (kind === 'group') {
+    members = await services.groupMembers(convId).catch(() => [])
+  } else if (kind === 'channel') {
+    const cid = communities.find((c) => c.channels.some(([id]) => id === convId))?.id
+    if (cid) {
+      const lista = await services.communityMembers(cid).catch(() => [])
+      members = lista.map((m) => [m.fp, m.nickname] as [string, string])
+    }
+  }
+  return { kind, members, at: Date.now() }
+}
+
+export function useConversationRoster(convId: string, myFp: string): ConversationRoster {
+  const [estado, setEstado] = useState<ConversationRoster>({ kind: null, members: [], loading: !!convId })
+
+  useEffect(() => {
+    let alive = true
+    if (!convId) {
+      setEstado({ kind: null, members: [], loading: false })
+      return () => { alive = false }
+    }
+    garantirAssinatura()
+    const cached = rosterCache.get(convId)
+    if (cached && Date.now() - cached.at < ROSTER_TTL_MS) {
+      setEstado({ kind: cached.kind, members: cached.members, loading: false })
+    } else {
+      setEstado((s) => ({ ...s, loading: true }))
+    }
+    const recarregar = () => {
+      void loadRoster(convId).then((entry) => {
+        if (alive) setEstado({ kind: entry.kind, members: entry.members, loading: false })
+      })
+    }
+    rosterListeners.add(recarregar)
+    recarregar()
+    return () => {
+      alive = false
+      rosterListeners.delete(recarregar)
+    }
+  }, [convId, myFp])
+
+  return estado
+}
+
+export type ReceiptsByMessage = Record<string, ReadReceipt[]>
+
+/**
+ * Recibos reais (`read_receipts`) das mensagens próprias da conversa. Uma
+ * chamada por conversa, não por bolha: a lista tem dezenas de mensagens.
+ */
+export function useMessageReceipts(
+  convId: string,
+  messages: { id: string; direction?: string; status?: string }[],
+): ReceiptsByMessage {
+  const [mapa, setMapa] = useState<ReceiptsByMessage>({})
+  const chave = useMemo(
+    () =>
+      messages
+        .filter((m) => m.direction === 'out' && m.status !== 'failed')
+        .map((m) => `${m.id}:${m.status ?? ''}`)
+        .join(','),
+    [messages],
+  )
+
+  useEffect(() => {
+    if (!convId || !chave) {
+      setMapa((cur) => (Object.keys(cur).length === 0 ? cur : {}))
+      return
+    }
+    const ids = chave.split(',').map((p) => p.split(':')[0]!).filter(Boolean)
+    let alive = true
+    services
+      .messageReceipts(ids)
+      .then((linhas) => {
+        if (!alive) return
+        const next: ReceiptsByMessage = {}
+        for (const [msgId, fp, at] of linhas) {
+          if (!msgId || !fp) continue
+          ;(next[msgId] ??= []).push({ fp, at })
+        }
+        setMapa(next)
+      })
+      .catch(() => {  })
+    return () => { alive = false }
+  }, [convId, chave])
+
+  return mapa
+}
 
 export interface Command {
   id: string

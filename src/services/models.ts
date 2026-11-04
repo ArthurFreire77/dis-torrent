@@ -678,6 +678,8 @@ export interface DisTorrentServices {
   pin(convId: string, msgId: string, pinned: boolean): Promise<void>
   pins(convId: string): Promise<MsgMetaView[]>
   metaBulk(msgIds: string[]): Promise<MsgMetaView[]>
+  /** [msg_id, fp, instante] — quem visualizou cada mensagem. */
+  messageReceipts(msgIds: string[]): Promise<[string, string, number][]>
   effectiveBodies(msgIds: string[]): Promise<[string, string][]>
   forward(srcMsgId: string, targetConv: string, targetChannel: string, fromLabel: string): Promise<StoredMessage>
 

@@ -1485,6 +1485,16 @@ export const browserServices: DisTorrentServices = {
     const all = loadAll<MsgMetaView>(META_BASE)
     return msgIds.map(id => all[id] ?? blankMeta(id, ''))
   },
+  messageReceipts: async (msgIds) => {
+    // Modo navegador não tem peer real: só existe o que este app registrou.
+    const all = loadAll<{ fp?: string; read_at?: number }>('distorrent:extras:receipts:')
+    const out: [string, string, number][] = []
+    for (const id of msgIds) {
+      const r = all[id]
+      if (r && r.fp && typeof r.read_at === 'number') out.push([id, r.fp, r.read_at])
+    }
+    return out
+  },
   effectiveBodies: async (msgIds) => {
     const all = loadAll<MsgMetaView>(META_BASE)
     return msgIds.flatMap(id => {
