@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## [1.1.55-pre-alpha] - 2026-11-04
+
+### Servidor público, e link que abre o navegador
+
+**Servidor público ou privado, escolhido na criação.** O passo *Identidade* do
+assistente ganhou o interruptor **Servidor público** (ligado = qualquer um
+entra; desligado = só com convite). O padrão é sempre **privado**, e o mesmo
+interruptor aparece nas **configurações do servidor** para o dono mudar depois —
+a mudança vale na hora para todos. Servidor público aceita entrada **sem
+convite e sem aprovação**; privado recusa com mensagem honesta ("peça um
+convite") em vez de aceitar calado.
+
+**"Qualquer um entra" não é porta aberta para script.** A entrada pública passa
+por um balde próprio de rate limit (`join_attempt_per_peer_10s`, padrão 6 por
+10 s com burst 3, ajustável por `DISTORRENT_LIMIT_JOIN_10S`/`_JOIN_BURST`).
+Quem faz flood de join é barrado com "muitas tentativas de entrada — aguarde um
+pouco", e o limite aparece na tela em vez de ficar escondido.
+
+O campo é aditivo no fio: frame antigo sem `is_public` cai em **privado**, então
+cliente velho nunca abre um servidor que era fechado.
+
+**Link na conversa não abria o navegador.** No Windows o `open_external` usava
+`cmd /C start "" <url>`, e o `cmd` trata **`&` como separador de comando**:
+qualquer link com query (`?a=1&b=2`) abria pela metade ou não abria nada (dá
+para reproduzir no terminal — o segundo parâmetro vira "comando não
+reconhecido"). Agora quem abre é `ShellExecuteW`, que recebe a URL crua, sem
+shell no meio. Se o SO ainda recusar (sem navegador padrão, esquema não
+registrado), o app cai para a janela do próprio WebView e, se nem isso, mostra
+um aviso na tela — antes ia só para o console e o clique parecia morto.
+
+**Verificação:** typecheck 0, lint 0, **546 unitários**, `cargo test --lib` 259
+e `--test channels` 8 no WSL, `cargo fmt --check` nos dois crates, `cargo check`
+do `src-tauri`. **Não** validado em dois dispositivos: entrada real num servidor
+público de outra máquina exige rede com dois nós.
+
 ## [1.1.54-pre-alpha] - 2026-11-04
 
 ### Chamadas honestas, recibos de verdade e bot com documentação
