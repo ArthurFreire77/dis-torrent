@@ -32,6 +32,59 @@ Regra do par: **o fingerprint maior oferece**. Isso evita offer contra offer
 quando dois entram no mesmo instante. Vale para os três gatilhos: o seu
 `voice_join`, o `VoiceJoin` que você recebe e o `VoiceState` que você recebe.
 
+Exceção: em `enterRoom` (entrar numa sala de grupo já no ar) **os dois lados
+oferecem**. A offer do host pode se perder no caminho e, sem isso, a sala fica
+em "Conectando…" esperando para sempre; o glare continua resolvido por
+polite/impolite (`callRepair.ts`).
+
+## Quem aparece na chamada
+
+`call_participant_added` é **aviso de roster**, não convite. Só entra no roster
+quem provou presença por mídia (`markJoined`, no `onTrack`/answer) ou já estava
+lá. Antes o anfitrião de um grupo pré-semeava os convidados com esse frame e
+**quem nunca aceitou aparecia na chamada** — o "entrou o Carso e apareceu o
+Felipe também".
+
+## Quanto tempo a chamada dura
+
+| Situação | Regra | Onde |
+|---|---|---|
+| Canal de servidor (`voice-*`) | dura até o último sair; sozinho espera | `isCollectiveRoom` (`voice-` sempre coletivo) |
+| Grupo (qualquer tamanho) | dura até o último sair | `isCollectiveRoom({ group: true })` |
+| DM 1:1 | encerra quando o outro sai | `leaveOutcome` |
+
+Grupo de **duas** pessoas caía na regra de 1:1 (um participante no roster) e
+quem saía encerrava a chamada para o outro. O shell agora passa
+`{ group: true }` no `callManager.start` e a sala sobrevive.
+
+## Câmera: ligar e inverter
+
+Um caminho só, `trocarFeedDeCamera`, usado pelo botão de inverter, pelo seletor
+de aparelho em Ajustes e pelo pedido da câmera:
+
+- **Windows**: solta a câmera antiga antes de abrir a nova (webcam é exclusiva —
+  abrir as duas dá `NotReadableError`).
+- **Celular**: abre a nova antes de soltar a antiga (frontal e traseira são
+  devices distintos) e a troca é **ao vivo**, sem reiniciar a chamada.
+- `getLocalMedia({ video: {} })` deixa a preferência inteira (device,
+  `facingMode`, qualidade, fps) ser mesclada. Montar as constraints à mão
+  esquecia o `facingMode` e a imagem não mudava.
+- Se a nova falha, a preferência **volta antes** de reabrir a anterior — senão
+  o retry pedia de novo a câmera que acabou de falhar.
+- No Android/iOS o botão de inverter **não depende de `enumerateDevices`**
+  (`shouldShowCameraFlip`): antes da permissão o WebView devolve um único
+  `videoinput` e o botão simplesmente não existia.
+
+## Por que a câmera aparecia no "amigo" e não no servidor
+
+Cada par WebRTC recebe `audio` e `video  recvonly` de propósito (a chamada de
+voz precisa RECEBER vídeo de quem liga a câmera). Ao entrar com câmera já
+ligada, `attachLocalStreamToPC` fazia `pc.addTrack(video)` e criava uma
+**segunda** m-line de vídeo — que muitos endpoints ignoram. Agora a track reusa
+a m-line existente (`replaceTrack` + `sendrecv`), e a renegociação insiste 3×
+(`enviarOfferComRetry`) porque numa sala de servidor há vários pares
+disputando a mesma fila.
+
 ## Caminho de mídia por plataforma
 
 | Plataforma | Captura/encode | Observação |
@@ -71,6 +124,32 @@ a leitura e, com vários peers entrando, travava a interface inteira.
 `CallDiagnostics` mostra, por peer: estado ICE, rota (LAN/STUN/TURN), RTT,
 jitter, perda, FPS e codec. "Conectado" sem trilha de mídia é reportado como
 conectado-sem-mídia, não como sucesso.
+
+## Salas anunciadas (grupo/DM)
+
+O anúncio (`SecureFrame::CallRoom`) é o que faz o botão **Entrar** aparecer na
+conversa. Regras que agora valem e têm teste:
+
+- **Sair tira você da lista**, mesmo sem ser o host. Antes `leave_room` saía
+  cedo quando `host_fp != eu`, então a própria entrada ficava viva para sempre
+  — o "saio da chamada e continua aparecendo Entrar".
+- **Se o host sai, o comando passa** para quem ficou (`Rooms::remove_member`).
+  Sem isso ninguém renova o TTL de 35 s e a sala morre com gente dentro.
+- **Último sair fecha** a sala (evento `closed` + frame `closed`).
+- `closed` é aceito do host **ou de quem está na lista**: os dois lados podem
+  ter aberto a mesma sala se achando host, e recusar o fechamento do outro
+  deixava a sala fantasma.
+
+## Recibos de leitura (grupo e canal)
+
+`messages.status` é **agregado**: o primeiro membro que lê marcava `read` para
+todos. Agora existe `read_receipts(msg_id, fp, read_at)`:
+
+- `SecureFrame::Read` grava o recibo de **um** membro;
+- a mensagem só vira `status='read'` (e o duplo check azul) quando **todos** os
+  outros membros esperados já têm recibo (`messages_read_by_all`);
+- a UI lê `message_receipts` (Tauri) e o `⋯` da mensagem mostra **quem
+  visualizou** com horário, quem ainda não e o que não chegou de recibo.
 
 ## Como testar (dois aparelhos)
 

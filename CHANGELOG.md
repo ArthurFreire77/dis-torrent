@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## [1.1.54-pre-alpha] - 2026-11-04
+
+### Chamadas honestas, recibos de verdade e bot com documentação
+
+**"Saio da chamada e o Entrar continua aparecendo."** `leave_room` saía cedo
+quando quem saía não era o host: a própria entrada ficava na lista para sempre.
+Agora sair tira você da lista **sempre**; se quem sai é o host, o comando passa
+para quem ficou (senão ninguém renova o TTL de 35 s e a sala morre com gente
+dentro); o último sair fecha a sala. `closed` também é aceito de quem está na
+lista — os dois lados podiam abrir a mesma sala se achando host e o fechamento
+do outro era recusado.
+
+**"Entrou o Carso e apareceu o Felipe também, mas o Felipe não entrou."**
+`call_participant_added` é **aviso de roster**, não convite, mas o anfitrião de
+grupo pré-semeava os convidados com ele. Só entra na chamada quem provou
+presença por mídia (`markJoined`) ou já estava no roster. O mesmo vale para a
+duração: grupo de **duas** pessoas caía na regra de DM 1:1 e quem saía
+encerrava a chamada do outro. Grupo e canal agora duram **até o último sair**
+(`isCollectiveRoom({ group: true })`).
+
+**"A câmera funciona no amigo e não no servidor."** Cada par já tem uma m-line
+de vídeo `recvonly` (para RECEBER a câmera do outro). Entrar com a câmera ligada
+fazia `addTrack` e criava uma **segunda** m-line, que muitos endpoints ignoram.
+Agora a track reusa a m-line existente (`replaceTrack` + `sendrecv`) e a
+renegociação insiste 3×, porque numa sala há vários pares na mesma fila.
+Entrar numa sala de grupo também passou a oferecer dos **dois** lados: se a
+offer do host se perder, o outro assume em vez de ficar em "Conectando…".
+
+**"No celular não tem botão de inverter a câmera."** O botão dependia de
+`enumerateDevices`, e no Android, antes da permissão, ele devolve um único
+`videoinput` — o botão não existia. Agora `shouldShowCameraFlip` mostra no
+celular sempre (frontal/traseira é dado do aparelho) e `sameCamera` evita
+anunciar "inverti" quando o sensor não mudou.
+
+**"A troca de câmera deve ser em tempo real."** Um caminho só
+(`trocarFeedDeCamera`) para o botão, o seletor de Ajustes e o ligar da câmera:
+no Windows solta a antiga antes (webcam é exclusiva), no celular abre a nova
+antes (devices distintos), publica a track nova para **todos** os pares na hora
+e, se falhar, **volta a preferência antes** de reabrir a anterior. As
+constraints deixaram de ser montadas à mão: pedir só qualidade esquecia o
+`facingMode` e a imagem continuava a mesma.
+
+**Recibos de leitura no grupo.** `messages.status` é agregado: o primeiro que
+lia pintava o duplo check azul para todos. Nova tabela `read_receipts(msg_id,
+fp, read_at)`, migração 13: o `Read` de cada membro é gravado e a mensagem só
+vira `read` quando **todos** os outros já têm recibo. O `⋯` da mensagem abre
+**quem visualizou** (nome + horário), quem ainda não e o que não chegou de
+recibo. No celular a mesma folha "Quem visualizou".
+
+**Bots: documentação para baixar e barreiras de segurança.** Botão **Baixar
+documentação (.md)** no painel gera o guia em memória (mesma fonte do acordeão,
+sem token) com exemplos copiáveis e a seção "Por que um bot não vira vírus".
+Três brechas reais fechadas: a saída do bot não era sanitizada (uma API podia
+devolver bidi/zero-width e forjar `foto.png` como `foto.exe`), o webhook aceitava
+qualquer esquema apesar da doc prometer http(s), e bot `offline` continuava
+disparando rede.
+
+**Cargos no celular.** O painel móvel só **mostrava** as tags. Agora o dono
+cria cargo (nome + cor), apaga e dá/tira cargo de cada membro.
+
+**Verificação:** typecheck 0, lint 0, **537 unitários**, `cargo test --lib` 259
+no WSL, `cargo fmt --check`, `cargo clippy` (só o warning pré-existente),
+`cargo check` do `src-tauri` e build de produção. **Não** validado em aparelho:
+câmera física, inverter frontal/traseira, chamada de grupo com 3+ pessoas e o
+duplo check entre dois celulares — exige dispositivo real.
+
 ## [1.1.51-pre-alpha] - 2026-11-03
 
 ### Histórico que não se perde, limpeza configurável e chamadas que se adaptam
