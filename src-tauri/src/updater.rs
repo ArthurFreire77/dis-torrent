@@ -441,10 +441,38 @@ pub fn open_external(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", alvo])
-            .spawn()
-            .map_err(|e| format!("abrir endereço: {e}"))?;
+        // `cmd /C start "" <url>` passa pela linha de comando do cmd, que trata
+        // `&` como separador: qualquer link com query (`?a=1&b=2`) abria o
+        // navegador pela metade ou não abria. ShellExecuteW recebe a URL crua,
+        // sem shell no meio.
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        fn wide(s: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+        let op = wide("open");
+        let file = wide(alvo);
+        // SAFETY: as duas strings são NUL-terminadas e vivem até o fim da chamada;
+        // os parâmetros restantes são nulos/documentados como opcionais.
+        let rc = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                op.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // A API devolve um inteiro <= 32 em caso de erro (não é GetLastError).
+        if (rc as isize) <= 32 {
+            return Err(format!("abrir endereço: código {}", rc as isize));
+        }
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
