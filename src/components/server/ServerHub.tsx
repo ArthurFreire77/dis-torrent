@@ -1,9 +1,3 @@
-// Hub de servidores — o MESMO fluxo no desktop e no celular (`mode`):
-// desktop pode criar e entrar por convite; mobile só entra (decisão de produto).
-// Uma tela só: lista, detalhes e convite sem abas (ver `ServerHubModal`).
-// Honestidade: `joinCommunity` devolve "pedido enviado" (não "membro"); estado
-// de membro vem de `communityMembers`; silenciar é preferência local.
-
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ic } from '../../shared/icons'
 import { Button, IconButton, Modal, Notice, TextField, ui } from '../../shared/ui'
@@ -12,12 +6,10 @@ import { services } from '../../services'
 import type { CommunityView, InviteView, MemberPairing } from '../../services/models'
 import { tokenFromInviteUrl } from '../../services/deepLink'
 
-/** Item da lista de servidores com o resumo de pareamento. */
 export interface ServerSummary {
   community: CommunityView
   online: number
   total: number
-  /** `true` quando o próprio nó ainda aguarda confirmação de entrada. */
   pending: boolean
 }
 
@@ -46,7 +38,6 @@ const PAIR_COLOR = (state: MemberPairing['state']): string => {
   }
 }
 
-/** Resumo dos membros de um servidor, calculado a partir dos estados reais. */
 export function summarize(members: MemberPairing[]): { online: number; total: number; pending: boolean } {
   const total = members.length
   let online = 0
@@ -58,12 +49,8 @@ export function summarize(members: MemberPairing[]): { online: number; total: nu
   return { online, total, pending }
 }
 
-// `copyText`/`readClipboard` em `shared/clipboard.ts` (fonte única); reexportados
-// pois shells e formulário de convite já importam daqui.
 import { copyText, readClipboard } from '../../shared/clipboard'
 export { copyText, readClipboard }
-
-// ---------------------------------------------------------------- lista
 
 export function ServerList({
   servers,
@@ -170,8 +157,7 @@ export function ServerList({
   )
 }
 
-// ---------------------------------------------------------------- membros
-
+// Seção 1: MemberPairingList
 export function MemberPairingList({
   members,
   emptyHint,
@@ -242,19 +228,12 @@ export function MemberPairingList({
   )
 }
 
-// ---------------------------------------------------------------- convite
-
-/**
- * Painel de convite: gera, copia TOKEN (principal — funciona por qualquer app,
- * sem depender de esquema registrado) e link (atalho secundário).
- */
 export function InvitePanel({
   communityId,
   canCreateInvite,
   onError,
 }: {
   communityId: string
-  /** Só o dono assina convite; membro comum vê a explicação, não o botão morto. */
   canCreateInvite: boolean
   onError: (msg: string) => void
 }) {
@@ -277,7 +256,6 @@ export function InvitePanel({
     if (busy) return
     setBusy(true)
     try {
-      // Sem `memberFp`: convite ABERTO (fp próprio criava token inútil a terceiros).
       const v = await services.makeInviteLink(communityId)
       setInvite(v)
     } catch (e) {
@@ -394,19 +372,13 @@ export function InvitePanel({
   )
 }
 
-// ---------------------------------------------------------------- entrada
-
-/**
- * Entrada por token: `idle` → `validating` → `waiting` → `joined` (host
- * confirmou). Nunca pula para "membro" — isso fechava o modal sem servidor.
- */
+// Seção 2: JoinServerForm
 export function JoinServerForm({
   onJoined,
   autoToken,
   compact,
 }: {
   onJoined: (communityId: string) => void
-  /** Token pré-preenchido por deep link. */
   autoToken?: string | null
   compact?: boolean
 }) {
@@ -434,7 +406,6 @@ export function JoinServerForm({
     setPhase('validating')
     try {
       const cid = await services.joinCommunity(cleaned)
-      // Core validou o token; falta o host confirmar — o evento leva ao servidor.
       setPhase('waiting')
       setJoinedName(cid)
     } catch (e) {
@@ -443,7 +414,6 @@ export function JoinServerForm({
     }
   }, [cleaned, phase])
 
-    // Confirmação real do host via `community_joined`.
   useEffect(() => {
     if (phase !== 'waiting') return
     const un = services.subscribe((ev) => {
@@ -456,7 +426,6 @@ export function JoinServerForm({
         }
       }
     })
-    // Timeout honesto: o join persiste e é reenviado quando o dono aparecer.
     const timeout = window.setTimeout(() => {
       setPhase('idle')
       setPasteMsg(
@@ -542,13 +511,88 @@ export function JoinServerForm({
       {pasteMsg && (
         <div style={{ fontSize: 12, color: '#ffe0a3', lineHeight: 1.5 }}>{pasteMsg}</div>
       )}
+
+      <PublicJoinForm onJoined={onJoined} />
     </div>
   )
 }
 
-// ---------------------------------------------------------------- painel
+/** Entrada num servidor PÚBLICO: sem convite, só host + id. */
+export function PublicJoinForm({ onJoined }: { onJoined: (communityId: string) => void }) {
+  const [hostFp, setHostFp] = useState('')
+  const [communityId, setCommunityId] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
 
-/** Painel de um servidor: identidade, membros reais, convite e silenciamento. */
+  const hostOk = /^[0-9a-f]{12}$/.test(hostFp.trim().toLowerCase())
+  const cidOk = communityId.trim().length >= 8
+
+  async function entrar() {
+    if (!hostOk || !cidOk || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const cid = await services.joinPublicCommunity(hostFp.trim().toLowerCase(), communityId.trim())
+      onJoined(cid)
+    } catch (e) {
+      setError((e as Error)?.message ?? String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        display: 'flex', flexDirection: 'column', gap: ui.sm,
+        borderTop: `1px solid ${ui.border}`, paddingTop: ui.md, marginTop: ui.sm,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 800, color: ui.heading }}>
+        Servidor público — entrar sem convite
+      </div>
+      <div style={{ fontSize: 11.5, color: ui.muted, lineHeight: 1.5 }}>
+        Só funciona em servidor marcado como público. No privado, o dono precisa te mandar
+        um convite.
+      </div>
+      <div style={{ display: 'flex', gap: ui.sm, flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 200px', minWidth: 0 }}>
+          <TextField
+            value={hostFp}
+            onChange={(v) => { setHostFp(v); setError(null) }}
+            label="Fingerprint do dono"
+            placeholder="12 caracteres hexadecimais"
+            mono
+            ariaLabel="Fingerprint do dono do servidor"
+          />
+        </div>
+        <div style={{ flex: '1 1 240px', minWidth: 0 }}>
+          <TextField
+            value={communityId}
+            onChange={(v) => { setCommunityId(v); setError(null) }}
+            label="ID do servidor"
+            placeholder="id que o dono publicou"
+            mono
+            ariaLabel="ID do servidor público"
+            error={error}
+          />
+        </div>
+      </div>
+      <div>
+        <Button
+          variant="secondary"
+          icon="globe"
+          disabled={!hostOk || !cidOk}
+          busy={busy}
+          onClick={() => void entrar()}
+        >
+          Entrar no servidor público
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 export function ServerDetails({
   community,
   members,
@@ -666,12 +710,7 @@ export function ServerDetails({
   )
 }
 
-// ---------------------------------------------------------------- modal
-
-/**
- * Modal de servidores: uma tela com ações no topo, lista sempre visível,
- * detalhes do selecionado e o convite aberto por botão (ou por deep link).
- */
+// Seção 3: ServerHubModal
 export function ServerHubModal({
   open,
   onClose,
@@ -688,7 +727,6 @@ export function ServerHubModal({
 }: {
   open: boolean
   onClose: () => void
-  /** `mobile` esconde a criação (decisão de produto) e prioriza o convite. */
   mode: 'desktop' | 'mobile'
   servers: ServerSummary[]
   selectedId: string | null
@@ -698,7 +736,6 @@ export function ServerHubModal({
   onJoined: (id: string) => void
   autoToken?: string | null
   onError: (msg: string) => void
-  /** Abre a seção de convite já expandida (vem do "Já tem um convite?"). */
   openJoin?: boolean
 }) {
   const selected = servers.find((s) => s.community.id === selectedId)?.community ?? null
@@ -708,7 +745,6 @@ export function ServerHubModal({
     if (open && (autoToken || openJoin)) setJoinOpen(true)
   }, [open, autoToken, openJoin])
 
-  // Reabrir o modal não deve manter o convite aberto da vez anterior.
   useEffect(() => {
     if (!open) setJoinOpen(!!autoToken)
   }, [open, autoToken])

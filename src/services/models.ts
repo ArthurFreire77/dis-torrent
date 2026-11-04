@@ -231,6 +231,8 @@ export interface CommunityView {
   category?: string
   icon?: string
   is_owner?: boolean
+  /** `true` = qualquer um entra (com rate limit). `false`/ausente = só por convite. */
+  is_public?: boolean
 }
 
 export type MemberPairingState =
@@ -303,6 +305,8 @@ export interface CreateCommunityOptions {
   rulesText?: string
   channelsMeta?: CommunityChannelSeed[]
   roles?: CommunityRoleSeed[]
+  /** Servidor público: qualquer um entra, com rate limit. Padrão: privado. */
+  isPublic?: boolean
 }
 
 export interface MemberRoleAssignment {
@@ -535,8 +539,12 @@ export interface DisTorrentServices {
   makeInvite(communityId: string, memberFp?: string): Promise<string>
   makeInviteLink(communityId: string, memberFp?: string): Promise<InviteView>
   joinCommunity(token: string): Promise<string>
+  /** Entra num servidor público sem convite (o host aceita direto). */
+  joinPublicCommunity(hostFp: string, communityId: string): Promise<string>
   communityRename(communityId: string, name: string): Promise<void>
   communitySetMeta(communityId: string, patch: { description?: string; category?: string; icon?: string }): Promise<void>
+  /** Liga/desliga "qualquer um entra". Só o dono muda. */
+  communitySetPublic(communityId: string, isPublic: boolean): Promise<void>
   sendChannelMessage(communityId: string, channelId: string, body: string): Promise<StoredMessage>
   conversationsList(): Promise<Conversation[]>
   dmOpen(peerFp: string, peerNick: string): Promise<Conversation>

@@ -1,15 +1,3 @@
-// Configurações do servidor.
-//
-// O problema anterior não era宽度 mas arquitetura: cinco abas num modal de
-// 960px, nav de 220px, e cada aba reescrevendo seus próprios inputs. Canais,
-// cargos, bots e membros eram quatro formulários diferentes para quatro tarefas
-// que pertencem ao mesmo lugar.
-//
-// Agora é uma tela de verdade: navegação lateral fixa, uma seção por vez, cada
-// seção com largura de leitura confortável (~72 caracteres) e uma explicação do
-// que cada coisa faz. Os modais de criação/edição saem daqui para
-// ChannelManager / RoleEditor / BotConfigPanel.
-
 import { useEffect, useMemo, useState } from 'react'
 import type { BotView, ChannelMeta, RoleView } from '../../services/models'
 import { mergeChannels } from '../../app/channels'
@@ -56,7 +44,7 @@ export interface ServerSettingsProps {
   myFp: string | undefined
   description?: string
   category?: string
-  /** Canais: as DUAS listas, já deduplicadas por `mergeChannels`. */
+  isPublic: boolean
   channelsSummary: [string, string][] | undefined
   channelsFull: ChannelMeta[] | undefined
   members: [string, string, string][]
@@ -66,6 +54,7 @@ export interface ServerSettingsProps {
   onClose: () => void
   onRename: (nome: string) => Promise<void>
   onSetMeta: (patch: { description?: string; category?: string }) => Promise<void>
+  onSetPublic: (isPublic: boolean) => Promise<void>
   onChannelCreate: (data: { name: string; topic: string; category: string; kind: 'text' | 'voice' | 'video' }) => Promise<void>
   onChannelUpdate: (id: string, data: { name: string; topic: string; category: string; kind: 'text' | 'voice' | 'video' }) => Promise<void>
   onChannelDelete: (id: string) => Promise<void>
@@ -83,11 +72,8 @@ export interface ServerSettingsProps {
   onRefresh: () => void
   error?: string | null
   onError: (msg: string | null) => void
-  /** Abre já na seção pedida (o menu da sidebar sabe qual é). */
   initialSection?: ServerSection
-  /** Canal a abrir em edição assim que a tela montar. */
   editChannelId?: string | null
-  /** Categoria pré-escolhida ao criar canal. */
   presetCategory?: string | null
   onConsumedPending?: () => void
 }
@@ -102,9 +88,6 @@ export default function ServerSettings(props: ServerSettingsProps) {
 
   const ehDono = props.ownerFp === props.myFp
 
-  // FONTE ÚNICA DE VERDADE dos canais. Este é o ponto que elimina o bug de
-  // duplicação: antes, cada aba fazia seu próprio merge das duas listas e um
-  // deles (painel de bot) não filtrava duplicata.
   const channels = useMemo(
     () => mergeChannels(props.channelsSummary, props.channelsFull),
     [props.channelsSummary, props.channelsFull],
@@ -124,8 +107,6 @@ export default function ServerSettings(props: ServerSettingsProps) {
 
   const roleEmEdicao = editRoleId ? (props.roles.find((r) => r.id === editRoleId) ?? null) : null
 
-  // Pedido de abertura vinda de fora (menu da sidebar). Consome uma vez só —
-  // sem isso o modal reabria a edição a cada re-render.
   useEffect(() => {
     if (props.editChannelId) {
       const c = channels.find((x) => x.id === props.editChannelId)
@@ -141,10 +122,8 @@ export default function ServerSettings(props: ServerSettingsProps) {
       setChannelModal(true)
       props.onConsumedPending?.()
     }
-    // Só reage à mudança da identidade do pedido, não de cada render.
   }, [props.editChannelId, props.presetCategory])
 
-  // Em tela pequena a nav vira gaveta; trocar de seção a fecha.
   function irPara(s: ServerSection) {
     setSection(s)
     setNavAberta(false)
@@ -182,11 +161,9 @@ export default function ServerSettings(props: ServerSettingsProps) {
           boxSizing: 'border-box',
         }}
       >
-        {/* ---------- navegação ---------- */}
+        {}
         <nav
           aria-label="Seções do servidor"
-          // Em tela estreita a nav só entra no DOM quando a gaveta está aberta
-          // (o CSS esconde a versão fixa). No desktop ela é sempre renderizada.
           className={`srv-settings-nav${navAberta ? ' srv-nav-open' : ''}`}
           style={{
             width: 248,
@@ -204,6 +181,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
               style={{
                 fontSize: 10,
                 fontWeight: 800,
+                // Seção 1: letterSpacing
                 letterSpacing: 0.8,
                 color: ui.muted,
                 marginBottom: 6,
@@ -277,9 +255,9 @@ export default function ServerSettings(props: ServerSettingsProps) {
           </div>
         </nav>
 
-        {/* ---------- conteúdo ---------- */}
+        {}
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
-          {/* barra superior em telas pequenas: gaveta + título da seção */}
+          {}
           <div
             className="srv-settings-topbar"
             style={{
@@ -303,7 +281,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', padding: ui.xxl }}>
-            {/* Gaveta de seções no mobile */}
+            {}
             {navAberta && (
               <div
                 onClick={() => setNavAberta(false)}
@@ -339,7 +317,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
               </div>
             )}
 
-            {/* as seções só abrem para o dono, exceto membros/convites/bots */}
+            {}
             {section === 'visao-geral' && (
               <OverviewSection
                 serverName={props.serverName}
@@ -349,8 +327,10 @@ export default function ServerSettings(props: ServerSettingsProps) {
                 myFp={props.myFp}
                 serverId={props.serverId}
                 ehDono={ehDono}
+                isPublic={props.isPublic}
                 onRename={props.onRename}
                 onSetMeta={props.onSetMeta}
+                onSetPublic={props.onSetPublic}
                 onError={props.onError}
               />
             )}
@@ -366,9 +346,8 @@ export default function ServerSettings(props: ServerSettingsProps) {
                   flexWrap: 'wrap',
                 }}
               >
-                {/* O botão precisa existir TAMBÉM quando há canais. Só no
-                    estado vazio ele some quando você cria o primeiro — e aí
-                    não há mais como criar o segundo. */}
+                {
+}
                 {channels.length > 0 && (
                   <Button
                     variant="success"
@@ -504,7 +483,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
         </div>
       </div>
 
-      {/* ---------- modais ---------- */}
+      {}
       <ChannelEditor
         open={channelModal}
         onClose={() => setChannelModal(false)}
@@ -534,6 +513,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
   )
 }
 
+// Seção 2: contagemDe
 function contagemDe(
   k: ServerSection,
   c: { channels: number; roles: number; members: number; bots: number; categorias: number },
@@ -570,7 +550,6 @@ function SectionHead({ icon, title, desc }: { icon: IconName; title: string; des
   )
 }
 
-/** Resumo dos cargos: visão geral sem abrir modal. */
 function RoleSummary({
   roles,
   memberCount,
@@ -663,12 +642,6 @@ function ConviteSection({
   }
 
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
-  // DENTRO DO APP (WebView) `origin` é `http://tauri.localhost` — o esquema
-  // interno do Tauri, que NÃO existe para nenhum navegador nem para outra
-  // máquina. Mostrar esse endereço como convite clicável criava exatamente o
-  // erro de campo: a janela nova abria em `tauri.localhost` e o engine
-  // respondia `ECONNREFUSED: Unable to connect`. O link de verdade no app é o
-  // deep link `distorrent://`, que é o mesmo que o wizard já gera.
   const appRuntime = isTauriRuntime()
   const inviteUrl = !token
     ? ''
@@ -777,3 +750,4 @@ function ConviteSection({
     </div>
   )
 }
+// Seção 3: fim

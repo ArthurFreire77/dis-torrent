@@ -127,6 +127,12 @@ export const tauriServices: DisTorrentServices = {
 
   joinCommunity: (token) => invoke<string>('join_community', { token }),
 
+  joinPublicCommunity: (hostFp, communityId) =>
+    invoke<string>('join_public_community', { hostFp, communityId }),
+
+  communitySetPublic: (communityId, isPublic) =>
+    invoke<void>('community_set_public', { communityId, isPublic }),
+
   communityRename: (communityId, name) => invoke<void>('community_rename', { communityId, name }),
 
   sendChannelMessage: (communityId, channelId, body) =>

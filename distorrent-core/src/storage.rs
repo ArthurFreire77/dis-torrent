@@ -365,6 +365,12 @@ fn migrate(conn: &Connection) -> Result<()> {
          );
          CREATE INDEX IF NOT EXISTS idx_receipts_msg ON read_receipts(msg_id);",
     )?;
+    // Servidor público: qualquer um entra (com rate limit); privado exige convite.
+    if !column_exists(conn, "communities", "is_public") {
+        conn.execute_batch(
+            "ALTER TABLE communities ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
     conn.execute(
         "INSERT INTO kv(key,value) VALUES('schema_version','13') ON CONFLICT(key) DO UPDATE SET value='13'",
         [],
@@ -1545,6 +1551,41 @@ impl Store {
         conn.execute(&sql, values.as_slice()).map_err(Into::into)
     }
 
+    /// Marca o servidor como público (entrada livre com rate limit) ou privado
+    /// (só por convite). Devolve quantas linhas mudaram.
+    pub fn community_set_public(&self, id: &str, is_public: bool) -> Result<usize> {
+        self.locked()
+            .execute(
+                "UPDATE communities SET is_public=?2 WHERE id=?1",
+                params![id, i64::from(is_public)],
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn community_is_public(&self, id: &str) -> Result<bool> {
+        let conn = self.locked();
+        conn.query_row(
+            "SELECT is_public FROM communities WHERE id=?1",
+            params![id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|o| o.unwrap_or(0) != 0)
+        .map_err(Into::into)
+    }
+
+    /// Servidores públicos desta máquina, para o diretório/descoberta.
+    pub fn list_public_communities(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT id,name,owner_fp FROM communities WHERE is_public=1 ORDER BY created_at",
+        )?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn list_channels(&self, community_id: &str) -> Result<Vec<(String, String)>> {
         let conn = self.locked();
         let mut st =
@@ -2696,14 +2737,16 @@ impl Store {
         member_roles: &[(String, Vec<String>)],
         members: &[(String, String, String)],
         meta: &(String, String, String),
+        is_public: bool,
     ) -> Result<()> {
         let mut conn = self.locked();
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO communities(id,name,owner_fp,created_at,description,category,icon)
-             VALUES(?1,?2,?3,?4,?5,?6,?7)
+            "INSERT INTO communities(id,name,owner_fp,created_at,description,category,icon,is_public)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_fp=excluded.owner_fp,
-               description=excluded.description, category=excluded.category, icon=excluded.icon",
+               description=excluded.description, category=excluded.category, icon=excluded.icon,
+               is_public=excluded.is_public",
             params![
                 community_id,
                 name,
@@ -2711,7 +2754,8 @@ impl Store {
                 crate::identity::now_ms(),
                 meta.0,
                 meta.1,
-                meta.2
+                meta.2,
+                i64::from(is_public)
             ],
         )?;
         tx.execute(

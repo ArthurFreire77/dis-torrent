@@ -361,6 +361,9 @@ pub struct CommunityCreateOptions {
     pub channels_meta: Vec<CommunityChannelSeed>,
     #[serde(default)]
     pub roles: Vec<CommunityRoleSeed>,
+    /// Público: qualquer um entra, com rate limit. Privado: só por convite.
+    #[serde(rename = "isPublic", alias = "is_public", default)]
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2630,6 +2633,7 @@ impl NetworkEngine {
             }
         }
         let (description, category, icon) = self.store.community_meta(&id).unwrap_or_default();
+        let is_public = self.store.community_is_public(&id).unwrap_or(false);
         Ok(SecureFrame::CommunityState {
             community_id: id,
             name,
@@ -2642,6 +2646,7 @@ impl NetworkEngine {
             description,
             category,
             icon,
+            is_public,
         })
     }
 
@@ -3614,6 +3619,9 @@ impl NetworkEngine {
             Some(opts.category.trim()),
             Some(opts.icon.trim()),
         )?;
+        if opts.is_public {
+            self.store.community_set_public(&cid, true)?;
+        }
         if !opts.rules_text.trim().is_empty() {
             self.store.kv_set(
                 &format!("rules:text:{cid}"),
@@ -3650,6 +3658,21 @@ impl NetworkEngine {
 
     pub fn community_meta(&self, community_id: &str) -> Result<(String, String, String)> {
         self.store.community_meta(community_id)
+    }
+
+    /// Liga/desliga o servidor público. Só o dono muda; o estado vai para todos
+    /// na mesma hora para ninguém ficar com a regra antiga na tela.
+    pub fn community_set_public(&self, community_id: &str, is_public: bool) -> Result<()> {
+        self.require_owner(community_id)?;
+        if self.store.community_set_public(community_id, is_public)? == 0 {
+            return Err(DistorrentError::Protocol("comunidade inexistente".into()));
+        }
+        self.broadcast_community_state(community_id);
+        Ok(())
+    }
+
+    pub fn community_is_public(&self, community_id: &str) -> Result<bool> {
+        self.store.community_is_public(community_id)
     }
 
     pub fn make_invite(&self, community_id: &str, member_fp: &str, ttl_ms: i64) -> Result<String> {
@@ -3718,6 +3741,34 @@ impl NetworkEngine {
         self.persist_pending_join(&cid, &normalized);
         self.send_join_to_host(&host_fp, &cid, &normalized);
         self.connect_to_community_peer(&host_fp);
+        Ok(cid)
+    }
+
+    /// Entra num servidor PÚBLICO sem convite: o host aceita direto (com rate
+    /// limit). Se o servidor for privado, o host recusa com erro honesto.
+    pub fn join_public_community(&self, host_fp: &str, community_id: &str) -> Result<String> {
+        let host = host_fp.trim().to_lowercase();
+        let cid = community_id.trim().to_string();
+        if host.is_empty() || cid.is_empty() {
+            return Err(DistorrentError::Protocol(
+                "servidor público precisa de host e id".into(),
+            ));
+        }
+        if self
+            .store
+            .member_role(&cid, &self.identity.fingerprint)
+            .is_some()
+        {
+            self.connect_to_community_peer(&host);
+            self.request_community_sync(&cid);
+            return Ok(cid);
+        }
+        self.pending_joins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(cid.clone(), String::new());
+        self.send_join_to_host(&host, &cid, "");
+        self.connect_to_community_peer(&host);
         Ok(cid)
     }
 
@@ -9956,6 +10007,30 @@ async fn handle_frame(
                 .store
                 .get_community(&community_id)?
                 .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
+            // Servidor PÚBLICO: entrada livre, sem convite e sem aprovação.
+            // O rate limit é o que impede "qualquer um entra" virar flood.
+            if token.trim().is_empty() {
+                if !engine.store.community_is_public(&community_id)? {
+                    return Err(DistorrentError::Protocol(
+                        "este servidor é privado — peça um convite".into(),
+                    ));
+                }
+                if engine.netlimiter.allow_public_join(peer_fp) == Decision::Blocked {
+                    return Err(DistorrentError::Protocol(
+                        "muitas tentativas de entrada — aguarde um pouco".into(),
+                    ));
+                }
+                engine
+                    .store
+                    .upsert_member(&community_id, peer_fp, peer_nick, "member")?;
+                let frame = engine.community_state_payload(&community_id, Some(peer_fp))?;
+                engine
+                    .cmd_tx
+                    .send(EngineCmd::SendToPeer(peer_fp.into(), frame))
+                    .ok();
+                engine.broadcast_community_state(&community_id);
+                return Ok(());
+            }
             let (tok_host, _cid, member_fp, exp, sig) =
                 crate::protocol::parse_invite_token(&token)?;
             const WILDCARD: &str = "000000000000";
@@ -10025,6 +10100,7 @@ async fn handle_frame(
             description,
             category,
             icon,
+            is_public,
         } => {
             let allowed = match engine
                 .store
@@ -10061,27 +10137,33 @@ async fn handle_frame(
                             "CommunityState sem convite pendente".into(),
                         ));
                     };
-                    let (host_fp, token_cid, member_fp, exp, sig) =
-                        crate::protocol::parse_invite_token(&token)?;
-                    const WILDCARD: &str = "000000000000";
-                    let member_bound =
-                        member_fp == WILDCARD || member_fp == engine.identity.fingerprint;
-                    let host_key = engine.store.get_peer(&host_fp)?.map(|p| p.pubkey_hex);
-                    if host_fp != owner_fp
-                        || token_cid != community_id
-                        || !member_bound
-                        || crate::identity::now_ms() > exp
-                    {
-                        false
-                    } else if let Some(host_key) = host_key {
-                        Keypair::verify(
-                            &host_key,
-                            &crate::protocol::invite_sign_bytes(&community_id, &member_fp, exp),
-                            &sig,
-                        )
-                        .unwrap_or(false)
+                    // Entrada em servidor PÚBLICO vai sem token: o host já
+                    // aceitou e provou ser o dono assinando o próprio estado.
+                    if token.trim().is_empty() {
+                        peer_fp == owner_fp
                     } else {
-                        false
+                        let (host_fp, token_cid, member_fp, exp, sig) =
+                            crate::protocol::parse_invite_token(&token)?;
+                        const WILDCARD: &str = "000000000000";
+                        let member_bound =
+                            member_fp == WILDCARD || member_fp == engine.identity.fingerprint;
+                        let host_key = engine.store.get_peer(&host_fp)?.map(|p| p.pubkey_hex);
+                        if host_fp != owner_fp
+                            || token_cid != community_id
+                            || !member_bound
+                            || crate::identity::now_ms() > exp
+                        {
+                            false
+                        } else if let Some(host_key) = host_key {
+                            Keypair::verify(
+                                &host_key,
+                                &crate::protocol::invite_sign_bytes(&community_id, &member_fp, exp),
+                                &sig,
+                            )
+                            .unwrap_or(false)
+                        } else {
+                            false
+                        }
                     }
                 }
             };
@@ -10100,6 +10182,7 @@ async fn handle_frame(
                 &member_roles,
                 &members,
                 &(description, category, icon),
+                is_public,
             )?;
             engine.clear_pending_join(&community_id);
             let _ = engine

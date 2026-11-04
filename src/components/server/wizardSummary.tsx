@@ -1,8 +1,3 @@
-// Resumo lateral do assistente: prévia do servidor + canais/cargos/regras.
-//
-// Layout vem de `layout` (inline) — o resumo é a única confirmação do que está
-// sendo criado, então ele não pode colapsar quando a folha de estilo não carrega.
-
 import { Ic, type IconName } from '../../shared/icons'
 import { ui } from '../../shared/ui'
 import { layout } from './wizardStyles'
@@ -31,6 +26,7 @@ export function WizardSummary({
   cargosAtivos,
   rulesText,
   bots,
+  isPublic = false,
 }: {
   iconId: IconName
   name: string
@@ -41,8 +37,8 @@ export function WizardSummary({
   canaisVoz: number
   cargosAtivos: RolePreset[]
   rulesText: string
-  /** Bots que serão criados junto com o servidor. */
   bots?: { name: string }[]
+  isPublic?: boolean
 }) {
   return (
     <aside className="csw-side" style={layout.side} aria-label="Resumo do servidor">
@@ -55,6 +51,22 @@ export function WizardSummary({
           <span style={layout.prevDesc}>{description.trim() || 'Sem descrição'}</span>
         </span>
       </div>
+
+      <SideBox icon={isPublic ? 'globe' : 'lock'} title="Quem entra">
+        <div style={layout.listItem}>
+          <span style={layout.listIcon}>
+            <Ic name={isPublic ? 'globe' : 'lock'} size={13} />
+          </span>
+          <span style={layout.ellipsis}>
+            {isPublic ? 'Público — qualquer um entra' : 'Privado — só com convite'}
+          </span>
+        </div>
+        <div style={{ marginTop: 6, fontSize: 11, color: ui.muted, lineHeight: 1.5 }}>
+          {isPublic
+            ? 'Cada pessoa tem limite de tentativas por minuto.'
+            : 'Você envia um convite para quem quiser.'}
+        </div>
+      </SideBox>
 
       <SideBox icon="hash" title="Canais">
         <div style={layout.list}>

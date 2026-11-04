@@ -1,25 +1,10 @@
-// Pareamento imediato + push do estado do SERVIDOR.
-//
-// Dois buracos reais que este arquivo fecha:
-//
-// 1. `maintain_communities` discava os membros, mas com throttle de 45 s — abrir
-//    o servidor na UI não iniciava nada na hora.
-// 2. O estado (canais, cargos/tags, bots) só era empurrado quando o dono MEXIA
-//    nele e o outro lado já estava Online. Quem entrava depois ficava com a
-//    lista velha até o sync de 45 s: era o "criei a tag no PC e não apareceu no
-//    celular".
-
 use super::{EngineCmd, NetworkEngine};
 
 impl NetworkEngine {
-    /// Disca AGORA todos os membros do servidor (abrir o servidor ou o app).
-    ///
-    /// O throttle continua valendo, mas curto: repetir a chamada em cada render
-    /// não vira rajada de announce/DHT.
     pub fn community_pair_now(&self, community_id: &str) {
         let me = self.identity.fingerprint.clone();
         if self.store.member_role(community_id, &me).is_none() {
-            return; // não sou membro: não há com quem parear
+            return;
         }
         let now = crate::identity::now_ms();
         for (fp, _, _) in self.store.list_members(community_id).unwrap_or_default() {
@@ -30,11 +15,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Servidores cujo estado EU devo empurrar para `peer_fp`.
-    ///
-    /// Só o DONO entra: ele é a autoridade do estado. Um membro empurrando a
-    /// cópia dele (possivelmente velha) faria o receptor apagar canais/cargos
-    /// novos no `community_full_sync`.
     fn state_targets_for(&self, peer_fp: &str) -> Vec<String> {
         let me = self.identity.fingerprint.clone();
         let mut out = Vec::new();
@@ -54,8 +34,6 @@ impl NetworkEngine {
         out
     }
 
-    /// Empurra o estado oficial para um peer que acabou de ficar Online.
-    /// Sem isto o membro só via a tag nova no sync de até 45 s.
     pub fn flush_community_state_to(&self, peer_fp: &str) {
         if self.link_tx(peer_fp).is_none() {
             return;
@@ -69,9 +47,6 @@ impl NetworkEngine {
         }
     }
 
-    /// Pede o estado agora, sem esperar o intervalo de 45 s do tique.
-    /// Usado quando a UI volta ao primeiro plano (WebView do celular fica
-    /// congelada e os eventos do intervalo se perdem).
     pub fn community_sync_now(&self, community_id: &str) {
         if self
             .store
@@ -103,7 +78,6 @@ mod tests {
         (e, dir)
     }
 
-    /// Monta um servidor local com `owner` e os membros informados.
     fn seed_community(e: &Arc<NetworkEngine>, cid: &str, owner: &str, members: &[&str]) {
         let rows: Vec<(String, String, String)> = members
             .iter()
@@ -125,11 +99,11 @@ mod tests {
                 &assignments,
                 &rows,
                 &meta,
+                false,
             )
             .unwrap();
     }
 
-    /// Abrir o servidor disca os membros NA HORA, sem esperar o tique de 15 s.
     #[test]
     fn pareamento_imediato_disca_membros() {
         let (e, _dir) = mk_engine("PairDono");
@@ -149,7 +123,6 @@ mod tests {
         assert!(viu_relay, "o pareamento imediato precisa enfileirar o dial");
     }
 
-    /// Fora do servidor não existe pareamento (nem dial, nem frame).
     #[test]
     fn pareamento_de_servidor_alheio_e_no_op() {
         let (e, _dir) = mk_engine("PairForasteiro");
@@ -158,7 +131,6 @@ mod tests {
         assert!(rx.try_recv().is_err(), "sem membros não há o que discar");
     }
 
-    /// O dono tem autoridade sobre o próprio servidor; o membro comum, não.
     #[test]
     fn apenas_o_dono_empurra_estado() {
         let (e, _dir) = mk_engine("SyncDono");
@@ -170,7 +142,6 @@ mod tests {
         assert_eq!(alvos, vec!["cid-meu".to_string()]);
     }
 
-    /// Peer que não é membro não recebe estado (nada de vazar estrutura).
     #[test]
     fn nao_empurra_estado_para_quem_nao_e_membro() {
         let (e, _dir) = mk_engine("SyncEstranho");
@@ -179,8 +150,6 @@ mod tests {
         assert!(e.state_targets_for("peer-desconhecido").is_empty());
     }
 
-    /// `community_sync_now` de servidor alheio não gasta frame nem registra
-    /// rate-limit para um id que nem é meu.
     #[test]
     fn sync_agora_de_servidor_alheio_e_no_op() {
         let (e, _dir) = mk_engine("SyncForasteiro");

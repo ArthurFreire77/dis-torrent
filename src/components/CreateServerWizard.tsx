@@ -1,9 +1,3 @@
-// ASSISTENTE DE CRIAÇÃO DE SERVIDOR — estado da sessão, navegação e criação.
-// Regras puras/dados em wizardModel.ts; passos em wizardSteps*.tsx; resumo em
-// wizardSummary.tsx (antes 1191 linhas em um arquivo só).
-// Contrato que NÃO muda: `onCreated(id)` UMA vez e só com servidor existente;
-// reabrir reseta tudo; modal não fecha com `busy`; convite wildcard (000000000000).
-
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ic, type IconName } from '../shared/icons'
 import { Modal, Notice, ui } from '../shared/ui'
@@ -42,18 +36,16 @@ export default function CreateServerWizard({
 }: {
   open: boolean
   onClose: () => void
-  /** Id do servidor criado, como string — é o que o shell consome. */
   onCreated: (communityId: string) => void
-  /** "Já tem um convite?": leva para a entrada por token no hub. */
   onJoinInstead?: () => void
 }) {
   const [step, setStep] = useState(0)
-  /** Maior passo já alcançado. O stepper só volta para <= este. */
   const [visited, setVisited] = useState(0)
   const [modeloId, setModeloId] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [iconId, setIconId] = useState<IconName>('server')
+  const [isPublic, setIsPublic] = useState(false)
   const [channels, setChannels] = useState<WizardChannel[]>(initialChannels)
   const [roles, setRoles] = useState<RolePreset[]>(initialRoles)
   const [bots, setBots] = useState<WizardBot[]>([])
@@ -63,7 +55,6 @@ export default function CreateServerWizard({
   const [error, setError] = useState<string | null>(null)
   const [inviteUrl, setInviteUrl] = useState('')
   const [createdId, setCreatedId] = useState('')
-  /** Bots que falharam ao criar (o servidor em si foi criado). */
   const [botsFalhos, setBotsFalhos] = useState<string[]>([])
 
   const mainRef = useRef<HTMLDivElement | null>(null)
@@ -76,6 +67,7 @@ export default function CreateServerWizard({
     setName('')
     setDescription('')
     setIconId('server')
+    setIsPublic(false)
     setChannels(initialChannels())
     setRoles(initialRoles())
     setBots([])
@@ -88,7 +80,6 @@ export default function CreateServerWizard({
     setBotsFalhos([])
   }, [open])
 
-  // Troca de passo volta o scroll ao topo (passos altos → curtos deixavam no vazio).
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0
   }, [step])
@@ -107,10 +98,6 @@ export default function CreateServerWizard({
   const cargosAtivos = roles.filter((r) => r.enabled)
   const validosCount = channels.length - channelErrors.filter((e) => e !== null).length
 
-  /**
-   * O que impede de seguir — a lista aparece na tela (botão mudo obrigava a
-   * adivinhar).
-   */
   const pendencias = useMemo((): string[] => {
     if (step === 0) {
       if (nomeVazio(name)) return ['Escreva um nome com pelo menos 2 caracteres.']
@@ -130,12 +117,6 @@ export default function CreateServerWizard({
 
   const concluido = step === PASSO_CONCLUIDO
 
-  // ---------- mutações ----------
-
-  /**
-   * Modelo preenche descrição/ícone/canais; NÃO mexe no nome (única coisa que
-   * a pessoa escreveu — sobrescrever é o pior que um atalho pode fazer).
-   */
   function aplicarModelo(id: string) {
     if (id === 'custom') {
       setModeloId(null)
@@ -175,7 +156,6 @@ export default function CreateServerWizard({
   }
 
   function removeChannel(i: number) {
-    // Guard de 1 repetido aqui: protege contra clique duplo.
     setChannels((prev) => (prev.length <= 1 ? prev : prev.filter((_, idx) => idx !== i)))
   }
 
@@ -187,6 +167,7 @@ export default function CreateServerWizard({
     setRoles((prev) => prev.map((r) => (r.key === key ? { ...r, name: nome } : r)))
   }
 
+  // Seção 1: togglePerm
   function togglePerm(key: string, bit: number) {
     setRoles((prev) =>
       prev.map((r) => {
@@ -196,8 +177,6 @@ export default function CreateServerWizard({
       }),
     )
   }
-
-  // ---------- bots ----------
 
   function addBot() {
     setBots((prev) => [
@@ -222,8 +201,6 @@ export default function CreateServerWizard({
     setBots((prev) => prev.map((b, idx) => (idx === i ? { ...b, roleKey } : b)))
   }
 
-  // ---------- criação ----------
-
   async function createServer() {
     setError(null)
     if (nomeVazio(name) || nomeCheck.error) {
@@ -243,10 +220,10 @@ export default function CreateServerWizard({
         validos.map((c) => c.name),
         {
           description: description.trim() || undefined,
-          // `icon` é texto livre no backend: mandamos o NOME do ícone (não emoji).
           icon: iconId,
           category: modeloId ?? undefined,
           rulesText: rulesText.trim() || undefined,
+          isPublic,
           channelsMeta: validos.map((c) => ({ name: c.name, kind: c.kind, category: c.category })),
           roles: cargosAtivos.map((r) => ({
             name: r.name.trim() || r.key,
@@ -257,14 +234,10 @@ export default function CreateServerWizard({
           })),
         },
       )
-      // BOTS DO ASSISTENTE: criados DEPOIS do servidor existir, porque o core
-      // exige o servidor e os cargos para validar (cargo fantasma é recusado).
-      // Falha de bot não pode desfazer o servidor: o resultado é reportado.
       const botsFalhos: string[] = []
       if (bots.length > 0) {
-        // presets de cargo → ids reais, na mesma ordem em que foram criados
         let cargosCriados: { id: string; name: string }[] = []
-        try { cargosCriados = await services.rolesList(id) } catch { /* sem lista: bots sem cargo */ }
+        try { cargosCriados = await services.rolesList(id) } catch {  }
         for (const b of bots) {
           const nome = b.name.trim()
           if (!nome) continue
@@ -280,8 +253,6 @@ export default function CreateServerWizard({
           }
         }
       }
-      // Convite público wildcard: vale em qualquer aparelho (formato aceito
-      // pelo Rust e pelo modo navegador).
       const token = await services.makeInvite(id, '000000000000')
       setCreatedId(id)
       setBotsFalhos(botsFalhos)
@@ -298,8 +269,6 @@ export default function CreateServerWizard({
     }
   }
 
-  // ---------- conteúdo ----------
-
   const conteudo = ((): React.ReactNode => {
     if (step === 0) {
       return (
@@ -313,6 +282,8 @@ export default function CreateServerWizard({
           onName={setName}
           onDescription={setDescription}
           onIcon={setIconId}
+          isPublic={isPublic}
+          onPublic={setIsPublic}
         />
       )
     }
@@ -356,7 +327,6 @@ export default function CreateServerWizard({
       )
     }
 
-    // Passo concluído
     return (
       <>
         <div className="csw-done" style={layout.done}>
@@ -393,7 +363,7 @@ export default function CreateServerWizard({
     )
   })()
 
-  // Título estável em todos os passos (o contexto fica no `StepHead` interno).
+  // Seção 2: subtitulo
   const subtitulo = concluido
     ? 'Pronto. O convite está abaixo.'
     : 'Seu servidor é onde você e seus amigos se reúnem. Crie o seu e comece a interagir.'
@@ -462,7 +432,7 @@ export default function CreateServerWizard({
         <WizardStepper step={step} visited={visited} busy={busy} onGo={goTo} />
 
         <div className="csw-cols" style={layout.cols} ref={mainRef}>
-          {/* `role="group"` para o leitor de tela anunciar a troca de contexto. */}
+          {}
           <div
             className="csw-main"
             style={layout.main}
@@ -484,6 +454,7 @@ export default function CreateServerWizard({
               cargosAtivos={cargosAtivos}
               rulesText={rulesText}
               bots={bots}
+              isPublic={isPublic}
             />
           )}
         </div>
@@ -492,5 +463,4 @@ export default function CreateServerWizard({
   )
 }
 
-/** Reexportado para quem já importava o slug daqui. */
 export { slugChannel }

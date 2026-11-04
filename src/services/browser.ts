@@ -670,6 +670,26 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
 
+  communitySetPublic: (communityId, isPublic) => {
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
+    const idx = list.findIndex(c => c.id === communityId)
+    if (idx < 0) return Promise.reject(new Error('comunidade não encontrada'))
+    list[idx] = { ...list[idx], is_public: isPublic }
+    writeJson(WEB_KEYS.communities, list)
+    emit({ type: 'community_synced', community_id: communityId } as any)
+    return Promise.resolve()
+  },
+
+  joinPublicCommunity: (hostFp, communityId) => {
+    // Modo navegador não tem host remoto: só existe o servidor desta máquina.
+    const list = readList<import('./models').CommunityView>(WEB_KEYS.communities)
+    const sala = list.find(c => c.id === communityId)
+    if (!sala) return Promise.reject(new Error('servidor não encontrado'))
+    if (!sala.is_public) return Promise.reject(new Error('este servidor é privado — peça um convite'))
+    void hostFp
+    return Promise.resolve(communityId)
+  },
+
   makeInvite: (cid) => Promise.resolve(`local-invite:${cid}:${btoa(cid).slice(0, 8)}`),
 
   makeInviteLink: (cid) => {

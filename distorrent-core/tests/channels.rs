@@ -1,6 +1,3 @@
-//! Testes de servidor (v4): canais completos, cargos, bots, sync P2P do
-//! estado da comunidade e mensagens de grupo — tudo sobre SQLite real.
-
 use std::sync::Arc;
 
 use distorrent_core::net::engine::NetworkEngine;
@@ -8,8 +5,6 @@ use distorrent_core::protocol::{MessageEnvelope, SecureFrame};
 use distorrent_core::storage::{BotPatch, ChannelMetaRow, RoleRow, Store};
 use tempfile::TempDir;
 
-/// Engine SEM start(): os métodos de servidor tocam apenas store e canais
-/// internos — nada de sockets, testes ficam determinísticos.
 fn engine_for(
     nick: &str,
 ) -> (
@@ -34,12 +29,10 @@ fn channel_create_exige_dono_e_comunidade_existente() {
     let (a, _ka, _da) = engine_for("Alice");
     let cid = a.create_community("Servidor da Alice", &[]).unwrap();
 
-    // comunidade inexistente → erro real
     assert!(a
         .channel_create("nao-existe-000", "geral", "", "", "text")
         .is_err());
 
-    // dono cria: nome normalizado, id prefixado, kind válido
     let ch = a
         .channel_create(&cid, "Meu Canal", "tópico legal", "", "text")
         .unwrap();
@@ -48,10 +41,8 @@ fn channel_create_exige_dono_e_comunidade_existente() {
     assert_eq!(ch.kind, "text");
     assert!(ch.id.starts_with(&format!("{cid}-ch-")));
 
-    // kind fora de text|voice → erro
     assert!(a.channel_create(&cid, "x", "", "", "video").is_err());
 
-    // membro NÃO dono (estado sincronizado no store dele) não altera servidor
     let dir_b = tempfile::tempdir().unwrap();
     let store_b = Arc::new(Store::open(&dir_b.path().join("distorrent.db")).unwrap());
     if let SecureFrame::CommunityState {
@@ -66,6 +57,7 @@ fn channel_create_exige_dono_e_comunidade_existente() {
         description,
         category,
         icon,
+        is_public,
     } = a.community_state_payload(&cid, None).unwrap()
     {
         store_b
@@ -79,6 +71,7 @@ fn channel_create_exige_dono_e_comunidade_existente() {
                 &member_roles,
                 &members,
                 &(description, category, icon),
+                is_public,
             )
             .unwrap();
     } else {
@@ -127,7 +120,6 @@ fn channel_crud_reflete_em_channel_list() {
 
     a.channel_delete(&cid, &c2.id).unwrap();
     assert!(a.channel_list(&cid).unwrap().iter().all(|c| c.id != c2.id));
-    // apagar canal que já foi embora → erro
     assert!(a.channel_delete(&cid, &c2.id).is_err());
 }
 
@@ -147,7 +139,6 @@ fn roles_crud_e_assignments() {
         .unwrap();
     assert_eq!(role2.position, 1);
 
-    // patch parcial
     a.role_update(
         &cid,
         &role.id,
@@ -170,19 +161,16 @@ fn roles_crud_e_assignments() {
     assert!(r.mentionable);
     assert!(r.hoist, "hoist não mexido continua true");
 
-    // assign/unassign (dono é membro da comunidade)
     a.member_assign_role(&cid, &me, &role.id).unwrap();
     assert_eq!(a.member_roles(&cid, &me).unwrap(), vec![role.id.clone()]);
     a.member_unassign_role(&cid, &me, &role.id).unwrap();
     assert!(a.member_roles(&cid, &me).unwrap().is_empty());
 
-    // cargo inexistente / membro inexistente → erro
     assert!(a.member_assign_role(&cid, &me, "cargo-falso").is_err());
     assert!(a
         .member_assign_role(&cid, "ffffffffffff", &role.id)
         .is_err());
 
-    // role_delete limpa assignments e desvincula bots
     a.member_assign_role(&cid, &me, &role.id).unwrap();
     let bot = a.bot_create(&cid, "Robô", None, Some(&role.id)).unwrap();
     assert_eq!(bot.role_id.as_deref(), Some(role.id.as_str()));
@@ -193,6 +181,7 @@ fn roles_crud_e_assignments() {
         "assignments sumiram com o cargo"
     );
     assert!(a.roles_list(&cid).unwrap().iter().all(|r| r.id != role.id));
+    // Seção 1: bot
     let bot = a
         .bots_list(&cid)
         .unwrap()
@@ -201,7 +190,6 @@ fn roles_crud_e_assignments() {
         .unwrap();
     assert!(bot.role_id.is_none(), "bot ficou sem cargo");
 
-    // @everyone é intocável
     assert!(a.role_delete(&cid, &format!("{cid}-everyone")).is_err());
 }
 
@@ -223,7 +211,6 @@ fn bots_crud() {
     assert_eq!(bot.owner_fp, a.identity().fingerprint);
     assert_eq!(bot.role_id.as_deref(), Some(role.id.as_str()));
 
-    // update: renomeia + limpa cargo com "" + offline
     a.bot_update(
         &cid,
         &bot.id,
@@ -245,7 +232,6 @@ fn bots_crud() {
     assert!(b.role_id.is_none(), "string vazia limpa o cargo");
     assert!(!b.online);
 
-    // cargo volta via Some(Some)
     a.bot_update(
         &cid,
         &bot.id,
@@ -263,7 +249,6 @@ fn bots_crud() {
         .unwrap();
     assert_eq!(b.role_id.as_deref(), Some(role.id.as_str()));
 
-    // cargo inexistente no create → erro
     assert!(a.bot_create(&cid, "X", None, Some("cargo-falso")).is_err());
 
     a.bot_delete(&cid, &bot.id).unwrap();
@@ -284,7 +269,6 @@ fn community_full_sync_replica_estado_do_host() {
     let me = ka.fingerprint();
     a.member_assign_role(&cid, &me, &role.id).unwrap();
 
-    // store do membro aplica o estado do host
     let dir_b = tempfile::tempdir().unwrap();
     let store_b = Arc::new(Store::open(&dir_b.path().join("distorrent.db")).unwrap());
     let apply = |store_b: &Store| {
@@ -300,6 +284,7 @@ fn community_full_sync_replica_estado_do_host() {
             description,
             category,
             icon,
+            is_public,
         } = a.community_state_payload(&cid, None).unwrap()
         {
             store_b
@@ -313,6 +298,7 @@ fn community_full_sync_replica_estado_do_host() {
                     &member_roles,
                     &members,
                     &(description, category, icon),
+                    is_public,
                 )
                 .unwrap();
         } else {
@@ -321,7 +307,6 @@ fn community_full_sync_replica_estado_do_host() {
     };
     apply(&store_b);
 
-    // canais, cargos, bots e assignments batem com o host
     assert_eq!(
         store_b.channel_rows(&cid).unwrap(),
         a.channel_list(&cid).unwrap()
@@ -345,7 +330,6 @@ fn community_full_sync_replica_estado_do_host() {
         .collect();
     assert!(member_fps.contains(&me));
 
-    // host remove o primeiro canal e cria outro; membro re-sincroniza
     let removed = a.channel_list(&cid).unwrap().first().unwrap().id.clone();
     a.channel_delete(&cid, &removed).unwrap();
     a.channel_create(&cid, "Novo Canal", "", "", "text")
@@ -369,19 +353,18 @@ fn community_full_sync_replica_estado_do_host() {
     );
 }
 
+// Seção 2: test
 #[test]
 fn send_dm_em_grupo_fica_pendente_sem_erro() {
     let (a, _ka, _da) = engine_for("Alice");
     let kp_b = distorrent_core::identity::Keypair::generate();
     let fp_b = kp_b.identity("Bob").fingerprint;
 
-    // registra B como contato local (sem conexão) para o create_group aceitar
     a.friend_request(&fp_b).unwrap();
 
     let conv = a.create_group("Equipe", vec![fp_b]).unwrap();
     assert_eq!(conv.kind, "group");
 
-    // sem peer online: PENDING — e NUNCA o erro "apenas DM nesta fase"
     let m = a.send_dm(&conv.id, "oi grupo").unwrap();
     assert_eq!(m.status, "pending");
     assert_eq!(m.direction, "out");
@@ -405,7 +388,6 @@ fn pending_group_messages_e_revert_no_store() {
     let env_g = MessageEnvelope::new(&kp, &conv.id, "msg de grupo");
     store.insert_message(&env_g, "out", "pending").unwrap();
 
-    // flush de grupo só enxerga mensagens de conversas group
     let pend = store.pending_group_messages().unwrap();
     assert_eq!(pend.len(), 1);
     assert_eq!(pend[0].id, env_g.id);
@@ -413,7 +395,6 @@ fn pending_group_messages_e_revert_no_store() {
     store.set_message_status(&env_g.id, "sent").unwrap();
     assert!(store.pending_group_messages().unwrap().is_empty());
 
-    // queda de link: grupos em sending/sent voltam a PENDING (DM não mexe)
     let ids = store.revert_unacked_groups_to_pending().unwrap();
     assert_eq!(ids, vec![env_g.id.clone()]);
     assert_eq!(
@@ -453,6 +434,7 @@ fn community_state_frame_serializa_com_campos_novos() {
         description: "servidor de teste".into(),
         category: "jogos".into(),
         icon: "game".into(),
+        is_public: true,
     };
     let json = serde_json::to_string(&frame).unwrap();
     let back: SecureFrame = serde_json::from_str(&json).unwrap();
@@ -462,17 +444,18 @@ fn community_state_frame_serializa_com_campos_novos() {
             roles,
             bots,
             member_roles,
+            is_public,
             ..
         } => {
             assert_eq!(channels.len(), 1);
             assert_eq!(roles.len(), 1);
             assert!(bots.is_empty());
             assert_eq!(member_roles.len(), 1);
+            assert!(is_public, "servidor público precisa sobreviver ao JSON");
         }
         _ => unreachable!(),
     }
 
-    // frame de host LEGADO (sem campos novos) carrega com defaults — compat
     let legacy = r#"{"CommunityState":{"community_id":"cid","name":"S","owner_fp":"h","channels":[],"members":[]}}"#;
     let back: SecureFrame = serde_json::from_str(legacy).unwrap();
     match back {
@@ -480,11 +463,16 @@ fn community_state_frame_serializa_com_campos_novos() {
             roles,
             bots,
             member_roles,
+            is_public,
             ..
         } => {
             assert!(roles.is_empty());
             assert!(bots.is_empty());
             assert!(member_roles.is_empty());
+            assert!(
+                !is_public,
+                "frame antigo sem o campo tem de cair em PRIVADO, nunca público"
+            );
         }
         _ => unreachable!(),
     }

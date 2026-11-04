@@ -1,122 +1,82 @@
-//! Limites de rede centralizados (rate, concorrência e recursos) para TODO o
-//! transporte — o antispam/authlimit não protegem o TRANSPORTE (handshakes
-//! sem freio, frames a taxa ilimitada, UDP sem limite). Taxa e tamanho são
-//! limitados INDEPENDENTES, por peer e globais. Política em dois andares:
-//! THROTTLE (descarta excedente, sessão sobrevive) e KILL (só abuso/bug —
-//! encerra). Fail-closed no lock; tudo configurável via env (`DISTORRENT_LIMIT_*`).
-
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Teto de chaves por mapa de buckets — poda defensiva (mesmo padrão dos maps
-/// do engine: churn de peers não pode crescer sem freio).
 const MAP_CAP: usize = 8192;
 
-// ---------------------------------------------------------------------------
-// Parâmetros
-// ---------------------------------------------------------------------------
-
-/// Todos os tetos do transporte, calibrados 2-3x acima do uso legítimo.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Limits {
-    /// Conexões TCP INBOUND por IP de origem por janela de 10s.
     pub tcp_accept_per_ip_10s: u32,
-    /// Rajada inicial de accepts por IP (tokens do bucket).
     pub tcp_accept_burst: u32,
-    /// Accepts inbound GLOBAIS por 10s (todas as origens somadas).
     pub tcp_accept_global_10s: u32,
     pub tcp_accept_global_burst: u32,
-    /// Handshakes concorrentes (aceitos e ainda não concluídos).
     pub handshake_conc: usize,
-    /// Teto de sessões online simultâneas (peers conectados de fato).
     pub sessions_max: usize,
-    /// Datagramas de discovery UDP por IP de origem por 10s.
     pub disc_udp_per_ip_10s: u32,
     pub disc_udp_burst: u32,
     pub disc_udp_global_10s: u32,
     pub disc_udp_global_burst: u32,
-    /// Hellos NOVOS por peer via relay por 10s (eph fresco = dial novo).
     pub relay_hello_per_peer_10s: u32,
     pub relay_hello_burst: u32,
-    /// Frames de sessão por peer por 10s (throttle — excedente descartado).
     pub frames_per_peer_10s: u32,
     pub frames_per_peer_burst: u32,
-    /// BYTES de sessão por peer por 10s (independente do nº de frames).
     pub bytes_per_peer_10s: u64,
     pub bytes_per_peer_burst: u64,
-    /// Frames por peer por 10s no andar de KILL (5x o throttle).
     pub frames_kill_per_peer_10s: u32,
-    /// Bytes por peer por 10s no andar de KILL (5x o throttle).
     pub bytes_kill_per_peer_10s: u64,
-    /// Frames inbound somando TODOS os peers por 10s.
     pub frames_global_10s: u32,
     pub frames_global_burst: u32,
-    /// Loops de dial outbound concorrentes (direto + relay; um por destino).
     pub dial_conc: usize,
-    /// Pedidos de chunk de arquivo recebidos por peer por 10s.
     pub chunk_req_per_peer_10s: u32,
     pub chunk_req_burst: u32,
-    /// Frames de sinalização de chamada/tela por peer por 10s (ICE em rajada).
     pub call_sig_per_peer_10s: u32,
     pub call_sig_burst: u32,
-    /// FriendRequests recebidos por peer por 10s.
     pub friend_req_per_peer_10s: u32,
     pub friend_req_burst: u32,
+    /// Entradas num servidor público por peer: o "qualquer um entra" não é
+    /// porta aberta para script — quem faz flood de join é barrado.
+    pub join_attempt_per_peer_10s: u32,
+    pub join_attempt_burst: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            // LAN reconecta em rajada (restart do app na mesma máquina) — 30/10s
-            // com burst 20 cobre 10 nós de teste sem derrubar nada.
             tcp_accept_per_ip_10s: 30,
             tcp_accept_burst: 20,
             tcp_accept_global_10s: 120,
             tcp_accept_global_burst: 80,
             handshake_conc: 64,
-            // 256 peers online: acima disso o app desktop já não é o gargalo.
             sessions_max: 256,
-            // Discovery legítimo = 1 anúncio/2s = 5/10s por origem. 15/10s dá
-            // folga 3x (reconexões, múltiplas interfaces).
             disc_udp_per_ip_10s: 15,
             disc_udp_burst: 10,
             disc_udp_global_10s: 300,
             disc_udp_global_burst: 200,
-            // Relay reenvia o Hello a cada 1,5s ⇒ pior caso legítimo ~7/10s.
             relay_hello_per_peer_10s: 12,
             relay_hello_burst: 8,
-            // Voz ~50 fps + ICE + acks ≈ 60-100/s pico. Throttle em 120/s.
             frames_per_peer_10s: 1200,
             frames_per_peer_burst: 800,
-            // 128 MiB/10s = 12,8 MiB/s sustentado por peer. Transferência de
-            // arquivos em LAN é mais rápida, mas o excedente só perde chunk
-            // (reenviado); matar a sessão por throughput seria pior.
             bytes_per_peer_10s: 128 * 1024 * 1024,
             bytes_per_peer_burst: 64 * 1024 * 1024,
-            // 600 frames/s por peer = máquina de flood, não usuário.
             frames_kill_per_peer_10s: 6000,
-            // 64 MiB/s por peer sustentado.
             bytes_kill_per_peer_10s: 640 * 1024 * 1024,
             frames_global_10s: 6000,
             frames_global_burst: 4000,
             dial_conc: 64,
-            // Swarm pede chunks em lote; 20/s por peer é generoso e suficiente.
             chunk_req_per_peer_10s: 200,
             chunk_req_burst: 120,
-            // Trickle ICE pode cuspir dezenas de candidatos num segundo.
             call_sig_per_peer_10s: 240,
             call_sig_burst: 160,
             friend_req_per_peer_10s: 20,
             friend_req_burst: 12,
+            join_attempt_per_peer_10s: 6,
+            join_attempt_burst: 3,
         }
     }
 }
 
-/// Lê `DISTORRENT_LIMIT_<NOME>` como número; valor ausente/inválido = default.
-/// Falha aberta NÃO: env inválido ignora a override e usa o default saudável.
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name)
         .ok()
@@ -125,7 +85,6 @@ fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 impl Limits {
-    /// Defaults + overrides de env (self-host/CI pode apertar/soltar sem build).
     pub fn from_env() -> Self {
         let d = Self::default();
         Self {
@@ -195,28 +154,22 @@ impl Limits {
                 d.friend_req_per_peer_10s,
             ),
             friend_req_burst: env_num("DISTORRENT_LIMIT_FRIEND_REQ_BURST", d.friend_req_burst),
+            join_attempt_per_peer_10s: env_num(
+                "DISTORRENT_LIMIT_JOIN_10S",
+                d.join_attempt_per_peer_10s,
+            ),
+            join_attempt_burst: env_num("DISTORRENT_LIMIT_JOIN_BURST", d.join_attempt_burst),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Vereditos
-// ---------------------------------------------------------------------------
-
-/// Decisão de uma checagem de taxa. `Blocked` = a ação NÃO acontece (o
-/// chamador descarta a conexão/datagrama/pedido e segue vivo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allowed,
     Blocked,
 }
 
-/// Veredito de um frame de sessão inbound — três andares, para NÃO derrubar
-/// quem só estourou uma rajada legítima:
-/// - `Allow`: processa normalmente.
-/// - `Drop`: descarta ESTE frame; sessão preservada (throttle). O outbox/ACK/
-///   fileSwarm do par reenvia o que importava.
-/// - `Kill`: encerra a sessão — tráfego na casa do abuso (andar de KILL).
+// Seção 1: derive
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameVerdict {
     Allow,
@@ -224,19 +177,12 @@ pub enum FrameVerdict {
     Kill(&'static str),
 }
 
-// ---------------------------------------------------------------------------
-// Token bucket genérico (conta E bytes: unidades são f64)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy)]
 struct Cell {
     tokens: f64,
     last: Instant,
 }
 
-/// Bucket por chave. `rate_per_s` recarrega continuamente (janela deslizante
-/// de verdade, não contador fixo por intervalo — evita rajada no início de
-/// cada janela). `check_at` recebe `now` injetado para testes determinísticos.
 #[derive(Debug)]
 struct KeyedBuckets {
     rate_per_s: f64,
@@ -259,11 +205,9 @@ impl KeyedBuckets {
         self.cells.clear();
     }
 
-    /// Consome `units` da chave. `true` = permitido. Bucket novo nasce CHEIO
-    /// (burst inicial) — igual ao `RateLimiter` do antispam.
     fn check_at(&mut self, key: &str, units: f64, now: Instant) -> bool {
         if self.cells.len() > MAP_CAP {
-            self.cells.clear(); // poda defensiva (padrão dos maps do engine)
+            self.cells.clear();
         }
         let cell = self.cells.entry(key.to_string()).or_insert(Cell {
             tokens: self.burst,
@@ -285,7 +229,6 @@ impl KeyedBuckets {
     }
 }
 
-/// Bucket global (uma célula só) — pressão somada de todas as origens.
 #[derive(Debug)]
 struct GlobalBucket {
     rate_per_s: f64,
@@ -327,10 +270,6 @@ impl GlobalBucket {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Slots de concorrência (handshake/dial) com guarda RAII
-// ---------------------------------------------------------------------------
-
 #[derive(Debug)]
 struct Slots {
     active: AtomicUsize,
@@ -346,14 +285,10 @@ impl Slots {
     }
 
     fn reconfig(&self, cap: usize) {
-        // cap não encolhe abaixo dos ativos de propósito: os guards vigentes
-        // liberam no Drop e o novo teto vale a partir daí (fail-safe).
         self.cap.store(cap, Ordering::Relaxed);
     }
 }
 
-/// Segura uma vaga de concorrência até o fim do escopo (Drop libera).
-/// Guarda `Arc<Slots>` para funcionar movida entre tasks (handshake spawnado).
 #[derive(Debug)]
 pub struct SlotGuard {
     inner: Arc<Slots>,
@@ -380,17 +315,11 @@ fn try_slot(inner: &Arc<Slots>) -> Option<SlotGuard> {
                     inner: Arc::clone(inner),
                 })
             }
-            Err(atual) => cur = atual, // outra thread ganhou a corrida — retenta
+            Err(atual) => cur = atual,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Snapshot para diagnóstico/UI
-// ---------------------------------------------------------------------------
-
-/// Contadores de rejeição por classe (diagnóstico honesto na UI: o usuário
-/// vê quando um limite está apertado demais para o uso dele).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RejectedCounters {
     pub tcp_accept: u64,
@@ -402,22 +331,19 @@ pub struct RejectedCounters {
     pub chunk_req: u64,
     pub call_sig: u64,
     pub friend_req: u64,
+    pub join_attempt: u64,
     pub dial_conc: u64,
     pub frames_allowed: u64,
 }
 
-/// Estado completo dos limites para o comando `net_limits` (Tauri) e testes.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LimitsSnapshot {
     pub limits: Limits,
+    // Seção 2: pub
     pub rejected: RejectedCounters,
     pub active_handshakes: usize,
     pub active_dials: usize,
 }
-
-// ---------------------------------------------------------------------------
-// NetLimiter — o ponto único de decisão
-// ---------------------------------------------------------------------------
 
 pub struct NetLimiter {
     limits: Mutex<Limits>,
@@ -434,14 +360,13 @@ pub struct NetLimiter {
     chunk_req: Mutex<KeyedBuckets>,
     call_sig: Mutex<KeyedBuckets>,
     friend_req: Mutex<KeyedBuckets>,
+    join_attempt: Mutex<KeyedBuckets>,
     handshake_slots: Arc<Slots>,
     dial_slots: Arc<Slots>,
     rejected: Mutex<RejectedCounters>,
 }
 
 impl NetLimiter {
-    /// Constrói com defaults + env. Devolve `Arc` porque o discovery/mDNS
-    /// precisam da MESMA instância (limites compartilhados, sem duplicar mapa).
     pub fn from_env() -> Arc<Self> {
         let l = Limits::from_env();
         let lim = Self {
@@ -498,6 +423,10 @@ impl NetLimiter {
                 l.friend_req_per_peer_10s as u64,
                 l.friend_req_burst as u64,
             )),
+            join_attempt: Mutex::new(KeyedBuckets::new(
+                l.join_attempt_per_peer_10s as u64,
+                l.join_attempt_burst as u64,
+            )),
             handshake_slots: Slots::new(l.handshake_conc),
             dial_slots: Slots::new(l.dial_conc),
             rejected: Mutex::new(RejectedCounters::default()),
@@ -505,13 +434,10 @@ impl NetLimiter {
         Arc::new(lim)
     }
 
-    /// Copia dos parâmetros vigentes (o engine lê `sessions_max` daqui).
     pub fn limits(&self) -> Limits {
         *self.limits.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Troca TODOS os parâmetros em runtime (host/testes). Recalcula os
-    /// buckets — mudança de teto nunca deixa estado antigo contaminando.
     pub fn reconfigure(&self, l: Limits) {
         let mut g = self.limits.lock().unwrap_or_else(|e| e.into_inner());
         *g = l;
@@ -545,7 +471,6 @@ impl NetLimiter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .reconfig(l.frames_per_peer_10s as u64, l.frames_per_peer_burst as u64);
-        // Andar de KILL nasce com burst = rate (rajada não perdoa no abuso).
         self.frames_kill_ip
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -577,21 +502,23 @@ impl NetLimiter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .reconfig(l.friend_req_per_peer_10s as u64, l.friend_req_burst as u64);
+        self.join_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reconfig(
+                l.join_attempt_per_peer_10s as u64,
+                l.join_attempt_burst as u64,
+            );
         self.handshake_slots.reconfig(l.handshake_conc);
         self.dial_slots.reconfig(l.dial_conc);
     }
 
+    // Seção 3: bump
     fn bump(&self, f: impl FnOnce(&mut RejectedCounters)) {
         let mut r = self.rejected.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut r);
     }
 
-    // ── TCP inbound ─────────────────────────────────────────────────────────
-
-    /// Um accept inbound pode virar handshake? Checa por IP de origem E o
-    /// teto global. `Blocked` = feche o stream imediatamente (o OS RST cuida
-    /// do resto) — cada accept é uma task de handshake criptográfico, sem
-    /// isto mil accepts = mil tasks (DoS de CPU).
     pub fn allow_tcp_accept(&self, ip: IpAddr) -> Decision {
         let now = Instant::now();
         let key = ip.to_string();
@@ -616,8 +543,6 @@ impl NetLimiter {
         Decision::Allowed
     }
 
-    /// Vaga para MAIS UM handshake concorrente. Segure o guard até o fim do
-    /// handshake (Drop libera) — ele NÃO limita a sessão que nasce depois.
     pub fn try_handshake_slot(&self) -> Option<SlotGuard> {
         let g = try_slot(&self.handshake_slots);
         if g.is_none() {
@@ -626,9 +551,6 @@ impl NetLimiter {
         g
     }
 
-    // ── Discovery UDP ───────────────────────────────────────────────────────
-
-    /// Datagrama de discovery pode ser processado? (anúncio legítimo = 1/2s)
     pub fn allow_disc_datagram(&self, ip: IpAddr) -> Decision {
         let now = Instant::now();
         let key = ip.to_string();
@@ -653,11 +575,6 @@ impl NetLimiter {
         Decision::Allowed
     }
 
-    // ── Relay ───────────────────────────────────────────────────────────────
-
-    /// Hello NOVO (eph fresco) via relay pode nascer respondente? O dedup
-    /// por (eph, nonce) já barra REPETIÇÃO do mesmo Hello; isto barra a
-    /// fábrica de Hellos novos (cada um = task de handshake viva).
     pub fn allow_relay_hello(&self, peer_fp: &str) -> Decision {
         let ok = self
             .relay_hello
@@ -672,17 +589,11 @@ impl NetLimiter {
         }
     }
 
-    // ── Frames de sessão inbound ────────────────────────────────────────────
-
-    /// Veredito de UM frame inbound de sessão (throttle + kill, por peer e
-    /// global; frames E bytes — um não substitui o outro).
     pub fn allow_frame_in(&self, peer_fp: &str, wire_bytes: u64) -> FrameVerdict {
         self.allow_frame_in_at(peer_fp, wire_bytes, Instant::now())
     }
 
-    /// Variante com relógio injetado (testes determinísticos, sem sleep).
     pub fn allow_frame_in_at(&self, peer_fp: &str, wire_bytes: u64, now: Instant) -> FrameVerdict {
-        // Andar de KILL primeiro: se é abuso, mata logo (sem gastar throttle).
         let kill_frames = !self
             .frames_kill_ip
             .lock()
@@ -702,7 +613,6 @@ impl NetLimiter {
             self.bump(|r| r.sessions_killed += 1);
             return FrameVerdict::Kill("flood de bytes (muito acima do normal)");
         }
-        // Throttle por peer: descarta o frame, preserva a sessão.
         let th_frames = !self
             .frames_ip
             .lock()
@@ -722,7 +632,6 @@ impl NetLimiter {
             self.bump(|r| r.frames_throttled += 1);
             return FrameVerdict::Drop("rate de bytes por peer");
         }
-        // Pressão global (muitos peers somados): descarta sem matar.
         if !self
             .frames_global
             .lock()
@@ -736,9 +645,6 @@ impl NetLimiter {
         FrameVerdict::Allow
     }
 
-    // ── Gates por classe de frame (handle_frame) ─────────────────────────────
-
-    /// Pedido de chunk de arquivo recebido (Bulk) — flood enche o disco/IO.
     pub fn allow_chunk_request(&self, peer_fp: &str) -> Decision {
         let ok = self
             .chunk_req
@@ -753,8 +659,6 @@ impl NetLimiter {
         }
     }
 
-    /// Frame de sinalização de chamada/tela (Call*/ScreenShare*) — ICE em
-    /// rajada é legítimo, mas não ilimitado.
     pub fn allow_call_signal(&self, peer_fp: &str) -> Decision {
         let ok = self
             .call_sig
@@ -769,7 +673,7 @@ impl NetLimiter {
         }
     }
 
-    /// FriendRequest recebido — spam de pedido de amizade pelo transport.
+    // Seção 4: allow_friend_request
     pub fn allow_friend_request(&self, peer_fp: &str) -> Decision {
         let ok = self
             .friend_req
@@ -784,11 +688,22 @@ impl NetLimiter {
         }
     }
 
-    // ── Dial outbound ───────────────────────────────────────────────────────
+    /// Entrada em servidor PÚBLICO ("qualquer um entra") também é limitada:
+    /// sem isto, o servidor aberto é convite para script de join em massa.
+    pub fn allow_public_join(&self, peer_fp: &str) -> Decision {
+        let ok = self
+            .join_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_at(peer_fp, 1.0, Instant::now());
+        if ok {
+            Decision::Allowed
+        } else {
+            self.bump(|r| r.join_attempt += 1);
+            Decision::Blocked
+        }
+    }
 
-    /// Vaga para MAIS UM loop de dial outbound (direto ou relay). Segure o
-    /// guard até o fim do loop (são eternos por destino — o teto limita
-    /// DESTINOS simultâneos, que é o que vaza fd/CPU).
     pub fn try_dial_slot(&self) -> Option<SlotGuard> {
         let g = try_slot(&self.dial_slots);
         if g.is_none() {
@@ -797,10 +712,6 @@ impl NetLimiter {
         g
     }
 
-    // ── Higiene e diagnóstico ────────────────────────────────────────────────
-
-    /// Sessão com este peer acabou: limpa os buckets dele (evita mapa morto
-    /// crescendo com churn de peers — o prune de MAP_CAP é a rede de segurança).
     pub fn forget_peer(&self, peer_fp: &str) {
         self.frames_ip
             .lock()
@@ -834,9 +745,12 @@ impl NetLimiter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .forget(peer_fp);
+        self.join_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget(peer_fp);
     }
 
-    /// Snapshot completo (comando `net_limits` / ConnectionDiagnostics).
     pub fn snapshot(&self) -> LimitsSnapshot {
         LimitsSnapshot {
             limits: self.limits(),
@@ -851,18 +765,12 @@ impl NetLimiter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Testes (determinísticos: relógio injetado, SEM sleep e SEM env)
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
     fn limiter() -> NetLimiter {
-        // Instância crua (não from_env) com defaults — testes nunca dependem
-        // do ambiente do processo (mesma lição do authlimit).
         let l = NetLimiter {
             limits: Mutex::new(Limits::default()),
             tcp_accept_ip: Mutex::new(KeyedBuckets::new(30, 20)),
@@ -878,6 +786,7 @@ mod tests {
             chunk_req: Mutex::new(KeyedBuckets::new(200, 120)),
             call_sig: Mutex::new(KeyedBuckets::new(240, 160)),
             friend_req: Mutex::new(KeyedBuckets::new(20, 12)),
+            join_attempt: Mutex::new(KeyedBuckets::new(6, 3)),
             handshake_slots: Slots::new(64),
             dial_slots: Slots::new(64),
             rejected: Mutex::new(RejectedCounters::default()),
@@ -887,15 +796,12 @@ mod tests {
 
     #[test]
     fn bucket_burst_e_refill_deslizante() {
-        let mut b = KeyedBuckets::new(10, 3); // 1/s, burst 3
+        let mut b = KeyedBuckets::new(10, 3);
         let t0 = Instant::now();
-        // burst inicial cheio: 3 passam
         assert!(b.check_at("a", 1.0, t0));
         assert!(b.check_at("a", 1.0, t0));
         assert!(b.check_at("a", 1.0, t0));
-        // 4º na mesma hora: bloqueado
         assert!(!b.check_at("a", 1.0, t0));
-        // +10s ⇒ +10 tokens (teto burst 3): 3 passam de novo
         let t1 = t0 + Duration::from_secs(10);
         assert!(b.check_at("a", 1.0, t1));
         assert!(b.check_at("a", 1.0, t1));
@@ -905,9 +811,6 @@ mod tests {
 
     #[test]
     fn bucket_bytes_consome_em_unidades() {
-        // taxa ≠ tamanho: 100 bytes/10s, burst 250 — dois frames de 128 B
-        // passam (256>250 não: o primeiro consome 128, restam 122 <128) — o
-        // segundo é barrado MESMO sendo só "1 frame".
         let mut b = KeyedBuckets::new(100, 250);
         let t0 = Instant::now();
         assert!(b.check_at("p", 128.0, t0));
@@ -917,7 +820,6 @@ mod tests {
     #[test]
     fn frames_throttle_descarta_e_kill_encerra() {
         let l = limiter();
-        // Limiares didáticos: throttle 10/10s burst 5; kill 20/10s burst 20.
         let mut cfg = Limits::default();
         cfg.frames_per_peer_10s = 10;
         cfg.frames_per_peer_burst = 5;
@@ -968,6 +870,7 @@ mod tests {
         );
     }
 
+    // Seção 5: test
     #[test]
     fn snapshot_conta_rejeicoes() {
         let l = limiter();
@@ -985,8 +888,6 @@ mod tests {
 
     #[test]
     fn env_num_usa_default_quando_ausente_ou_invalido() {
-        // Nunca seta env no teste (evita flakiness entre suítes) — valida só
-        // o caminho ausente/inválido.
         assert_eq!(env_num::<u32>("DISTORRENT_LIMIT_TESTE_INEXISTENTE", 42), 42);
         assert_eq!(env_num::<u32>("DISTORRENT_LIMIT_TESTE_INEXISTENTE_2", 7), 7);
     }
@@ -1002,7 +903,6 @@ mod tests {
         assert_eq!(l.allow_disc_datagram(ip), Decision::Allowed);
         assert_eq!(l.allow_disc_datagram(ip), Decision::Allowed);
         assert_eq!(l.allow_disc_datagram(ip), Decision::Blocked);
-        // Outra origem não paga a conta desta
         let ip2: IpAddr = "192.168.0.11".parse().unwrap();
         assert_eq!(l.allow_disc_datagram(ip2), Decision::Allowed);
     }

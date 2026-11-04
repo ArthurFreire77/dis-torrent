@@ -3390,6 +3390,7 @@ export default function ThemeShell({ designId }: {designId:string}){
           channelsSummary={activeComm.channels}
           channelsFull={extraChannels}
           members={activeComm.members}
+          isPublic={activeComm.is_public === true}
           roles={roles}
           bots={bots}
           memberRoles={memberRolesCache}
@@ -3402,6 +3403,10 @@ export default function ThemeShell({ designId }: {designId:string}){
           }}
           onSetMeta={async (patch) => {
             await services.communitySetMeta(selCommunity, patch)
+            refreshCommunities()
+          }}
+          onSetPublic={async (isPublic) => {
+            await services.communitySetPublic(selCommunity, isPublic)
             refreshCommunities()
           }}
           onChannelCreate={async (d) => {

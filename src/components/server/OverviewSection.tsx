@@ -1,13 +1,7 @@
-// Visão geral do servidor: identidade e descrição.
-//
-// Antes era um `<input>` com id="srv-rename" lido por `document.getElementById`
-// dentro do onClick do botão — ou seja, o valor vinha do DOM, não do estado do
-// React. Isso quebrava com qualquer re-render e impedia validação. Agora é
-// estado real, com salvar só sujo.
-
 import { useEffect, useState } from 'react'
 import { Ic } from '../../shared/icons'
 import { Button, Card, DataRow, Notice, TextArea, TextField, ui } from '../../shared/ui'
+import { PublicToggle } from './wizardSteps'
 
 export function OverviewSection({
   serverName,
@@ -17,8 +11,10 @@ export function OverviewSection({
   myFp,
   serverId,
   ehDono,
+  isPublic,
   onRename,
   onSetMeta,
+  onSetPublic,
   onError,
 }: {
   serverName: string
@@ -28,8 +24,10 @@ export function OverviewSection({
   myFp: string | undefined
   serverId: string
   ehDono: boolean
+  isPublic: boolean
   onRename: (nome: string) => Promise<void>
   onSetMeta: (patch: { description?: string; category?: string }) => Promise<void>
+  onSetPublic: (isPublic: boolean) => Promise<void>
   onError: (msg: string | null) => void
 }) {
   const [nome, setNome] = useState(serverName)
@@ -37,7 +35,6 @@ export function OverviewSection({
   const [cat, setCat] = useState(category ?? '')
   const [salvando, setSalvando] = useState(false)
 
-  // Reabrir a tela com outro servidor tem que mostrar o servidor novo.
   useEffect(() => {
     setNome(serverName)
     setDesc(description ?? '')
@@ -146,6 +143,40 @@ export function OverviewSection({
         )}
       </Card>
 
+      <Card
+        icon={isPublic ? 'globe' : 'lock'}
+        title="Quem pode entrar"
+        subtitle="Servidor público aceita qualquer pessoa; privado exige convite."
+      >
+        <PublicToggle
+          value={isPublic}
+          disabled={!ehDono}
+          onChange={async (v) => {
+            setSalvando(true)
+            onError(null)
+            try {
+              await onSetPublic(v)
+            } catch (e: any) {
+              onError(String(e?.message ?? e))
+            } finally {
+              setSalvando(false)
+            }
+          }}
+        />
+        {!ehDono && (
+          <div style={{ fontSize: 11.5, color: ui.muted, lineHeight: 1.5 }}>
+            Só o dono do servidor pode mudar quem entra.
+          </div>
+        )}
+        {isPublic && (
+          <Notice tone="info" icon="shield">
+            Servidor aberto: qualquer pessoa entra pelo servidor, sem convite. Cada pessoa
+            tem um limite de tentativas por minuto, para um script não conseguir inundar a
+            entrada.
+          </Notice>
+        )}
+      </Card>
+
       <Card icon="info" title="Informações técnicas" subtitle="Identificadores úteis para diagnosticar problemas.">
         <DataRow label="Dono">
           {ownerFp === myFp ? 'Você' : `${ownerFp.slice(0, 16)}…`}
@@ -209,3 +240,4 @@ export function OverviewSection({
     </div>
   )
 }
+// Seção 1: fim

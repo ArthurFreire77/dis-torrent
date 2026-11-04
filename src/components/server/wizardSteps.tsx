@@ -1,14 +1,3 @@
-// Passo 1 do assistente: identidade do servidor (modelo, nome, descrição, ícone).
-//
-// Componente de APRESENTAÇÃO: recebe o estado e devolve mudanças por callback.
-// Toda regra (limite de nome, catálogo de ícones, modelos) vem de `wizardModel`,
-// que é puro e testável.
-//
-// O layout vem de `layout` (INLINE, em `wizardStyles`), não de folha de estilo.
-// Assim rótulo e descrição nunca colam um no outro nem quando o `<style>` não é
-// aplicado — era o defeito de "ServidorSem tema definido… Grudados" num build
-// que perdeu a folha.
-
 import { Ic, type IconName } from '../../shared/icons'
 import { Notice, TextArea, TextField, ui } from '../../shared/ui'
 import { layout } from './wizardStyles'
@@ -23,7 +12,6 @@ export function StepCap({ children }: { children: React.ReactNode }) {
   return <div style={layout.cap}>{children}</div>
 }
 
-/** Título + explicação do passo. Fica no conteúdo (abaixo do stepper). */
 export function StepHead({ step, title, sub }: { step: number; title: string; sub: string }) {
   return (
     <div style={layout.stepHead}>
@@ -36,12 +24,70 @@ export function StepHead({ step, title, sub }: { step: number; title: string; su
   )
 }
 
-/** Seta ">" do molde, girada quando o molde está selecionado. */
 export function ModelChevron({ selected }: { selected: boolean }) {
   return (
     <span style={layout.cardChevron} aria-hidden>
       <Ic name="chevronRight" size={14} rotate={selected ? 90 : 0} />
     </span>
+  )
+}
+
+/**
+ * "Público" é um interruptor, não um texto: quem lê a tela precisa entender na
+ * hora que ligado = qualquer um entra e desligado = só com convite.
+ */
+export function PublicToggle({ value, onChange, disabled }: {
+  value: boolean
+  onChange: (v: boolean) => void | Promise<void>
+  disabled?: boolean
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: ui.sm,
+        background: value ? `${ui.accent}14` : ui.input,
+        border: `1px solid ${value ? `${ui.accent}66` : ui.border}`,
+        borderRadius: 10, padding: '10px 12px',
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      <span style={{ display: 'flex', color: value ? ui.accent : ui.muted, flexShrink: 0 }}>
+        <Ic name={value ? 'globe' : 'lock'} size={18} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: ui.heading }}>
+          Servidor público
+        </div>
+        <div style={{ fontSize: 11.5, color: ui.muted, lineHeight: 1.5, marginTop: 1 }}>
+          {value
+            ? 'Qualquer pessoa entra pelo servidor, sem convite — com limite de tentativas por pessoa.'
+            : 'Privado: só entra quem receber convite. Você pode mudar isso depois nas configurações.'}
+        </div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label="Servidor público"
+        data-testid="wizard-public-toggle"
+        disabled={disabled}
+        onClick={() => { void onChange(!value) }}
+        style={{
+          width: 46, height: 26, borderRadius: 13, border: 'none', flexShrink: 0, padding: 0,
+          background: value ? ui.accent : ui.border,
+          cursor: disabled ? 'not-allowed' : 'pointer', position: 'relative',
+          transition: 'background 140ms ease',
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute', top: 3, left: value ? 23 : 3,
+            width: 20, height: 20, borderRadius: '50%', background: '#fff',
+            transition: 'left 140ms ease', display: 'block',
+          }}
+        />
+      </button>
+    </div>
   )
 }
 
@@ -55,6 +101,8 @@ export function StepIdentity({
   onName,
   onDescription,
   onIcon,
+  isPublic,
+  onPublic,
 }: {
   modeloId: string | null
   name: string
@@ -65,6 +113,8 @@ export function StepIdentity({
   onName: (v: string) => void
   onDescription: (v: string) => void
   onIcon: (id: IconName) => void
+  isPublic: boolean
+  onPublic: (v: boolean) => void
 }) {
   return (
     <>
@@ -73,7 +123,7 @@ export function StepIdentity({
       <div>
         <StepCap>Começar de um molde</StepCap>
         <div style={layout.models} className="csw-models">
-          {/* "Criar o meu" primeiro: quem quer o básico não precisa ler molde. */}
+          {}
           <button
             type="button"
             className="csw-card"
@@ -106,8 +156,8 @@ export function StepIdentity({
               <span style={{ ...layout.modelIcon(modeloId === m.id), background: `${m.tint}26`, color: m.tint }}>
                 <Ic name={m.icon} size={15} />
               </span>
-              {/* `display:block` no título e na descrição é obrigatório: como
-                  spans inline eles saíam grudados ("ComunidadeBate-papo…"). */}
+              {
+}
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'block', fontSize: 13, fontWeight: 800, color: ui.heading, ...layout.ellipsis }}>
                   {m.label}
@@ -158,6 +208,8 @@ export function StepIdentity({
         hint="Aparece para quem está pensando em entrar. Uma linha basta."
       />
 
+      <PublicToggle value={isPublic} onChange={onPublic} />
+
       <div>
         <StepCap>Ícone — {ICON_CATEGORIES.find((c) => c.id === iconId)?.label ?? 'Servidor'}</StepCap>
         <div style={layout.cats} className="csw-cats" role="group" aria-label="Ícone do servidor">
@@ -188,3 +240,4 @@ export function StepIdentity({
     </>
   )
 }
+// Seção 1: fim

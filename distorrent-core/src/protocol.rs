@@ -1,7 +1,3 @@
-//! Protocolo de rede DisTorrent v1: TCP com frames length-prefixed + JSON,
-//! handshake autenticado (ed25519 + X25519 → ChaCha20Poly1305, anti-replay
-//! e anti-MITM via transcript assinado), mensagens em envelope assinado.
-
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 
@@ -10,8 +6,6 @@ use crate::identity::Keypair;
 pub const PROTOCOL_NAME: &str = "distorrent/v1";
 pub const MAGIC: &[u8; 4] = b"FGE1";
 
-/// Bytes canônicos assinados de uma mensagem. Qualquer alteração de campo
-/// invalida a assinatura — o receptor SEMPRE re-verifica.
 pub fn message_sign_bytes(
     id: &str,
     conv_id: &str,
@@ -65,8 +59,6 @@ impl MessageEnvelope {
         }
     }
 
-    /// Verifica assinatura + vínculo fingerprint↔pubkey.
-    /// A pubkey do autor vem do PeerBook (preenchida no handshake autenticado).
     pub fn verify_with_pubkey(&self, pubkey_hex: &str) -> bool {
         if !crate::identity::fingerprint_matches(&self.author_fp, pubkey_hex) {
             return false;
@@ -98,17 +90,14 @@ pub fn new_message_id(author_fp: &str, conv_id: &str, ts: i64, body: &str) -> St
     hex::encode(h.finalize().as_bytes())
 }
 
-/// Frames de controle do handshake (plaintext, antes da sessão AEAD).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hello {
     pub fp: String,
     pub pubkey_hex: String,
     pub nickname: String,
     pub nonce: [u8; 16],
-    pub eph_pub: [u8; 32], // X25519 efêmero
-    pub tcp_port: u16,     // porta de escuta, p/ peers registrarem addr
-    /// Versão do protocolo de sessão (0 = legado). Campos com default:
-    /// peers antigos ignoram, novos detectam capacidade (ex.: Punch).
+    pub eph_pub: [u8; 32],
+    pub tcp_port: u16,
     #[serde(default)]
     pub proto_v: u32,
 }
@@ -120,18 +109,16 @@ pub struct HelloAck {
     pub nickname: String,
     pub nonce: [u8; 16],
     pub eph_pub: [u8; 32],
-    pub sig: String, // sign(transcript) do respondente
+    pub sig: String,
     #[serde(default)]
     pub proto_v: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloOk {
-    pub sig: String, // sign(transcript) do iniciador
+    pub sig: String,
 }
 
-/// Transcript assinado por ambos os lados — cobre identidades, nonces e
-/// chaves efêmeras. Reuso de nonce invalida a assinatura (replay).
 pub fn handshake_transcript(
     fp_a: &str,
     eph_a: &[u8; 32],
@@ -152,21 +139,16 @@ pub fn handshake_transcript(
     h.finalize().as_bytes().to_vec()
 }
 
-/// Frames cifrados (após handshake).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecureFrame {
     Msg(MessageEnvelope),
     Ack {
         msg_id: String,
     },
-    /// Visto azul: "li as mensagens desta conversa até up_to_ts". Só enviar
-    /// para peers com proto_v>=4 — variante desconhecida derruba a sessão
-    /// legada no deserialize.
     Read {
         conv_id: String,
         up_to_ts: i64,
     },
-    /// Pedido de amizade (remetente já autenticado pela sessão).
     FriendRequest {
         nickname: String,
     },
@@ -175,63 +157,39 @@ pub enum SecureFrame {
     },
     FriendReject,
     FriendRemove,
-    /// Hole punching coordenado (estilo torrent/Radmin): "fura teu NAT para
-    /// meu endpoint em T". Só enviado se o peer anunciou proto_v>=1 no
-    /// handshake (peers legados derrubariam a sessão no deserialize).
     Punch {
-        /// "ip:porta" público de quem pede (UPnP/ipify).
         endpoint: String,
-        /// unix_ms desejado para o dial simultâneo (tolerância ±10s).
         at_ms: u64,
-        /// amarração anti-replay (ecoado só em log; handshake autentica).
         nonce: [u8; 16],
     },
-    /// Túnel virtual (LAN estilo Radmin, Fase 1+): oferta de handshake X25519
-    /// efêmero autenticada por ed25519. SÓ enviar se `peer_proto_v >= 2`
-    /// (variante desconhecida derruba sessão legada no deserialize).
     TunnelOffer {
-        /// efêmera X25519 de quem oferece (hex 64).
         eph_pub_hex: String,
-        /// nonce anti-replay da oferta (hex 32).
         nonce_hex: String,
-        /// ed25519(identidade) sobre o transcript do túnel.
         sig: String,
     },
-    /// Resposta à oferta (mesmo gate de versão).
     TunnelAnswer {
-        /// efêmera X25519 de quem responde (hex 64).
         eph_pub_hex: String,
-        /// nonce anti-replay da resposta (hex 32).
         nonce_hex: String,
-        /// nonce da oferta que esta resposta atende (hex 32).
         for_nonce_hex: String,
-        /// ed25519(identidade) sobre o transcript do túnel.
         sig: String,
     },
-    /// Datagrama cifrado do túnel (ChaCha20Poly1305, nonce u64 crescente).
     TunnelData {
         nonce: u64,
         ct_b64: String,
     },
-    /// Membro → Host: entrar numa comunidade (token assinado pelo dono)
     JoinCommunity {
         community_id: String,
         token: String,
     },
-    /// Membro → Host/outro membro: "me manda o estado atual do servidor" —
-    /// membro que reiniciava o app ficava com estado congelado. Autenticado
-    /// pela sessão (sem token), responde só para quem está no roster.
     CommunitySyncRequest {
         community_id: String,
     },
-    /// Host → Membro: estado completo da comunidade (canais, cargos, bots,
-    /// assignments e membros). Campos novos com #[serde(default)] para
-    /// tolerar hosts legados sem essas seções.
     CommunityState {
         community_id: String,
         name: String,
         owner_fp: String,
         channels: Vec<crate::storage::ChannelMetaRow>,
+        // Seção 1: serde
         #[serde(default)]
         roles: Vec<crate::storage::RoleRow>,
         #[serde(default)]
@@ -239,46 +197,40 @@ pub enum SecureFrame {
         #[serde(default)]
         member_roles: Vec<(String, Vec<String>)>,
         members: Vec<(String, String, String)>,
-        /// Metadados do wizard (v6): descrição/categoria/ícone.
         #[serde(default)]
         description: String,
         #[serde(default)]
         category: String,
         #[serde(default)]
         icon: String,
+        /// Público = qualquer um entra (com rate limit). Ausente em frames
+        /// antigos = privado, que é o comportamento seguro.
+        #[serde(default)]
+        is_public: bool,
     },
-    /// Host → Membro expulso: remova a comunidade localmente.
     CommunityKicked {
         community_id: String,
     },
-    /// Membro → Host → Membros: mensagem de canal assinada
     ChannelMsg {
         community_id: String,
         channel_id: String,
         env: MessageEnvelope,
-        /// v6: não-vazio = mensagem postada POR UM BOT (id do BotRow). O autor
-        /// real (assinatura) continua sendo o host — o bot_id é só display.
         #[serde(default)]
         bot_id: String,
     },
-    /// Host → autor: confirmação de relay
     ChannelAck {
         env_id: String,
     },
-    /// Criador → membros: estado completo de um grupo DM (sincroniza a
-    /// conversa e a lista de membros; reenviado a cada reconexão).
     GroupCreated {
         conv_id: String,
         title: String,
         members: Vec<(String, String)>,
     },
-    /// Criador → membros existentes: novo integrante no grupo.
     GroupMemberAdded {
         conv_id: String,
         fp: String,
         nickname: String,
     },
-    // ---------- chamadas (WebRTC signaling via P2P cifrado) ----------
     CallInvite {
         call_id: String,
         kind: String,
@@ -287,12 +239,6 @@ pub enum SecureFrame {
     CallAccept {
         call_id: String,
     },
-    /// Confirmação de que o convite CHEGOU e o aparelho está tocando.
-    ///
-    /// Sem isto o chamador só sabia "enviei o invite": se o frame se perdia ou o
-    /// outro lado estava offline, a tela dizia "Chamando…" mentindo — parecia
-    /// que estava tocando do outro lado quando nada tinha chegado. Com o ring
-    /// confirmado, o texto passa a ser honesto nos dois sentidos.
     CallRinging {
         call_id: String,
     },
@@ -319,28 +265,19 @@ pub enum SecureFrame {
     CallAddParticipant {
         call_id: String,
         fp: String,
-        /// v6: não-vazio = deve TOCAR no receptor (ring do convidado);
-        /// vazio = só aviso de roster para quem já está na chamada.
         #[serde(default)]
         kind: String,
     },
-    /// Criador → membros: o grupo foi encerrado (dono apagou para todos).
     GroupDeleted {
         conv_id: String,
     },
-    /// Sala de chamada VIVA (grupo, DM ou canal de voz): o convite só chega a
-    /// quem foi chamado, então quem está na conversa nunca sabia que havia
-    /// chamada acontecendo. Repetido a cada ~10 s; `state: "closed"` encerra.
     CallRoom {
         call_id: String,
         conv_id: String,
         kind: String,
-        /// "open" | "closed"
         state: String,
-        /// Quem está na sala agora (fps; inclui o host).
         #[serde(default)]
         participants: Vec<String>,
-        /// Quando o host publicou (epoch ms) — só informativo.
         #[serde(default)]
         ts: i64,
     },
@@ -359,7 +296,6 @@ pub enum SecureFrame {
         deafened: bool,
         speaking: bool,
     },
-    // ---------- swarm de arquivos (BitTorrent-like) ----------
     FileAnnounce {
         file_id: String,
         name: String,
@@ -381,12 +317,7 @@ pub enum SecureFrame {
         file_id: String,
         indices: Vec<u32>,
     },
-    // ---------- sincronização de perfil ----------
-    // `ProfileSet` (caro, perfil inteiro) só trafega quando `rev` remoto é
-    // maior; `ProfileQuery` é a via barata de reconciliação e recupera
-    // alterações de autor que ficou offline.
     ProfileQuery {
-        /// Revisão que o solicitante já conhece (0 = não conhece nada).
         known_rev: i64,
     },
     ScreenShareOffer {
@@ -403,99 +334,72 @@ pub enum SecureFrame {
     Pong {
         ts: i64,
     },
-    // PEX: gossip de peers para Internet P2P sem tracker central (v3.1)
     PeerExchange {
         peers: Vec<crate::storage::PeerRecord>,
     },
-    // ---------- peer-relay: circuito por peer intermediário (v0) ----------
-    // Um peer ONLINE (pode ser NÃO-amigo) atua como intermediário: guarda e
-    // repassa bytes OPACOS entre dois peers atrás de CGNAT quando a direta
-    // falha. O intermediário só vê ciphertext da sessão A↔B (E2E já cifrada).
-    // Peers antigos NUNCA enviam estas variantes (compatibilidade retroativa).
-    /// A → intermediário: guarde `body` no tópico `topic` (broker em memória).
     PeerRelayPut {
         topic: String,
         body: String,
     },
-    /// B → intermediário: devolva (drenando) o que houver no tópico `topic`.
     PeerRelayGet {
         topic: String,
         req_id: u32,
     },
-    /// intermediário → B: resposta ao `PeerRelayGet` (correlaciona por `req_id`).
     PeerRelayData {
         req_id: u32,
         bodies: Vec<String>,
     },
-    // ---------- camada social v3 (paridade Discord) ----------
-    // Todas abaixo viajam DENTRO da sessão AEAD (autenticadas) e o motor
-    // valida autor/permissão antes de aplicar — a UI não decide nada.
-    /// Reação em mensagem. `add=false` remove. O `reactor_fp` é sempre o
-    /// autor da conexão (o motor sobrescreve com o peer real).
     React {
         conv_id: String,
         msg_id: String,
         emoji: String,
         add: bool,
+        // Seção 2: serde
         #[serde(default)]
         reactor_fp: String,
     },
-    /// Citação: liga a mensagem nova (`msg_id`) à mensagem citada. `conv_id` é
-    /// redundante com o da mensagem, mas sem ele o receptor não consegue provar
-    /// que a citação pertence à mesma conversa — por isso o motor valida.
     Reply {
         #[serde(default)]
         conv_id: String,
         msg_id: String,
         reply_to: String,
     },
-    /// Edição — só o autor original (motor confere `author_fp` da mensagem).
     MsgEdit {
         conv_id: String,
         msg_id: String,
         body: String,
     },
-    /// Exclusão lógica (mostra "mensagem apagada").
     MsgDelete {
         conv_id: String,
         msg_id: String,
     },
-    /// Fixar/desafixar mensagem.
     MsgPin {
         conv_id: String,
         msg_id: String,
         pinned: bool,
     },
-    /// Encaminhar: reenvia o CONTEÚDO (assinado de novo pelo autor) para
-    /// outro destino, com a origem anotada para o receptor mostrar o cabeçalho.
     Forward {
         conv_id: String,
         channel_id: String,
         env: MessageEnvelope,
-        /// "canal:geral" | "dm:peer" | "thread:id"
         from_label: String,
     },
-    /// Presença estendida (online/idle/dnd/invisible) + status personalizado.
     PresenceSet {
         status: String,
         custom: String,
         custom_emoji: String,
     },
-    /// Perfil público. `rev`/`content_hash` são a identidade da versão.
     ProfileSet {
         display_name: String,
         about: String,
         avatar_b64: String,
         banner_b64: String,
         accent: String,
-        /// Revisão do autor. 0 = formato antigo (peer sem este campo).
         #[serde(default)]
         rev: i64,
-        /// blake3 do conteúdo público, calculado pelo AUTOR.
         #[serde(default)]
         content_hash: String,
     },
-    /// Thread criada a partir de uma mensagem (ou post de fórum).
     ThreadCreate {
         community_id: String,
         thread_id: String,
@@ -504,14 +408,12 @@ pub enum SecureFrame {
         kind: String,
         tags: String,
     },
-    /// Mensagem dentro de uma thread (canal próprio, como no Discord).
     ThreadMsg {
         community_id: String,
         thread_id: String,
         parent_channel: String,
         env: MessageEnvelope,
     },
-    /// Moderador → membros: ban (0 = permanente) e timeout.
     MemberBan {
         community_id: String,
         target_fp: String,
@@ -524,7 +426,6 @@ pub enum SecureFrame {
         until_ms: i64,
         reason: String,
     },
-    /// Dono → membros: config do canal (slowmode/NSFW).
     ChannelCfg {
         community_id: String,
         channel_id: String,
@@ -558,17 +459,11 @@ pub enum SecureFrame {
         community_id: String,
         emoji: crate::social::EmojiRow,
     },
-    /// Pergunta "você está online?" → resposta automática com presença.
     PresencePing,
-    /// "Estou digitando" — efêmero: NÃO persistido, sem ack/retransmissão;
-    /// `until_ms` é o prazo que o próprio remetente trava.
     Typing {
         conv_id: String,
         until_ms: i64,
     },
-    /// Reordenação de canais pelo dono/moderador. `ids` é a ordem final
-    /// completa dentro de uma categoria; o motor valida que os ids pertencem
-    /// todos à mesma comunidade antes de gravar qualquer posição.
     ChannelReorder {
         community_id: String,
         ids: Vec<String>,
@@ -576,7 +471,6 @@ pub enum SecureFrame {
     Bye,
 }
 
-/// Frame plaintext do handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HandshakeFrame {
     Hello(Hello),
@@ -584,9 +478,6 @@ pub enum HandshakeFrame {
     HelloOk(HelloOk),
 }
 
-/// Deriva a chave de sessão compartilhada (32 bytes).
-/// `nonce_initiator`/`nonce_responder` são explícitos — ambos os lados derivam
-/// a mesma chave sem ambiguidade de papel.
 pub fn session_key(
     eph_secret: &x25519_dalek::StaticSecret,
     peer_eph: &[u8; 32],
@@ -612,15 +503,13 @@ pub fn session_key(
     Ok(okm)
 }
 
-/// Token de convite: base64url(host_fp|community_id|member_fp|exp_ms|sig_hex)
-/// — base64url (não padrão) porque `+`/`/`/`=` quebram em URL/query/clipboard;
-/// parse ainda aceita base64 padrão p/ tokens antigos.
 pub fn make_invite_token(
     host: &Keypair,
     community_id: &str,
     member_fp: &str,
     exp_ms: i64,
 ) -> String {
+    // Seção 3: use
     use std::fmt::Write as _;
     let msg = invite_sign_bytes(community_id, member_fp, exp_ms);
     let sig = host.sign(&msg);
@@ -637,16 +526,12 @@ pub fn make_invite_token(
     b64url_encode(raw.as_bytes())
 }
 
-/// Extrai o token de token cru, URL completa, query ou percent-encoded
-/// (colar o link inteiro é o gesto natural e antes dava "token inválido").
 pub fn extract_invite_token(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    // 1. Já é uma URL? Extrai o caminho/query e pega o último segmento útil.
     if trimmed.contains("://") || trimmed.starts_with('/') {
-        // Tenta extrair da query string (?invite= / &invite=).
         if let Some(q) = trimmed.split_once('?').map(|(_, q)| q) {
             for pair in q.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
@@ -656,7 +541,6 @@ pub fn extract_invite_token(input: &str) -> String {
                 }
             }
         }
-        // Path: /invite/TOKEN  ou  /d/distorrent?invite=TOKEN (o segundo já caiu acima)
         let path = trimmed.split('?').next().unwrap_or(trimmed);
         if let Some(seg) = path.rsplit('/').find(|s| !s.is_empty()) {
             return percent_decode(seg);
@@ -666,7 +550,6 @@ pub fn extract_invite_token(input: &str) -> String {
     percent_decode(trimmed)
 }
 
-/// Decodifica %XX de uma string (resto intacto).
 fn percent_decode(s: &str) -> String {
     if !s.contains('%') {
         return s.to_string();
@@ -689,8 +572,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-/// Valida e decompõe um token de convite (base64url atual ou base64 antigo);
-/// erros são específicos — "token inválido" genérico enganava o usuário.
 pub fn parse_invite_token(
     token: &str,
 ) -> Result<(String, String, String, i64, String), crate::DistorrentError> {
@@ -796,8 +677,7 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// base64url — formato URL-safe do token de convite (sem `+`, `/` ou `=`).
-
+// Seção 4: b64url_encode
 fn b64url_encode(data: &[u8]) -> String {
     b64_encode(data)
         .trim_end_matches('=')
@@ -805,8 +685,6 @@ fn b64url_encode(data: &[u8]) -> String {
         .replace('/', "_")
 }
 
-/// Decodifica base64url, tolerando alfabeto padrão/padding e espaços/quebras
-/// colados de editores de texto (descartar é mais útil que errar).
 fn b64url_decode(s: &str) -> Option<Vec<u8>> {
     let mut norm = String::with_capacity(s.len() + 3);
     for c in s.chars() {
@@ -818,7 +696,6 @@ fn b64url_decode(s: &str) -> Option<Vec<u8>> {
             other => norm.push(other),
         }
     }
-    // Recalcula o padding '=' para os chunks de 3 bytes saírem certos.
     while norm.len() % 4 != 0 {
         norm.push('=');
     }
@@ -872,7 +749,6 @@ mod tests {
             &sig
         )
         .unwrap());
-        // token violado não passa na verificação de assinatura
         let (fp2, _cid2, member2, exp2, sig2) = parse_invite_token(&tok).unwrap();
         assert!(!Keypair::verify(
             &host.public_hex(),
@@ -884,34 +760,11 @@ mod tests {
         assert_eq!(member2, "memberfp001");
     }
 
-    /// O token viaja dentro de uma URL, então o alfabeto tem de ser URL-safe.
-    ///
-    /// O caso que quebra não é o `community_id` hexadecimal deste build: com
-    /// payload toda em hex o base64 padrão quase só produz `=`. O problema real
-    /// é que `make_invite_token` NÃO valida `community_id` como hex — ele só
-    /// formata a string. Um id remoto, um id de outra versão do app ou
-    /// qualquer id futuro fora do hex traz `+` e `/` para o token (medido:
-    /// ~12% dos tokens), e aí o path `/invite/AAA/BBB` deixa de casar com a
-    /// rota e o convite morre no link.
-    ///
-    /// base64url elimina a classe inteira do problema.
     #[test]
     fn invite_token_e_url_safe() {
-        // O caso que realmente quebra é o `community_id` NÃO-hex: com payload
-        // toda em hex o base64 padrão quase só produz `=` (padding), que é
-        // inofensivo. Mas `make_invite_token` NÃO valida `community_id` como
-        // hex — ele só formata a string. Um id remoto, um id de outra versão
-        // ou qualquer id futuro fora do hex traz `+` e `/` para o token, e aí
-        // o path `/invite/AAA/BBB` deixa de casar com a rota e o convite morre
-        // no link.
-        //
-        // `x~cid` é o caso DETERMINÍSTICO: nessa posição os bits do `~` (0x7E)
-        // caem exatamente num grupo de 6 bits que vira `+`/`/` em base64
-        // padrão, em 100% das assinaturas (medido). Nenhum sorteio envolvido —
-        // se alguém voltar para base64 padrão, este teste quebra na hora.
         let ids = [
-            "local-abc123", // id hex deste build
-            "x~cid",        // força `+`/`/` em base64 padrão
+            "local-abc123",
+            "x~cid",
             "cid/with/slash",
             "cid+plus",
             "a b c",
@@ -923,7 +776,6 @@ mod tests {
             let exp = 1_000_000 + i as i64;
             let tok = make_invite_token(&host, cid, "memberfp001", exp);
 
-            // 1. O token emitido é sempre URL-safe.
             for c in tok.chars() {
                 assert!(
                     c.is_ascii_alphanumeric() || c == '-' || c == '_',
@@ -932,7 +784,6 @@ mod tests {
             }
             assert!(!tok.contains('='), "padding '=' quebra URL: {tok}");
 
-            // 2. E sobrevive a URL/query/clipboard — roundtrip completo.
             let esperado = parse_invite_token(&tok).unwrap();
             assert_eq!(esperado.1, *cid, "community_id não sobreviveu ao token");
             assert_eq!(
@@ -940,9 +791,6 @@ mod tests {
                 esperado,
                 "token com id={cid:?} não sobreviveu dentro de uma URL"
             );
-
-            // 3. Confirma que o alfabeto padrão realmente exigiria escaping
-            //    no caso `x~cid` (senão o teste passaria por acidente).
         }
 
         let host = Keypair::generate();
@@ -963,9 +811,6 @@ mod tests {
         );
     }
 
-    /// Colar o LINK inteiro (o gesto natural) tem que funcionar tanto quanto
-    /// colar o token cru. Este é o bug de "token inválido" que o usuário
-    /// relatava.
     #[test]
     fn invite_token_aceita_url_completa_e_query() {
         let host = Keypair::generate();
@@ -973,16 +818,13 @@ mod tests {
 
         let esperado = parse_invite_token(&tok).unwrap();
 
-        // link completo em path
         let by_path = parse_invite_token(&format!("http://localhost:5173/invite/{tok}")).unwrap();
         assert_eq!(esperado, by_path);
 
-        // link completo em query string
         let by_query =
             parse_invite_token(&format!("http://192.168.0.10:5173/?invite={tok}")).unwrap();
         assert_eq!(esperado, by_query);
 
-        // token percent-encoded (o que encodeURIComponent produz em App.tsx)
         let encoded: String = tok
             .chars()
             .flat_map(|c| {
@@ -1003,13 +845,11 @@ mod tests {
         let by_encoded = parse_invite_token(&encoded).unwrap();
         assert_eq!(esperado, by_encoded);
 
-        // espaços/quebras de linha de um editor de texto são tolerados
         let spaced = format!("  {}\n", tok);
         assert_eq!(esperado, parse_invite_token(&spaced).unwrap());
     }
 
-    /// Tokens antigos (base64 padrão com `+`/`/`/`=`) continuam válidos —
-    /// regerar o convite não pode invalidar o link que a pessoa já tem.
+    // Seção 5: test
     #[test]
     fn invite_token_aceita_base64_padrao_antigo() {
         let host = Keypair::generate();
@@ -1028,8 +868,6 @@ mod tests {
         assert_eq!(exp, 999999);
     }
 
-    /// Erro tem que dizer O QUE está errado. "token inválido" genérico é o que
-    /// fez o usuário achar que o token estava corrompido.
     #[test]
     fn invite_token_erro_e_especifico() {
         let vazio = parse_invite_token("").unwrap_err().to_string();
@@ -1043,7 +881,6 @@ mod tests {
             "lixo: {lixo}"
         );
 
-        // payload base64 válido mas com número errado de campos
         let curto = b64url_encode(b"a|b|c");
         let e = parse_invite_token(&curto).unwrap_err().to_string();
         assert!(e.contains("incompleto"), "curto: {e}");
@@ -1051,14 +888,11 @@ mod tests {
 
     #[test]
     fn b64_e_token_malformado_nao_panica() {
-        // b64_encode: chunks(3) nunca produz chunk vazio → chunk[0] é seguro;
-        // índices 1/2 usam .get().unwrap_or(&0). Prova com todos os tamanhos.
         assert_eq!(b64_encode(&[]), "");
         for len in 1..=8usize {
             let data = vec![0xABu8; len];
             let _ = b64_encode(&data);
         }
-        // b64_decode: chars inválidos → None (via ?), nunca index out of bounds
         for s in [
             "",
             "!!!!",
@@ -1073,12 +907,10 @@ mod tests {
             "\u{7f}\u{80}\u{ff}",
         ] {
             let _ = b64_decode(s);
-            // token de convite com chars estranhos: erro limpo, sem panic
             assert!(parse_invite_token(s).is_err());
         }
-        // token bem-formado mas com '|' estranho no payload interno → 5 partes ou erro
         let raw = b64_encode(b"a|b|c|d|e|f");
-        let _ = parse_invite_token(&raw); // 6 partes → erro, sem panic
+        let _ = parse_invite_token(&raw);
     }
 
     #[test]

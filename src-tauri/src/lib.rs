@@ -880,6 +880,8 @@ struct CommunityView {
     category: String,
     icon: String,
     is_owner: bool,
+    /// `true` = qualquer um entra (com rate limit); `false` = só por convite.
+    is_public: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -912,6 +914,7 @@ fn communities_list(state: State<AppState>) -> Result<Vec<CommunityView>, String
             channels: engine.store_list_channels(&id),
             members: engine.store_list_members(&id),
             is_owner: owner == me,
+            is_public: engine.community_is_public(&id).unwrap_or(false),
             id,
             name,
             owner_fp: owner,
@@ -975,6 +978,28 @@ fn community_set_meta(
             category.as_deref(),
             icon.as_deref(),
         )
+        .map_err(err)
+}
+
+#[tauri::command]
+fn community_set_public(
+    community_id: String,
+    is_public: bool,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .community_set_public(&community_id, is_public)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn join_public_community(
+    host_fp: String,
+    community_id: String,
+    state: State<AppState>,
+) -> Result<String, String> {
+    engine(&state)?
+        .join_public_community(&host_fp, &community_id)
         .map_err(err)
 }
 
@@ -4559,6 +4584,8 @@ fn main() {
             channel_list,
             community_rename,
             community_set_meta,
+            community_set_public,
+            join_public_community,
             role_create,
             role_update,
             role_delete,
