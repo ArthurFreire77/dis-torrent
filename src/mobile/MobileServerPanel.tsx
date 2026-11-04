@@ -1,12 +1,3 @@
-// Painel de um SERVIDOR no celular: canais por categoria, quem está na voz e
-// as ações que fazem sentido com o dedo (entrar/sair da chamada, criar,
-// renomear e apagar canal).
-//
-// Por que é um arquivo separado: a tela vivia inline no `MobileShell.tsx`
-// (193 KB) e despejava os canais numa lista corrida, sem tipo, sem quem está
-// na voz e sem ação — o servidor no celular parecia "só leitura". Aqui a
-// lista é a mesma fonte de verdade do desktop (`services.channelList`).
-
 import { useEffect, useMemo, useState } from 'react'
 import { Ic } from '../shared/icons'
 import { services } from '../services'
@@ -27,7 +18,200 @@ const T = {
   text: '#f2f3f5', heading: '#ffffff', muted: '#8e929b', yellow: '#f0b232',
 }
 
-/** Linha de UM canal: ícone do tipo, nome, quem está na voz e ação. */
+/** Cargos no celular: criar e dar/tirar de cada membro. Antes só as tags apareciam. */
+function CargosPanel({
+  community,
+  myFp,
+  roles,
+  onRolesChanged,
+  onError,
+}: {
+  community: CommunityView
+  myFp: string
+  roles: RoleView[]
+  onRolesChanged: (lista: RoleView[]) => void
+  onError: (msg: string) => void
+}) {
+  const [aberto, setAberto] = useState(false)
+  const [nome, setNome] = useState('')
+  const [cor, setCor] = useState('#5865f2')
+  const [salvando, setSalvando] = useState(false)
+  const [membro, setMembro] = useState<string>('')
+  const [doMembro, setDoMembro] = useState<string[]>([])
+
+  const membros = (community.members ?? []).map(([fp, nickname]) => ({ fp, nickname }))
+
+  const recarregar = async () => {
+    try { onRolesChanged(await services.rolesList(community.id)) } catch {  }
+  }
+
+  useEffect(() => {
+    if (!aberto || !membro) { setDoMembro([]); return }
+    let vivo = true
+    services.memberRoles(community.id, membro)
+      .then((l) => { if (vivo) setDoMembro(Array.isArray(l) ? l : []) })
+      .catch(() => { if (vivo) setDoMembro([]) })
+    return () => { vivo = false }
+  }, [aberto, membro, community.id])
+
+  async function criarCargo() {
+    const limpo = nome.trim()
+    if (!limpo || salvando) return
+    setSalvando(true)
+    try {
+      await services.roleCreate(community.id, {
+        name: limpo,
+        color: cor,
+        permissions: 96,
+        hoist: false,
+        mentionable: true,
+        position: roles.length,
+      })
+      setNome('')
+      await recarregar()
+    } catch (e) {
+      onError((e as Error)?.message ?? String(e))
+    } finally {
+      setSalvando(false)
+    }
+  }
+
+  async function alternarCargo(roleId: string) {
+    if (!membro || !roleId) return
+    try {
+      if (doMembro.includes(roleId)) {
+        await services.memberUnassignRole(community.id, membro, roleId)
+        setDoMembro((cur) => cur.filter((r) => r !== roleId))
+      } else {
+        await services.memberAssignRole(community.id, membro, roleId)
+        setDoMembro((cur) => [...cur, roleId])
+      }
+    } catch (e) {
+      onError((e as Error)?.message ?? String(e))
+    }
+  }
+
+  async function apagarCargo(roleId: string) {
+    try {
+      await services.roleDelete(community.id, roleId)
+      await recarregar()
+    } catch (e) {
+      onError((e as Error)?.message ?? String(e))
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <button
+        type="button"
+        onClick={() => setAberto((v) => !v)}
+        aria-expanded={aberto}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+          background: aberto ? T.accent : T.input, border: `1px solid ${T.border}`,
+          color: aberto ? '#fff' : T.text, borderRadius: 8,
+          padding: '8px 10px', fontSize: 12, fontWeight: 800, cursor: 'pointer',
+        }}
+      >
+        <Ic name="crown" size={13} />
+        <span style={{ flex: 1, textAlign: 'left' }}>Cargos{roles.length > 0 ? ` · ${roles.length}` : ''}</span>
+        <span style={{ fontSize: 10, opacity: 0.8 }}>{aberto ? 'fechar' : 'gerenciar'}</span>
+      </button>
+
+      {aberto && (
+        <>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={nome}
+              onChange={(e) => setNome(e.target.value)}
+              placeholder="nome do cargo"
+              aria-label="Nome do novo cargo"
+              maxLength={32}
+              style={{ flex: 1, minWidth: 0, background: T.input, border: `1px solid ${T.border}`, borderRadius: 8, color: T.text, padding: '8px 10px', fontSize: 13 }}
+            />
+            <input
+              type="color"
+              value={cor}
+              onChange={(e) => setCor(e.target.value)}
+              aria-label="Cor do cargo"
+              style={{ width: 42, background: T.input, border: `1px solid ${T.border}`, borderRadius: 8, padding: 2 }}
+            />
+            <button
+              type="button"
+              onClick={() => void criarCargo()}
+              disabled={salvando || !nome.trim()}
+              style={{ background: T.green, border: 'none', color: '#fff', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 800, opacity: salvando || !nome.trim() ? 0.6 : 1 }}
+            >{salvando ? '…' : 'Criar'}</button>
+          </div>
+
+          {roles.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+              {roles.map((r) => (
+                <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 6, background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: '5px 8px' }}>
+                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: r.color || T.muted, flexShrink: 0 }} />
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => void apagarCargo(r.id)}
+                    aria-label={`Apagar cargo ${r.name}`}
+                    style={{ background: 'transparent', border: 'none', color: T.muted, cursor: 'pointer', padding: 4, display: 'flex' }}
+                  ><Ic name="trash" size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {membros.length > 0 && roles.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, background: T.input, border: `1px solid ${T.border}`, borderRadius: 10, padding: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.6, color: T.muted }}>DAR CARGO A UM MEMBRO</div>
+              <select
+                value={membro}
+                onChange={(e) => setMembro(e.target.value)}
+                aria-label="Escolher membro"
+                style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, color: T.text, padding: '7px 8px', fontSize: 12.5 }}
+              >
+                <option value="">escolha o membro…</option>
+                {membros.map((m) => (
+                  <option key={m.fp} value={m.fp}>
+                    {m.nickname || m.fp.slice(0, 8)}{m.fp === myFp ? ' (você)' : ''}
+                  </option>
+                ))}
+              </select>
+
+              {membro && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                  {[...roles]
+                    .sort((a, b) => (b.position ?? 0) - (a.position ?? 0))
+                    .map((r) => {
+                      const tem = doMembro.includes(r.id)
+                      return (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => void alternarCargo(r.id)}
+                          aria-pressed={tem}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            background: tem ? `${r.color || T.accent}33` : T.panel,
+                            border: `1px solid ${tem ? (r.color || T.accent) : T.border}`,
+                            color: tem ? T.heading : T.muted,
+                            borderRadius: 99, padding: '4px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                          }}
+                        >
+                          {tem ? '✓ ' : '+ '}{r.name}
+                        </button>
+                      )
+                    })}
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function ChannelRow({
   communityId,
   channel,
@@ -47,9 +231,6 @@ function ChannelRow({
   onJoinCall: () => void
   onManage?: () => void
 }) {
-  // Fonte de participantes é o MOTOR (o mesmo da barra de voz do desktop).
-  // Só canais de chamada consultam: um poll por canal de TEXTO era N×15 s de
-  // SQLite à toa numa lista longa.
   const callable = channel.kind === 'voice' || channel.kind === 'video'
   const peers = useChannelVoicePeers(communityId, channel.id, callable, myFp)
   const isCall = callable
@@ -140,13 +321,6 @@ function ChannelRow({
   )
 }
 
-/**
- * Lista completa do servidor no celular.
- *
- * - canais agrupados por categoria (mesma ordem do desktop);
- * - voz/vídeo entram na chamada ao tocar (câmera é opcional, dentro da chamada);
- * - o dono ganha as ações de criar/renomear/apagar.
- */
 export default function MobileServerPanel({
   community,
   myFp,
@@ -160,7 +334,6 @@ export default function MobileServerPanel({
   community: CommunityView
   myFp: string
   selectedChannelId: string | null
-  /** Canal em que EU estou na chamada agora (null = fora). */
   inCallChannelId: string | null
   onOpenText: (channelId: string) => void
   onJoinCall: (channelId: string) => void
@@ -173,14 +346,12 @@ export default function MobileServerPanel({
   const [novoNome, setNovoNome] = useState('')
   const [novoTipo, setNovoTipo] = useState<'text' | 'voice' | 'video'>('text')
   const [criando, setCriando] = useState(false)
+  // Seção 1: const
   const [menuCanal, setMenuCanal] = useState<ChannelMeta | null>(null)
-  /** Cargos/tags do servidor — o membro PRECISA ver as tags criadas pelo dono. */
   const [roles, setRoles] = useState<RoleView[]>([])
 
   const owner = canManageChannels(community.owner_fp, myFp)
 
-  // Recarrega quando o servidor muda e quando o motor avisa que a estrutura
-  // mudou (tag/canal criado no PC, sync de estado, entrada de membro).
   useEffect(() => {
     let vivo = true
     const ler = () => {
@@ -190,13 +361,11 @@ export default function MobileServerPanel({
         .finally(() => { if (vivo) setLoading(false) })
     }
     ler()
-    // TAGS/CARGOS: vêm do mesmo sync do estado. Sem esta chamada o celular
-    // mostrava os canais mas nenhuma tag criada pelo dono no PC.
     let rolesVivo = true
     const lerRoles = () => {
       services.rolesList(community.id)
         .then((list) => { if (rolesVivo) setRoles(Array.isArray(list) ? list : []) })
-        .catch(() => { /* sem motor: mantém a lista anterior */ })
+        .catch(() => {  })
     }
     lerRoles()
     const off = services.subscribe((ev) => {
@@ -212,7 +381,6 @@ export default function MobileServerPanel({
         lerRoles()
       }
     })
-    // Celular: a WebView congela em segundo plano; ao voltar, relê a lista.
     const onVisible = () => { if (!document.hidden) { ler(); lerRoles() } }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', onVisible)
@@ -226,7 +394,6 @@ export default function MobileServerPanel({
   }, [community.id])
 
   const grupos = useMemo(() => {
-    // `groupByCategory` preserva a ordem e devolve categoria vazia agrupada.
     return groupByCategory(channels)
   }, [channels])
 
@@ -319,8 +486,8 @@ export default function MobileServerPanel({
             style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, color: T.text, padding: '8px 10px', fontSize: 13 }}
           />
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {/* Só texto e voz: o canal de VOZ já é uma chamada com câmera
-                (botão dentro da chamada). O tipo "vídeo" duplicava isso. */}
+            {
+}
             {(['text', 'voice'] as const).map((k) => (
               <button
                 key={k}
@@ -390,8 +557,8 @@ export default function MobileServerPanel({
         ))
       )}
 
-      {/* TAGS/CARGOS do servidor: o membro comum via nenhuma tag no celular
-          porque esta seção não existia. Leitura pura (edição é do dono no PC). */}
+      {
+}
       {roles.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
           <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.7, color: T.muted, padding: '4px 6px' }}>
@@ -418,6 +585,16 @@ export default function MobileServerPanel({
               ))}
           </div>
         </div>
+      )}
+
+      {owner && (
+        <CargosPanel
+          community={community}
+          myFp={myFp}
+          roles={roles}
+          onRolesChanged={(lista) => setRoles(lista)}
+          onError={onError}
+        />
       )}
 
       {menuCanal && (
@@ -465,3 +642,4 @@ export default function MobileServerPanel({
     </div>
   )
 }
+// Seção 2: fim

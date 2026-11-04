@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   canManageChannels,
   channelActionLabel,
@@ -20,8 +21,6 @@ const ch = (id: string, name: string, over: Partial<ChannelMeta> = {}): ChannelM
   ...over,
 })
 
-// ---------- canal de vídeo é chamada, como o de voz ----------
-
 test('voice e video entram em chamada; texto e forum não', () => {
   assert.equal(isCallableChannel('voice'), true)
   assert.equal(isCallableChannel('video'), true)
@@ -31,7 +30,6 @@ test('voice e video entram em chamada; texto e forum não', () => {
 })
 
 test('o canal de vídeo NÃO abre a tela de texto no celular', () => {
-  // Antes só `voice` era tratado como canal; `video` caía no compositor.
   const canais = [ch('a', 'geral'), ch('b', 'sala', { kind: 'video' }), ch('c', 'call', { kind: 'voice' })]
   const chamada = canais.filter((c) => isCallableChannel(c.kind))
   assert.deepEqual(chamada.map((c) => c.id), ['b', 'c'])
@@ -53,8 +51,6 @@ test('groupByCategory separa vídeo de voz quando as categorias diferem', () => 
   assert.equal(grupos[1]!.channels[0]!.kind, 'video')
 })
 
-// ---------- ícone / rótulo de ação ----------
-
 test('ícone do canal segue o tipo', () => {
   assert.equal(channelIcon('voice'), 'speaker')
   assert.equal(channelIcon('video'), 'video')
@@ -71,8 +67,6 @@ test('rótulo diz entrar, sair e quantas pessoas estão na chamada', () => {
   assert.equal(channelActionLabel('voice', 3, true), 'Sair da chamada de voz')
   assert.equal(channelActionLabel('text', 5, false), 'Abrir canal de texto')
 })
-
-// ---------- gestão: só o dono (o core também recusa) ----------
 
 test('só o dono gerencia canais', () => {
   assert.equal(canManageChannels('dono', 'dono'), true)
@@ -92,4 +86,16 @@ test('nome do canal é normalizado antes de ir para o core', () => {
   assert.equal(normalizeChannelName('  Sala de Jogo  '), 'sala-de-jogo')
   assert.equal(normalizeChannelName(''), '')
   assert.equal(normalizeChannelName('   '), '')
+})
+
+test('celular gerencia cargos (criar e dar a membros), não só ver as tags', () => {
+  const painel = readFileSync('src/mobile/MobileServerPanel.tsx', 'utf8')
+  assert.match(painel, /function CargosPanel/, 'existe o painel de cargos no celular')
+  assert.match(painel, /services\.roleCreate\(/, 'o dono cria cargo pelo celular')
+  assert.match(painel, /services\.memberAssignRole\(/, 'dá cargo a um membro')
+  assert.match(painel, /services\.memberUnassignRole\(/, 'tira o cargo')
+  assert.match(painel, /services\.memberRoles\(/, 'mostra o que o membro já tem')
+  // `members` é tripla [fp, nickname, role] — ler `.fp` quebra em runtime.
+  assert.match(painel, /map\(\(\[fp, nickname\]\)/, 'members é tupla, não objeto')
+  assert.doesNotMatch(painel, /members\.map\(\(m\) => \(\s*<option key=\{m\.fp\}/)
 })
