@@ -38,3 +38,42 @@ export function cameraCycleLabel(devices: CameraDevice[], atual: string): string
 export function shouldShowCameraSwitch(devices: CameraDevice[]): boolean {
   return devices.length > 1
 }
+
+/**
+ * Dois tracks são da MESMA câmera? Serve para não mentir no "inverter": se o
+ * aparelho devolver o mesmo sensor, o vídeo não teria mudado.
+ */
+export function sameCamera(
+  a: { deviceId?: string; facingMode?: string } | null | undefined,
+  b: { deviceId?: string; facingMode?: string } | null | undefined,
+): boolean {
+  if (!a || !b) return false
+  const da = typeof a.deviceId === 'string' ? a.deviceId : ''
+  const db = typeof b.deviceId === 'string' ? b.deviceId : ''
+  if (da && db) return da === db
+  const fa = typeof a.facingMode === 'string' ? a.facingMode : ''
+  const fb = typeof b.facingMode === 'string' ? b.facingMode : ''
+  if (fa && fb) return fa === fb
+  return false
+}
+
+export interface CameraSwitchInput {
+  /** Câmeras com deviceId distinto (o que o navegador consegue alternar). */
+  devices: CameraDevice[]
+  /** `videoinput` crus, inclusive os que repetem deviceId antes da permissão. */
+  rawCount: number
+  /** Celular: tem frontal e traseira por definição do aparelho. */
+  mobile: boolean
+}
+
+/**
+ * Decide se o botão de inverter aparece. No celular ele NÃO pode depender do
+ * `enumerateDevices`: antes da permissão o Android devolve um único
+ * `videoinput` (ou nenhum) e o botão simplesmente não existia. Lá a troca é
+ * feita por `facingMode`, que o aparelho sempre entende.
+ */
+export function shouldShowCameraFlip(input: CameraSwitchInput): boolean {
+  if (input.mobile) return true
+  if (input.devices.length > 1) return true
+  return input.rawCount > 1
+}

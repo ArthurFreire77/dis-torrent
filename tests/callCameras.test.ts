@@ -4,6 +4,8 @@ import {
   cameraDevices,
   cameraCycleLabel,
   nextCameraId,
+  sameCamera,
+  shouldShowCameraFlip,
   shouldShowCameraSwitch,
 } from '../src/services/callCameras.ts'
 
@@ -58,6 +60,33 @@ test('preferência "padrão do sistema" (vazia) começa pelo segundo aparelho', 
 test('preferência apontando para device removido cai na primeira', () => {
   const duas = cameraDevices([cam('a'), cam('b')])
   assert.equal(nextCameraId(duas, 'sumiu'), 'a')
+})
+
+test('botão de inverter: no celular aparece mesmo com enumerateDevices mentindo', () => {
+  // Antes da permissão o Android devolve um único `videoinput` (ou nenhum) e
+  // o botão de inverter simplesmente não existia no aparelho.
+  assert.equal(shouldShowCameraFlip({ devices: [], rawCount: 0, mobile: true }), true)
+  assert.equal(shouldShowCameraFlip({ devices: [], rawCount: 1, mobile: true }), true)
+  assert.equal(shouldShowCameraFlip({ devices: cameraDevices([cam('a')]), rawCount: 1, mobile: true }), true)
+})
+
+test('botão de inverter no desktop segue a regra honesta: 2+ câmeras', () => {
+  assert.equal(shouldShowCameraFlip({ devices: [], rawCount: 0, mobile: false }), false)
+  assert.equal(shouldShowCameraFlip({ devices: cameraDevices([cam('a')]), rawCount: 1, mobile: false }), false)
+  assert.equal(
+    shouldShowCameraFlip({ devices: cameraDevices([cam('a'), cam('b')]), rawCount: 2, mobile: false }),
+    true,
+  )
+  assert.equal(shouldShowCameraFlip({ devices: [], rawCount: 2, mobile: false }), true)
+})
+
+test('sameCamera evita anunciar "inverti" quando o sensor não mudou', () => {
+  assert.equal(sameCamera({ deviceId: 'a' }, { deviceId: 'a' }), true)
+  assert.equal(sameCamera({ deviceId: 'a' }, { deviceId: 'b' }), false)
+  assert.equal(sameCamera({ facingMode: 'user' }, { facingMode: 'user' }), true)
+  assert.equal(sameCamera({ facingMode: 'user' }, { facingMode: 'environment' }), false)
+  assert.equal(sameCamera(null, { deviceId: 'a' }), false, 'settings ausente não prova nada')
+  assert.equal(sameCamera({ deviceId: 'a' }, { facingMode: 'user' }), false, 'id e facing não se comparam')
 })
 
 test('lista vazia devolve null em vez de quebrar', () => {

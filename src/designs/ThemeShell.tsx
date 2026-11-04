@@ -1705,7 +1705,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     if (activeCall) { setError('já existe uma chamada em andamento'); return }
     setCallActionBusy(true)
-    try { await callManager.start(kind, selConv, fps) } catch (e: any) { setError(String(e?.message ?? e)) }
+    try { await callManager.start(kind, selConv, fps, { group: isGroup }) } catch (e: any) { setError(String(e?.message ?? e)) }
     finally { setCallActionBusy(false) }
   }
   async function handleIncomingAccept() {
@@ -3674,7 +3674,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 title={cameraSwitchLabel ? `Trocar de câmera (${cameraSwitchLabel})` : 'Trocar de câmera'}
                 aria-label={cameraSwitchLabel ? `Trocar de câmera (${cameraSwitchLabel})` : 'Trocar de câmera'}
                 style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              ><Icon d={Icons.camera} size={18} /></button>
+              ><Icon d={Icons.cameraSwitch} size={18} /></button>
             )}
             <button
               onClick={() => setShowCallSettings(v => !v)}

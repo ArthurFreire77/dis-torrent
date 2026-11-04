@@ -9,14 +9,10 @@ test('canal de voz é sempre coletivo', () => {
 
 test('DM 1:1 não é coletiva (sair encerra para os dois)', () => {
   assert.equal(isCollectiveRoom({ callId: 'call-abc', participants: ['eu'] }), false)
-  // EU + UMA pessoa = 1:1. Era `size > 1` e classificava TODA chamada de dois
-  // como coletiva: o lado que ficava nunca encerrava e a próxima chamada batia
-  // em "já existe uma chamada em andamento" (chamada fantasma).
   assert.equal(isCollectiveRoom({ callId: 'call-abc', participants: ['eu', 'fulano'] }), false)
 })
 
 test('sala com MAIS DE DUAS pessoas é coletiva — mesmo com um único PC', () => {
-  // Era exatamente aqui que a chamada de grupo morria: pcs.size === 1.
   assert.equal(
     isCollectiveRoom({ callId: 'call-abc', participants: ['eu', 'fulano', 'ciclano'] }),
     true,
@@ -40,8 +36,18 @@ test('entrada inválida nunca derruba a chamada', () => {
   assert.equal(isCollectiveRoom({ callId: '', participants: [] }), false)
 })
 
-// O relato: "5 pessoas; um saiu, outro saiu e a chamada acabou". A regra não
-// pode recalcular coletividade com o roster já reduzido.
+test('grupo de DUAS pessoas continua até o último sair (não é 1:1)', () => {
+  // Antes, um grupo com dois membros tinha um participante no roster e caía na
+  // regra de chamada 1:1: quem saía encerrava a chamada para o outro.
+  assert.equal(
+    isCollectiveRoom({ callId: 'call-g', participants: ['eu'], invited: ['amigo'], group: true }),
+    true,
+  )
+  assert.equal(isCollectiveRoom({ callId: 'call-g', participants: ['eu'], group: true }), true)
+  // Sem a marca de grupo o comportamento de DM não muda.
+  assert.equal(isCollectiveRoom({ callId: 'call-dm', participants: ['eu'] }), false)
+})
+
 test('sala coletiva continua mesmo quando eu fico sozinho', () => {
   assert.equal(leaveOutcome({ collective: true, othersRemain: true }), 'keep')
   assert.equal(leaveOutcome({ collective: true, othersRemain: false }), 'keep')
@@ -53,8 +59,7 @@ test('chamada 1:1 encerra quando o outro sai', () => {
 })
 
 test('sequência real: 3 pessoas, duas saem, a chamada NÃO acaba', () => {
-  // Trava do manager: uma vez coletiva, sempre coletiva.
   const collective = true
-  assert.equal(leaveOutcome({ collective, othersRemain: true }), 'keep') // 1ª saída
-  assert.equal(leaveOutcome({ collective, othersRemain: false }), 'keep') // 2ª saída
+  assert.equal(leaveOutcome({ collective, othersRemain: true }), 'keep')
+  assert.equal(leaveOutcome({ collective, othersRemain: false }), 'keep')
 })

@@ -24,9 +24,10 @@ import ScreenSharePicker from '../components/ScreenSharePicker'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
 import MobileCallStage from './MobileCallStage'
-import { cameraCycleLabel, shouldShowCameraSwitch } from '../services/callCameras'
+import { cameraCycleLabel, shouldShowCameraFlip } from '../services/callCameras'
 import { useCallCameras } from '../services/useCallCameras'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
+import { isAndroidRuntime, isIOSRuntime } from '../shared/runtime'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import { isCallableChannel } from '../app/channels'
 import {
@@ -874,7 +875,13 @@ export default function MobileShell() {
       off?.()
     }
   }, [activeCall, activeCall?.cameraOn])
-  const mostrarTrocaCameraMobile = shouldShowCameraSwitch(camerasMobile) || cameraCount > 1
+  const mostrarTrocaCameraMobile = shouldShowCameraFlip({
+    devices: camerasMobile,
+    rawCount: cameraCount,
+    // No Android/iOS frontal+traseira existem por definição: o botão não pode
+    // depender do `enumerateDevices`, que antes da permissão devolve um só.
+    mobile: isAndroidRuntime() || isIOSRuntime(),
+  })
   const trocarCameraMobile = async () => {
     try {
       setError(null)
@@ -1204,8 +1211,9 @@ export default function MobileShell() {
   async function startCall(kind: 'voice' | 'video') {
     if (callActionBusy) return
     if (!selConv) return
+    const ehGrupo = selConvObj?.kind === 'group'
     let fps: string[] = []
-    if (selConvObj?.kind === 'group') {
+    if (ehGrupo) {
       try {
         const mems = await services.groupMembers(selConv)
         fps = (mems as Array<{ fp?: string } | [string, string]>)
@@ -1220,7 +1228,7 @@ export default function MobileShell() {
     }
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     setCallActionBusy(true)
-    try { await callManager.start(kind, selConv, fps) } catch (e: any) { setError(String(e?.message ?? e)) }
+    try { await callManager.start(kind, selConv, fps, { group: ehGrupo }) } catch (e: any) { setError(String(e?.message ?? e)) }
     finally { setCallActionBusy(false) }
   }
   async function handleIncomingAccept() {

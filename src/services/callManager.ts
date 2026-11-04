@@ -1,6 +1,6 @@
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
-import { isWindowsRuntime } from '../shared/runtime'
+import { isWindowsRuntime, isIOSRuntime } from '../shared/runtime'
 import { setCallVideoSending, applyOfferInStable as applyOfferToSession } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
@@ -171,7 +171,7 @@ import {
   videoConstraintsFromPrefs,
   type CallMediaPrefs,
 } from './callMediaPrefs'
-import { cameraDevices, nextCameraId } from './callCameras'
+import { cameraDevices, nextCameraId, sameCamera } from './callCameras'
 
 let mediaPrefs: CallMediaPrefs = (() => {
   try {
@@ -972,6 +972,8 @@ export class CallManager {
   private leavingCalls = new Set<string>()
   private roomConvId: string | null = null
   private collectiveRoom = false
+  /** A chamada atual nasceu numa conversa de grupo: dura até o último sair. */
+  private callIsGroup = false
   private micRecoveryTimer: ReturnType<typeof setTimeout> | null = null
   private micRecoveryAttempts = 0
   private roomTimer: ReturnType<typeof setInterval> | null = null
@@ -1589,17 +1591,22 @@ export class CallManager {
       const st = this.state
       if (!st || st.callId !== callId) return
       if (!fp || fp === this.myFp) return
+      // `call_participant_added` é AVISO DE ROSTER ("X entrou"), não convite.
+      // Mas o anfitrião de grupo pré-semeava os convidados com este frame, o
+      // que fazia quem nunca aceitou aparecer na chamada. Só entra quem já
+      // provou presença por mídia (`markJoined`) ou já está no roster.
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) {
-        this.dropInvite(fp)
-        st.participants.push({ fp, nickname: fp.slice(0, 6) })
-      } else if (p.disconnected) {
+        if (this.pcs.has(fp)) this.markJoined(fp)
+        return
+      }
+      if (p.disconnected) {
         p.disconnected = false
+        this.onUpdate({ ...st })
       }
       if (!this.pcs.has(fp) && isCallPhaseActive(st.phase)) {
         this.createPC(fp, callId, true).catch(() => {  })
       }
-      this.onUpdate({ ...st })
     } catch {  }
   }
 
@@ -1715,7 +1722,7 @@ export class CallManager {
     } catch {  }
   }
 
-  async start(kind: CallKind, convId: string, targetFps: string[]): Promise<CallState> {
+  async start(kind: CallKind, convId: string, targetFps: string[], opts?: { group?: boolean }): Promise<CallState> {
     if (this.state && isCallPhaseActive(this.state.phase)) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes')
     }
@@ -1724,6 +1731,8 @@ export class CallManager {
     const me = this.getIdentity()
     if (!me) throw new Error('sem identidade')
     this.myFp = me.fingerprint
+    this.callIsGroup = opts?.group === true
+    this.collectiveRoom = this.callIsGroup
 
     this.quality = getStoredQuality()
     this.qualityNotice = null
@@ -2547,47 +2556,17 @@ export class CallManager {
     }
 
     const camTrack = this.localStream?.getVideoTracks()[0] ?? null
-    if (trocouCam && camTrack && camTrack.readyState === 'live') {
-      const fpAntigo = antes.videoInputId || camTrack.getSettings?.().deviceId || ''
+    // `facingMode` também troca o aparelho: sem isso o seletor do painel de
+    // ajustes só valia na próxima transmissão.
+    const trocouFacing = antes.facingMode !== depois.facingMode
+    if ((trocouCam || trocouFacing) && camTrack && camTrack.readyState === 'live') {
       try {
-        try { this.localStream?.removeTrack(camTrack) } catch {  }
-        try { camTrack.stop() } catch {  }
-        await new Promise<void>((r) => setTimeout(r, 60))
-        const novo = await getLocalMedia({ video: videoConstraintsFromPrefs(depois) })
-        const track = novo?.getVideoTracks()[0]
-        if (!track) throw new Error('a câmera escolhida não entregou imagem')
-        if (!this.localStream) {
-          try { this.localStream = new MediaStream([track]) } catch { this.localStream = null }
-        } else {
-          try { this.localStream.addTrack(track) } catch {  }
-        }
-        try { novo?.getTracks().forEach((t) => { if (t !== track) t.stop() }) } catch {  }
-        setCameraContentHint(track)
-        for (const [fp, pc] of this.pcs) {
-          try {
-            const tr = this.findVideoTransceiver(pc)
-            if (tr) await tr.sender.replaceTrack(track)
-          } catch {  }
-          if (this.state) await this.sendOffer(fp, this.state.callId).catch(() => false)
-        }
+        await this.trocarFeedDeCamera({
+          soltarAntes: true,
+          reverter: () => setCallMediaPrefs(antes),
+        })
       } catch (e) {
-        setCallMediaPrefs({ videoInputId: antes.videoInputId })
-        try {
-          const volta = await getLocalMedia({
-            video: { ...videoConstraintsFromPrefs({ ...depois, videoInputId: fpAntigo }) },
-          })
-          const track = volta?.getVideoTracks()[0]
-          if (track) {
-            if (!this.localStream) this.localStream = new MediaStream([track])
-            else try { this.localStream.addTrack(track) } catch {  }
-            for (const pc of this.pcs.values()) {
-              try {
-                const tr = this.findVideoTransceiver(pc)
-                if (tr) await tr.sender.replaceTrack(track)
-              } catch {  }
-            }
-          }
-        } catch {  }
+        setCallMediaPrefs(antes)
         throw new Error(
           `não foi possível trocar a câmera: ${describeMediaError(e) ?? String((e as Error)?.message ?? e)}`,
         )
@@ -2607,6 +2586,7 @@ export class CallManager {
     if (!md || typeof md.enumerateDevices !== 'function') {
       throw new Error('este aparelho não expõe as câmeras para alternância')
     }
+    if (this.cameraBusy) throw new Error('a câmera está trocando — aguarde um instante')
     const lista = cameraDevices(await md.enumerateDevices())
     // Android devolve os dois `videoinput` com o mesmo deviceId vazio até a
     // permissão ser dada. Nesse caso não há id alternável e a troca é feita
@@ -2614,35 +2594,37 @@ export class CallManager {
     // exato de um device inexistente faz o getUserMedia falhar sempre.
     if (lista.length < 2) {
       const brutos = (await md.enumerateDevices()).filter((d) => d.kind === 'videoinput')
-      if (brutos.length < 2) {
+      const mobile = isAndroidRuntime() || isIOSRuntime()
+      if (brutos.length < 2 && !mobile) {
         throw new Error('só há uma câmera disponível neste aparelho')
       }
-      const alvo: 'user' | 'environment' =
-        getCallMediaPrefs().facingMode === 'user' ? 'environment' : 'user'
+      const antes = getCallMediaPrefs()
+      const alvo: 'user' | 'environment' = antes.facingMode === 'user' ? 'environment' : 'user'
+      const reverter = () => setCallMediaPrefs({ facingMode: antes.facingMode })
       setCallMediaPrefs({ videoInputId: '', facingMode: alvo })
-      if (this.state) {
-        const camLive = !!this.localStream?.getVideoTracks().some((t) => t.readyState === 'live')
-        if (camLive) {
-          const antigo = this.localStream?.getVideoTracks()[0] ?? null
-          try { antigo?.stop() } catch {  }
-          if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
-          await new Promise<void>((r) => setTimeout(r, 60))
-          const novo = await getLocalMedia({ video: videoConstraintsFromPrefs(getCallMediaPrefs()) })
-          const track = novo?.getVideoTracks()[0]
-          if (track) {
-            if (!this.localStream) this.localStream = new MediaStream([track])
-            else try { this.localStream.addTrack(track) } catch {  }
-            for (const pc of this.pcs.values()) {
-              try {
-                const tr = this.findVideoTransceiver(pc)
-                if (tr) await tr.sender.replaceTrack(track)
-              } catch {  }
-            }
-            if (this.state) this.onUpdate({ ...this.state })
+      // Câmera ligada: troca AGORA, no meio da chamada. Antes só a preferência
+      // mudava e a imagem continuava a antiga até a próxima transmissão.
+      if (this.hasLiveCamera()) {
+        const settingsAntes = this.localStream?.getVideoTracks()[0]?.getSettings?.() ?? null
+        this.cameraBusy = true
+        try {
+          await this.trocarFeedDeCamera({ soltarAntes: false, reverter })
+          const depois = this.localStream?.getVideoTracks()[0]?.getSettings?.() ?? null
+          if (sameCamera(settingsAntes, depois)) {
+            // O aparelho expôs uma câmera só: reabrir a mesma não é "inverter".
+            try { this.onCallNotice?.('este aparelho não expôs uma segunda câmera') } catch {  }
           }
+          if (this.state) this.onUpdate({ ...this.state })
+        } catch (e) {
+          reverter()
+          throw new Error(
+            `não foi possível inverter a câmera: ${describeMediaError(e) ?? String((e as Error)?.message ?? e)}`,
+          )
+        } finally {
+          this.cameraBusy = false
         }
       }
-      return { deviceId: alvo, available: brutos.length }
+      return { deviceId: alvo, available: Math.max(brutos.length, mobile ? 2 : 0) }
     }
     const atual = getCallMediaPrefs().videoInputId
     const proximo = nextCameraId(lista, atual)
@@ -2651,7 +2633,7 @@ export class CallManager {
       setCallMediaPrefs({ videoInputId: proximo, facingMode: '' })
       return { deviceId: proximo, available: lista.length }
     }
-    const camLive = !!this.localStream?.getVideoTracks().some((t) => t.readyState === 'live')
+    const camLive = this.hasLiveCamera()
     if (!camLive) {
       setCallMediaPrefs({ videoInputId: proximo, facingMode: '' })
       try {
@@ -2659,8 +2641,22 @@ export class CallManager {
       } catch {  }
       return { deviceId: proximo, available: lista.length }
     }
-    const aplicado = await this.applyMediaPrefs({ videoInputId: proximo })
-    return { deviceId: aplicado.videoInputId, available: lista.length }
+    const antes = getCallMediaPrefs()
+    const reverter = () => setCallMediaPrefs({ videoInputId: antes.videoInputId })
+    setCallMediaPrefs({ videoInputId: proximo, facingMode: '' })
+    this.cameraBusy = true
+    try {
+      await this.trocarFeedDeCamera({ soltarAntes: true, reverter })
+      if (this.state) this.onUpdate({ ...this.state })
+      return { deviceId: proximo, available: lista.length }
+    } catch (e) {
+      reverter()
+      throw new Error(
+        `não foi possível trocar a câmera: ${describeMediaError(e) ?? String((e as Error)?.message ?? e)}`,
+      )
+    } finally {
+      this.cameraBusy = false
+    }
   }
 
   async setQuality(q: CallQuality): Promise<void> {
@@ -3301,6 +3297,106 @@ export class CallManager {
     } catch { return false }
   }
 
+  /** Manda a track de câmera para TODOS os pares, promovendo a m-line de
+   *  vídeo para envio. Devolve quantos pares aceitaram. */
+  private async publicarCameraEmTodos(track: MediaStreamTrack): Promise<number> {
+    const st = this.state
+    if (!st) return 0
+    let ok = 0
+    for (const [fp, pc] of this.pcs) {
+      try {
+        if (pc.signalingState === 'closed') continue
+        const tr = this.findVideoTransceiver(pc)
+        let precisaOffer = false
+        if (tr) {
+          precisaOffer = setCallVideoSending(tr, true)
+          await tr.sender.replaceTrack(track)
+        } else {
+          pc.addTrack(track, this.localStream ?? new MediaStream([track]))
+          precisaOffer = true
+        }
+        if (precisaOffer) await this.enviarOfferComRetry(fp, st.callId)
+        const sender = tr?.sender ?? pc.getSenders().find((s) => s.track === track) ?? null
+        if (sender) await applyCameraTuning(sender, this.cameraQuality())
+        ok++
+      } catch {  }
+    }
+    return ok
+  }
+
+  /** Renegociação que insiste um pouco: uma offer perdida deixava a câmera
+   *  "ligada" sem vídeo saindo — e no canal de servidor há mais pares
+   *  disputando a mesma fila de negociação. */
+  private async enviarOfferComRetry(fp: string, callId: string): Promise<boolean> {
+    for (let i = 0; i < 3; i++) {
+      if (await this.sendOffer(fp, callId)) return true
+      if (!this.state || this.state.callId !== callId) return false
+      await new Promise<void>((r) => setTimeout(r, 350))
+    }
+    return false
+  }
+
+  /** Troca o feed da câmera AGORA, sem reiniciar a chamada.
+   *  `reverter` devolve a preferência anterior e é chamado antes de reabrir. */
+  private async trocarFeedDeCamera(opts: {
+    soltarAntes: boolean
+    reverter?: () => void
+  }): Promise<boolean> {
+    const st = this.state
+    if (!st) return false
+    const antigo = this.localStream?.getVideoTracks()[0] ?? null
+    // No Windows a webcam é exclusiva: abrir a nova com a velha viva dá
+    // NotReadableError, então a velha sai primeiro. No celular são devices
+    // diferentes: abrir a nova antes evita o quadro preto no meio.
+    if (opts.soltarAntes) {
+      try { antigo?.stop() } catch {  }
+      if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
+      await new Promise<void>((r) => setTimeout(r, 60))
+    }
+    // `{}` deixa `getLocalMedia` mesclar a preferência inteira (aparelho,
+    // `facingMode`, qualidade e fps). Passar só as constraints de qualidade
+    // abria SEMPRE a câmera padrão e desfazia o "inverter".
+    const constraints: MediaTrackConstraints = {}
+    let novo: MediaStream | null = null
+    try {
+      novo = await getLocalMedia({ video: constraints })
+      const track = novo?.getVideoTracks()[0] ?? null
+      if (!track) throw new Error('a câmera escolhida não entregou imagem')
+      setCameraContentHint(track)
+      if (!this.localStream) {
+        try { this.localStream = new MediaStream([track]) } catch { this.localStream = null }
+      } else {
+        try { this.localStream.addTrack(track) } catch {  }
+      }
+      if (!this.localStream) throw new Error('não foi possível montar o stream local')
+      await this.publicarCameraEmTodos(track)
+      st.cameraOn = true
+      if (!opts.soltarAntes) {
+        try { antigo?.stop() } catch {  }
+        if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
+      }
+      return true
+    } catch (e) {
+      try { novo?.getTracks().forEach((t) => { try { t.stop() } catch {  } }) } catch {  }
+      if (antigo) {
+        // A preferência precisa VOLTAR antes de reabrir, senão o retry pediria
+        // de novo a câmera que acabou de falhar e o usuário ficava sem vídeo.
+        try { opts.reverter?.() } catch {  }
+        try {
+          const volta = await getLocalMedia({ video: constraints })
+          const track = volta?.getVideoTracks()[0] ?? null
+          if (track) {
+            if (!this.localStream) this.localStream = new MediaStream([track])
+            else try { this.localStream.addTrack(track) } catch {  }
+            await this.publicarCameraEmTodos(track)
+            st.cameraOn = true
+          }
+        } catch {  }
+      }
+      throw e
+    }
+  }
+
   async toggleCamera() {
     if (!this.state) return
     if ((this.state as any)?.nativeMedia) {
@@ -3337,12 +3433,17 @@ export class CallManager {
         }
         this.state.cameraOn = false
       } else {
-        const vs = await getLocalMedia({ video: { ...QUALITY_CONSTRAINTS[this.quality] } })
+        const constraints: MediaTrackConstraints = {
+          ...videoConstraintsFromPrefs(getCallMediaPrefs()),
+          ...QUALITY_CONSTRAINTS[this.quality],
+        }
+        const vs = await getLocalMedia({ video: constraints })
         const track = vs?.getVideoTracks()[0]
         if (!track) {
           this.state.cameraOn = false
           return
         }
+        try { vs?.getTracks().forEach((t) => { if (t !== track) t.stop() }) } catch {  }
         if (!this.localStream) {
           try { this.localStream = new MediaStream([track]) }
           catch { this.localStream = null }
@@ -3351,37 +3452,13 @@ export class CallManager {
         }
         setCameraContentHint(track)
         if (!this.localStream) return
-        let sent = 0
-        let lastErr: unknown = null
-        for (const [fp, pc] of this.pcs) {
-          try {
-            if (pc.signalingState === 'closed') continue
-            const tr = this.findVideoTransceiver(pc)
-            let needsOffer = false
-            if (tr) {
-              needsOffer = setCallVideoSending(tr, true)
-              await tr.sender.replaceTrack(track)
-            } else {
-              pc.addTrack(track, this.localStream)
-              needsOffer = true
-            }
-            if (needsOffer) {
-              const saiu = await this.sendOffer(fp, this.state.callId)
-              if (!saiu) needsOffer = false
-            }
-            const videoSender = tr?.sender ?? pc.getSenders().find((s) => s.track === track) ?? null
-            if (videoSender) await applyCameraTuning(videoSender, this.cameraQuality())
-            sent++
-          } catch (e) {
-            lastErr = e
-          }
-        }
+        const sent = await this.publicarCameraEmTodos(track)
         if (this.pcs.size > 0 && sent === 0) {
           try { track.stop() } catch {  }
           try { this.localStream?.removeTrack(track) } catch {  }
           this.state.cameraOn = false
           try {
-            this.onCallNotice?.(`não foi possível enviar a câmera${lastErr ? `: ${(lastErr as Error)?.message ?? lastErr}` : ''}`)
+            this.onCallNotice?.('não foi possível enviar a câmera — a negociação com os outros não completou')
           } catch {  }
         } else {
           this.state.cameraOn = true
@@ -4072,7 +4149,20 @@ export class CallManager {
           try {
             // Seção 24: already
             const already = pc.getSenders().some(x => x.track === t)
-            if (!already) pc.addTrack(t, s)
+            if (already) continue
+            if (t.kind === 'video') {
+              // Reusa a m-line de vídeo que já existe (a que recebe a câmera
+              // do outro) em vez de abrir uma SEGUNDA seção de vídeo. No canal
+              // de servidor, com o outro já transmitindo, a segunda m-line
+              // ficava sem oferta válida e a minha câmera não chegava.
+              const tr = this.findVideoTransceiver(pc)
+              if (tr && !tr.sender.track) {
+                try { setCallVideoSending(tr, true) } catch {  }
+                tr.sender.replaceTrack(t).catch(() => {  })
+                continue
+              }
+            }
+            pc.addTrack(t, s)
           } catch {  }
         }
       }
@@ -4371,7 +4461,7 @@ export class CallManager {
         const pc = this.pcs.get(fp)
         if (!pc || pc.signalingState === 'closed') return false
         if (this.state && this.state.callId !== callId) return false
-        if (!(await this.waitForStable(pc))) return false
+        if (!(await this.waitForStable(pc, 12_000))) return false
         const offer = await applyOfferInStable(pc, opts)
         if (!offer) return false
         if ((this.state && this.state.callId !== callId) || this.pcs.get(fp) !== pc) return false
@@ -4493,6 +4583,7 @@ export class CallManager {
       callId: st.callId,
       participants: (st.participants ?? []).map((p) => p.fp),
       invited: (st.invited ?? []).map((i) => i.fp),
+      group: this.callIsGroup,
     })
   }
 
@@ -4822,9 +4913,10 @@ export class CallManager {
     this.startQualityMonitor()
     this.ensureRelayTransport()
     for (const fp of new Set([...alvos, ...fps.filter((f) => f && f !== me.fingerprint)])) {
-      // Seção 28: iniciar
-      const iniciar = !!this.myFp && this.myFp > fp
-      await this.createPC(fp, callId, iniciar).catch(() => {  })
+      // Quem ENTRA também oferece: a offer do host pode se perder e a sala
+      // ficaria muda esperando para sempre. O glare é resolvido por
+      // polite/impolite (`callRepair.ts`).
+      await this.createPC(fp, callId, true).catch(() => {  })
     }
     try {
       for (const fp of [...this.pendingOffers.keys()]) {

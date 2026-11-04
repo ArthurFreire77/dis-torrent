@@ -14,21 +14,27 @@ function blocoDe(nome: string, tamanho = 2200): string {
 }
 
 test('trocar de câmera SOLTA a antiga antes de abrir a nova', () => {
-  const bloco = blocoDe('if (trocouCam && camTrack && camTrack.readyState ===')
-  const solta = bloco.indexOf('camTrack.stop()')
-  const abre = bloco.indexOf('getLocalMedia({ video: videoConstraintsFromPrefs(depois) })')
+  // A troca ficou num caminho único (`trocarFeedDeCamera`), usado pelo botão
+  // de inverter, pelo seletor de aparelho e pelo `applyMediaPrefs`.
+  const bloco = blocoDe('private async trocarFeedDeCamera')
+  const solta = bloco.indexOf('antigo?.stop()')
+  const abre = bloco.indexOf('getLocalMedia({ video: constraints })')
   assert.ok(solta > 0, 'precisa soltar a câmera antiga')
   assert.ok(abre > 0, 'precisa abrir a nova')
   assert.ok(
     solta < abre,
     'abrir a nova com a antiga viva dá NotReadableError ("em uso por outro app") no Windows',
   )
+  assert.match(bloco, /soltarAntes/, 'o chamador escolhe soltar antes (Windows) ou depois (celular)')
 })
 
-test('troca de câmera que falha tenta reabrir a anterior', () => {
-  const bloco = blocoDe('if (trocouCam && camTrack && camTrack.readyState ===', 3000)
-  assert.match(bloco, /videoInputId: fpAntigo/, 'volta para o device que estava funcionando')
-  assert.match(bloco, /setCallMediaPrefs\(\{ videoInputId: antes\.videoInputId \}\)/, 'restaura a preferência')
+test('troca de câmera que falha reabre a ANTERIOR (preferência volta antes)', () => {
+  const bloco = blocoDe('private async trocarFeedDeCamera', 3600)
+  assert.match(bloco, /reverter\?\.\(\)/, 'sem reverter a preferência o retry pede a câmera que falhou')
+  const iReverter = bloco.indexOf('reverter?.()')
+  const iVolta = bloco.indexOf('const volta = await getLocalMedia')
+  assert.ok(iVolta > 0, 'precisa reabrir a câmera anterior')
+  assert.ok(iReverter > 0 && iReverter < iVolta, 'a preferência precisa voltar ANTES de reabrir')
 })
 
 test('câmera ocupada é retentada ANTES de cair para só voz', () => {
@@ -106,4 +112,59 @@ test('celular: chamada dentro da conversa não esconde as mensagens', () => {
   const stage = readFileSync('src/mobile/MobileCallStage.tsx', 'utf8')
   assert.match(stage, /if \(strip\)/, 'existe o modo tira')
   assert.match(stage, /height: stripHeight/, 'a faixa tem altura fixa e deixa o resto para o chat')
+})
+
+test('celular: o botão de inverter câmera NÃO depende de enumerateDevices', () => {
+  const mobile = readFileSync('src/mobile/MobileShell.tsx', 'utf8')
+  assert.match(
+    mobile,
+    /shouldShowCameraFlip\(\{/,
+    'antes o botão sumia: no Android o enumerateDevices devolve uma câmera só',
+  )
+  const cameras = readFileSync('src/services/callCameras.ts', 'utf8')
+  assert.match(cameras, /if \(input\.mobile\) return true/, 'no celular frontal/traseira é dado do aparelho')
+})
+
+test('inverter câmera é AO VIVO, não só na próxima transmissão', () => {
+  const troca = manager.slice(manager.indexOf('async switchCamera'))
+  assert.match(
+    troca.slice(0, 3000),
+    /hasLiveCamera\(\)/,
+    'só troca o feed se houver câmera viva',
+  )
+  assert.match(
+    troca.slice(0, 3000),
+    /trocarFeedDeCamera\(/,
+    'com câmera ligada a troca precisa acontecer na hora',
+  )
+  // `trocarFeedDeCamera` publica para todos e devolve a track nova.
+  const feed = manager.slice(manager.indexOf('private async trocarFeedDeCamera'))
+  assert.match(feed.slice(0, 3000), /publicarCameraEmTodos\(track\)/, 'manda a track nova para os pares')
+  assert.doesNotMatch(
+    feed.slice(0, 3000),
+    /videoConstraintsFromPrefs\(getCallMediaPrefs\(\)\)/,
+    'constraints montadas à mão esquecem facingMode e a câmera não muda',
+  )
+})
+
+test('câmera no canal de servidor: reusa a m-line de vídeo existente', () => {
+  const attach = manager.slice(manager.indexOf('private attachLocalStreamToPC'))
+  const bloco = attach.slice(0, 1400)
+  assert.match(
+    bloco,
+    /findVideoTransceiver\(pc\)/,
+    'sem reusar a m-line, a câmera virava uma segunda seção de vídeo',
+  )
+  assert.match(bloco, /tr\.sender\.replaceTrack\(t\)/, 'a track vai pela m-line que já existe')
+})
+
+test('chamada de grupo: quem NÃO aceitou não aparece no roster', () => {
+  const added = manager.slice(manager.indexOf('private onParticipantAdded'))
+  const bloco = added.slice(0, 1400)
+  assert.doesNotMatch(
+    bloco,
+    /st\.participants\.push\(/,
+    'call_participant_added é aviso, não convite: ninguém entra no roster por ele',
+  )
+  assert.match(bloco, /markJoined\(fp\)/, 'só quem provou presença por mídia entra')
 })
