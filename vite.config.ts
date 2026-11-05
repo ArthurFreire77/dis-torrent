@@ -14,7 +14,9 @@ export default defineConfig({
     host: '127.0.0.1',
     strictPort: true,
     fs: { strict: true },
-    watch: { ignored: ['**/src-tauri/**', '**/dist/**', '**/test-results/**'] },
+    // `dist-release` guarda os instaladores gerados: o Vite tentava vigiar os
+    // .exe/.apk e morria com EBUSY (arquivo travado pelo Explorer/antivírus).
+    watch: { ignored: ['**/src-tauri/**', '**/dist/**', '**/dist-release/**', '**/test-results/**'] },
   },
   preview: { port: 5173, host: '127.0.0.1', strictPort: true },
   build: {
