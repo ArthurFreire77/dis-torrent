@@ -95,7 +95,7 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
   await befriend(a, b);
 
   await dial(a, 'Bob');
-  await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
+  await expect(a.getByText(/^(Discando|Chamando)…/)).toBeVisible({ timeout: 15000 });
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await b.getByRole('button', { name: 'Aceitar' }).click();
   await expect(a.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });
@@ -106,7 +106,7 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
   await expect(b.getByText(/^Conectado • /)).toBeHidden({ timeout: 15000 });
 
   await dial(a, 'Bob');
-  await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
+  await expect(a.getByText(/^(Discando|Chamando)…/)).toBeVisible({ timeout: 15000 });
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await b.getByRole('button', { name: 'Aceitar' }).click();
   await Promise.all([
@@ -141,7 +141,7 @@ test('quem ATENDEu consegue ligar de volta depois de sair (direção invertida)'
   await expect(a.getByText(/^Conectado • /)).toBeHidden({ timeout: 15000 });
 
   await dial(b, 'Alice');
-  await expect(b.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
+  await expect(b.getByText(/^(Discando|Chamando)…/)).toBeVisible({ timeout: 15000 });
   await expect(a.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await a.getByRole('button', { name: 'Aceitar' }).click();
   await expect(a.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });

@@ -19,7 +19,7 @@ async function befriendMobile(a: Page, b: Page) {
   const fpB = await fpOf(b);
   await a.getByRole('button', { name: 'Amigos' }).click();
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Ex.: a1b2c3d4e5f6').fill(fpB);
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Amigos' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
