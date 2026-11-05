@@ -177,9 +177,11 @@ pub fn start(
 ) -> Result<Bridge, String> {
     let server = Server::http(("127.0.0.1", port))
         .map_err(|e| format!("não foi possível abrir 127.0.0.1:{port}: {e}"))?;
+    // `ListenAddr` tem variante `Unix` só no Unix: o catch-all cobre as duas
+    // plataformas sem deixar o match não-exaustivo no Linux.
     let real_port = match server.server_addr() {
         tiny_http::ListenAddr::IP(addr) => addr.port(),
-        other => return Err(format!("endereço inesperado da ponte: {other}")),
+        _ => return Err("a ponte só escuta em TCP loopback".to_string()),
     };
     let secret = secret_hex();
     let server = Arc::new(server);

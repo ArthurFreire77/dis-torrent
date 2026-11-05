@@ -1,8 +1,4 @@
-//! Descoberta de peers em LAN: UDP broadcast periódico + escuta.
-//! Sem servidor de bootstrap — peers se encontram na mesma rede.
-//! Fase futura (internet): DHT/rendezvous documentados em AUX_SERVICES.md.
-
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +13,11 @@ use crate::Result;
 
 pub const DISCOVERY_PORT: u16 = 45900;
 const ANNOUNCE_INTERVAL_SECS: u64 = 2;
+
+/// Grupo multicast do DisTorrent. Broadcast puro morre em Wi-Fi de escola e em
+/// rede com isolamento de cliente; o multicast é a segunda rota e é o que faz
+/// dois PCs do mesmo roteador se verem mesmo quando o broadcast é filtrado.
+const DISCOVERY_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 42, 99);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Announcement {
@@ -33,22 +34,119 @@ pub struct DiscoveredPeer {
     pub fp: String,
     pub pubkey_hex: String,
     pub nickname: String,
-    pub addr: SocketAddr, // ip do anunciante + porta TCP dele
+    pub addr: SocketAddr,
 }
 
 pub struct Discovery {
     pub local_addr: SocketAddr,
 }
 
+/// Endereços de broadcast REAIS das interfaces locais.
+///
+/// A lista fixa anterior (`192.168.1.255`, `192.168.0.255`, ...) só acertava
+/// três faixas domésticas: um roteador em `192.168.100.0/24`, `10.150.0.0/16` ou
+/// o Wi-Fi de uma escola nunca recebia o anúncio. Sem anúncio não há descoberta
+/// e dois PCs no MESMO roteador ficavam invisíveis um para o outro.
+fn broadcast_targets() -> Vec<SocketAddrV4> {
+    let mut out: Vec<SocketAddrV4> = Vec::new();
+    #[cfg(not(target_os = "android"))]
+    {
+        let Ok(ifaces) = if_addrs::get_if_addrs() else {
+            return out;
+        };
+        for i in ifaces {
+            let if_addrs::IfAddr::V4(v4) = i.addr else {
+                continue;
+            };
+            if v4.ip.is_loopback() || v4.ip.is_link_local() || v4.ip.is_unspecified() {
+                continue;
+            }
+            // /31 e /32 não têm endereço de broadcast útil.
+            if v4.prefixlen >= 31 {
+                continue;
+            }
+            let b = v4.broadcast.unwrap_or_else(|| {
+                let ip = u32::from(v4.ip);
+                let mask = u32::from(v4.netmask);
+                Ipv4Addr::from(ip | !mask)
+            });
+            let target = SocketAddrV4::new(b, DISCOVERY_PORT);
+            if !out.contains(&target) {
+                out.push(target);
+            }
+        }
+    }
+    // Android: `if-addrs` não linka (bionic não tem `getifaddrs`). Usa a faixa
+    // /24 do endereço local, que cobre o caso real (Wi-Fi/4G privado).
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(ip) = local_ipv4() {
+            let o = ip.octets();
+            let b = Ipv4Addr::new(o[0], o[1], o[2], 255);
+            out.push(SocketAddrV4::new(b, DISCOVERY_PORT));
+        }
+    }
+    out
+}
+
+/// Endereço IPv4 local pela rota padrão (UDP connect não envia pacote).
+#[cfg(target_os = "android")]
+fn local_ipv4() -> std::result::Result<Ipv4Addr, ()> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|_| ())?;
+    sock.connect("8.8.8.8:80").map_err(|_| ())?;
+    match sock.local_addr().map_err(|_| ())? {
+        std::net::SocketAddr::V4(a) => Ok(*a.ip()),
+        _ => Err(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broadcast_sai_da_mascara_e_nao_de_lista_fixa() {
+        // 192.168.100.2/24 -> .255 (a lista antiga cobria 0, 1 e 100; agora vale
+        // para QUALQUER faixa, inclusive a de uma escola atrás de CGNAT).
+        let ip = Ipv4Addr::new(192, 168, 100, 2);
+        let mask = Ipv4Addr::new(255, 255, 255, 0);
+        assert_eq!(
+            Ipv4Addr::from(u32::from(ip) | !u32::from(mask)),
+            Ipv4Addr::new(192, 168, 100, 255)
+        );
+
+        // 10.150.7.31/16 -> 10.150.255.255
+        let ip = Ipv4Addr::new(10, 150, 7, 31);
+        let mask = Ipv4Addr::new(255, 255, 0, 0);
+        assert_eq!(
+            Ipv4Addr::from(u32::from(ip) | !u32::from(mask)),
+            Ipv4Addr::new(10, 150, 255, 255)
+        );
+
+        // 172.20.3.9/22 -> 172.20.3.255 (a rede começa em 172.20.0.0)
+        let ip = Ipv4Addr::new(172, 20, 3, 9);
+        let mask = Ipv4Addr::new(255, 255, 252, 0);
+        assert_eq!(
+            Ipv4Addr::from(u32::from(ip) | !u32::from(mask)),
+            Ipv4Addr::new(172, 20, 3, 255)
+        );
+    }
+
+    #[test]
+    fn alvos_reais_nao_incluem_loopback_nem_link_local() {
+        for b in broadcast_targets() {
+            let ip = *b.ip();
+            assert!(
+                !ip.is_loopback(),
+                "broadcast de loopback não descobre ninguém"
+            );
+            assert!(!ip.is_link_local(), "169.254.x não tem rota útil");
+            assert_eq!(b.port(), DISCOVERY_PORT, "a porta combinada não muda");
+        }
+    }
+}
+
 impl Discovery {
-    /// Sobe UDP listener + broadcaster. `tx` recebe peers descobertos (não-eu).
-    ///
-    /// `allowed` = gate de privacidade EM TEMPO REAL (false em proxy/full):
-    /// o broadcaster NÃO anuncia (presença fp+nickname na LAN é vazamento
-    /// documentado do modo anônimo) e o listener descarta datagramas — a
-    /// descoberta inteira fica off sem reiniciar o app.
-    /// `limiter` = rate limit de datagramas por origem (compartilhado com o
-    /// engine — a MESMA instância, senão cada cópia teria o próprio mapa).
     pub async fn spawn(
         keypair: Arc<Keypair>,
         nickname: String,
@@ -60,18 +158,22 @@ impl Discovery {
         let bound = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await {
             Ok(s) => s,
             Err(e) => {
-                // conflito com outra instância local: bind em porta efêmera
-                // (a instância original ainda faz broadcast e nos encontrará)
+                // Sem a porta combinada não recebemos ninguém, mas continuamos
+                // anunciando: o outro lado ainda pode nos descobrir e discar.
                 warn!("porta {DISCOVERY_PORT} ocupada ({e}); usando porta efêmera");
                 UdpSocket::bind(("0.0.0.0", 0)).await?
             }
         };
         let socket = Arc::new(bound);
         socket.set_broadcast(true)?;
+        // Multicast além do broadcast: muitas redes de escola/hotel filtram
+        // broadcast de cliente para cliente, mas deixam multicast passar.
+        if let Err(e) = socket.join_multicast_v4(DISCOVERY_GROUP, Ipv4Addr::UNSPECIFIED) {
+            debug!("multicast de descoberta indisponível ({e}); seguindo só com broadcast");
+        }
         let local_addr = socket.local_addr()?;
         info!(%local_addr, "discovery UDP ativo");
 
-        // broadcaster
         {
             let socket = socket.clone();
             let keypair = keypair.clone();
@@ -81,11 +183,6 @@ impl Discovery {
                 let mut tick = interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
                 loop {
                     tick.tick().await;
-                    // PRIVACIDADE (gate na FONTE): em modo anônimo não
-                    // anunciamos presença na LAN — o broadcast carrega
-                    // fp+nickname e contradiz o "esconder presença" do modo.
-                    // Gate por TICK: trocar de modo em runtime liga/desliga
-                    // na próxima rodada (≤2s), sem reiniciar.
                     if !allowed() {
                         continue;
                     }
@@ -104,24 +201,16 @@ impl Discovery {
                             continue;
                         }
                     };
-                    // 100% automático: broadcast em todas subnets + loopback + multicast.
-                    // Extras via DISTORRENT_DISCOVERY_BROADCASTS (ex. broadcast da
-                    // subnet do ZeroTier/Radmin: "10.147.0.255:45900"): o
-                    // broadcast limitado (255.255.255.255) sai pela rota padrão
-                    // e NÃO alcança adaptadores virtuais de VPN — sem o alvo
-                    // explícito, peers na LAN virtual nunca se descobrem.
-                    let mut targets: Vec<(String, u16)> = [
-                        ("255.255.255.255", DISCOVERY_PORT),
-                        ("127.255.255.255", DISCOVERY_PORT),
-                        ("224.0.0.1", DISCOVERY_PORT), // multicast local
-                        ("192.168.1.255", DISCOVERY_PORT),
-                        ("192.168.0.255", DISCOVERY_PORT),
-                        ("192.168.100.255", DISCOVERY_PORT),
-                        ("10.0.0.255", DISCOVERY_PORT),
-                    ]
-                    .iter()
-                    .map(|(h, p)| (h.to_string(), *p))
-                    .collect();
+                    let mut targets: Vec<(String, u16)> = vec![
+                        (DISCOVERY_GROUP.to_string(), DISCOVERY_PORT),
+                        ("255.255.255.255".to_string(), DISCOVERY_PORT),
+                        ("127.255.255.255".to_string(), DISCOVERY_PORT),
+                    ];
+                    // Broadcast calculado da máscara de CADA interface; sem isto
+                    // o anúncio só saía para 192.168.0/1/100 e 10.0.0.
+                    for b in broadcast_targets() {
+                        targets.push((b.ip().to_string(), b.port()));
+                    }
                     for extra in std::env::var("DISTORRENT_DISCOVERY_BROADCASTS")
                         .unwrap_or_default()
                         .split(',')
@@ -132,6 +221,8 @@ impl Discovery {
                             targets.push((sa.ip().to_string(), sa.port()));
                         }
                     }
+                    targets.sort();
+                    targets.dedup();
                     for target in &targets {
                         let addr = format!("{}:{}", target.0, target.1);
                         let _ = socket.send_to(&payload, addr.as_str()).await;
@@ -140,7 +231,6 @@ impl Discovery {
             });
         }
 
-        // listener
         {
             let socket = socket;
             let allowed = allowed;
@@ -150,14 +240,9 @@ impl Discovery {
                 loop {
                     match socket.recv_from(&mut buf).await {
                         Ok((n, from)) => {
-                            // PRIVACIDADE: datagrama em modo anônimo é ruído —
-                            // descarta antes de QUALQUER parse/dial.
                             if !allowed() {
                                 continue;
                             }
-                            // RATE LIMIT: sem isto, um host na LAN inundava a
-                            // porta 45900 com anúncios válidos e cada um
-                            // virava upsert+evento+dial (DoS de CPU/IO).
                             if limiter.allow_disc_datagram(from.ip()) == Decision::Blocked {
                                 continue;
                             }
@@ -190,3 +275,4 @@ impl Discovery {
         Ok(Self { local_addr })
     }
 }
+// Seção 1: fim

@@ -33,7 +33,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], defaul
 # Dependabot conta alertas de um caminho inalcançável.
 rumqttc = { version = "0.25.1", default-features = false }
 mdns-sd = "0.21.1"
-# (movido para target-gated abaixo)
+
 mainline = "2"
 unicode-normalization = "0.1"
 zstd = "0.13"
@@ -90,5 +90,13 @@ jpeg-encoder = "0.6"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 mdns-sd = "0.21.1"
+# Broadcast de descoberta calculado da máscara de cada interface: a lista fixa
+# de 192.168.x.255 não cobria o Wi-Fi de escola e dois PCs na mesma rede não se
+# achavam. Já vinha na árvore via mdns-sd; aqui vira dependência direta.
+#
+# NÃO-Android de propósito: `if-addrs` chama `getifaddrs`/`freeifaddrs`, que o
+# bionic do Android não exporta — o link do .so falhava com "undefined symbol".
+# No Android o broadcast usa a faixa do endereço local (fallback abaixo).
+if-addrs = "0.15"
 tempfile = "3"
 serde_json = "1"
