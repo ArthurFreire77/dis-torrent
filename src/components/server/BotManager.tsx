@@ -5,6 +5,8 @@ import { validateBotEntryName } from './botModel'
 import { BotDocsAccordion } from './BotDocsAccordion'
 import { BOT_DOCS_FILE_NAME, botDocsMarkdown } from './botDocs'
 import { baixarTexto } from './botDocsDownload'
+import { botSummary } from './BotPanel'
+import { BOT_PERM_DEFS } from '../../services/botCommands'
 import {
   Button,
   EmptyState,
@@ -36,16 +38,23 @@ export function BotManager({
   onUpdate,
   onDelete,
   onConfigure,
+  onImportFolder,
 }: {
   bots: BotView[]
   roles: RoleView[]
   ehDono: boolean
   onCreate: (data: { name: string; roleId: string | null }) => Promise<void>
-  onUpdate: (id: string, patch: { name?: string; roleId?: string | null; online?: boolean }) => Promise<void>
+  onUpdate: (id: string, patch: { name?: string; roleId?: string | null; online?: boolean; perms?: number }) => Promise<void>
   onDelete: (id: string) => Promise<void>
   onConfigure: (botId: string) => void
+  /** Importa uma pasta de bot (`bot.json`): cria o bot com a config e permissões. */
+  onImportFolder?: (dir: string) => Promise<string>
 }) {
   const [criando, setCriando] = useState(false)
+  const [importando, setImportando] = useState(false)
+  const [importDir, setImportDir] = useState('')
+  const [importBusy, setImportBusy] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
   const [editandoId, setEditandoId] = useState<string | null>(null)
   const [paraRemover, setParaRemover] = useState<BotView | null>(null)
   const [copiado, setCopiado] = useState<string | null>(null)
@@ -98,10 +107,18 @@ export function BotManager({
       <BotDocsAccordion />
 
       {ehDono && (
-        <div>
+        <div style={{ display: 'flex', gap: ui.sm, flexWrap: 'wrap', alignItems: 'center' }}>
           <Button variant="success" icon="plus" onClick={() => setCriando(true)}>
             Criar bot
           </Button>
+          {onImportFolder && (
+            <Button variant="secondary" icon="download" onClick={() => setImportando(true)}>
+              Adicionar bot existente
+            </Button>
+          )}
+          <span style={{ fontSize: 11.5, color: ui.muted }}>
+            “Adicionar” lê a pasta de um bot (bot.json + código) e cria no servidor.
+          </span>
         </div>
       )}
 
@@ -157,6 +174,65 @@ export function BotManager({
           setCriando(false)
         }}
       />
+
+      <Modal
+        open={importando}
+        onClose={() => setImportando(false)}
+        title="Adicionar bot existente"
+        subtitle="Informe a pasta que contém o bot.json do bot."
+        width={WIDTHS.md}
+        footer={
+          <>
+            <span style={{ flex: 1 }} />
+            <Button onClick={() => setImportando(false)} disabled={importBusy}>
+              Cancelar
+            </Button>
+            <Button
+              variant="success"
+              icon="check"
+              busy={importBusy}
+              onClick={async () => {
+                if (!onImportFolder) return
+                setImportBusy(true)
+                setImportError(null)
+                try {
+                  const nome = await onImportFolder(importDir.trim())
+                  setImportando(false)
+                  setImportDir('')
+                  setEditandoId(null)
+                  void nome
+                } catch (e: unknown) {
+                  setImportError(e instanceof Error ? e.message : String(e))
+                } finally {
+                  setImportBusy(false)
+                }
+              }}
+            >
+              Importar pasta
+            </Button>
+          </>
+        }
+      >
+        {importError && (
+          <div style={{ marginBottom: ui.lg }}>
+            <Notice tone="danger">{importError}</Notice>
+          </div>
+        )}
+        <TextField
+          label="Pasta do bot"
+          value={importDir}
+          mono
+          autoFocus
+          ariaLabel="Pasta do bot a importar"
+          placeholder="C:\\bots\\freirebot"
+          hint="A pasta precisa ter um bot.json com name e config. Nada roda sem você confirmar."
+          onChange={setImportDir}
+        />
+        <Notice tone="info" icon="info">
+          A importação só cria o bot e a configuração. O token é gerado pelo servidor e o código só roda
+          quando você iniciar o plugin no painel do bot.
+        </Notice>
+      </Modal>
 
       <Modal
         open={paraRemover !== null}
@@ -241,6 +317,7 @@ function BotRow({
   }
 
   const cor = cargo?.color ?? ui.accent
+  const summary = botSummary(bot)
 
   return (
     <div
@@ -344,8 +421,30 @@ function BotRow({
           )}
 
           {!isEditing && (
-            <div style={{ fontSize: 11, color: ui.muted, marginTop: 4 }}>
-              {cargo ? `Cargo: ${cargo.name}` : 'Sem cargo — herda só o básico'}
+            <div style={{ fontSize: 11, color: ui.muted, marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <span>{cargo ? `Cargo: ${cargo.name}` : 'Sem cargo — herda só o básico'}</span>
+              <span style={{ color: ui.borderStrong }}>·</span>
+              <span>{summary.commands} comando(s)</span>
+              {summary.events > 0 && (
+                <>
+                  <span style={{ color: ui.borderStrong }}>·</span>
+                  <span>{summary.events} evento(s)</span>
+                </>
+              )}
+              {summary.perms !== 0 && (
+                <>
+                  <span style={{ color: ui.borderStrong }}>·</span>
+                  <span style={{ color: ui.warning, fontWeight: 700 }}>
+                    {BOT_PERM_DEFS.filter((d) => (summary.perms & d.bit) !== 0).length} permissõe(s) admin
+                  </span>
+                </>
+              )}
+              {summary.broken && (
+                <>
+                  <span style={{ color: ui.borderStrong }}>·</span>
+                  <span style={{ color: '#ff9c9c', fontWeight: 700 }}>config inválida</span>
+                </>
+              )}
             </div>
           )}
           {isEditing && erro && (

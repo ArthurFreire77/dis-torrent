@@ -34,6 +34,7 @@ import { SessionDriver } from '../core/storage/sessionDriver'
 import { IdentityStore } from '../core/storage/identityStore'
 import * as LX from './localExtras'
 import { WEB_KEYS, readList, writeJson, writeString } from './browserStore'
+import { parseBotConfig } from './botCommands'
 
 const sharedDriver = new LocalDriver()
 const identityDriver = new SessionDriver()
@@ -905,6 +906,36 @@ export const browserServices: DisTorrentServices = {
     if (!tok) return Promise.reject(new Error('bot não encontrado'))
     return Promise.resolve(tok)
   },
+  // O modo navegador não tem core nem banco: admin/log/variável são recusados
+  // com mensagem honesta em vez de fingir sucesso.
+  botAdmin: () =>
+    Promise.reject(
+      new Error('comandos administrativos de bot só existem no app nativo (precisam do core)'),
+    ),
+  botLogAppend: () => Promise.resolve(),
+  botLogs: () => Promise.resolve([]),
+  botLogsClear: () => Promise.resolve(0),
+  botVarGet: () => Promise.resolve(null),
+  botVarSet: () => Promise.resolve(),
+  botVarsList: () => Promise.resolve([]),
+  botConfigValidate: async (config) => {
+    const cfg = parseBotConfig(config)
+    if (!cfg) throw new Error('config de bot inválida')
+    return { prefix: cfg.prefix, commands: cfg.commands.length, events: cfg.events }
+  },
+  botWarningsList: () => Promise.resolve([]),
+  botBridgeStart: () =>
+    Promise.reject(new Error('a ponte local (127.0.0.1) só existe no app nativo')),
+  botBridgeStop: () => Promise.resolve(false),
+  botBridgeStatus: () => Promise.resolve(null),
+  botBridgeList: () => Promise.resolve([]),
+  botFolderRead: () =>
+    Promise.reject(new Error('importar pasta de bot só existe no app nativo')),
+  botPluginStart: () =>
+    Promise.reject(new Error('executar código de bot só existe no app nativo')),
+  botPluginStop: () => Promise.resolve(false),
+  botPluginStatus: () => Promise.resolve(null),
+  botPluginList: () => Promise.resolve([]),
   httpFetch: async (url, method, headers, body, timeoutMs) => {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), Math.max(1000, Math.min(timeoutMs, 15000)))
@@ -947,6 +978,12 @@ export const browserServices: DisTorrentServices = {
 
   webrtcReport: () => Promise.resolve(),
   netDiag: () => Promise.reject(new Error('diagnóstico de rede só existe no app nativo')),
+
+  firewallStatus: () => Promise.reject(new Error('firewall só existe no app nativo')),
+
+  firewallAllow: () => Promise.reject(new Error('firewall só existe no app nativo')),
+
+  openFirewallConsole: () => Promise.reject(new Error('firewall só existe no app nativo')),
 
   updateCheck: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
   updateDownload: () => Promise.reject(new Error('atualização automática só existe no app nativo')),

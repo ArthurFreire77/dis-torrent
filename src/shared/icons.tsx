@@ -59,6 +59,8 @@ export const Icons = {
 
   plus: 'M12 5v14 M5 12h14',
   minus: 'M5 12h14',
+  play: 'M6 4l14 8-14 8z',
+  stop: 'M6 6h12v12H6z',
   check: 'M20 6L9 17l-5-5',
   checkDouble: 'M1 12l5 5L16 7 M8 12l5 5L23 7',
   x: 'M18 6L6 18 M6 6l12 12',

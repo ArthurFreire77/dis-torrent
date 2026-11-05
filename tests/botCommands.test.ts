@@ -9,6 +9,13 @@ import {
   findCommand,
   renderBotReply,
   botIsActive,
+  serializeBotConfig,
+  urlProblem,
+  commandProblem,
+  permAllows,
+  BOT_PERMS,
+  BOT_PERM_ALL,
+  BOT_EVENTS,
   type BotConfig,
   type BotCommandDef,
 } from '../src/services/botCommands.ts'
@@ -86,9 +93,9 @@ test('parseBotConfig: JSON inválido / raw nulo → null', () => {
   assert.equal(parseBotConfig(undefined), null)
 })
 
-test('parseBotConfig: config >16KB → null', () => {
-  const big = JSON.stringify({ prefix: '!', pad: 'a'.repeat(20_000) })
-  assert.ok(big.length > 16 * 1024)
+test('parseBotConfig: config acima de 64KB → null', () => {
+  const big = JSON.stringify({ prefix: '!', pad: 'a'.repeat(70_000) })
+  assert.ok(big.length > 64 * 1024)
   assert.equal(parseBotConfig(big), null)
 })
 
@@ -201,5 +208,160 @@ test('renderBotReply: texto vindo da API é sanitizado (bidi/zero-width/controle
   assert.ok(!out!.includes('\u200B'), 'zero-width esconderia conteúdo')
   assert.ok(!out!.includes('\x07'), 'controle não pode virar mensagem')
   assert.match(out!, /gnp\.exe/)
+})
+
+// --- Superfície nova: aliases, exec, permissões, admin, guarda de URL ---
+
+test('parseBotConfig: alias, cooldown, args e permissão são lidos', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({
+      prefix: '/',
+      commands: [
+        {
+          name: 'ajuda',
+          aliases: ['help', 'AJUDA'],
+          reply: 'olá',
+          cooldownMs: 5000,
+          permission: 'moderate',
+          ephemeral: true,
+          args: [{ name: 'Tópico', required: true }],
+        },
+      ],
+    }),
+  )
+  assert.ok(cfg)
+  const c = cfg.commands[0]
+  assert.equal(cfg.prefix, '/')
+  assert.deepEqual(c.aliases, ['help'])
+  assert.equal(c.exec, 'reply')
+  assert.equal(c.cooldownMs, 5000)
+  assert.equal(c.permission, 'moderate')
+  assert.equal(c.ephemeral, true)
+  assert.equal(c.args?.[0].name, 'topico')
+  assert.equal(c.args?.[0].required, true)
+})
+
+test('parseBotConfig: admin e script definem exec sem url', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({
+      commands: [
+        { name: 'ban', admin: 'ban' },
+        { name: 'oi', script: 'reply "olá"' },
+      ],
+    }),
+  )
+  assert.ok(cfg)
+  assert.equal(cfg.commands[0].exec, 'admin')
+  assert.equal(cfg.commands[0].admin, 'ban')
+  assert.equal(cfg.commands[1].exec, 'script')
+})
+
+test('parseBotConfig: comando sem corpo válido é descartado', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({
+      commands: [
+        { name: 'vazio', exec: 'reply', reply: '   ' },
+        { name: 'ok', reply: 'funciona' },
+      ],
+    }),
+  )
+  assert.ok(cfg)
+  assert.equal(cfg.commands.length, 1)
+  assert.equal(cfg.commands[0].name, 'ok')
+})
+
+test('findCommand: acha por alias e ignora comando desabilitado', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({
+      commands: [
+        { name: 'ajuda', aliases: ['help'], reply: 'x' },
+        { name: 'off', reply: 'y', enabled: false },
+      ],
+    }),
+  )
+  assert.ok(cfg)
+  assert.equal(findCommand(cfg, 'help')?.name, 'ajuda')
+  assert.equal(findCommand(cfg, 'off'), undefined, 'desabilitado não dispara')
+})
+
+test('parseBotCommand: aceita hífen no nome e não trata "!!" como comando', () => {
+  assert.deepEqual(parseBotCommand('/', '/bom-dia ana'), {
+    name: 'bom-dia',
+    args: ['ana'],
+  })
+  assert.equal(parseBotCommand('!', '!!risos'), null)
+})
+
+test('urlProblem: bloqueia metadados sempre e rede privada por flag', () => {
+  assert.equal(urlProblem('https://api.exemplo.com/x', true), null)
+  assert.ok(urlProblem('http://169.254.169.254/latest/meta-data', false))
+  assert.ok(urlProblem('http://192.168.0.10/x', true))
+  assert.equal(urlProblem('http://192.168.0.10/x', false), null)
+  assert.ok(urlProblem('http://localhost:8080/x', true))
+  assert.ok(urlProblem('file:///etc/passwd', false))
+  assert.ok(urlProblem('https://', false))
+})
+
+test('events: lista fechada — evento desconhecido é descartado', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({ events: ['message_new', 'teleportou', 'member_joined'] }),
+  )
+  assert.ok(cfg)
+  assert.deepEqual(cfg.events, ['message_new', 'member_joined'])
+})
+
+test('serializeBotConfig: ida e volta preserva o que importa', () => {
+  const original = {
+    prefix: '$',
+    commands: [
+      { name: 'ping', method: 'GET', url: 'https://x/y', responsePath: 't', template: '{{value}}' },
+      { name: 'ban', admin: 'ban', permission: 'moderate' },
+    ],
+    channels: ['c1'],
+    events: ['message_new'],
+    blockPrivate: false,
+    maxRepliesPerMinute: 5,
+    webhook: { url: 'https://h/x' },
+  }
+  const parsed = parseBotConfig(JSON.stringify(original))
+  assert.ok(parsed)
+  const round = parseBotConfig(serializeBotConfig(parsed))
+  assert.ok(round)
+  assert.equal(round.prefix, '$')
+  assert.equal(round.commands.length, 2)
+  assert.equal(round.commands[0].responsePath, 't')
+  assert.equal(round.commands[1].admin, 'ban')
+  assert.equal(round.blockPrivate, false)
+  assert.equal(round.maxRepliesPerMinute, 5)
+  assert.equal(round.webhook?.url, 'https://h/x')
+})
+
+test('permAllows: cada ação administrativa exige o bit certo', () => {
+  assert.equal(permAllows(BOT_PERMS.BAN, 'ban'), true)
+  assert.equal(permAllows(0, 'ban'), false)
+  assert.equal(permAllows(BOT_PERMS.MANAGE, 'kick'), true)
+  assert.equal(permAllows(BOT_PERMS.BAN, 'kick'), false)
+  assert.equal(permAllows(0, 'ping'), true, 'leitura não exige permissão')
+  assert.equal(permAllows(BOT_PERM_ALL, 'inexistente'), false)
+})
+
+test('commandProblem: valida nome, duplicata e corpo por exec', () => {
+  const base: BotCommandDef = { name: 'a', method: 'GET', url: 'https://x/y', exec: 'http' }
+  assert.equal(commandProblem(base, []), null)
+  assert.ok(commandProblem({ ...base, name: '' }, []))
+  assert.ok(commandProblem({ ...base, name: 'b' }, [{ ...base, name: 'b', exec: 'reply', reply: 'x' }]))
+  assert.ok(commandProblem({ ...base, url: 'ftp://x' }, []))
+  assert.ok(commandProblem({ ...base, exec: 'reply', reply: '' }, []))
+  assert.ok(commandProblem({ ...base, exec: 'script', script: ' ' }, []))
+  assert.ok(commandProblem({ ...base, exec: 'admin', admin: undefined }, []))
+  assert.ok(commandProblem({ ...base, exec: 'admin', admin: 'roubar' }, []))
+})
+
+test('BOT_EVENTS só tem ids que o parser aceita', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({ events: BOT_EVENTS.map((e) => e.id) }),
+  )
+  assert.ok(cfg)
+  assert.equal(cfg.events.length, BOT_EVENTS.length, 'todo evento documentado precisa ser aceito')
 })
 // Seção 1: fim

@@ -13,7 +13,7 @@ export interface BotTemplateDef {
   config: string
 }
 
-export const BOT_CONFIG_MAX_KB = 16
+export const BOT_CONFIG_MAX_KB = 64
 
 const CLIMA_CONFIG = JSON.stringify(
   {

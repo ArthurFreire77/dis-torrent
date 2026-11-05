@@ -95,6 +95,14 @@ export interface LocalAddresses {
   port: number
 }
 
+/** Estado real do firewall do Windows (ver `src-tauri/src/firewall.rs`). */
+export interface FirewallStatus {
+  allowed: boolean
+  profile: string
+  program: string
+  reason: string | null
+}
+
 export interface NetworkStatusView {
   state: NetworkState
   online_peers: number
@@ -293,6 +301,74 @@ export interface BotView {
   ownerFp: string
   createdAt: number
   config?: string
+  /** Permissões administrativas concedidas pelo dono (bitmask). */
+  perms?: number
+}
+
+/** Linha do console de um bot. */
+export interface BotLogView {
+  id: number
+  community_id: string
+  bot_id: string
+  level: string
+  message: string
+  created_at: number
+}
+
+export interface WarnView {
+  id: string
+  community_id: string
+  fp: string
+  reason: string
+  actor_fp: string
+  created_at: number
+  active: boolean
+}
+
+/** Ponte local (`127.0.0.1`) aberta para um bot. */
+export interface BotBridgeInfo {
+  bot_id: string
+  community_id: string
+  /** URL completa e secreta: o plugin usa isso e nada mais. */
+  url: string
+  port: number
+  started_at: number
+}
+
+export interface BotBridgeStatus {
+  running: boolean
+  url: string | null
+  port: number | null
+  events_pending: number
+  requests: number
+  dropped: number
+}
+
+export interface BotFolderInfo {
+  dir: string
+  name: string
+  avatar: string
+  config: string
+  run: string | null
+  requires: string[]
+  description: string
+  files: string[]
+}
+
+export interface BotPluginLine {
+  at: number
+  level: string
+  message: string
+}
+
+export interface BotPluginStatus {
+  running: boolean
+  pid: number | null
+  command: string
+  dir: string
+  started_at: number
+  exited_code: number | null
+  lines: BotPluginLine[]
 }
 
 export interface CommunityChannelSeed { name: string; kind: 'text' | 'voice' | 'video'; category: string }
@@ -511,6 +587,12 @@ export interface DisTorrentServices {
   networkStatus(): Promise<NetworkStatusView>
   peersList(): Promise<PeerView[]>
   netDiag(): Promise<NetDiag>
+  /** Estado real do firewall do Windows (só no app nativo). */
+  firewallStatus(): Promise<FirewallStatus>
+  /** Pede ao Windows para liberar o app; devolve o estado DEPOIS da tentativa. */
+  firewallAllow(): Promise<FirewallStatus>
+  /** Abre a tela "Permitir um aplicativo" do Firewall do Windows (sem UAC). */
+  openFirewallConsole(): Promise<FirewallStatus>
   webrtcReport(info: string): Promise<void>
 
   updateCheck(): Promise<import('./updater').UpdateInfo>
@@ -585,11 +667,35 @@ export interface DisTorrentServices {
   memberKick(communityId: string, fp: string): Promise<void>
 
   botCreate(communityId: string, data: { name: string; avatar?: string; roleId?: string | null }): Promise<string>
-  botUpdate(communityId: string, botId: string, patch: Partial<Pick<BotView, 'name' | 'avatar' | 'roleId' | 'online' | 'config'>>): Promise<void>
+  botUpdate(communityId: string, botId: string, patch: Partial<Pick<BotView, 'name' | 'avatar' | 'roleId' | 'online' | 'config'>> & { perms?: number }): Promise<void>
   botDelete(communityId: string, botId: string): Promise<void>
   botsList(communityId: string): Promise<BotView[]>
   botPostMessage(communityId: string, channelId: string, botId: string, body: string): Promise<StoredMessage>
   botRegenToken(communityId: string, botId: string): Promise<string>
+  /** Execução administrativa validada pelo core. Só existe no app nativo. */
+  botAdmin?(communityId: string, botId: string, action: string, target: string, reason: string, number: number | null): Promise<string>
+  botLogAppend?(communityId: string, botId: string, level: string, message: string): Promise<void>
+  botLogs?(communityId: string, botId: string, limit?: number): Promise<BotLogView[]>
+  botLogsClear?(communityId: string, botId: string): Promise<number>
+  botVarGet?(communityId: string, botId: string, key: string): Promise<string | null>
+  botVarSet?(communityId: string, botId: string, key: string, value: string): Promise<void>
+  botVarsList?(communityId: string, botId: string): Promise<[string, string][]>
+  botConfigValidate?(config: string): Promise<Record<string, unknown>>
+  botWarningsList?(communityId: string, fp: string): Promise<WarnView[]>
+  /** Ponte local (`127.0.0.1`) do bot. Só desktop: no Android é ausente. */
+  botBridgeStart?(communityId: string, botId: string, port?: number): Promise<BotBridgeInfo>
+  botBridgeStop?(communityId: string, botId: string): Promise<boolean>
+  botBridgeStatus?(communityId: string, botId: string): Promise<BotBridgeStatus | null>
+  botBridgeList?(): Promise<BotBridgeInfo[]>
+  /** Lê uma pasta de bot (`bot.json`) sem gravar. */
+  botFolderRead?(dir: string): Promise<BotFolderInfo>
+  /** Executa o código do bot (plugin) com a ponte já aberta. */
+  botPluginStart?(communityId: string, botId: string, dir: string, run: string): Promise<BotPluginStatus>
+  botPluginStop?(communityId: string, botId: string): Promise<boolean>
+  botPluginStatus?(communityId: string, botId: string): Promise<BotPluginStatus | null>
+  botPluginList?(): Promise<BotPluginStatus[]>
+  /** Abre o seletor de pasta do SO. */
+  pickFolder?(): Promise<string | null>
   httpFetch(url: string, method: 'GET' | 'POST', headers: Record<string, string>, body: string | null, timeoutMs: number): Promise<{ status: number; body: string }>
 
   createGroup(title: string, members: string[]): Promise<Conversation>

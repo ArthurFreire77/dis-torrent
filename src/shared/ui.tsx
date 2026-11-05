@@ -1,16 +1,7 @@
-// Primitives de interface das telas de configuração.
-//
-// Estas telas eram o ponto mais fraco da UI: cada painel escrevia seu próprio
-// `inputStyle()`, seu próprio botão e seu próprio card, e o resultado eram
-// larguras diferentes (460px, 560px, "85vh"), cores divergentes e zero
-// consistência. Tudo aqui é compartilhado para que um campo em Configurações
-// e o mesmo campo em Editor de Bot sejam literalmente o mesmo componente.
-
 import type { ReactNode } from 'react'
 import { Ic, type IconName } from './icons'
 
 export const ui = {
-  // painel de fundo
   bg: '#313338',
   surface: '#2b2d31',
   surfaceHover: '#35373c',
@@ -30,7 +21,6 @@ export const ui = {
   muted: '#949ba4',
   link: '#00a8fc',
 
-  // escala de espaço — múltiplos de 4, como o resto do app
   xs: 4,
   sm: 8,
   md: 12,
@@ -43,22 +33,14 @@ export const ui = {
   radiusLg: 12,
 } as const
 
-/** Larguras de modal. Antes cada tela escolhia a sua (460/560) e nada batia. */
 export const WIDTHS = {
-  /** Formulário curto: editar canal, criar categoria. */
   sm: 520,
-  /** Painel padrão: criar bot, editar cargo. */
   md: 720,
-  /** Tela de cadastro complexa: painel de bot completo. */
   lg: 880,
-  /** Wizard de servidor, com resumo lateral. */
   wizard: 940,
 } as const
 
-/** Altura máxima de modal. `dvh` evita o bug do 100vh no mobile. */
 export const MODAL_MAX_H = 'min(88vh, 88dvh)'
-
-// ---------- tipografia ----------
 
 export const labelStyle: React.CSSProperties = {
   display: 'block',
@@ -87,8 +69,6 @@ export const errorStyle: React.CSSProperties = {
   lineHeight: 1.5,
 }
 
-// ---------- campos ----------
-
 export function TextField({
   value,
   onChange,
@@ -101,6 +81,7 @@ export function TextField({
   maxLength,
   autoFocus,
   disabled,
+  readOnly,
   ariaLabel,
 }: {
   value: string
@@ -114,6 +95,7 @@ export function TextField({
   maxLength?: number
   autoFocus?: boolean
   disabled?: boolean
+  readOnly?: boolean
   ariaLabel?: string
 }) {
   return (
@@ -127,6 +109,7 @@ export function TextField({
         maxLength={maxLength}
         autoFocus={autoFocus}
         disabled={disabled}
+        readOnly={readOnly}
         aria-label={ariaLabel ?? label}
         aria-invalid={error ? true : undefined}
         style={{
@@ -180,6 +163,7 @@ export function TextArea({
     <div style={{ marginBottom: ui.lg }}>
       {label && <label style={labelStyle}>{label}</label>}
       <textarea
+        // Seção 1: value
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -259,8 +243,6 @@ export function Select({
   )
 }
 
-// ---------- botões ----------
-
 export type ButtonVariant = 'primary' | 'success' | 'secondary' | 'ghost' | 'danger'
 
 export function Button({
@@ -286,7 +268,6 @@ export function Button({
   ariaLabel?: string
   title?: string
   type?: 'button' | 'submit'
-  /** Ajuste pontual de layout. Não substitui os tokens — use para margem/ordem. */
   style?: React.CSSProperties
 }) {
   const bg: Record<ButtonVariant, string> = {
@@ -337,7 +318,7 @@ export function Button({
   )
 }
 
-/** Botão só de ícone. SEMPRE com `label` — é o que o leitor de_screen lê. */
+// Seção 2: IconButton
 export function IconButton({
   icon,
   onClick,
@@ -349,7 +330,6 @@ export function IconButton({
 }: {
   icon: IconName
   onClick?: () => void
-  /** Nome da ação. Obrigatório: ícone sozinho não é acessível. */
   label: string
   variant?: ButtonVariant
   disabled?: boolean
@@ -386,9 +366,6 @@ export function IconButton({
   )
 }
 
-// ---------- containers ----------
-
-/** Card de conteúdo. `pad: false` quando o próprio conteúdo já tem padding. */
 export function Card({
   children,
   title,
@@ -446,7 +423,6 @@ export function Card({
   )
 }
 
-/** Aviso inline (informação, não erro). */
 export function Notice({
   children,
   tone = 'info',
@@ -487,7 +463,6 @@ export function Notice({
   )
 }
 
-/** Linha rótulo/valor, para blocos de informação (dono do servidor, id...). */
 export function DataRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ display: 'flex', gap: ui.md, padding: '7px 0', alignItems: 'baseline' }}>
@@ -499,7 +474,7 @@ export function DataRow({ label, children }: { label: string; children: ReactNod
   )
 }
 
-/** Estado vazio: ícone + texto + ação opcional. Melhor que div cinza vazia. */
+// Seção 3: EmptyState
 export function EmptyState({
   icon,
   title,
@@ -535,12 +510,6 @@ export function EmptyState({
   )
 }
 
-// ---------- diálogo ----------
-
-/**
- * Modal com fundo, clique-fora e ESC. Centraliza as três coisas que toda tela
- * precisa e que antes cada uma reimplementava (e uma delas esquecia do ESC).
- */
 export function Modal({
   open,
   onClose,
@@ -561,13 +530,7 @@ export function Modal({
   footer?: ReactNode
   width?: number
   zIndex?: number
-  /** ID do <h2> do título (p/ aria-labelledby quando o título é dinâmico). */
   labelId?: string
-  /**
-   * Nome acessível ESTÁVEL do dialog. Use quando o título visual muda
-   * (ex.: wizard por passos): leitores de tela e testes precisam de um
-   * nome que não muda a cada passo.
-   */
   dialogLabel?: string
 }) {
   if (!open) return null
@@ -605,10 +568,6 @@ export function Modal({
           width: '100%',
           maxWidth: width,
           maxHeight: MODAL_MAX_H,
-          // `hidden` no diálogo: a rolagem é do CORPO (abaixo). Rolar o diálogo
-          // inteiro fazia o conteúdo alto passar POR BAIXO do rodapé — medido no
-          // wizard de servidor: cards terminavam em y=852 com o rodapé em y=735.
-          // Com o corpo rolando, título e rodapé ficam parados e nada se sobrepõe.
           overflow: 'hidden',
           boxSizing: 'border-box',
           display: 'flex',

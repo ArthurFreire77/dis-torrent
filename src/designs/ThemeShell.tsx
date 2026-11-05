@@ -22,6 +22,7 @@ import CallTilesGrid from '../components/calls/CallTilesGrid'
 import VoiceStage from '../components/calls/VoiceStage'
 import { resolveVoiceLayout, callScreenTitle } from '../services/voiceLayout'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
+import { resolveBootPhase } from '../services/bootPhase'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
@@ -32,7 +33,7 @@ import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import { FileCard } from '../components/FileCard'
 import CreateServerWizard from '../components/CreateServerWizard'
-import BotConfigPanel from '../components/BotConfigPanel'
+import BotPanel from '../components/server/BotPanel'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import ServerSettings from '../components/server/ServerSettings'
@@ -132,6 +133,17 @@ function BootScreen(){
           ? 'ainda iniciando o nó P2P — se demorar muito, confirme se o app nativo está rodando (não só o navegador).'
           : 'abrindo sua identidade e o nó P2P…'}
       </div>
+      {slow && (
+        // Sem saída nenhuma, o boot travado era indistinguível de uma janela
+        // morta: a splash ficava girando para sempre sem oferecer ação.
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          style={{ marginTop: 4, background: 'transparent', color: '#b7c0cd', border: '1px solid #2f3742', borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
+        >
+          Recarregar
+        </button>
+      )}
     </div>
   )
 }
@@ -787,32 +799,43 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   useEffect(() => {
     services.version().then(setVersion).catch(() => {})
-    services.identityGet().then(id => {
-      if (id) {
-        setIdentity(id)
-        setPhase('app')
-      } else {
-        services.vaultStatus().then(v => {
-          if (!v.has_identity) setPhase('create')
-          else if (v.has_vault) {
-            services.vaultUnlock('').then(unlocked => {
-              setIdentity(unlocked); setPhase('app')
-            }).catch(() => setPhase('lock'))
-          } else {
-            services.identityGet().then(retry => {
-              if (retry) { setIdentity(retry); setPhase('app') }
-              else setPhase('create')
-            }).catch(() => setPhase('create'))
-          }
-        }).catch(() => setPhase('create'))
+    // Um único caminho de decisão (o mesmo do celular): antes o catch do
+    // `identityGet` levava para `app` sem identidade, e a interface abria vazia.
+    const decidir = async () => {
+      let id: Identity | null = null
+      try {
+        id = await services.identityGet()
+      } catch {
+        id = null
       }
-    }).catch(() => {
-      services.vaultStatus().then(v => {
-        if (!v.has_identity) setPhase('create')
-        else if (v.has_vault) setPhase('lock')
-        else setPhase('app')
-      }).catch(() => setPhase('create'))
-    })
+      let vault: { has_identity: boolean; has_vault: boolean } | null = null
+      try {
+        vault = await services.vaultStatus()
+      } catch {
+        vault = null
+      }
+      let unlocked: Identity | null = null
+      if (!id && vault?.has_vault) {
+        try {
+          unlocked = await services.vaultUnlock('')
+        } catch {
+          unlocked = null
+        }
+      }
+      if (!id && !unlocked && vault && !vault.has_vault) {
+        // Tem identidade mas nenhum cofre: relê (o keyring pode responder depois).
+        try {
+          id = await services.identityGet()
+        } catch {
+          id = null
+        }
+      }
+      const fase = resolveBootPhase({ identity: id, vault, unlocked })
+      const pronto = unlocked ?? id
+      if (pronto) setIdentity(pronto)
+      setPhase(fase)
+    }
+    void decidir()
     void services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {})
   }, [])
 
@@ -1778,6 +1801,9 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!friendFpInput.trim()) return
     setError(null); setFriendSuccess(null)
     try {
+      // Aceita 12 hex (fingerprint) e TAMBÉM a chave pública de 64 hex, que é o
+      // que aparece em "copiar identidade". Recusar o formato longo fazia o
+      // usuário colar certo e receber "fingerprint deve ter 12 hex chars".
       const res: any = await services.friendRequest(friendFpInput.trim())
       setFriendFpInput('')
       if (res === 'sent' || res === undefined) setFriendSuccess('Solicitação enviada! Aguardando aceitação.')
@@ -2709,7 +2735,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <button onClick={async () => { await navigator.clipboard?.writeText?.(identity?.fingerprint ?? '').catch(() => {}) }} className="fp-copy" title="Copiar seu fingerprint">{identity?.fingerprint}</button>
                   </div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 16, borderBottom: `1px solid ${borderColor}`, paddingBottom: 16 }}>
-                    <input value={friendFpInput} onChange={e => setFriendFpInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addFriend()} placeholder="Digite o fingerprint do seu amigo" style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: text, fontSize: 15, fontFamily: 'JetBrains Mono' }} />
+                    <input value={friendFpInput} onChange={e => setFriendFpInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && addFriend()} placeholder="Fingerprint (12) ou chave pública (64)" style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: text, fontSize: 15, fontFamily: 'JetBrains Mono' }} />
                     <button onClick={addFriend} className="add-btn" style={{ opacity: friendFpInput.trim() ? 1 : 0.5, cursor: friendFpInput.trim() ? 'pointer' : 'not-allowed' }}>Enviar solicitação</button>
                   </div>
                   {friendSuccess && <div style={{ marginTop: 12, background: '#1a3329', border: `1px solid ${t.green}55`, color: '#8cf5b8', fontSize: 12, padding: '8px 12px', borderRadius: 8 }}>{friendSuccess}</div>}
@@ -3350,11 +3376,11 @@ export default function ThemeShell({ designId }: {designId:string}){
         const cb = configBotId ? bots.find(b => b.id === configBotId) ?? null : null
         if (!cb || !selCommunity) return null
         return (
-          <BotConfigPanel
+          <BotPanel
             communityId={selCommunity}
             bot={cb}
             channels={mergeChannels(activeComm?.channels, extraChannels)}
-            onSaved={() => { refreshExtras(selCommunity); setConfigBotId(null) }}
+            onSaved={() => { refreshExtras(selCommunity) }}
             onClose={() => setConfigBotId(null)}
           />
         )
@@ -3470,6 +3496,20 @@ export default function ThemeShell({ designId }: {designId:string}){
             await services.botDelete(selCommunity, id)
             refreshExtras(selCommunity)
           }}
+          onImportBotFolder={
+            services.botFolderRead
+              ? async (dir) => {
+                  const info = await services.botFolderRead!(dir)
+                  const id = await services.botCreate(selCommunity, {
+                    name: info.name,
+                    avatar: info.avatar,
+                  })
+                  await services.botUpdate(selCommunity, id, { config: info.config })
+                  refreshExtras(selCommunity)
+                  return info.name
+                }
+              : undefined
+          }
           onConfigBot={setConfigBotId}
           onMakeInvite={async () =>
             services.makeInvite(selCommunity, identity?.fingerprint ?? '000000000000')

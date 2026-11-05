@@ -65,9 +65,11 @@ export interface ServerSettingsProps {
   onMemberUnassign: (fp: string, roleId: string) => Promise<void>
   onMemberKick: (fp: string) => Promise<void>
   onBotCreate: (data: { name: string; roleId: string | null }) => Promise<void>
-  onBotUpdate: (id: string, patch: { name?: string; roleId?: string | null; online?: boolean }) => Promise<void>
+  onBotUpdate: (id: string, patch: { name?: string; roleId?: string | null; online?: boolean; perms?: number }) => Promise<void>
   onBotDelete: (id: string) => Promise<void>
   onConfigBot: (botId: string) => void
+  /** Importa a pasta de um bot existente (bot.json) e devolve o nome criado. */
+  onImportBotFolder?: (dir: string) => Promise<string>
   onMakeInvite: () => Promise<string>
   onRefresh: () => void
   error?: string | null
@@ -468,6 +470,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
                 onUpdate={props.onBotUpdate}
                 onDelete={props.onBotDelete}
                 onConfigure={props.onConfigBot}
+                onImportFolder={props.onImportBotFolder}
               />
             )}
 

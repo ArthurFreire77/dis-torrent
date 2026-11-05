@@ -35,6 +35,12 @@ import type {
   EmojiView,
   ReadCursor,
   SearchHit,
+  BotLogView,
+  WarnView,
+  BotBridgeInfo,
+  BotBridgeStatus,
+  BotFolderInfo,
+  BotPluginStatus,
 } from './models'
 
 export const tauriServices: DisTorrentServices = {
@@ -60,6 +66,9 @@ export const tauriServices: DisTorrentServices = {
   peersList: () => invoke<PeerView[]>('peers_list'),
 
   netDiag: () => invoke<import('./models').NetDiag>('net_diag'),
+  firewallStatus: () => invoke<import('./models').FirewallStatus>('network_firewall_status'),
+  firewallAllow: () => invoke<import('./models').FirewallStatus>('network_firewall_allow'),
+  openFirewallConsole: () => invoke<import('./models').FirewallStatus>('network_firmware_open_firewall'),
   webrtcReport: (info: string) => invoke('webrtc_report', { info }),
 
   updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check'),
@@ -233,7 +242,7 @@ export const tauriServices: DisTorrentServices = {
     return typeof row === 'string' ? row : (row as any).id ?? String(row)
   },
   botUpdate: (cid, botId, patch) =>
-    invoke<void>('bot_update', { communityId: cid, botId: botId, name: patch.name ?? null, avatar: patch.avatar ?? null, roleId: patch.roleId === undefined ? null : (patch.roleId ?? ''), online: patch.online ?? null, config: patch.config ?? null }),
+    invoke<void>('bot_update', { communityId: cid, botId: botId, name: patch.name ?? null, avatar: patch.avatar ?? null, roleId: patch.roleId === undefined ? null : (patch.roleId ?? ''), online: patch.online ?? null, config: patch.config ?? null, perms: patch.perms ?? null }),
   botDelete: (cid, botId) =>
     invoke<void>('bot_delete', { communityId: cid, botId: botId }),
   botsList: (cid) =>
@@ -242,6 +251,34 @@ export const tauriServices: DisTorrentServices = {
     invoke<StoredMessage>('bot_post_message', { communityId: cid, channelId, botId, body }),
   botRegenToken: (cid, botId) =>
     invoke<string>('bot_regen_token', { communityId: cid, botId }),
+  botAdmin: (cid, botId, action, target, reason, number) =>
+    invoke<string>('bot_admin', { communityId: cid, botId, action, target, reason, number }),
+  botLogAppend: (cid, botId, level, message) =>
+    invoke<void>('bot_log_append', { communityId: cid, botId, level, message }),
+  botLogs: (cid, botId, limit) =>
+    invoke<BotLogView[]>('bot_logs', { communityId: cid, botId, limit: limit ?? null }),
+  botLogsClear: (cid, botId) => invoke<number>('bot_logs_clear', { communityId: cid, botId }),
+  botVarGet: (cid, botId, key) =>
+    invoke<string | null>('bot_var_get', { communityId: cid, botId, key }),
+  botVarSet: (cid, botId, key, value) =>
+    invoke<void>('bot_var_set', { communityId: cid, botId, key, value }),
+  botVarsList: (cid, botId) =>
+    invoke<[string, string][]>('bot_vars_list', { communityId: cid, botId }),
+  botConfigValidate: (config) => invoke<Record<string, unknown>>('bot_config_validate', { config }),
+  botWarningsList: (cid, fp) => invoke<WarnView[]>('bot_warnings_list', { communityId: cid, fp }),
+  botBridgeStart: (cid, botId, port) =>
+    invoke<BotBridgeInfo>('bot_bridge_start', { communityId: cid, botId, port: port ?? null }),
+  botBridgeStop: (cid, botId) => invoke<boolean>('bot_bridge_stop', { communityId: cid, botId }),
+  botBridgeStatus: (cid, botId) =>
+    invoke<BotBridgeStatus | null>('bot_bridge_status', { communityId: cid, botId }),
+  botBridgeList: () => invoke<BotBridgeInfo[]>('bot_bridge_list'),
+  botFolderRead: (dir) => invoke<BotFolderInfo>('bot_folder_read', { dir }),
+  botPluginStart: (cid, botId, dir, run) =>
+    invoke<BotPluginStatus>('bot_plugin_start', { communityId: cid, botId, dir, run }),
+  botPluginStop: (cid, botId) => invoke<boolean>('bot_plugin_stop', { communityId: cid, botId }),
+  botPluginStatus: (cid, botId) =>
+    invoke<BotPluginStatus | null>('bot_plugin_status', { communityId: cid, botId }),
+  botPluginList: () => invoke<BotPluginStatus[]>('bot_plugin_list'),
   httpFetch: async (url, method, headers, body, timeoutMs) => {
     const r = await invoke<{ status: number; body_b64: string; body_text: string | null; truncated: boolean }>('http_fetch', {
       url, method,

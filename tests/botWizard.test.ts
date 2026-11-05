@@ -31,8 +31,8 @@ test('nome de bot: duplicata ignora caixa e espaço nas pontas', () => {
   assert.equal(validateBotEntryName('Bot2', ['bot']), null)
 })
 
-test('config do bot não passa do teto do core (16 KB)', () => {
-  assert.equal(BOT_CONFIG_MAX_KB, 16)
+test('config do bot não passa do teto do core (64 KB)', () => {
+  assert.equal(BOT_CONFIG_MAX_KB, 64)
   assert.equal(fitsBotConfig('{}'), true)
   assert.equal(fitsBotConfig('a'.repeat(BOT_CONFIG_MAX_KB * 1024)), true)
   assert.equal(fitsBotConfig('a'.repeat(BOT_CONFIG_MAX_KB * 1024 + 1)), false)

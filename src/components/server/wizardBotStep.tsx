@@ -1,21 +1,13 @@
-// Passo "Bots" do assistente de criação de servidor.
-//
-// Antes só era possível criar bot DEPOIS de o servidor existir, no painel de
-// configurações — quem estava criando o servidor não tinha como saber que bots
-// existiam nem como configurar um. Aqui a pessoa cria o primeiro bot junto com
-// o servidor e já lê as regras reais (quem executa, o que não funciona).
-
 import { Ic } from '../../shared/icons'
 import { Button, Notice, Select, TextField, ui } from '../../shared/ui'
 import { layout } from './wizardStyles'
 import { StepCap, StepHead } from './wizardSteps'
-import { BOT_CONFIG_MAX_KB, BOT_TEMPLATES, type BotTemplate } from './botDocs'
+import { BOT_TEMPLATES, type BotTemplate } from './botDocs'
 import { validateBotEntryName } from './botModel'
 import { BotDocsAccordion } from './BotDocsAccordion'
 
 export interface WizardBot {
   name: string
-  /** `key` do preset de cargo (o id real só existe depois de criar o servidor). */
   roleKey: string | null
   template: BotTemplate
 }
@@ -30,7 +22,6 @@ export function StepBots({
   onRole,
 }: {
   bots: WizardBot[]
-  /** Cargos ATIVOS deste servidor (presets do passo anterior). */
   roles: { key: string; name: string }[]
   onAdd: () => void
   onRemove: (index: number) => void
@@ -54,7 +45,6 @@ export function StepBots({
         )}
 
         {bots.map((bot, i) => {
-          // Mesma regra do painel de Bots: nome único entre os bots deste passo.
           const outros = bots.filter((_, idx) => idx !== i).map((b) => b.name)
           const erro = bot.name.trim() ? validateBotEntryName(bot.name, outros) : null
           return (
@@ -131,14 +121,15 @@ export function StepBots({
         </div>
       </div>
 
-      {/* DOCUMENTAÇÃO no próprio passo: quem cria não precisa sair procurando. */}
+      {}
       <div>
         <StepCap>Como o bot funciona (leia antes de criar)</StepCap>
         <BotDocsAccordion initial="O que é um bot aqui" />
         <div style={{ marginTop: 8 }}>
           <Notice tone="info" icon="file">
-            Config (JSON) até {BOT_CONFIG_MAX_KB} KB. O token é criado junto com o bot e só
-            aparece para o dono do servidor.
+            Config (JSON) até 64 KB. O token é criado junto com o bot e só aparece para o dono do
+            servidor. Depois de criar, o painel de Bots permite adicionar comandos, eventos,
+            permissões administrativas e rodar o código da pasta do bot como plugin.
           </Notice>
         </div>
       </div>

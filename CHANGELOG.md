@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## [1.1.56-pre-alpha] - 2026-11-05
+
+### Bots de verdade: comandos, eventos, permissões e plugin local
+
+**O bot deixou de ser só um JSON de HTTP.** Cada bot agora tem um motor
+executável no app do dono: comandos com prefixo, aliases, cooldown por autor e
+rate limit por minuto; quatro tipos de comando (resposta fixa, HTTP, script e
+ação administrativa); 13 eventos (mensagem, edição, exclusão, reação, entrada e
+saída de membro, canal criado/apagado, chamada, voz). A config passou de 16 KB
+para 64 KB e continua compatível: config antiga (só `url`) é lida como `http`.
+
+**Permissões administrativas reais, validadas no core.** `bots.perms` é um
+bitmask novo (`banir`, `silenciar`, `apagar`, `gerenciar`). Bot nasce com
+**zero**. Cada ação confere o bit em `NetworkEngine::bot_admin`, o dono do
+servidor nunca é alvo e tudo vira `audit_log` com `bot:<ação>`. O bot pode
+montar o servidor: criar/renomear/excluir canal, criar/excluir cargo,
+dar/tirar cargo de membro e renomear o servidor — sempre com a permissão
+concedida e nunca além dela.
+
+**Ponte local sem token.** `127.0.0.1` abre um servidor HTTP mínimo por bot. A
+credencial é um **caminho secreto** (`/b/<32 hex>`) gerado a cada abertura: não
+existe token para colar, guardar ou vazar. A ponte recusa `Origin` de navegador,
+exige `Host` de loopback, limita a 120 req/min e fecha no exit do app. Rotas:
+`/v1/info`, `/v1/events` (long-poll), `/v1/config`, `/v1/message`, `/v1/admin`,
+`/v1/commands` (o bot troca a própria config, sem poder mudar `perms`),
+`/v1/log` e `/v1/stop`.
+
+**Código do bot como plugin.** Pasta com `bot.json` + `run` (ex.: `node bot.js`)
+roda como processo filho com ambiente limpo, argv sem shell, programa obrigado
+a ficar dentro da pasta e kill garantido ao parar. O app injeta
+`DISTORRENT_BOT_URL` já autenticada — o plugin não configura credencial.
+
+**Banco (schema 14).** Novas tabelas `bot_logs` (500 linhas por bot),
+`bot_vars` (variáveis persistentes de script) e `warnings` (avisos de
+moderação), além de `bots.perms`.
+
+**Painel novo.** Aba de comandos com editor visual (sem JSON), permissões por
+bit, eventos, ponte e console. Botões reais de criar, adicionar existente
+(pasta), gerenciar, iniciar/parar plugin, ver logs e exportar.
+
+**Docs.** `docs/bots.md` reescrito e `docs/bots-criar.md` novo, com o passo a
+passo de criação, tabela de ações, DSL, rotas da ponte e limitações honestas
+(app fechado, Android, sandbox).
+
+Testes: 16 no `bots_exec` (core), 13 em `bots.rs`, 15 na ponte/plugin (Tauri),
+32 em `botCommands`, 16 em `botRuntime`; 592 no `test:unit`.
+
 ## [1.1.55-pre-alpha] - 2026-11-04
 
 ### Servidor público, e link que abre o navegador
