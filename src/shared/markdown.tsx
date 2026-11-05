@@ -1,31 +1,45 @@
-/**
- * Renderizador de markdown no dialeto EXATO do Discord (parser próprio: a
- * sintaxe diverge do CommonMark — `__sublinhado__`, `-#`, `||spoiler||` etc).
- * Duas passagens: scanner de blocos (linha a linha) e scanner inline — é o que
- * faz `` `code` `` não quebrar o bullet e o fence abrir/fechar direito.
- * Segurança: nunca gera HTML (árvore React escapa tudo — sem XSS por
- * construção); URLs passam por `safeUrl()` (só http/https/mailto).
- */
-
 import { Fragment, useState, type ReactNode } from 'react'
-
-// ---------------------------------------------------------------------------
-// URL segura — bloqueia javascript:, data:, vbscript: e friends.
-// ---------------------------------------------------------------------------
+import { services } from '../services'
 
 const SAFE_PROTO = /^(https?:|mailto:)/i
+
+/**
+ * Abre um link fora do app. No Tauri `target="_blank"`/`window.open` não abre
+ * navegador (WebView sem abas): quem abre é o `open_external` do shell. Na web
+ * comum o `window.open` segue valendo.
+ */
+function openUrlOutside(url: string): void {
+  const raw = (url ?? '').trim()
+  if (!SAFE_PROTO.test(raw)) return
+  const w = typeof window !== 'undefined' ? (window as unknown as { __TAURI_INTERNALS__?: unknown }) : null
+  if (w?.__TAURI_INTERNALS__) {
+    void services
+      .openExternal(raw)
+      .catch(() => {
+        try {
+          window.open(raw, '_blank', 'noopener,noreferrer')
+        } catch {
+          /* sem navegador e sem aba: não há o que fazer */
+        }
+      })
+    return
+  }
+  try {
+    window.open(raw, '_blank', 'noopener,noreferrer')
+  } catch {
+    /* bloqueado pelo navegador */
+  }
+}
 
 export function safeUrl(raw: string): string | null {
   const s = raw.trim()
   if (!s) return null
-  // Strip de whitespace/control chars que o navegador ignora ao resolver o esquema.
   // eslint-disable-next-line no-control-regex
   const stripped = s.replace(/[\u0000-\u0020\s]/g, '')
   if (!SAFE_PROTO.test(stripped)) return null
   return s
 }
 
-/** Detecta URL "pelada" no meio de texto (como o Discord faz ao colar). */
 export function findBareUrl(text: string): string | null {
   const m = text.match(/(?:https?:\/\/|www\.)[^\s<>"']{2,}/i)
   if (!m) return null
@@ -33,36 +47,23 @@ export function findBareUrl(text: string): string | null {
   return raw.startsWith('www.') ? `https://${raw}` : raw
 }
 
-// ---------------------------------------------------------------------------
-// Núcleos
-// ---------------------------------------------------------------------------
-
 interface InlineCtx {
-  /** Resolve menção @fp para nome/cargo — fornecido pelo shell. */
   resolveMention: (token: string) => MentionHit | null
-  /** Resolves emoji customizado :nome: do servidor. */
   resolveEmoji: (name: string) => string | null
   onMentionClick?: (hit: MentionHit) => void
-  /** Spoilers revelados são controlados pelo chamador (persistência). */
   revealedSpoilers: Set<string>
   onRevealSpoiler: (key: string) => void
-  /** Contador único por render — evita colisão de chave entre spoilers. */
   spoilerSeq: { n: number }
 }
 
 export interface MentionHit {
   kind: 'everyone' | 'here' | 'role' | 'user'
-  /** Rótulo exibido (display name do usuário / nome do cargo). */
   label: string
-  /** Cor do cargo quando aplicável. */
   color?: string
-  /** fp do usuário, para abrir o perfil. */
   fp?: string
-  /** Índice de NOTE de para qual mensagem a menção rola. */
   noteIndex: number
 }
 
-/** Uma linha classificada pelo scanner de blocos. */
 type Block =
   | { t: 'code'; lang: string; lines: string[] }
   | { t: 'text'; lines: string[] }
@@ -82,7 +83,6 @@ function classifyBlocks(src: string): Block[] {
 
   while (i < lines.length) {
     const line = lines[i]
-    // Code fence: ``` ou ```lang (o Discord só aceita fence de 3+)
     const fence = line.match(/^\s*(`{3,})([^`]*)$/)
     if (fence) {
       flush()
@@ -92,7 +92,6 @@ function classifyBlocks(src: string): Block[] {
       i++
       while (i < lines.length) {
         const close = lines[i].match(/^\s*(`{3,})\s*$/)
-        // Só fecha com o MESMO tamanho de fence (``` dentro de ```` é conteúdo).
         if (close && close[1].length >= marker.length) { i++; break }
         body.push(lines[i])
         i++
@@ -107,11 +106,6 @@ function classifyBlocks(src: string): Block[] {
   return out
 }
 
-// ---------------------------------------------------------------------------
-// Scanner inline
-// ---------------------------------------------------------------------------
-
-/** Um token inline. `raw` = texto literal (React escapa sozinho). */
 type Token =
   | { t: 'text'; raw: string }
   | { t: 'bold'; children: Token[] }
@@ -126,10 +120,6 @@ type Token =
   | { t: 'emoji'; ch: string }
   | { t: 'br' }
 
-/**
- * Casa um par de delimitadores e devolve os tokens internos; sem fechamento
- * válido devolve null (texto literal, como o Discord faz).
- */
 function tryDelimited(
   src: string,
   start: number,
@@ -137,7 +127,6 @@ function tryDelimited(
   close: string,
   make: (children: Token[]) => Token,
 ): { node: Token; next: number } | null {
-  // Delimitador precisa ter conteúdo logo depois (Discord ignora `****`).
   if (!src.startsWith(open, start)) return null
   const contentStart = start + open.length
   if (contentStart >= src.length) return null
@@ -165,13 +154,11 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
   const flush = () => {
     if (buf) { out.push({ t: 'text', raw: buf }); buf = '' }
   }
-  // Spoilers não aninham (igual Discord) — PROFUNDIDADE 1.
   const effDepth = Math.min(depth, 1)
 
   for (let i = 0; i < src.length; ) {
     const ch = src[i]
 
-    // --- escape \  --------------------------------------------------
     if (ch === '\\' && i + 1 < src.length) {
       const n = src[i + 1]
       if ('*_~`>#-|:\\'.includes(n)) {
@@ -181,7 +168,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- código inline  ---------------------------------------------
     if (ch === '`') {
       const ticks = src.slice(i).match(/^(`+)/)?.[1] ?? '`'
       const closeIdx = src.indexOf(ticks, i + ticks.length)
@@ -196,7 +182,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- spoiler  ||...||  e  /spoiler  -------------------------------
     if (effDepth === 0) {
       if (src.startsWith('||', i)) {
         const end = src.indexOf('||', i + 2)
@@ -206,7 +191,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
           out.push({
             t: 'spoiler',
             children: parseInline(src.slice(i + 2, end), ctx, 1),
-            // `key` carregado no nó para o shell revelar.
           } as Token & { key?: string })
           ;(out[out.length - 1] as Token & { key?: string }).key = key
           i = end + 2
@@ -215,6 +199,7 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
       if (src.startsWith('/spoiler', i)) {
         const end = src.indexOf('\n', i + 8)
+        // Seção 1: stop
         const stop = end === -1 ? src.length : end
         const inner = src.slice(i + 8, stop).replace(/^\s+/, '')
         flush()
@@ -224,7 +209,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- link mascarada  [texto](url)  --------------------------------
     if (ch === '[') {
       const close = src.indexOf('](', i)
       if (close > i) {
@@ -243,14 +227,12 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- URL pelada  --------------------------------------------------
     if ((ch === 'h' && src.startsWith('http', i)) || (ch === 'w' && src.startsWith('www.', i))) {
       const m = src.slice(i).match(/^(https?:\/\/|www\.)[^\s<>()"'`]+/i)
       if (m) {
         const href = safeUrl(m[0].startsWith('www.') ? `https://${m[0]}` : m[0])
         if (href) {
           flush()
-          // Corta pontuação final que costuma estar fora do link.
           const trimmed = href.replace(/[.,;:!?]+$/, '')
           out.push({ t: 'bare', href: trimmed, label: trimmed.replace(/^https?:\/\//, '') })
           i += trimmed.length
@@ -259,7 +241,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- menções  @everyone @here @role @user  ------------------------
     if (ch === '@' && ctx) {
       const rest = src.slice(i + 1)
       if (/^(everyone|here|channel)\b/i.test(rest)) {
@@ -272,7 +253,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
           continue
         }
       }
-      // @Cargo (com espaço) ou @user (sem espaço, até whitespace/fim)
       const m = rest.match(/^([^\s@:,;!?()[\]{}<>"'`|]{1,64})/)
       if (m) {
         const hit = ctx.resolveMention(m[1])
@@ -285,7 +265,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- emoji customizado  :nome:  -----------------------------------
     if (ch === ':' && ctx) {
       const m = src.slice(i + 1).match(/^([A-Za-z0-9_]{2,32}):/)
       if (m) {
@@ -299,7 +278,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- ênfase: par (negrito/sublinhado) antes do simples (itálico) ---
     if (ch === '_' || ch === '*') {
       const isDbl = src[i + 1] === ch
       const pair = ch + ch
@@ -312,7 +290,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
             : tryDelimited(src, i, pair, pair, (c) => ({ t: 'bold', children: c }))
       }
       if (!hit) {
-        // `**x**` com o fechamento tolerado como `*x*` (markdown legado).
         hit = isDbl ? tryDelimited(src, i, pair, ch, (c) => ({ t: 'bold', children: c })) : null
       }
       if (!hit) {
@@ -326,7 +303,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- tachado  ~~...~~ ---------------------------------------------
     if (ch === '~' && src.startsWith('~~', i)) {
       const s = tryDelimited(src, i, '~~', '~~', (c) => ({ t: 'strike', children: c }))
       if (s) {
@@ -337,7 +313,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
     }
 
-    // --- emoji literal ------------------------------------------------
     if (ch === ':' || /\p{Extended_Pictographic}/u.test(ch)) {
       const m = src.slice(i).match(/^\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic}|[\u{1F3FB}-\u{1F3FF}])*/u)
       if (m && m[0].length > 0 && m[0] !== ch) {
@@ -345,9 +320,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
         out.push({ t: 'emoji', ch: m[0] })
         i += m[0].length
         continue
-      }
-      if (m && m[0].length === 1 && ch.match(/\p{Extended_Pictographic}/u)) {
-        // emoji simples — deixa no buffer como texto (renderiza igual)
       }
     }
 
@@ -365,10 +337,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
   return out
 }
 
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
 export interface MarkdownTheme {
   text: string
   heading: string
@@ -383,7 +351,6 @@ export interface MarkdownTheme {
   quoteBar: string
   font: string
   mono: string
-  /** fundo do cabeçalho do bloco de código (linguagem + copiar) */
   codeHead?: string
 }
 
@@ -404,6 +371,7 @@ export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   mono: '"JetBrains Mono", ui-monospace, monospace',
 }
 
+// Seção 2: renderTokens
 function renderTokens(
   toks: Token[],
   ctx: InlineCtx,
@@ -476,10 +444,16 @@ function renderTokens(
           <a
             key={k}
             href={tk.href}
-            target="_blank"
             rel="noopener noreferrer nofollow"
-            style={{ color: th.link, textDecoration: 'none' }}
-            onClick={(e) => e.stopPropagation()}
+            style={{ color: th.link, textDecoration: 'none', cursor: 'pointer' }}
+            onClick={(e) => {
+              // `target="_blank"` não abre nada no WebView do Tauri (não há
+              // aba). O handler global captura, mas aqui é o ponto que garante
+              // abertura do navegador mesmo se o handler não estiver montado.
+              e.stopPropagation()
+              e.preventDefault()
+              openUrlOutside(tk.href)
+            }}
           >
             {tk.label}
           </a>
@@ -489,10 +463,13 @@ function renderTokens(
           <a
             key={k}
             href={tk.href}
-            target="_blank"
             rel="noopener noreferrer nofollow"
-            style={{ color: th.link, textDecoration: 'none' }}
-            onClick={(e) => e.stopPropagation()}
+            style={{ color: th.link, textDecoration: 'none', cursor: 'pointer' }}
+            onClick={(e) => {
+              e.stopPropagation()
+              e.preventDefault()
+              openUrlOutside(tk.href)
+            }}
           >
             {tk.label}
           </a>
@@ -533,7 +510,6 @@ function renderTokens(
   })
 }
 
-/** Remove prefixo de lista/citação e devolve nível + texto. */
 function listInfo(line: string): { indent: number; marker: string; text: string } | null {
   const m = line.match(/^(\s*)(?:([-*])\s+|(\d+)\.\s+)(.*)$/)
   if (!m) return null
@@ -544,8 +520,6 @@ function listInfo(line: string): { indent: number; marker: string; text: string 
   }
 }
 
-
-/** Bloco de código: cabeçalho com linguagem e botão copiar (igual Discord). */
 function CodeBlock({ lang, code, th }: { lang: string; code: string; th: MarkdownTheme }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -567,11 +541,12 @@ function CodeBlock({ lang, code, th }: { lang: string; code: string; th: Markdow
           type="button"
           onClick={(e) => {
             e.stopPropagation()
+            // Seção 3: done
             const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1400) }
             try {
               const w = navigator.clipboard
               if (w?.writeText) { void w.writeText(code).then(done, () => {}) } else done()
-            } catch { /* clipboard bloqueado */ }
+            } catch {  }
           }}
           style={{
             background: 'transparent', border: 'none', color: th.muted,
@@ -601,13 +576,11 @@ function renderBlock(
     return <CodeBlock key={key} lang={b.lang} code={b.lines.join('\n')} th={th} />
   }
 
-  // Linha de texto: classifica heading / subtexto / citação / lista.
   const nodes: ReactNode[] = []
   let listRun: Array<{ indent: number; marker: string; text: string }> = []
 
   const flushList = (listKey: string) => {
     if (!listRun.length) return
-    // Aninha itens por nível de indent, recursivamente.
     const renderItems = (items: typeof listRun, depth: number): ReactNode => (
       <ul key={`${listKey}.u${depth}`} style={{ margin: '2px 0', paddingLeft: 20, listStyle: 'none' }}>
         {items.map((it, i) => {
@@ -635,14 +608,12 @@ function renderBlock(
   b.lines.forEach((line, li) => {
     const k = `${key}.l${li}`
 
-    // Linha vazia = respiro de 1 linha (não collapse tudo).
     if (line.trim() === '') {
       flushList(`${k}.lst`)
       nodes.push(<div key={k} style={{ height: 8 }} />)
       return
     }
 
-    // Citação: `> ` ou `>>> `
     const q = line.match(/^(\s*)(>+)\s?(.*)$/)
     if (q) {
       flushList(`${k}.lst`)
@@ -664,7 +635,6 @@ function renderBlock(
       return
     }
 
-    // Heading H1/H2/H3
     const h = line.match(/^(#{1,3})\s+(.*)$/)
     if (h) {
       flushList(`${k}.lst`)
@@ -687,7 +657,6 @@ function renderBlock(
       return
     }
 
-    // Subtexto: `-# texto`
     const sub = line.match(/^\s*-#\s?(.*)$/)
     if (sub) {
       flushList(`${k}.lst`)
@@ -699,7 +668,6 @@ function renderBlock(
       return
     }
 
-    // Lista (bulleted / numerada)
     const li2 = listInfo(line)
     if (li2) {
       listRun.push(li2 as unknown as { indent: number; marker: string; text: string })
@@ -718,11 +686,6 @@ function renderBlock(
   return <div key={key}>{nodes}</div>
 }
 
-
-// ---------------------------------------------------------------------------
-// API pública
-// ---------------------------------------------------------------------------
-
 export interface MarkdownProps {
   body: string
   theme?: Partial<MarkdownTheme>
@@ -731,7 +694,6 @@ export interface MarkdownProps {
   onMentionClick?: (hit: MentionHit) => void
   revealedSpoilers?: Set<string>
   onRevealSpoiler?: (key: string) => void
-  /** Rótulo usado no aria-label quando há spoiler escondido. */
   className?: string
   style?: React.CSSProperties
 }
@@ -746,6 +708,7 @@ export function Markdown(props: MarkdownProps) {
     onRevealSpoiler: props.onRevealSpoiler ?? (() => {}),
     spoilerSeq: { n: 0 },
   }
+  // Seção 4: blocks
   const blocks = classifyBlocks(props.body)
   return (
     <div
@@ -767,7 +730,6 @@ export function Markdown(props: MarkdownProps) {
 
 const EMPTY_SET = new Set<string>()
 
-/** Texto puro sem formatação — usado em resumos de notificação/preview. */
 export function stripMarkdown(body: string): string {
   return body
     .replace(/```[\s\S]*?```/g, ' ')
@@ -780,13 +742,8 @@ export function stripMarkdown(body: string): string {
     .trim()
 }
 
-// ---------------------------------------------------------------------------
-// Extração para o composer: menções e formatação
-// ---------------------------------------------------------------------------
-
 export interface MentionCandidate {
   kind: 'user' | 'role' | 'everyone' | 'here' | 'channel'
-  /** Texto que o composer insere. */
   insert: string
   label: string
   color?: string
@@ -797,25 +754,17 @@ export interface MentionCandidate {
 export interface SlashCommand {
   name: string
   summary: string
-  /**(args) => Promise<string> — a resposta vai como mensagem do autor. */
   run: (args: string) => Promise<string>
-  /** Escopo: 'chat' (DM/canal), 'server' (só em servidor), 'mod' (só mod). */
   scope?: 'chat' | 'server' | 'mod'
 }
 
-/** Emoji CRU que o composer entende: sequência completa (com ZWJ/modificadores). */
 const ZWJ_TAIL = '(?:\\uFE0F|\\u200D\\p{Extended_Pictographic}|[\\u{1F3FB}-\\u{1F3FF}])*'
 
-/**
- * Detecta o token de autocompletar sob o cursor.
- * Devolve `{ kind:'mention'|'slash'|'emoji', query, start, end }`.
- */
 export function activeToken(
   text: string,
   caret: number,
 ): { kind: 'mention' | 'slash' | 'emoji'; query: string; start: number; end: number } | null {
   const upto = text.slice(0, caret)
-  // @
   const at = upto.lastIndexOf('@')
   if (at >= 0) {
     const after = upto.slice(at + 1)
@@ -823,12 +772,10 @@ export function activeToken(
       return { kind: 'mention', query: after, start: at, end: caret }
     }
   }
-  // / só no início da linha (comando), como no Discord
   const slashLine = upto.split('\n').pop() ?? ''
   if (slashLine.startsWith('/') && !/\s/.test(slashLine)) {
     return { kind: 'slash', query: slashLine.slice(1), start: caret - slashLine.length, end: caret }
   }
-  // :emoji:
   const colon = upto.lastIndexOf(':')
   if (colon >= 0) {
     const after = upto.slice(colon + 1)
@@ -839,7 +786,6 @@ export function activeToken(
   return null
 }
 
-/** Aplica Surrounding/prefixo de formatação, como o Discord faz nos botões. */
 export function applyFormat(
   text: string,
   start: number,
@@ -855,7 +801,6 @@ export function applyFormat(
     const lineStart = text.lastIndexOf('\n', start - 1) + 1
     return { text: text.slice(0, lineStart) + '> ' + text.slice(lineStart), caret: end + 2 }
   }
-  // Se já está envolvido, desembrulha (toggle).
   const before = text.slice(Math.max(0, start - m.length), start)
   const after = text.slice(end, end + m.length)
   if (before === m && after === m) {

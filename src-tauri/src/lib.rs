@@ -4732,6 +4732,26 @@ fn main() {
         .plugin(downloads_plugin())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init());
+    // Rede de segurança do clique em link: o WebView NUNCA navega para fora do
+    // app (`target="_blank"` não existe aqui e um site aberto dentro da janela
+    // do app seria phishing). Qualquer navegação para hxxp(s)/mailto é
+    // redirecionada para o navegador do sistema; o esquema distorrent:// fica
+    // no app, que é quem trata convite.
+    #[cfg(desktop)]
+    {
+        builder = builder.on_navigation(|_webview, url| {
+            let s = url.as_str();
+            let baixo = s.to_ascii_lowercase();
+            if baixo.starts_with("http://") || baixo.starts_with("https://") || baixo.starts_with("mailto:") {
+                let alvo = s.to_string();
+                std::thread::spawn(move || {
+                    let _ = updater::open_external(alvo);
+                });
+                return false;
+            }
+            true
+        });
+    }
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_autostart::init(

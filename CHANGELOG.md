@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## [1.1.57-pre-alpha] - 2026-11-05
+
+### Painel de bot, fonte e clique em link
+
+**Painel do bot virou diálogo de verdade.** Ele era renderizado solto sobre a
+interface: abas cortadas no topo e Salvar boiando no meio da tela. Agora tem
+overlay, cabeçalho com identidade e estado, navegação lateral com contador por
+seção, conteúdo com rolagem própria e rodapé fixo. Em tela estreita a navegação
+vira barra horizontal. `Esc` e clique fora fecham.
+
+**Fonte deixa de cair em serif.** `fontFamily: 'Inter'` era declarado sem
+fallback em oito pontos, inclusive no container raiz do theme. Enquanto a
+webfont não chegava, o navegador usava o default do CSS (Times) e contaminava
+tudo por herança — era o "texto feio" em toda a interface. Passa a usar
+`'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif` no TSX e nas
+duas folhas de estilo.
+
+**Clique em link abre de fato.** O Markdown renderizava com
+`target="_blank"`, que no WebView do Tauri não abre navegador nenhum (não há
+aba), e nada chamava o `open_external`. Agora o link chama o shell do SO, com o
+`window.open` só como reserva. No Rust, `on_navigation` garante que http/https/
+mailto nunca navegam DENTRO da janela do app — vão sempre para o navegador do
+sistema (e um site aberto ali seria phishing).
+
+**Documentação embutida atualizada.** O `.md` descrevia o bot antigo: "não
+executa código", 16 KB, 16 comandos, só `message_new`, sem permissões. Agora
+reflete o código: 64 KB, 48 comandos, quatro tipos de execução, 13 eventos,
+DSL sem eval, tabela de ações administrativas com o bit exigido e a ponte local
+sem token.
+
 ## [1.1.56-pre-alpha] - 2026-11-05
 
 ### Bots de verdade: comandos, eventos, permissões e plugin local
