@@ -105,10 +105,14 @@ test('painel de bot não duplica canais ao abrir e salvar', async ({ page }) => 
   await expect(modal).toBeHidden({ timeout: 15000 })
 
   await dialog.getByRole('button', { name: /^Configurar BotDup$/ }).click()
-  const painel = page.getByRole('dialog', { name: /Configurar BotDup/ })
+  // O painel agora ocupa a área das configurações do servidor em vez de abrir
+  // um segundo modal: `role="region"`, não `dialog`.
+  const painel = page.getByRole('region', { name: /Configurar BotDup/ })
   await expect(painel).toBeVisible({ timeout: 10000 })
 
-  await painel.getByRole('tab', { name: /Escopos/ }).click()
+  // O escopo de canais mora na aba "Comandos" (a antiga "Escopos" foi
+  // incorporada a ela quando o seletor de tipos de canal entrou).
+  await painel.getByRole('tab', { name: /Comandos/ }).click()
   const nomes = await painel.evaluate((root: HTMLElement) => {
     const out: string[] = []
     for (const lb of root.querySelectorAll('label')) {
@@ -118,7 +122,7 @@ test('painel de bot não duplica canais ao abrir e salvar', async ({ page }) => 
     }
     return out
   })
-  expect(nomes.length, 'a aba de escopos deveria listar canais').toBeGreaterThan(0)
+  expect(nomes.length, 'a aba de canais deveria listar canais').toBeGreaterThan(0)
   const dups = nomes.filter((n, i) => nomes.indexOf(n) !== i)
   expect(dups, `canais duplicados no painel do bot: ${JSON.stringify(dups)}`).toEqual([])
 })

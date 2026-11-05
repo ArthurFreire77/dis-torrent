@@ -19,14 +19,14 @@ async function befriendLive(a: Page, b: Page) {
   const fpB = await fpOf(b);
   const fpA = await fpOf(a);
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave p/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
-  await expect(a.locator('.nav-row', { hasText: 'Bob' }).first()).toBeVisible({ timeout: 15000 });
+  await expect(a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first()).toBeVisible({ timeout: 15000 });
   return { fpA, fpB };
 }
 
@@ -57,7 +57,7 @@ test('chamada de voz mantém conversa visível no painel lateral sem crash (ou m
   await createAccount(b, 'Bob');
   const { fpA, fpB } = await befriendLive(a, b);
 
-  await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
+  await a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first().click();
 
   const hasRTC = await a.evaluate(() => typeof RTCPeerConnection !== 'undefined');
   const hasMedia = await a.evaluate(
@@ -80,7 +80,7 @@ test('chamada de voz mantém conversa visível no painel lateral sem crash (ou m
 
   const panel = a.getByTestId('call-panel');
   await expect(panel).toBeVisible({ timeout: 15000 });
-  await expect(a.getByLabel('Mensagem')).toBeVisible();
+  await expect(a.getByRole('textbox', { name: 'Mensagem' })).toBeVisible();
   const localTile = panel.locator(`[data-call-participant="${fpA}"]`);
   await expect(localTile).toBeVisible();
   const normalWidth = await panel.evaluate(el => el.getBoundingClientRect().width);
@@ -119,9 +119,9 @@ test('sem WebRTC: clique mostra diagnóstico detalhado honesto (sem crash)', asy
 
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
-  await befriendLive(a, b);
+  const { fpB } = await befriendLive(a, b);
 
-  await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
+  await a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first().click();
 
   const rtcType = await a.evaluate(() => typeof RTCPeerConnection);
   expect(rtcType).toBe('undefined');

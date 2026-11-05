@@ -1,8 +1,35 @@
 # CHANGELOG
 
-## [Não lançado]
+## [1.1.59-pre-alpha] - 2026-11-05
 
 ### Bots: escopo por tipo de canal, mais poder, e o "Conectando…" infinito
+
+**Correções desta rodada nos testes.** O `cargo test --lib` do core **não
+compilava no Windows**: a constante `PEER` (usada por `engine_com_amigo`) tinha
+`#[cfg(target_os = "linux")]` e sumia no alvo Windows. Agora os **252** testes de
+lib rodam também aqui.
+
+O E2E tinha três classes de expectativa obsoleta, todas fazendo o teste falhar
+por motivo errado:
+
+- **Placeholder de amizade**: procurava "Digite o fingerprint do seu amigo";
+  o campo hoje aceita chave pública e diz "Fingerprint (12) ou chave pública
+  (64)". Os 8 specs que compartilham o helper foram atualizados.
+- **Linha da conversa**: procurava `.nav-row` pelo *nome* ("Bob"), mas essa
+  linha é a lista de peers **online** (depende de BroadcastChannel e é instável
+  no modo navegador) e mostra `nickname || fp`. Passou a usar `.friend-row` e o
+  fingerprint, que dependem só da amizade.
+- **Limites de arquivo**: o teste mandava 8 GB quando o teto era outro; agora
+  o teto é 50 GB e 204.801 chunks. Os valores passaram a ser derivados do teto
+  real, senão o teste "passa" sem barrar nada.
+- **Painel de downloads**: clicar em "Baixar" no cartão enfileira mas **não**
+  abre o painel; quem abre é o botão "Downloads" do cabeçalho. E `b` ficava na
+  aba "Pendentes", onde a lista de amigos nem existe.
+- **"Chamando…"**: a fase `outgoing` mostra "Discando…" e vira "Chamando…" só
+  quando a sinalização chega — exigir um dos dois era corrida.
+- **Painel de bot**: o teste procurava `dialog`; o painel ocupa a área das
+  configurações do servidor (`role="region"`) desde que deixou de ser uma
+  segunda janela por cima.
 
 **O painel do bot aparecia com botões crus do navegador.** O Tauri injeta um
 `nonce` no CSP e, pela spec, nonce **anula** o `'unsafe-inline'`: toda tag

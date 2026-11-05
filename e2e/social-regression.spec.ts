@@ -10,13 +10,13 @@ async function createAccount(page: Page, name: string) {
 }
 
 async function createServer(page: Page, name: string): Promise<void> {
+  // O helper já abre o servidor; clicar no rail de novo era redundante.
   await createServerViaWizard(page, name)
-  await page.locator(`.rail-btn[title="${name}"]`).click()
   await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 })
 }
 
 async function send(page: Page, body: string): Promise<void> {
-  const ta = page.getByLabel('Mensagem')
+  const ta = page.getByRole('textbox', { name: 'Mensagem' })
   await ta.click()
   await ta.fill(body)
   await ta.press('Enter')
@@ -54,7 +54,7 @@ test('bloco de código renderiza uma única vez', async ({ page }) => {
 test('composer volta a uma linha depois de mensagem longa', async ({ page }) => {
   await seedServerWithMessage(page, 'ComposerOk')
 
-  const ta = page.getByLabel('Mensagem')
+  const ta = page.getByRole('textbox', { name: 'Mensagem' })
   const alturaAntes = (await ta.boundingBox())!.height
 
   await ta.click()
@@ -66,7 +66,7 @@ test('composer volta a uma linha depois de mensagem longa', async ({ page }) => 
   await ta.press('Enter')
   await page.waitForTimeout(400)
 
-  const alturaDepois = (await page.getByLabel('Mensagem').boundingBox())!.height
+  const alturaDepois = (await page.getByRole('textbox', { name: 'Mensagem' }).boundingBox())!.height
   expect(alturaDepois).toBeLessThan(alturaLonga)
   expect(alturaDepois).toBeLessThan(alturaAntes + 12)
 })
@@ -107,7 +107,9 @@ test('reação cria pilha com contador', async ({ page }) => {
 
   const linha = page.locator('[data-mid]').first()
   await linha.hover()
-  await linha.getByTitle('Reagir 👍').click()
+  // A barra tem "Reagir" (abre o picker); o emoji vem do próprio picker.
+  await page.getByTitle('Reagir', { exact: true }).first().click()
+  await page.getByRole('button', { name: /👍/ }).first().click()
 
   await expect(linageBtn(linha)).toBeVisible({ timeout: 8000 })
 })
@@ -168,7 +170,8 @@ test('thread criada a partir de mensagem abre o painel', async ({ page }) => {
 
   await expect(page.getByText(/thread criada por/i)).toBeVisible({ timeout: 10000 })
   const dialogo = page.getByRole('dialog').filter({ hasText: /thread criada por/i })
-  await dialogo.getByPlaceholder(/Mensar em/).fill('resposta na thread')
+  // O placeholder é `Mensagem em <nome da thread>`, não "Mensar em".
+  await dialogo.getByPlaceholder(/Mensagem em/i).fill('resposta na thread')
   await dialogo.getByRole('button', { name: 'Enviar', exact: true }).click()
   await expect(dialogo.getByText('resposta na thread')).toBeVisible({ timeout: 8000 })
 })

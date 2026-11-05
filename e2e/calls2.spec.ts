@@ -32,14 +32,14 @@ async function befriendLive(a: Page, b: Page) {
   const fpB = await fpOf(b);
   const fpA = await fpOf(a);
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave p/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
-  await expect(a.locator('.nav-row', { hasText: 'Bob' }).first()).toBeVisible({ timeout: 15000 });
+  await expect(a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first()).toBeVisible({ timeout: 15000 });
   return { fpA, fpB };
 }
 
@@ -140,9 +140,9 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
 
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
-  await befriendLive(a, b);
+  const { fpB } = await befriendLive(a, b);
 
-  await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
+  await a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first().click();
 
   const hasRTC = await a.evaluate(() => typeof RTCPeerConnection !== 'undefined');
   const hasMedia = await a.evaluate(
@@ -308,8 +308,8 @@ test('fallback modo compatibilidade: toggle ausente na UI é documentado; sem cr
 
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
-  await befriendLive(a, b);
-  await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
+  const { fpB } = await befriendLive(a, b);
+  await a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first().click();
 
   const switchCount = await a.getByRole('switch', { name: /compat/i }).count().catch(() => 0);
   const checkboxCount = await a.getByRole('checkbox', { name: /compat/i }).count().catch(() => 0);

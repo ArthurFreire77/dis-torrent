@@ -16,15 +16,20 @@ async function fpOf(page: Page): Promise<string> {
 }
 
 async function befriend(a: Page, b: Page) {
+  const fpA = await fpOf(a);
   const fpB = await fpOf(b);
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave p/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
+  // `b` estava na aba "Pendentes": sem voltar para "Todos" a lista de amigos
+  // (`.friend-row`) nem existe, e o teste de arquivo não acha o amigo.
+  await b.getByRole('button', { name: 'Todos' }).click();
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
+  return { fpA, fpB };
 }
 
 test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona', async ({ browser }) => {
@@ -33,9 +38,9 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
   const b = await ctx.newPage();
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
-  await befriend(a, b);
+  const { fpA, fpB } = await befriend(a, b);
 
-  await a.locator('.friend-row', { hasText: 'Bob' }).first().getByTitle('Conversar').click();
+  await a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first().getByTitle('Conversar').click();
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
 
   await a.locator('input[type="file"]').setInputFiles({
@@ -45,7 +50,7 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
   });
 
   await expect(a.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
-  await b.locator('.nav-row', { hasText: 'Alice' }).first().click();
+  await b.locator('.friend-row', { hasText: fpA.slice(0, 12) }).first().click();
   await expect(b.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
 
   const dlPromise = b.waitForEvent('download', { timeout: 30000 });
@@ -58,18 +63,24 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
 test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   await createAccount(page, 'Carol');
 
-  await page.evaluate(() =>
+  // Acima do limite REAL (`MAX_FILE_SIZE` = 50 GB por padrão). O teste usava
+  // 8 GB de quando o teto era outro e passava a "não barrar" nada.
+  const acimaDoTeto = 51200 * 1024 * 1024 + 1;
+  await page.evaluate((size) =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-big', name: 'big.bin',
-      size: 8 * 1024 * 1024 * 1024, chunks: 32768, hash: 'a'.repeat(32), from_fp: 'abcdef123456',
-    } }))
+      size, chunks: 200_000, hash: 'a'.repeat(32), from_fp: 'abcdef123456',
+    } })),
+    acimaDoTeto,
   );
   await expect(page.getByText(/arquivo muito grande \(limite/)).toBeVisible({ timeout: 10000 });
 
+  // Precisa violar o teto de CHUNKS (204.801) sem violar o de tamanho (50 GB).
+  // Antes usava 40.000, que passou a ser válido e o teste não barrava nada.
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-chunks', name: 'x.bin',
-      size: 1024, chunks: 40000, hash: 'b'.repeat(32), from_fp: 'abcdef123456',
+      size: 1024, chunks: 300_000, hash: 'b'.repeat(32), from_fp: 'abcdef123456',
     } }))
   );
   await expect(page.getByText(/chunks acima do limite/)).toBeVisible({ timeout: 10000 });

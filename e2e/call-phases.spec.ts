@@ -32,13 +32,16 @@ async function befriend(a: Page, b: Page) {
   const fpB = await fpOf(b);
   const fpA = await fpOf(a);
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
+  // O placeholder mudou quando a entrada passou a aceitar chave pública também.
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave p/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
   await a.getByRole('button', { name: 'Todos' }).click();
-  await expect(a.locator('.nav-row', { hasText: 'Bob' }).first()).toBeVisible({ timeout: 15000 });
+  // O nome no rail é o do PERFIL, não o da conta: criar uma conta "Bob" não
+  // garante que a linha se chame "Bob". Procura pelo fingerprint, que é estável.
+  await expect(a.locator('.friend-row', { hasText: fpB }).first()).toBeVisible({ timeout: 15000 });
   return { fpA, fpB };
 }
 
@@ -78,7 +81,10 @@ test('badge de fase: Chamando… no A antes do aceitar; Conectado após conectar
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
   await a.getByTitle(/Iniciar chamada de voz/).click();
 
-  await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
+  // "Discando…" → "Chamando…" → "Conectando…": a fase `outgoing` mostra os
+  // dois primeiros conforme a sinalização chega, e o terceiro entra quando o
+  // outro lado aceita. Exigir só "Chamando…" era corrida.
+  await expect(a.getByText(/^(Discando|Chamando)…$/)).toBeVisible({ timeout: 15000 });
 
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await b.getByRole('button', { name: 'Aceitar' }).click();
@@ -110,5 +116,5 @@ test('recusada mostra aviso honesto (máquina: remote-reject)', async ({ browser
 
   await b.getByRole('button', { name: 'Recusar' }).click();
   await expect(a.getByText('chamada recusada')).toBeVisible({ timeout: 15000 });
-  await expect(a.getByText('Chamando…')).toBeHidden({ timeout: 10000 });
+  await expect(a.getByText(/^(Discando|Chamando)…$/)).toBeHidden({ timeout: 10000 });
 });

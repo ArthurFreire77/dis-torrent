@@ -11,16 +11,18 @@ async function boot(page: Page) {
   await createServerViaWizard(page, 'Servidor Cabecalho');
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/m');
-  await expect(page.getByRole('button', { name: 'Servidores' })).toBeVisible({ timeout: 15000 });
+  await expect(page.getByRole('button', { name: 'Servidores', exact: true })).toBeVisible({ timeout: 15000 });
 }
 
 async function openConversation(page: Page) {
-  await page.getByRole('button', { name: 'Servidores' }).click();
+  await page.getByRole('button', { name: 'Servidores', exact: true }).click();
   await page.getByRole('button', { name: /Servidor Cabecalho/ }).click();
-  const canal = page.locator('.chan-row', { hasText: 'geral' }).first();
+  // O canal do mobile é um botão rotulado ("Abrir canal de texto"), não
+  // `.chan-row` (essa classe só existe no desktop).
+  const canal = page.getByRole('button', { name: /Abrir canal de texto/ }).first();
   await expect(canal).toBeVisible({ timeout: 15000 });
   await canal.click();
-  await expect(page.getByLabel('Mensagem')).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('textbox', { name: 'Mensagem' })).toBeVisible({ timeout: 10000 });
 }
 
 test.describe('cabeçalho do mobile sem poluição', () => {

@@ -16,15 +16,20 @@ async function fpOf(page: Page): Promise<string> {
 }
 
 async function befriend(a: Page, b: Page) {
+  const fpA = await fpOf(a);
   const fpB = await fpOf(b);
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave p/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
+  // `b` estava na aba "Pendentes": sem voltar para "Todos" a lista de amigos
+  // (`.friend-row`) nem existe.
+  await b.getByRole('button', { name: 'Todos' }).click();
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
+  return { fpA, fpB };
 }
 
 test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não quebra', async ({ browser }) => {
@@ -33,9 +38,9 @@ test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não q
   const b = await ctx.newPage();
   await createAccount(a, 'Alice');
   await createAccount(b, 'Bob');
-  await befriend(a, b);
+  const { fpA, fpB } = await befriend(a, b);
 
-  await a.locator('.friend-row', { hasText: 'Bob' }).first().getByTitle('Conversar').click();
+  await a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first().getByTitle('Conversar').click();
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
   await a.locator('input[type="file"]').setInputFiles({
     name: 'fila.bin',
@@ -44,9 +49,12 @@ test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não q
   });
   await expect(a.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
 
-  await b.locator('.nav-row', { hasText: 'Alice' }).first().click();
+  await b.locator('.friend-row', { hasText: fpA.slice(0, 12) }).first().click();
   await expect(b.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: /Baixar/ }).first().click();
+  // Clicar em "Baixar" no cartão enfileira mas NÃO abre o painel; quem abre é o
+  // botão "Downloads" do cabeçalho. O teste antigo assumia que abria sozinho.
+  await b.getByRole('button', { name: 'Downloads', exact: true }).first().click();
   const panel = b.getByRole('dialog', { name: 'Downloads' });
   await expect(panel).toBeVisible({ timeout: 10000 });
   await expect(panel.getByText('fila.bin')).toBeVisible({ timeout: 10000 });

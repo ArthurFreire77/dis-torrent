@@ -12996,7 +12996,9 @@ mod tests {
         assert!(!map.contains_key("fp0000"), "mais antigo sai");
     }
 
-    #[cfg(target_os = "linux")]
+    // Sem `cfg`: `engine_com_amigo` compila em todo alvo e usa esta constante.
+    // Com `#[cfg(target_os = "linux")]` o build no Windows quebrava com
+    // "cannot find value PEER" e nenhum teste de engine rodava lá.
     const PEER: &str = "peer-web";
 
     fn engine_com_amigo(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {

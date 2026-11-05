@@ -31,13 +31,13 @@ async function fpOf(page: Page): Promise<string> {
 async function befriend(a: Page, b: Page) {
   const fpB = await fpOf(b);
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
-  await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
+  await a.getByPlaceholder(/Fingerprint \(12\) ou chave p/i).fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
   await a.getByRole('button', { name: 'Todos' }).click();
-  await expect(a.locator('.nav-row', { hasText: 'Bob' }).first()).toBeVisible({ timeout: 15000 });
+  await expect(a.locator('.friend-row', { hasText: fpB.slice(0, 12) }).first()).toBeVisible({ timeout: 15000 });
 }
 
 function collectCrashSignals(page: Page, bucket: string[]) {
