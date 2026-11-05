@@ -83,6 +83,10 @@ pub struct BotRow {
     pub created_at: i64,
     #[serde(default)]
     pub config: String,
+    /// Permissões administrativas concedidas explicitamente pelo dono.
+    /// Sem isso o bot não executa `/ban`, `/kick`, etc.
+    #[serde(default)]
+    pub perms: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,6 +96,30 @@ pub struct BotPatch {
     pub role_id: Option<Option<String>>,
     pub online: Option<bool>,
     pub config: Option<String>,
+    pub perms: Option<i64>,
+}
+
+/// Uma denúncia/aviso registrado pela moderação (comando `/warn`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WarnRow {
+    pub id: String,
+    pub community_id: String,
+    pub fp: String,
+    pub reason: String,
+    pub actor_fp: String,
+    pub created_at: i64,
+    pub active: bool,
+}
+
+/// Uma linha do console de um bot. `level` é `info|warn|error`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BotLogRow {
+    pub id: i64,
+    pub community_id: String,
+    pub bot_id: String,
+    pub level: String,
+    pub message: String,
+    pub created_at: i64,
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
@@ -375,6 +403,44 @@ fn migrate(conn: &Connection) -> Result<()> {
         "INSERT INTO kv(key,value) VALUES('schema_version','13') ON CONFLICT(key) DO UPDATE SET value='13'",
         [],
     )?;
+    // Bots executáveis: permissões administrativas explícitas, console de logs,
+    // avisos e variáveis persistentes (`setvar`) de scripts.
+    if !column_exists(conn, "bots", "perms") {
+        conn.execute_batch("ALTER TABLE bots ADD COLUMN perms INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS bot_logs (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           community_id TEXT NOT NULL,
+           bot_id TEXT NOT NULL,
+           level TEXT NOT NULL DEFAULT 'info',
+           message TEXT NOT NULL,
+           created_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_bot_logs_bot ON bot_logs(community_id, bot_id, id);
+         CREATE TABLE IF NOT EXISTS bot_vars (
+           community_id TEXT NOT NULL,
+           bot_id TEXT NOT NULL,
+           key TEXT NOT NULL,
+           value TEXT NOT NULL,
+           updated_at INTEGER NOT NULL,
+           PRIMARY KEY(community_id, bot_id, key)
+         );
+         CREATE TABLE IF NOT EXISTS warnings (
+           id TEXT PRIMARY KEY,
+           community_id TEXT NOT NULL,
+           fp TEXT NOT NULL,
+           reason TEXT NOT NULL DEFAULT '',
+           actor_fp TEXT NOT NULL DEFAULT '',
+           created_at INTEGER NOT NULL,
+           active INTEGER NOT NULL DEFAULT 1
+         );
+         CREATE INDEX IF NOT EXISTS idx_warnings_target ON warnings(community_id, fp, active);",
+    )?;
+    conn.execute(
+        "INSERT INTO kv(key,value) VALUES('schema_version','14') ON CONFLICT(key) DO UPDATE SET value='14'",
+        [],
+    )?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(())
 }
@@ -430,8 +496,8 @@ fn insert_role_row(conn: &Connection, r: &RoleRow) -> Result<()> {
 
 fn insert_bot_row(conn: &Connection, b: &BotRow) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO bots(id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT OR REPLACE INTO bots(id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![
             b.id,
             b.community_id,
@@ -443,7 +509,8 @@ fn insert_bot_row(conn: &Connection, b: &BotRow) -> Result<()> {
             if b.online { 1 } else { 0 },
             b.owner_fp,
             b.created_at,
-            b.config
+            b.config,
+            b.perms
         ],
     )?;
     Ok(())
@@ -2529,7 +2596,7 @@ impl Store {
     pub fn bots_list(&self, community_id: &str) -> Result<Vec<BotRow>> {
         let conn = self.locked();
         let mut st = conn.prepare(
-            "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config
+            "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms
              FROM bots WHERE community_id=?1 ORDER BY created_at, id",
         )?;
         let rows = st
@@ -2546,6 +2613,7 @@ impl Store {
                     owner_fp: r.get(8)?,
                     created_at: r.get(9)?,
                     config: r.get(10)?,
+                    perms: r.get::<_, i64>(11).unwrap_or(0),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2594,6 +2662,9 @@ impl Store {
             }
             b.config = c.clone();
         }
+        if let Some(p) = patch.perms {
+            b.perms = p & crate::moderation::PERM_ALL;
+        }
         self.bot_upsert(&b)?;
         Ok(true)
     }
@@ -2619,6 +2690,188 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    // Seção 14: bot_logs / bot_vars / warnings
+
+    /// Grava uma linha no console do bot. Corta a mensagem e mantém só as 500
+    /// mais recentes por bot — log infinito viraria banco infinito.
+    pub fn bot_log(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        level: &str,
+        message: &str,
+    ) -> Result<()> {
+        let level = match level {
+            "warn" | "error" => level,
+            _ => "info",
+        };
+        let msg: String = message.chars().take(1000).collect();
+        let conn = self.locked();
+        conn.execute(
+            "INSERT INTO bot_logs(community_id,bot_id,level,message,created_at) VALUES(?1,?2,?3,?4,?5)",
+            params![community_id, bot_id, level, msg, crate::identity::now_ms()],
+        )?;
+        conn.execute(
+            "DELETE FROM bot_logs WHERE community_id=?1 AND bot_id=?2 AND id NOT IN
+               (SELECT id FROM bot_logs WHERE community_id=?1 AND bot_id=?2 ORDER BY id DESC LIMIT 500)",
+            params![community_id, bot_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn bot_logs(&self, community_id: &str, bot_id: &str, limit: i64) -> Result<Vec<BotLogRow>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT id,community_id,bot_id,level,message,created_at FROM bot_logs
+             WHERE community_id=?1 AND bot_id=?2 ORDER BY id DESC LIMIT ?3",
+        )?;
+        let rows = st
+            .query_map(params![community_id, bot_id, limit.clamp(1, 500)], |r| {
+                Ok(BotLogRow {
+                    id: r.get(0)?,
+                    community_id: r.get(1)?,
+                    bot_id: r.get(2)?,
+                    level: r.get(3)?,
+                    message: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn bot_logs_clear(&self, community_id: &str, bot_id: &str) -> Result<usize> {
+        Ok(self.locked().execute(
+            "DELETE FROM bot_logs WHERE community_id=?1 AND bot_id=?2",
+            params![community_id, bot_id],
+        )?)
+    }
+
+    pub fn bot_var_get(&self, community_id: &str, bot_id: &str, key: &str) -> Option<String> {
+        self.locked()
+            .query_row(
+                "SELECT value FROM bot_vars WHERE community_id=?1 AND bot_id=?2 AND key=?3",
+                params![community_id, bot_id, key],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    }
+
+    pub fn bot_vars_list(&self, community_id: &str, bot_id: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT key,value FROM bot_vars WHERE community_id=?1 AND bot_id=?2 ORDER BY key",
+        )?;
+        let rows = st
+            .query_map(params![community_id, bot_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn bot_var_set(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        let key: String = key.chars().take(64).collect();
+        let value: String = value.chars().take(2048).collect();
+        self.locked().execute(
+            "INSERT INTO bot_vars(community_id,bot_id,key,value,updated_at) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(community_id,bot_id,key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            params![community_id, bot_id, key, value, crate::identity::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn warn_add(
+        &self,
+        community_id: &str,
+        fp: &str,
+        reason: &str,
+        actor_fp: &str,
+    ) -> Result<WarnRow> {
+        let row = WarnRow {
+            id: format!(
+                "warn-{}",
+                hex::encode(
+                    &blake3::hash(
+                        format!(
+                            "{community_id}|{fp}|{}|{}",
+                            crate::identity::now_ms(),
+                            actor_fp
+                        )
+                        .as_bytes()
+                    )
+                    .as_bytes()[..8]
+                )
+            ),
+            community_id: community_id.to_string(),
+            fp: fp.to_string(),
+            reason: crate::names::sanitize_text(reason, 280),
+            actor_fp: actor_fp.to_string(),
+            created_at: crate::identity::now_ms(),
+            active: true,
+        };
+        self.locked().execute(
+            "INSERT INTO warnings(id,community_id,fp,reason,actor_fp,created_at,active)
+             VALUES(?1,?2,?3,?4,?5,?6,1)",
+            params![
+                row.id,
+                row.community_id,
+                row.fp,
+                row.reason,
+                row.actor_fp,
+                row.created_at
+            ],
+        )?;
+        Ok(row)
+    }
+
+    pub fn warnings_for(&self, community_id: &str, fp: &str) -> Result<Vec<WarnRow>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT id,community_id,fp,reason,actor_fp,created_at,active FROM warnings
+             WHERE community_id=?1 AND fp=?2 AND active=1 ORDER BY created_at DESC LIMIT 100",
+        )?;
+        let rows = st
+            .query_map(params![community_id, fp], |r| {
+                Ok(WarnRow {
+                    id: r.get(0)?,
+                    community_id: r.get(1)?,
+                    fp: r.get(2)?,
+                    reason: r.get(3)?,
+                    actor_fp: r.get(4)?,
+                    created_at: r.get(5)?,
+                    active: r.get::<_, i64>(6)? != 0,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn warnings_clear(&self, community_id: &str, fp: &str) -> Result<usize> {
+        Ok(self.locked().execute(
+            "UPDATE warnings SET active=0 WHERE community_id=?1 AND fp=?2",
+            params![community_id, fp],
+        )?)
+    }
+
+    /// Ids das N mensagens mais recentes de um canal (para `/clear`).
+    pub fn recent_message_ids(&self, conv_id: &str, limit: i64) -> Result<Vec<String>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT id FROM messages WHERE conv_id=?1 ORDER BY ts DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = st
+            .query_map(params![conv_id, limit.clamp(1, 100)], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn upsert_group_state(
@@ -2912,7 +3165,7 @@ impl Store {
             let roles = self.roles_list(&id)?;
             let bots = self.with_conn(|conn| {
                 let mut st = conn.prepare(
-                    "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config
+                    "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms
                      FROM bots WHERE community_id=?1 ORDER BY created_at",
                 )?;
                 let rows = st
@@ -3065,6 +3318,7 @@ impl Store {
                 owner_fp: r.get(8)?,
                 created_at: r.get(9)?,
                 config: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                perms: r.get::<_, i64>(11).unwrap_or(0),
             })
         }
     }

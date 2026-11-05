@@ -1,11 +1,3 @@
-//! Moderação por servidor — Storm camada de segurança.
-//!
-//! Cada servidor define `ServerRules` (nível anti-spam, palavras próprias,
-//! permissões, shadow-ban). Ações de moderação geram `AuditEntry`
-//! persistida no SQLite (tabela `audit_log`, migration v5).
-//!
-//! REGRA DE OURO: toda decisão é validada no CORE. A UI apenas reflete.
-
 use serde::{Deserialize, Serialize};
 
 use crate::antispam::SpamLevel;
@@ -16,15 +8,40 @@ pub const PERM_MUTE: i64 = 1 << 1;
 pub const PERM_DELETE: i64 = 1 << 2;
 pub const PERM_MANAGE: i64 = 1 << 3;
 
+/// Conjunto COMPLETO de permissões administrativas que um bot pode receber.
+/// Nunca inclui nada além disso: não existe "modo deus" para bot.
+pub const PERM_ALL: i64 = PERM_BAN | PERM_MUTE | PERM_DELETE | PERM_MANAGE;
+
+/// Atalhos de exibição/atribuição no painel. `manage` cobre canais/cargos,
+/// `kick` é `PERM_MANAGE`, e `slowmode`/`warn`/`lock` cabem em `PERM_MANAGE`.
+pub const PERM_BOT_LABELS: &[(i64, &str)] = &[
+    (PERM_BAN, "banir"),
+    (PERM_MUTE, "silenciar"),
+    (PERM_DELETE, "apagar mensagens"),
+    (PERM_MANAGE, "gerenciar canais/cargos"),
+];
+
+/// Cada ação administrativa exige uma permissão explícita do bot.
+pub fn perm_for_action(action: &str) -> Option<i64> {
+    Some(match action {
+        "ban" | "unban" => PERM_BAN,
+        "mute" | "unmute" | "warn" | "warnings" => PERM_MUTE,
+        "delete_msg" | "clear" => PERM_DELETE,
+        "kick" | "lock" | "unlock" | "slowmode" => PERM_MANAGE,
+        "channel_create" | "channel_delete" | "role_create" | "role_delete" => PERM_MANAGE,
+        "role_assign" | "role_unassign" | "channel_edit" | "server_edit" => PERM_MANAGE,
+        "userinfo" | "serverinfo" | "ping" => 0,
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServerRules {
     pub community_id: String,
-    pub spam_level: String, // "low" | "medium" | "high"
+    pub spam_level: String,
     pub banned_words: Vec<String>,
     pub blocked_domains: Vec<String>,
-    /// fps com poder de moderação (além do dono)
     pub moderators: Vec<String>,
-    /// shadow-ban: lista de fps que acham que postam, mas ninguém vê
     pub shadow_banned: Vec<String>,
     pub updated_at: i64,
 }
@@ -49,13 +66,12 @@ impl ServerRules {
     }
 }
 
-/// Uma ação de moderação auditável. `reason` é sanitizada (sem HTML).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuditEntry {
     pub id: String,
     pub community_id: String,
     pub actor_fp: String,
-    pub action: String, // "ban" | "unban" | "mute" | "unmute" | "delete" | "shadow_ban" | "rules"
+    pub action: String,
     pub target_fp: String,
     pub reason: String,
     pub created_at: i64,
@@ -92,11 +108,6 @@ impl AuditEntry {
     }
 }
 
-/// Quem pode moderar? Dono sempre; moderador listado; ou permissão por cargo.
-///
-/// `is_owner`: chamador é dono do servidor.
-/// `is_moderator`: está em `rules.moderators`.
-/// `role_perms`: bitmask somado dos cargos do chamador.
 pub fn can_moderate(is_owner: bool, is_moderator: bool, role_perms: i64, needed: i64) -> bool {
     if is_owner {
         return true;
@@ -119,10 +130,7 @@ pub fn can_delete(is_owner: bool, is_moderator: bool, role_perms: i64) -> bool {
     can_moderate(is_owner, is_moderator, role_perms, PERM_DELETE)
 }
 
-/// Valida texto de canal contra as regras do servidor.
-/// Retorna `None` se OK, `Some(motivo)` se bloquear.
 pub fn check_text_against_rules(body: &str, rules: &ServerRules) -> Option<String> {
-    // palavra proibida do servidor (skeleton p/ pegar leet/homoglifo)
     let skel = crate::names::skeleton(body);
     for w in &rules.banned_words {
         let ws = crate::names::skeleton(w);
@@ -130,7 +138,6 @@ pub fn check_text_against_rules(body: &str, rules: &ServerRules) -> Option<Strin
             return Some(format!("palavra bloqueada neste servidor: {w}"));
         }
     }
-    // domínios bloqueados
     match crate::antispam::check_links(body, &rules.blocked_domains) {
         crate::antispam::LinkVerdict::Malicious(d) => {
             return Some(format!("link bloqueado neste servidor: {d}"));
@@ -164,7 +171,6 @@ mod tests {
         r.banned_words = vec!["spoiler".into()];
         r.blocked_domains = vec!["evil.gg".into()];
         assert!(check_text_against_rules("que spoiler feio", &r).is_some());
-        // leet também pega
         assert!(check_text_against_rules("que sp0iler feio", &r).is_some());
         assert!(check_text_against_rules("veja https://evil.gg/a", &r).is_some());
         assert!(check_text_against_rules("bom dia a todos", &r).is_none());
@@ -185,3 +191,4 @@ mod tests {
         assert!(!r.is_shadow_banned("fpY"));
     }
 }
+// Seção 1: fim

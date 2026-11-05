@@ -317,6 +317,30 @@ pub enum EngineEvent {
         conv_id: String,
         until_ms: i64,
     },
+    /// Entrou de fato no servidor (após convite aceito ou entrada pública).
+    MemberJoined {
+        community_id: String,
+        fp: String,
+        nickname: String,
+    },
+    MemberLeft {
+        community_id: String,
+        fp: String,
+        nickname: String,
+    },
+    ChannelCreated {
+        community_id: String,
+        channel_id: String,
+        name: String,
+    },
+    ChannelDeleted {
+        community_id: String,
+        channel_id: String,
+    },
+    BotCreated {
+        community_id: String,
+        bot_id: String,
+    },
     Error {
         context: String,
     },
@@ -880,6 +904,12 @@ impl NetworkEngine {
 
     pub fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
+    }
+
+    /// Emite um evento interno. Existe para testes de integração (ponte local do
+    /// bot) conseguirem simular entradas sem abrir socket real.
+    pub fn emit_for_test(&self, ev: EngineEvent) {
+        let _ = self.events.send(ev);
     }
 
     pub fn listen_port(&self) -> u16 {
@@ -2723,6 +2753,11 @@ impl NetworkEngine {
             position,
         };
         self.store.upsert_channel(community_id, &row)?;
+        let _ = self.events.send(EngineEvent::ChannelCreated {
+            community_id: community_id.into(),
+            channel_id: row.id.clone(),
+            name: row.name.clone(),
+        });
         self.broadcast_community_state(community_id);
         Ok(row)
     }
@@ -2733,6 +2768,10 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("canal inexistente".into()));
         }
         self.store.delete_messages_by_conv(channel_id)?;
+        let _ = self.events.send(EngineEvent::ChannelDeleted {
+            community_id: community_id.into(),
+            channel_id: channel_id.into(),
+        });
         self.broadcast_community_state(community_id);
         Ok(())
     }
@@ -2983,6 +3022,11 @@ impl NetworkEngine {
         }
         self.store.remove_member(community_id, fp)?;
         self.store.member_roles_remove_all(community_id, fp)?;
+        let _ = self.events.send(EngineEvent::MemberLeft {
+            community_id: community_id.into(),
+            fp: fp.into(),
+            nickname: String::new(),
+        });
         if self.link_tx(fp).is_some() {
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
@@ -3263,8 +3307,13 @@ impl NetworkEngine {
             owner_fp: self.identity.fingerprint.clone(),
             created_at: crate::identity::now_ms(),
             config: String::new(),
+            perms: 0,
         };
         self.store.bot_upsert(&row)?;
+        let _ = self.events.send(EngineEvent::BotCreated {
+            community_id: community_id.into(),
+            bot_id: row.id.clone(),
+        });
         self.broadcast_community_state(community_id);
         Ok(row)
     }
@@ -3364,6 +3413,588 @@ impl NetworkEngine {
             .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
     }
 
+    /// Executa uma ação administrativa em nome de um bot.
+    ///
+    /// A autorização é conferida AQUI, não na UI: o bot precisa existir, estar
+    /// online e ter a permissão específica que o dono concedeu. Um bot nunca
+    /// alcança o dono do servidor nem age além do que lhe foi dado, e toda
+    /// ação vira audit log com o `bot_id` como autor.
+    pub fn bot_admin(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        action: &str,
+        target: &str,
+        reason: &str,
+        number: Option<i64>,
+    ) -> Result<String> {
+        self.require_owner(community_id)?;
+        let Some(bot) = self
+            .store
+            .bots_list(community_id)?
+            .into_iter()
+            .find(|b| b.id == bot_id)
+        else {
+            return Err(DistorrentError::Protocol("bot inexistente".into()));
+        };
+        if !bot.online {
+            return Err(DistorrentError::Protocol(
+                "bot está offline — ative-o no painel".into(),
+            ));
+        }
+        let need = crate::moderation::perm_for_action(action)
+            .ok_or_else(|| DistorrentError::Protocol(format!("ação inválida: {action}")))?;
+        if need != 0 && (bot.perms & need) == 0 {
+            return Err(DistorrentError::Protocol(format!(
+                "o bot não tem permissão para `{action}` — conceda no painel de Bots"
+            )));
+        }
+        let (_, name, owner) = self
+            .store
+            .get_community(community_id)?
+            .ok_or_else(|| DistorrentError::Protocol("comunidade inexistente".into()))?;
+        let target = target.trim();
+        let reason = crate::names::sanitize_text(reason.trim(), 280);
+        let needs_target = matches!(
+            action,
+            "ban" | "unban" | "kick" | "mute" | "unmute" | "warn" | "warnings" | "userinfo"
+        );
+        if needs_target && target.is_empty() {
+            return Err(DistorrentError::Protocol("informe o membro alvo".into()));
+        }
+        let resolved = if target.is_empty() {
+            None
+        } else {
+            self.resolve_member(community_id, target)
+        };
+        if needs_target {
+            let Some(fp) = resolved.clone() else {
+                return Err(DistorrentError::Protocol(format!(
+                    "membro `{target}` não encontrado neste servidor"
+                )));
+            };
+            if fp == owner {
+                return Err(DistorrentError::Protocol(
+                    "o dono do servidor não pode ser alvo de moderação".into(),
+                ));
+            }
+        }
+        let fp = resolved.unwrap_or_else(|| target.to_string());
+        self.store
+            .append_audit(&crate::moderation::AuditEntry::new(
+                community_id,
+                &bot.id,
+                &format!("bot:{action}"),
+                &fp,
+                &reason,
+            ))?;
+        match action {
+            "ban" => {
+                let until = number.unwrap_or(0).max(0);
+                self.store
+                    .ban_set(community_id, &fp, &reason, &bot.id, until)?;
+                self.store.remove_member(community_id, &fp).ok();
+                self.store.member_roles_remove_all(community_id, &fp)?;
+                if self.link_tx(&fp).is_some() {
+                    self.cmd_tx
+                        .send(EngineCmd::SendToPeer(
+                            fp.clone(),
+                            SecureFrame::CommunityKicked {
+                                community_id: community_id.to_string(),
+                            },
+                        ))
+                        .ok();
+                }
+                self.emit_moderation(community_id, &fp, "ban", until, &reason);
+                self.broadcast_community_state(community_id);
+                Ok(format!("{fp} foi banido do servidor"))
+            }
+            "unban" => {
+                self.store.ban_remove(community_id, &fp)?;
+                Ok(format!("{fp} não está mais banido"))
+            }
+            "kick" => {
+                if self
+                    .store
+                    .list_members(community_id)?
+                    .iter()
+                    .all(|(m, _, _)| m != &fp)
+                {
+                    return Err(DistorrentError::Protocol("membro inexistente".into()));
+                }
+                self.store.remove_member(community_id, &fp)?;
+                self.store.member_roles_remove_all(community_id, &fp)?;
+                if self.link_tx(&fp).is_some() {
+                    self.cmd_tx
+                        .send(EngineCmd::SendToPeer(
+                            fp.clone(),
+                            SecureFrame::CommunityKicked {
+                                community_id: community_id.to_string(),
+                            },
+                        ))
+                        .ok();
+                }
+                self.emit_moderation(community_id, &fp, "kick", 0, &reason);
+                self.broadcast_community_state(community_id);
+                Ok(format!("{fp} foi expulso do servidor"))
+            }
+            "mute" => {
+                let mins = number.unwrap_or(10).clamp(1, 10_080);
+                let until = crate::identity::now_ms() + mins * 60_000;
+                self.store
+                    .timeout_set(community_id, &fp, until, &reason, &bot.id)?;
+                self.emit_moderation(community_id, &fp, "mute", until, &reason);
+                Ok(format!("{fp} silenciado por {mins} min"))
+            }
+            "unmute" => {
+                self.store.timeout_clear(community_id, &fp)?;
+                self.emit_moderation(community_id, &fp, "unmute", 0, &reason);
+                Ok(format!("{fp} pode falar de novo"))
+            }
+            "warn" => {
+                self.store.warn_add(community_id, &fp, &reason, &bot.id)?;
+                let total = self.store.warnings_for(community_id, &fp)?.len();
+                Ok(format!("{fp} recebeu um aviso — total: {total}"))
+            }
+            "warnings" => {
+                let list = self.store.warnings_for(community_id, &fp)?;
+                if list.is_empty() {
+                    return Ok(format!("{fp} não tem avisos ativos"));
+                }
+                let mut out = format!("{fp}: {} aviso(s)", list.len());
+                for w in list.iter().take(5) {
+                    out.push_str(&format!(
+                        "\n• {}",
+                        if w.reason.is_empty() {
+                            "(sem motivo)"
+                        } else {
+                            &w.reason
+                        }
+                    ));
+                }
+                Ok(out)
+            }
+            "clear" => {
+                let n = number.unwrap_or(10).clamp(1, 100);
+                let Some(conv) = self.resolve_channel(community_id, target) else {
+                    return Err(DistorrentError::Protocol(
+                        "informe o canal (#nome ou id)".into(),
+                    ));
+                };
+                let ids = self.store.recent_message_ids(&conv, n)?;
+                let mut removed = 0usize;
+                for id in ids {
+                    if self.social_delete(&conv, &id).is_ok() {
+                        removed += 1;
+                    }
+                }
+                Ok(format!("{removed} mensagem(ns) apagada(s) em {conv}"))
+            }
+            "lock" | "unlock" => {
+                let Some(conv) = self.resolve_channel(community_id, target) else {
+                    return Err(DistorrentError::Protocol(
+                        "informe o canal (#nome ou id)".into(),
+                    ));
+                };
+                let slow = self.store.channel_cfg_slowmode(&conv).unwrap_or(0);
+                self.store
+                    .channel_cfg_set(&conv, slow, false, action == "lock")?;
+                Ok(if action == "lock" {
+                    format!("canal {conv} trancado")
+                } else {
+                    format!("canal {conv} destrancado")
+                })
+            }
+            "slowmode" => {
+                let Some(conv) = self.resolve_channel(community_id, target) else {
+                    return Err(DistorrentError::Protocol(
+                        "informe o canal (#nome ou id)".into(),
+                    ));
+                };
+                let secs = number.unwrap_or(0).clamp(0, 21_600);
+                self.store.channel_cfg_set(&conv, secs, false, false)?;
+                Ok(if secs == 0 {
+                    format!("slowmode desligado em {conv}")
+                } else {
+                    format!("slowmode de {secs}s em {conv}")
+                })
+            }
+            "channel_create" => {
+                let name = target;
+                if name.trim().is_empty() {
+                    return Err(DistorrentError::Protocol(
+                        "informe o nome do canal (ex.: `avisos`)".into(),
+                    ));
+                }
+                let kind = if reason.trim().is_empty() {
+                    "text"
+                } else {
+                    reason.trim()
+                };
+                let row = self.channel_create(community_id, name, "", "", kind)?;
+                Ok(format!("canal #{} criado", row.name))
+            }
+            "channel_delete" => {
+                let Some(conv) = self.resolve_channel(community_id, target) else {
+                    return Err(DistorrentError::Protocol(
+                        "informe o canal (#nome ou id)".into(),
+                    ));
+                };
+                self.channel_delete(community_id, &conv)?;
+                Ok(format!("canal {conv} excluído"))
+            }
+            "role_create" => {
+                let name = target;
+                if name.trim().is_empty() {
+                    return Err(DistorrentError::Protocol("informe o nome do cargo".into()));
+                }
+                // Cor vem em `reason` (opcional, formato #RRGGBB).
+                let color = if reason.trim().starts_with('#') {
+                    reason.trim()
+                } else {
+                    ""
+                };
+                let row = self.role_create(community_id, name, color, 0, false, true)?;
+                Ok(format!("cargo {} criado", row.name))
+            }
+            "role_delete" => {
+                let raw = target.trim();
+                if raw.is_empty() {
+                    return Err(DistorrentError::Protocol("informe o cargo".into()));
+                }
+                let role_id = self
+                    .store
+                    .roles_list(community_id)?
+                    .into_iter()
+                    .find(|r| r.id == raw || r.name.eq_ignore_ascii_case(raw))
+                    .map(|r| r.id)
+                    .ok_or_else(|| {
+                        DistorrentError::Protocol(format!("cargo `{raw}` não existe"))
+                    })?;
+                self.role_delete(community_id, &role_id)?;
+                Ok(format!("cargo {raw} excluído"))
+            }
+            "role_assign" => {
+                // `target` = cargo, `reason` = membro. Assim o mesmo comando
+                // serve para dar e tirar e o alvo é explícito.
+                let role_raw = target.trim();
+                let member_raw = reason.trim();
+                if role_raw.is_empty() || member_raw.is_empty() {
+                    return Err(DistorrentError::Protocol(
+                        "uso: /role_assign <cargo> <membro>".into(),
+                    ));
+                }
+                let role_id = self
+                    .store
+                    .roles_list(community_id)?
+                    .into_iter()
+                    .find(|r| r.id == role_raw || r.name.eq_ignore_ascii_case(role_raw))
+                    .map(|r| r.id)
+                    .ok_or_else(|| {
+                        DistorrentError::Protocol(format!("cargo `{role_raw}` não existe"))
+                    })?;
+                let Some(member) = self.resolve_member(community_id, member_raw) else {
+                    return Err(DistorrentError::Protocol("membro inexistente".into()));
+                };
+                if self
+                    .store
+                    .list_members(community_id)?
+                    .iter()
+                    .all(|(m, _, _)| m != &member)
+                {
+                    return Err(DistorrentError::Protocol("membro inexistente".into()));
+                }
+                self.member_assign_role(community_id, &member, &role_id)?;
+                Ok(format!("cargo {role_raw} dado a {member}"))
+            }
+            "role_unassign" => {
+                let role_raw = target.trim();
+                let member_raw = reason.trim();
+                if role_raw.is_empty() || member_raw.is_empty() {
+                    return Err(DistorrentError::Protocol(
+                        "uso: /role_unassign <cargo> <membro>".into(),
+                    ));
+                }
+                let role_id = self
+                    .store
+                    .roles_list(community_id)?
+                    .into_iter()
+                    .find(|r| r.id == role_raw || r.name.eq_ignore_ascii_case(role_raw))
+                    .map(|r| r.id)
+                    .ok_or_else(|| {
+                        DistorrentError::Protocol(format!("cargo `{role_raw}` não existe"))
+                    })?;
+                let Some(member) = self.resolve_member(community_id, member_raw) else {
+                    return Err(DistorrentError::Protocol("membro inexistente".into()));
+                };
+                self.member_unassign_role(community_id, &member, &role_id)?;
+                Ok(format!("cargo {role_raw} removido de {member}"))
+            }
+            "channel_edit" => {
+                // `target` = canal, `reason` = novo nome.
+                let Some(conv) = self.resolve_channel(community_id, target) else {
+                    return Err(DistorrentError::Protocol(
+                        "informe o canal (#nome ou id)".into(),
+                    ));
+                };
+                let new_name = reason.trim();
+                if new_name.is_empty() {
+                    return Err(DistorrentError::Protocol(
+                        "uso: /channel_edit <canal> <novo-nome>".into(),
+                    ));
+                }
+                self.channel_rename(community_id, &conv, new_name)?;
+                Ok(format!("canal {conv} renomeado para {new_name}"))
+            }
+            "server_edit" => {
+                if target.trim().is_empty() {
+                    return Err(DistorrentError::Protocol(
+                        "uso: /server_edit <novo-nome>".into(),
+                    ));
+                }
+                self.community_rename(community_id, target)?;
+                Ok(format!("servidor renomeado para {}", target.trim()))
+            }
+            "userinfo" => {
+                let (mfp, nick, role) = self
+                    .store
+                    .list_members(community_id)?
+                    .into_iter()
+                    .find(|(m, _, _)| m == &fp)
+                    .ok_or_else(|| DistorrentError::Protocol("membro inexistente".into()))?;
+                let role_ids = self.store.member_roles_list(community_id, &mfp)?;
+                let names: Vec<String> = self
+                    .store
+                    .roles_list(community_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|r| role_ids.iter().any(|id| id == &r.id))
+                    .map(|r| r.name)
+                    .collect();
+                let warns = self.store.warnings_for(community_id, &mfp)?.len();
+                Ok(format!(
+                    "**{nick}** (`{mfp}`)\nfunção: {role}\ncargos: {}\navisos: {warns}",
+                    if names.is_empty() {
+                        "nenhum".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                ))
+            }
+            "serverinfo" => {
+                let channels = self.store.channel_rows(community_id)?.len();
+                let members = self.store.list_members(community_id)?.len();
+                let roles = self.store.roles_list(community_id)?.len();
+                let bots = self.store.bots_list(community_id)?.len();
+                let public = self.store.community_is_public(community_id)?;
+                Ok(format!(
+                    "**{name}**\ndono: {owner}\ncanais: {channels}\nmembros: {members}\ncargos: {roles}\nbots: {bots}\nentrada: {}",
+                    if public { "pública" } else { "por convite" }
+                ))
+            }
+            "ping" => Ok("pong".to_string()),
+            other => Err(DistorrentError::Protocol(format!("ação inválida: {other}"))),
+        }
+    }
+
+    /// Resolve `fp`, `<@fp>` ou apelido para o fingerprint de um membro.
+    pub fn resolve_member(&self, community_id: &str, raw: &str) -> Option<String> {
+        let t = raw.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let t = t
+            .strip_prefix("<@")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(t);
+        if let Ok(members) = self.store.list_members(community_id) {
+            if let Some((fp, _, _)) = members.iter().find(|(fp, _, _)| fp == t) {
+                return Some(fp.clone());
+            }
+            let lower = t.to_lowercase();
+            if let Some((fp, _, _)) = members
+                .iter()
+                .find(|(_, nick, _)| nick.to_lowercase() == lower)
+            {
+                return Some(fp.clone());
+            }
+        }
+        Some(t.to_string())
+    }
+
+    /// Resolve `#nome`, id de canal ou o primeiro canal de texto quando vazio.
+    pub fn resolve_channel(&self, community_id: &str, raw: &str) -> Option<String> {
+        let t = raw.trim().trim_start_matches('#');
+        let channels = self.store.channel_rows(community_id).ok()?;
+        if t.is_empty() {
+            return channels
+                .iter()
+                .find(|c| c.kind == "text")
+                .map(|c| c.id.clone());
+        }
+        channels
+            .iter()
+            .find(|c| c.id == t || c.name.eq_ignore_ascii_case(t))
+            .map(|c| c.id.clone())
+    }
+
+    fn emit_moderation(
+        &self,
+        community_id: &str,
+        target: &str,
+        kind: &str,
+        until_ms: i64,
+        reason: &str,
+    ) {
+        let _ = self.events.send(EngineEvent::ModerationApplied {
+            community_id: community_id.into(),
+            target_fp: target.into(),
+            kind: kind.into(),
+            until_ms,
+            reason: reason.into(),
+        });
+    }
+
+    pub fn bot_logs(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        limit: i64,
+    ) -> Result<Vec<crate::storage::BotLogRow>> {
+        self.require_owner(community_id)?;
+        self.store.bot_logs(community_id, bot_id, limit)
+    }
+
+    pub fn bot_logs_clear(&self, community_id: &str, bot_id: &str) -> Result<usize> {
+        self.require_owner(community_id)?;
+        self.store.bot_logs_clear(community_id, bot_id)
+    }
+
+    /// O runtime roda na máquina do dono; log/variável exigem que o bot exista.
+    pub fn bot_log_append(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        level: &str,
+        message: &str,
+    ) -> Result<()> {
+        self.require_owner(community_id)?;
+        if self
+            .store
+            .bots_list(community_id)?
+            .iter()
+            .all(|b| b.id != bot_id)
+        {
+            return Err(DistorrentError::Protocol("bot inexistente".into()));
+        }
+        self.store.bot_log(community_id, bot_id, level, message)
+    }
+
+    pub fn bot_vars_list(&self, community_id: &str, bot_id: &str) -> Result<Vec<(String, String)>> {
+        self.require_owner(community_id)?;
+        self.store.bot_vars_list(community_id, bot_id)
+    }
+
+    pub fn bot_var_set(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        self.require_owner(community_id)?;
+        if self
+            .store
+            .bots_list(community_id)?
+            .iter()
+            .all(|b| b.id != bot_id)
+        {
+            return Err(DistorrentError::Protocol("bot inexistente".into()));
+        }
+        self.store.bot_var_set(community_id, bot_id, key, value)
+    }
+
+    /// O bot troca a **própria** config em tempo de execução (rota
+    /// `POST /v1/commands` da ponte). Regras que não podem cair:
+    ///
+    /// - a config inteira é revalidada pelo parser do core;
+    /// - `perms` **não** muda por aqui: um bot nunca se concede poder;
+    /// - o bot precisa existir e estar online, como em qualquer ação.
+    pub fn bot_replace_config(
+        &self,
+        community_id: &str,
+        bot_id: &str,
+        raw: &str,
+    ) -> Result<usize> {
+        self.require_owner(community_id)?;
+        let Some(bot) = self
+            .store
+            .bots_list(community_id)?
+            .into_iter()
+            .find(|b| b.id == bot_id)
+        else {
+            return Err(DistorrentError::Protocol("bot inexistente".into()));
+        };
+        if !bot.online {
+            return Err(DistorrentError::Protocol(
+                "bot está offline — ative-o no painel".into(),
+            ));
+        }
+        let parsed = crate::bots::parse_config(raw).map_err(DistorrentError::Protocol)?;
+        // Grava a forma NORMALIZADA: o que o parser descartou não volta.
+        let normalized = serde_json::json!({
+            "prefix": parsed.prefix,
+            "commands": parsed.commands.iter().map(|c| {
+                let mut o = serde_json::json!({
+                    "name": c.name,
+                    "method": c.method,
+                    "exec": c.exec.as_str(),
+                    "cooldownMs": c.cooldown_ms,
+                    "enabled": c.enabled,
+                });
+                if !c.aliases.is_empty() { o["aliases"] = serde_json::json!(c.aliases); }
+                if !c.description.is_empty() { o["description"] = serde_json::json!(c.description); }
+                if !c.need.as_str().is_empty() { o["permission"] = serde_json::json!(c.need.as_str()); }
+                if c.ephemeral { o["ephemeral"] = serde_json::json!(true); }
+                if c.autocomplete { o["autocomplete"] = serde_json::json!(true); }
+                if !c.url.is_empty() { o["url"] = serde_json::json!(c.url); }
+                if !c.headers.is_empty() {
+                    o["headers"] = serde_json::json!(c.headers);
+                }
+                if let Some(b) = &c.body { o["body"] = serde_json::json!(b); }
+                if let Some(p) = &c.response_path { o["responsePath"] = serde_json::json!(p); }
+                if let Some(t) = &c.template { o["template"] = serde_json::json!(t); }
+                if let Some(r) = &c.reply { o["reply"] = serde_json::json!(r); }
+                if let Some(s) = &c.script { o["script"] = serde_json::json!(s); }
+                if let Some(a) = &c.admin { o["admin"] = serde_json::json!(a); }
+                if !c.args.is_empty() {
+                    o["args"] = serde_json::json!(c.args.iter().map(|a| serde_json::json!({
+                        "name": a.name, "required": a.required, "rest": a.rest,
+                    })).collect::<Vec<_>>());
+                }
+                o
+            }).collect::<Vec<_>>(),
+            "channels": parsed.channels,
+            "events": parsed.events,
+            "blockPrivate": parsed.block_private,
+            "maxRepliesPerMinute": parsed.max_replies_per_min,
+            "webhook": parsed.webhook.map(|u| serde_json::json!({ "url": u })),
+        })
+        .to_string();
+        let n = parsed.commands.len();
+        // `perms: None` de propósito: o bot NÃO altera as próprias permissões.
+        self.store.bot_update_patch(
+            community_id,
+            bot_id,
+            &crate::storage::BotPatch {
+                config: Some(normalized),
+                ..Default::default()
+            },
+        )?;
+        self.broadcast_community_state(community_id);
+        Ok(n)
+    }
+
     pub fn disconnect_peer(&self, peer_fp: &str) {
         let link = self
             .links
@@ -3387,7 +4018,28 @@ impl NetworkEngine {
         matches!(self.store.get_friend(peer_fp).ok().flatten(), Some((_, s)) if s == "blocked")
     }
 
+    /// Normaliza um identificador de peer digitado/colado.
+    /// Aceita os dois formatos que a UI oferece para copiar: o fingerprint de 12
+    /// hex e a chave pública de 64 hex. Recusar o formato longo fazia quem
+    /// colava "certo" ver "fingerprint deve ter 12 hex chars".
+    pub fn normalize_peer_id(input: &str) -> Result<String> {
+        let v = input.trim().to_lowercase();
+        let v = v.strip_prefix("distorrent:").unwrap_or(&v).to_string();
+        if v.len() == 12 && v.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(v);
+        }
+        if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(crate::identity::fingerprint_of_pubkey_hex(&v));
+        }
+        Err(DistorrentError::Protocol(
+            "identificador inválido: use o fingerprint de 12 caracteres ou a chave pública de 64"
+                .into(),
+        ))
+    }
+
     pub fn friend_request(&self, peer_fp: &str) -> Result<FriendOutcome> {
+        let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        let peer_fp = peer_fp.as_str();
         if peer_fp == self.identity.fingerprint {
             return Err(DistorrentError::Protocol(
                 "não é possível adicionar a si mesmo".into(),
@@ -3421,6 +4073,8 @@ impl NetworkEngine {
     }
 
     pub fn friend_respond(&self, peer_fp: &str, accept: bool) -> Result<()> {
+        let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        let peer_fp = peer_fp.as_str();
         match self.store.get_friend(peer_fp).ok().flatten() {
             Some((_, status)) if status == "pending_in" => {}
             Some((_, status)) => {
@@ -5332,6 +5986,15 @@ impl NetworkEngine {
                 .ok();
         }
         self.store.leave_group_local(conv_id)?;
+        // Sair do grupo precisa marcar como dispensado como apagar "só para mim".
+        // Sem isto, o próximo GroupCreated/sync de qualquer membro recriava o
+        // grupo minutos depois — era o "saio e ele volta". O criador vai junto
+        // porque a conversa some e só ele pode me readicionar de propósito.
+        let dono = membros
+            .first()
+            .map(|(fp, _)| fp.clone())
+            .unwrap_or_default();
+        let _ = crate::group_trash::dismiss_owned(&self.store, conv_id, &dono);
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
             title: String::new(),
@@ -5381,8 +6044,13 @@ impl NetworkEngine {
         if conv.kind != "group" {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
+        let membros = self.store.list_group_members(conv_id).unwrap_or_default();
         self.store.leave_group_local(conv_id)?;
-        let _ = crate::group_trash::dismiss(&self.store, conv_id);
+        let dono = membros
+            .first()
+            .map(|(fp, _)| fp.clone())
+            .unwrap_or_default();
+        let _ = crate::group_trash::dismiss_owned(&self.store, conv_id, &dono);
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
             title: String::new(),
@@ -10023,6 +10691,11 @@ async fn handle_frame(
                 engine
                     .store
                     .upsert_member(&community_id, peer_fp, peer_nick, "member")?;
+                let _ = engine.events.send(EngineEvent::MemberJoined {
+                    community_id: community_id.clone(),
+                    fp: peer_fp.into(),
+                    nickname: peer_nick.into(),
+                });
                 let frame = engine.community_state_payload(&community_id, Some(peer_fp))?;
                 engine
                     .cmd_tx
@@ -10081,6 +10754,11 @@ async fn handle_frame(
                 .store
                 .upsert_member(&community_id, peer_fp, peer_nick, "member")?;
             engine.clear_pending_join(&community_id);
+            let _ = engine.events.send(EngineEvent::MemberJoined {
+                community_id: community_id.clone(),
+                fp: peer_fp.into(),
+                nickname: peer_nick.into(),
+            });
             let frame = engine.community_state_payload(&community_id, Some(peer_fp))?;
             engine
                 .cmd_tx
@@ -10228,6 +10906,24 @@ async fn handle_frame(
             let me_incluiu = members.iter().any(|(fp, _)| fp == eu);
             if crate::group_trash::is_dismissed(&engine.store, &conv_id) {
                 if !me_incluiu {
+                    return Ok(());
+                }
+                // Só o criador me readiciona de propósito. Sem esta checagem
+                // qualquer membro que reenviasse o roster antigo (rename,
+                // add-membro, flush de reconexão) ressuscitava o grupo que eu
+                // deixei — era o "saio e ele volta minutos depois".
+                let criador = crate::group_trash::owner_of(&engine.store, &conv_id);
+                let primeiro_do_roster = members
+                    .first()
+                    .map(|(fp, _)| fp.clone())
+                    .unwrap_or_default();
+                // Criador gravado que sumiu do roster é dado velho: cai para a
+                // convenção do resto do grupo (criador = primeiro da lista),
+                // senão eu nunca mais conseguiria voltar.
+                let dono_conhecido = criador
+                    .filter(|fp| members.iter().any(|(m, _)| m == fp))
+                    .unwrap_or_else(|| primeiro_do_roster.clone());
+                if dono_conhecido != peer_fp {
                     return Ok(());
                 }
                 let _ = crate::group_trash::restore(&engine.store, &conv_id);
@@ -12308,11 +13004,42 @@ mod tests {
     #[cfg(target_os = "linux")]
     const PEER: &str = "peer-web";
 
-    #[cfg(target_os = "linux")]
     fn engine_com_amigo(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
         let (e, d) = mk_engine(nick);
         e.store.set_friend(PEER, "Peer", "accepted").unwrap();
         (e, d)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identificador_de_amigo_aceita_fingerprint_e_chave_publica() {
+        // 12 hex = já é o fingerprint: passa como está.
+        assert_eq!(
+            NetworkEngine::normalize_peer_id("  A1B2C3D4E5F6 ").unwrap(),
+            "a1b2c3d4e5f6"
+        );
+        // 64 hex = chave pública: o fingerprint é derivado dela (é o que a tela
+        // de perfil oferece em "copiar identidade").
+        let kp = Keypair::generate();
+        let pk = kp.public_hex();
+        assert_eq!(
+            NetworkEngine::normalize_peer_id(&pk).unwrap(),
+            kp.fingerprint(),
+            "colar a chave pública tem de achar o mesmo peer"
+        );
+        // Prefixo do esquema de convite também é aceito.
+        assert_eq!(
+            NetworkEngine::normalize_peer_id(&format!("distorrent:{pk}")).unwrap(),
+            kp.fingerprint()
+        );
+        // Lixo continua recusado com mensagem que diz o que fazer.
+        let erro = NetworkEngine::normalize_peer_id("abc")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            erro.contains("12"),
+            "a recusa precisa explicar o formato: {erro}"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -12847,6 +13574,127 @@ mod tests {
             bloqueou,
             "o teto apertado precisa continuar valendo contra abuso"
         );
+    }
+
+    #[tokio::test]
+    async fn grupo_dispensado_nao_volta_com_roster_reenviado() {
+        let (e, _d) = mk_engine("grupo-nao-volta");
+        let criador = "fp-criador";
+        let outro_membro = "fp-outro";
+        let conv = e
+            .store
+            .create_group_dm(
+                &e.identity.fingerprint,
+                &[criador.to_string(), outro_membro.to_string()],
+                "Grupo que eu saí",
+            )
+            .unwrap();
+        let membros = e.store.list_group_members(&conv.id).unwrap();
+        e.store.leave_group_local(&conv.id).unwrap();
+        crate::group_trash::dismiss_owned(&e.store, &conv.id, criador).unwrap();
+
+        // Um membro comum reenvia o roster antigo — completo, comigo dentro.
+        handle_frame(
+            &e,
+            outro_membro,
+            "",
+            "Outro",
+            SecureFrame::GroupCreated {
+                conv_id: conv.id.clone(),
+                title: "Grupo que eu saí".into(),
+                members: membros.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            e.store.get_conversation(&conv.id).unwrap().is_none(),
+            "roster reenviado por quem não é criador não pode ressuscitar o grupo"
+        );
+        assert!(
+            crate::group_trash::is_dismissed(&e.store, &conv.id),
+            "o bloqueio tem de continuar valendo depois do reenvio"
+        );
+    }
+
+    #[tokio::test]
+    async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
+        let (e, _d) = mk_engine("grupo-volta");
+        let criador = "fp-criador";
+        let outro_membro = "fp-outro";
+        let conv = e
+            .store
+            .create_group_dm(
+                &e.identity.fingerprint,
+                &[criador.to_string(), outro_membro.to_string()],
+                "Grupo de volta",
+            )
+            .unwrap();
+        let membros = e.store.list_group_members(&conv.id).unwrap();
+        e.store.leave_group_local(&conv.id).unwrap();
+        crate::group_trash::dismiss_owned(&e.store, &conv.id, criador).unwrap();
+
+        // O criador reenvia o roster me incluindo de novo: readição de propósito.
+        handle_frame(
+            &e,
+            criador,
+            "",
+            "Criador",
+            SecureFrame::GroupCreated {
+                conv_id: conv.id.clone(),
+                title: "Grupo de volta".into(),
+                members: membros.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            e.store.get_conversation(&conv.id).unwrap().is_some(),
+            "o criador me adicionando de novo tem de recriar o grupo"
+        );
+        assert!(
+            !crate::group_trash::is_dismissed(&e.store, &conv.id),
+            "a readição do criador limpa o bloqueio"
+        );
+    }
+
+    #[test]
+    fn sair_do_grupo_marca_como_dispensado() {
+        let (e, _d) = mk_engine("sair-dispensa");
+        let criador = "fp-criador";
+        let eu = e.identity.fingerprint.clone();
+        let conv = e
+            .store
+            .create_group_dm(&eu, &[criador.to_string()], "Grupo para sair")
+            .unwrap();
+        // O roster é ordenado por `added_at`. Inserir os dois no mesmo
+        // milissegundo empata e a ordem fica arbitrária — se eu cair primeiro o
+        // código me trata como criador. Remove-me e readiciona depois de um
+        // intervalo para o criador ficar inequivocamente em primeiro.
+        e.store.remove_group_member(&conv.id, &eu).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        e.store.add_group_member(&conv.id, &eu, "Eu").unwrap();
+        let primeiro = e.store.list_group_members(&conv.id).unwrap();
+        assert_eq!(
+            primeiro.first().map(|(fp, _)| fp.clone()),
+            Some(criador.to_string()),
+            "cenário do teste exige o criador em primeiro"
+        );
+        let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
+
+        e.group_leave(&conv.id).unwrap();
+
+        assert!(
+            e.store.get_conversation(&conv.id).unwrap().is_none(),
+            "sair tem de remover a conversa local"
+        );
+        assert!(
+            crate::group_trash::is_dismissed(&e.store, &conv.id),
+            "sair sem marcar como dispensado deixava o grupo voltar no sync seguinte"
+        );
+        while commands.try_recv().is_ok() {}
     }
 
     #[test]

@@ -14,16 +14,20 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod background;
+mod botbridge;
+mod botplugin;
+mod firewall;
 mod sharebar;
 mod updater;
 
 use background::{
-    app_hide_to_tray, app_quit, app_show_window, autostart_ensure, autostart_get,
+    app_hide_to_tray, app_quit, app_show_window, app_ui_ready, autostart_ensure, autostart_get,
     autostart_mark_decided, autostart_set, background_prefs_get, background_prefs_set,
     background_set_connection, call_ring_start, call_ring_stop, notification_cancel,
     notification_cancel_all, notification_permission_state, notification_request_permission,
     notification_show, notify_prefs_set, window_toggle_fullscreen,
 };
+use firewall::{network_firewall_allow, network_firewall_status, network_firmware_open_firewall};
 
 fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("downloads")
@@ -87,6 +91,10 @@ struct AppState {
     unlocked: Mutex<bool>,
     cache: distorrent_core::cache::DiskLru,
     auth_limit: distorrent_core::authlimit::AuthLimiter,
+    /// Pontes locais abertas, por `community_id|bot_id`. Uma por bot.
+    bot_bridges: Mutex<std::collections::HashMap<String, Arc<botbridge::Bridge>>>,
+    /// Plugins de bot rodando como processo filho (código do usuário).
+    bot_plugins: botplugin::Plugins,
 }
 
 const AUTH_ORIGIN: &str = "desktop";
@@ -1134,6 +1142,8 @@ struct BotPatch {
     online: Option<bool>,
     #[serde(default)]
     config: Option<String>,
+    #[serde(default)]
+    perms: Option<i64>,
 }
 
 #[tauri::command]
@@ -1532,14 +1542,18 @@ fn bot_update(
     role_id: Option<String>,
     online: Option<bool>,
     config: Option<String>,
+    perms: Option<i64>,
     state: State<AppState>,
 ) -> Result<(), String> {
     // Seção 9: p
     let p = patch.unwrap_or_default();
     if let Some(c) = config.as_deref().or(p.config.as_deref()) {
-        if c.len() > 16 * 1024 {
-            return Err("config do bot muito grande (máx 16KB)".into());
+        if c.len() > 64 * 1024 {
+            return Err("config do bot muito grande (máx 64KB)".into());
         }
+        // Valida AGORA: config inválida não pode entrar no banco e quebrar o
+        // runtime depois, sem o dono saber qual campo está errado.
+        distorrent_core::bots::parse_config(c).map_err(|e| format!("config inválida: {e}"))?;
     }
     let merged = distorrent_core::storage::BotPatch {
         name: name.or(p.name),
@@ -1547,12 +1561,14 @@ fn bot_update(
         role_id: role_id.map(|r| Some(r)).or(p.role_id),
         online: online.or(p.online),
         config: config.or(p.config),
+        perms: perms.or(p.perms),
     };
     if merged.name.is_none()
         && merged.avatar.is_none()
         && merged.role_id.is_none()
         && merged.online.is_none()
         && merged.config.is_none()
+        && merged.perms.is_none()
     {
         return Err("nada para atualizar no bot".into());
     }
@@ -1604,6 +1620,292 @@ fn bot_regen_token(
     engine(&state)?
         .bot_regen_token(&community_id, &bot_id)
         .map_err(err)
+}
+
+#[tauri::command]
+fn bot_admin(
+    community_id: String,
+    bot_id: String,
+    action: String,
+    target: Option<String>,
+    reason: Option<String>,
+    number: Option<i64>,
+    state: State<AppState>,
+) -> Result<String, String> {
+    engine(&state)?
+        .bot_admin(
+            &community_id,
+            &bot_id,
+            action.trim(),
+            target.as_deref().unwrap_or(""),
+            reason.as_deref().unwrap_or(""),
+            number,
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+fn bot_logs(
+    community_id: String,
+    bot_id: String,
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::storage::BotLogRow>, String> {
+    engine(&state)?
+        .bot_logs(&community_id, &bot_id, limit.unwrap_or(120))
+        .map_err(err)
+}
+
+#[tauri::command]
+fn bot_log_append(
+    community_id: String,
+    bot_id: String,
+    level: String,
+    message: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .bot_log_append(&community_id, &bot_id, level.trim(), message.trim())
+        .map_err(err)
+}
+
+#[tauri::command]
+fn bot_logs_clear(
+    community_id: String,
+    bot_id: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    engine(&state)?
+        .bot_logs_clear(&community_id, &bot_id)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn bot_vars_list(
+    community_id: String,
+    bot_id: String,
+    state: State<AppState>,
+) -> Result<Vec<(String, String)>, String> {
+    engine(&state)?
+        .bot_vars_list(&community_id, &bot_id)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn bot_var_get(
+    community_id: String,
+    bot_id: String,
+    key: String,
+    state: State<AppState>,
+) -> Result<Option<String>, String> {
+    Ok(engine(&state)?
+        .store
+        .bot_var_get(&community_id, &bot_id, &key))
+}
+
+#[tauri::command]
+fn bot_var_set(
+    community_id: String,
+    bot_id: String,
+    key: String,
+    value: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    engine(&state)?
+        .bot_var_set(&community_id, &bot_id, &key, &value)
+        .map_err(err)
+}
+
+/// Valida/e normaliza uma config de bot sem gravar. Usado pelo editor visual e
+/// pelo importador para dar o erro exato do campo antes de salvar.
+#[tauri::command]
+fn bot_config_validate(config: String) -> Result<serde_json::Value, String> {
+    let cfg = distorrent_core::bots::parse_config(&config).map_err(|e| e.to_string())?;
+    let commands: Vec<serde_json::Value> = cfg
+        .commands
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "aliases": c.aliases,
+                "description": c.description,
+                "exec": c.exec.as_str(),
+                "permission": c.need.as_str(),
+                "cooldownMs": c.cooldown_ms,
+                "ephemeral": c.ephemeral,
+                "enabled": c.enabled,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "prefix": cfg.prefix,
+        "commands": commands,
+        "channels": cfg.channels,
+        "events": cfg.events,
+        "blockPrivate": cfg.block_private,
+        "maxRepliesPerMinute": cfg.max_replies_per_min,
+        "webhook": cfg.webhook,
+    }))
+}
+
+#[tauri::command]
+fn bot_warnings_list(
+    community_id: String,
+    fp: String,
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::storage::WarnRow>, String> {
+    engine(&state)?
+        .store
+        .warnings_for(&community_id, &fp)
+        .map_err(err)
+}
+
+// --- Ponte local do bot (`127.0.0.1`) -------------------------------------
+
+fn bridge_key(community_id: &str, bot_id: &str) -> String {
+    format!("{community_id}|{bot_id}")
+}
+
+/// Abre `http://127.0.0.1:<porta>` para UM bot falar com o servidor. Só o dono
+/// do servidor pode; a ponte herda o token do bot (não cria segredo novo) e
+/// escuta exclusivamente em loopback.
+#[tauri::command]
+fn bot_bridge_start(
+    community_id: String,
+    bot_id: String,
+    port: Option<u16>,
+    state: State<'_, AppState>,
+) -> Result<botbridge::BridgeInfo, String> {
+    let eng = engine(&state)?;
+    // O bot precisa existir, mas a ponte não usa mais o token dele: a
+    // credencial é o caminho secreto que o app gera e injeta no plugin.
+    if eng
+        .bots_list(&community_id)
+        .map_err(err)?
+        .iter()
+        .all(|b| b.id != bot_id)
+    {
+        return Err("bot inexistente".into());
+    }
+    let key = bridge_key(&community_id, &bot_id);
+    let mut map = state.bot_bridges.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = map.get(&key) {
+        return Ok(existing.info());
+    }
+    let bridge = Arc::new(botbridge::start(
+        eng,
+        community_id.clone(),
+        bot_id.clone(),
+        port.unwrap_or(0),
+    )?);
+    let info = bridge.info();
+    map.insert(key, bridge);
+    Ok(info)
+}
+
+#[tauri::command]
+fn bot_bridge_stop(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let key = bridge_key(&community_id, &bot_id);
+    let bridge = state
+        .bot_bridges
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&key);
+    match bridge {
+        Some(b) => {
+            b.stop();
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+#[tauri::command]
+fn bot_bridge_status(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<botbridge::BridgeStatus>, String> {
+    let key = bridge_key(&community_id, &bot_id);
+    Ok(state
+        .bot_bridges
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .map(|b| b.status()))
+}
+
+#[tauri::command]
+fn bot_bridge_list(state: State<'_, AppState>) -> Result<Vec<botbridge::BridgeInfo>, String> {
+    Ok(state
+        .bot_bridges
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .map(|b| b.info())
+        .collect())
+}
+
+/// Lê uma pasta de bot (`bot.json` + código) sem gravar. O painel mostra o que
+/// encontrou e o dono confirma a importação.
+#[tauri::command]
+fn bot_folder_read(dir: String) -> Result<botbridge::ImportedFolder, String> {
+    botbridge::read_bot_folder(std::path::Path::new(dir.trim()))
+}
+
+/// Inicia o CÓDIGO do bot (plugin) apontando para a ponte local já aberta.
+#[tauri::command]
+fn bot_plugin_start(
+    community_id: String,
+    bot_id: String,
+    dir: String,
+    run: String,
+    state: State<'_, AppState>,
+) -> Result<botplugin::PluginStatus, String> {
+    let key = bridge_key(&community_id, &bot_id);
+    let info = {
+        let map = state.bot_bridges.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&key)
+            .map(|b| b.info())
+            .ok_or_else(|| "abra a ponte local do bot antes de iniciar o plugin".to_string())?
+    };
+    state
+        .bot_plugins
+        .start(&key, dir.trim(), run.trim(), &info.url)
+}
+
+#[tauri::command]
+fn bot_plugin_stop(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let key = bridge_key(&community_id, &bot_id);
+    Ok(state.bot_plugins.stop(&key))
+}
+
+#[tauri::command]
+fn bot_plugin_status(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<botplugin::PluginStatus>, String> {
+    let key = bridge_key(&community_id, &bot_id);
+    Ok(state.bot_plugins.status(&key))
+}
+
+#[tauri::command]
+fn bot_plugin_list(state: State<'_, AppState>) -> Result<Vec<botplugin::PluginStatus>, String> {
+    Ok(state
+        .bot_plugins
+        .list()
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect())
 }
 
 #[tauri::command]
@@ -1686,11 +1988,9 @@ fn friend_request(
     peer_fp: String,
     state: State<AppState>,
 ) -> Result<distorrent_core::net::engine::FriendOutcome, String> {
-    let fp = peer_fp.trim().to_lowercase();
-    if !fp.chars().all(|c| c.is_ascii_hexdigit()) || fp.len() != 12 {
-        return Err("fingerprint deve ter 12 hex chars".into());
-    }
-    let outcome = engine(&state)?.friend_request(&fp).map_err(err)?;
+    // Aceita fingerprint (12 hex) ou a chave pública completa (64 hex); o core
+    // normaliza e devolve erro honesto quando não é nenhum dos dois.
+    let outcome = engine(&state)?.friend_request(&peer_fp).map_err(err)?;
     Ok(outcome)
 }
 
@@ -4610,6 +4910,24 @@ fn main() {
             bots_list,
             bot_post_message,
             bot_regen_token,
+            bot_admin,
+            bot_logs,
+            bot_log_append,
+            bot_logs_clear,
+            bot_vars_list,
+            bot_var_get,
+            bot_var_set,
+            bot_config_validate,
+            bot_warnings_list,
+            bot_bridge_start,
+            bot_bridge_stop,
+            bot_bridge_status,
+            bot_bridge_list,
+            bot_folder_read,
+            bot_plugin_start,
+            bot_plugin_stop,
+            bot_plugin_status,
+            bot_plugin_list,
             http_fetch,
             voice_join,
             voice_leave,
@@ -4685,9 +5003,13 @@ fn main() {
             notify_prefs_set,
             app_show_window,
             app_hide_to_tray,
+            app_ui_ready,
             app_quit,
             window_toggle_fullscreen,
             background_set_connection,
+            network_firewall_status,
+            network_firewall_allow,
+            network_firmware_open_firewall,
             call_ring_start,
             call_ring_stop,
         ])
@@ -4738,9 +5060,26 @@ fn main() {
                 unlocked: Mutex::new(false),
                 cache,
                 auth_limit: distorrent_core::authlimit::AuthLimiter::new(),
+                bot_bridges: Mutex::new(std::collections::HashMap::new()),
+                bot_plugins: botplugin::Plugins::new(),
             });
             app.manage(background::Background::new());
             background::init(app.handle());
+            // Sem regra de firewall o Windows descarta o tráfego de ENTRADA: dois
+            // PCs na mesma rede não se acham. Tenta liberar no primeiro boot;
+            // se o Windows negar (sem admin), o diagnóstico mostra e oferece o
+            // botão. Roda fora da thread de UI para não atrasar o boot.
+            #[cfg(target_os = "windows")]
+            std::thread::spawn(|| {
+                let s = firewall::network_firewall_allow();
+                if !s.allowed {
+                    tracing::warn!(
+                        reason = ?s.reason,
+                        profile = %s.profile,
+                        "firewall do Windows não liberado: o app vai receber conexões de entrada só se a regra existir"
+                    );
+                }
+            });
             {
                 let warm = dir.join("distorrent.db");
                 std::thread::spawn(move || {
@@ -4757,8 +5096,26 @@ fn main() {
             enable_webrtc(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("erro ao rodar distorrent");
+        .build(tauri::generate_context!())
+        .expect("erro ao montar distorrent")
+        .run(|app, event| {
+            // Fechar o app fecha as pontes: socket de bot não pode ficar órfão.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.bot_plugins.stop_all();
+                    let bridges: Vec<Arc<botbridge::Bridge>> = state
+                        .bot_bridges
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .drain()
+                        .map(|(_, b)| b)
+                        .collect();
+                    for b in bridges {
+                        b.stop();
+                    }
+                }
+            }
+        });
 }
 
 // Seção 28: cfg

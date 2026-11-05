@@ -1,6 +1,6 @@
 [package]
 name = "distorent-cli"
-version = "1.1.55-pre-alpha"
+version = "1.1.56-pre-alpha"
 description = "DisTorrent CLI — ferramentas de linha de comando para o ecossistema DisTorrent"
 authors = ["DisTorrent"]
 license = "MIT"
@@ -40,6 +40,9 @@ tauri-plugin-autostart = "2"
 # `deep-link` faz a 2ª instância entregar os argumentos à 1ª pelo plugin de
 # deep-link, então o convite abre na janela existente.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Ponte local do bot (`127.0.0.1`). Servidor HTTP mínimo e bloqueante: o bot
+# fala com o app por aqui, e só por loopback — sem hyper/tokio extra na árvore.
+tiny_http = "0.12"
 
 # Esconder a barra "tauri.localhost está compartilhando sua tela" no Windows:
 # é uma janela do Chromium, sem API de controle (WebView2Feedback#2442).
