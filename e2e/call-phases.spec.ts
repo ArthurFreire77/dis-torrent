@@ -1,10 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// v6 — fases da chamada (CallPhaseBadge): a máquina de estados do callManager
-// (callPhases.ts) aparece no overlay. Com fake device o WebRTC conecta de
-// verdade entre duas abas (padrão calls2.spec.ts), então as fases transitam
-// outgoing → connecting → connected de forma observável.
-
 test.use({
   browserName: 'chromium',
   launchOptions: {
@@ -59,7 +54,6 @@ async function useLocalHostIce(pages: Page[]) {
     const Native = window.RTCPeerConnection;
     window.RTCPeerConnection = new Proxy(Native, {
       construct(target, args) {
-        // Duas abas locais não devem depender do hairpin NAT/STUN da máquina.
         const config = args[0] && typeof args[0] === 'object'
           ? { ...args[0], iceServers: [] }
           : { iceServers: [] };
@@ -80,15 +74,12 @@ test('badge de fase: Chamando… no A antes do aceitar; Conectado após conectar
   await createAccount(b, 'Bob');
   await befriend(a, b);
 
-  // A liga para B
   await a.locator('.friend-row', { hasText: 'Bob' }).first().getByTitle('Conversar').click();
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
   await a.getByTitle(/Iniciar chamada de voz/).click();
 
-  // fase outgoing: badge "Chamando…" no overlay do A
   await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
 
-  // B aceita → overlay conecta → badge vira "Conectado • mm:ss"
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await b.getByRole('button', { name: 'Aceitar' }).click();
   await Promise.all([
@@ -96,11 +87,9 @@ test('badge de fase: Chamando… no A antes do aceitar; Conectado após conectar
     expect(b.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 }),
   ]);
 
-  // hangup limpa overlay (fase terminal 'ended' é interna; UI some)
   await a.getByRole('button', { name: 'Sair' }).first().click();
   await expect(a.getByText(/^Conectado • /)).toBeHidden({ timeout: 10000 });
 
-  // nenhum crash de página durante o ciclo inteiro
   const joined = errsA.join('\n');
   expect(joined).not.toContain('ReferenceError');
   expect(joined).not.toContain("Can't find variable");
@@ -119,12 +108,7 @@ test('recusada mostra aviso honesto (máquina: remote-reject)', async ({ browser
   await a.getByTitle(/Iniciar chamada de voz/).click();
   await expect(b.getByRole('button', { name: 'Recusar' })).toBeVisible({ timeout: 20000 });
 
-  // B recusa → A recebe o toast "chamada recusada" (onCallNotice) e overlay fecha
   await b.getByRole('button', { name: 'Recusar' }).click();
   await expect(a.getByText('chamada recusada')).toBeVisible({ timeout: 15000 });
   await expect(a.getByText('Chamando…')).toBeHidden({ timeout: 10000 });
 });
-
-// Nota: reconectar após derrubar a rota real não é coberto por este E2E de duas
-// abas; a transição reconnecting é coberta pelos testes unitários da máquina e
-// pelo watchdog do callManager. Não marcar o arquivo todo como skipped por isso.

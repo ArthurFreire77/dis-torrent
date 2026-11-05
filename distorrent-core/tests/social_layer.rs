@@ -1,10 +1,3 @@
-//! Testes de integração da camada social (paridade Discord).
-//!
-//! A camada social foi escrita sem NENHUM teste de integração: autorização,
-//! difusão e persistência rodavam sem rede de segurança. Esta suíte cobre, além
-//! do caminho feliz, os ataques que a autorização precisa barrar — o bug mais
-//! caro desta camada não é a funcionalidade ausente, é a permissiva demais.
-
 use std::sync::Arc;
 
 use distorrent_core::identity::{now_ms, Keypair};
@@ -14,9 +7,6 @@ use distorrent_core::social::{EmojiRow, EventRow, SearchQuery, ThreadRow};
 use distorrent_core::storage::Store;
 use tempfile::TempDir;
 
-/// Motor sem sockets: o que se testa é LÓGICA, não rede. Abrir socket real
-/// custaria segundos por teste e não provaria nada sobre autorização, que é
-/// toda local.
 fn engine(nick: &str) -> (Arc<NetworkEngine>, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open_in_memory().unwrap());
@@ -33,7 +23,6 @@ fn put(e: &NetworkEngine, m: &MessageEnvelope) {
     e.store_ref().insert_message(m, "out", "ok").unwrap();
 }
 
-/// Comunidade com 1 canal e 1 membro comum além do dono.
 fn srv(e: &NetworkEngine, id: &str, channel: &str) -> String {
     let owner = e.identity().fingerprint.clone();
     e.store_ref()
@@ -58,10 +47,6 @@ fn q(text: &str) -> SearchQuery {
         limit: 50,
     }
 }
-
-// =====================================================================
-// Reações
-// =====================================================================
 
 #[test]
 fn reacao_alterna_e_marca_como_minha() {
@@ -92,7 +77,6 @@ fn reacao_agrupa_por_emoji_e_por_reator() {
     st.reaction_toggle(&m.id, "c1", "🔥", "bbb").unwrap();
     st.reaction_toggle(&m.id, "c1", "🔥", "ccc").unwrap();
     st.reaction_toggle(&m.id, "c1", "👍", "aaa").unwrap();
-    // e o mesmo reator, no mesmo emoji, duas vezes = uma linha só
     assert!(!st.reaction_toggle(&m.id, "c1", "🔥", "aaa").unwrap());
     assert_eq!(
         st.reaction_toggle(&m.id, "c1", "🔥", "aaa").unwrap(),
@@ -109,8 +93,6 @@ fn reacao_agrupa_por_emoji_e_por_reator() {
 
 #[test]
 fn reacao_apply_e_idempotente_no_reenvio() {
-    // O receptor aplica com `add` explícito: re-entregar o mesmo frame (retry
-    // de offline, duplicata de relay) NÃO pode inverter o estado.
     let (e, _d) = engine("ana");
     let m = env(&Keypair::generate(), "c1", "oi");
     put(&e, &m);
@@ -143,8 +125,6 @@ fn reacao_apply_e_idempotente_no_reenvio() {
 
 #[test]
 fn reacao_offline_enfileira_ultimo_estado_e_drena() {
-    // Reagir com o peer offline enfileira; o último estado vence; o take
-    // entrega uma vez e limpa.
     let (e, _d) = engine("ana");
     let st = e.store_ref();
 
@@ -168,8 +148,6 @@ fn reacao_offline_enfileira_ultimo_estado_e_drena() {
 
 #[test]
 fn reacao_com_peer_offline_enfileira_para_reenvio() {
-    // Motor de teste não tem links: todo peer está "offline". Reagir numa DM
-    // aplica local E enfileira para o peer (antes, o frame caía no vazio).
     let (e, _d) = engine("ana");
     let eu = e.identity().fingerprint.clone();
     let conv = e
@@ -180,9 +158,7 @@ fn reacao_com_peer_offline_enfileira_para_reenvio() {
     put(&e, &m);
 
     assert!(e.social_react(&conv.id, &m.id, "👍").unwrap());
-    // local aplicou
     assert_eq!(e.store_ref().reactions_for_msg(&m.id).unwrap().len(), 1);
-    // e enfileirou para o peer offline
     let pend = e.store_ref().take_pending_reacts("peer1").unwrap();
     assert_eq!(pend.len(), 1, "reação foi para a fila do peer offline");
     assert_eq!(pend[0].1, m.id);
@@ -191,7 +167,6 @@ fn reacao_com_peer_offline_enfileira_para_reenvio() {
 
 #[test]
 fn reacao_offline_tem_teto_por_peer() {
-    // Um peer que nunca volta não pode inflar o banco: ficam as 200 novas.
     let (e, _d) = engine("ana");
     let st = e.store_ref();
     for i in 0..250 {
@@ -204,6 +179,7 @@ fn reacao_offline_tem_teto_por_peer() {
     assert!(!got.iter().any(|r| r.1 == "mx0"), "as mais velhas caem");
 }
 
+// Seção 1: test
 #[test]
 fn reacoes_de_varias_mensagens_vem_em_uma_travessia() {
     let (e, _d) = engine("ana");
@@ -219,10 +195,6 @@ fn reacoes_de_varias_mensagens_vem_em_uma_travessia() {
         .unwrap();
     assert_eq!(bulk.len(), 2, "uma consulta por tela, não uma por mensagem");
 }
-
-// =====================================================================
-// Edição / exclusão
-// =====================================================================
 
 #[test]
 fn edicao_preserva_o_original_e_marca_editado() {
@@ -265,7 +237,6 @@ fn edicao_e_limitada_ao_autor() {
     let outro = Keypair::generate();
     let m = env(&outro, "c1", "oi");
     put(&e, &m);
-    // `ana` é o dono do motor, `outro` é quem escreveu
     assert!(
         e.social_edit("c1", &m.id, "invadido").is_err(),
         "só o autor edita"
@@ -286,14 +257,8 @@ fn exclusao_e_logica() {
     assert!(e.store_ref().msg_meta(&m.id).unwrap().unwrap().deleted);
 }
 
-// =====================================================================
-// Citação
-// =====================================================================
-
 #[test]
 fn citacao_guarda_o_conv_id_real() {
-    // Regressão: o handler gravava conv_id="" e o registro ficava órfão —
-    // nenhuma forma de a UI resolver a mensagem citada.
     let (e, _d) = engine("ana");
     let alvo = env(&Keypair::generate(), "canal-7", "original");
     let citante = env(&Keypair::generate(), "canal-7", "citando");
@@ -310,7 +275,6 @@ fn citacao_para_mensagem_inexistente_nao_deixa_lixo() {
     let (e, _d) = engine("ana");
     let m = env(&Keypair::generate(), "c1", "oi");
     put(&e, &m);
-    // agora o motor REJEITA em vez de gravar lixo
     assert!(e.social_reply("c1", &m.id, "alvo-que-nao-existe").is_err());
     let meta = e.store_ref().msg_meta(&m.id).unwrap();
     assert!(
@@ -318,10 +282,6 @@ fn citacao_para_mensagem_inexistente_nao_deixa_lixo() {
         "citação órfã não pode ficar persistida: {meta:?}"
     );
 }
-
-// =====================================================================
-// Fixar
-// =====================================================================
 
 #[test]
 fn fixar_e_listar() {
@@ -351,10 +311,6 @@ fn pins_sao_por_conversa() {
     assert_eq!(e.store_ref().pins_list("c3").unwrap().len(), 0);
 }
 
-// =====================================================================
-// Canais: reordenação
-// =====================================================================
-
 #[test]
 fn reordenar_grava_a_ordem_enviada() {
     let (e, _d) = engine("dono");
@@ -376,8 +332,6 @@ fn reordenar_grava_a_ordem_enviada() {
 
 #[test]
 fn reordenar_recusa_canal_de_outra_comunidade() {
-    // Ataque: dono do servidor A manda os ids dos canais do servidor B e mexe
-    // em canais alheios.
     let (e, _d) = engine("dono-a");
     let a = e.identity().fingerprint.clone();
     let b = Keypair::generate().fingerprint();
@@ -395,6 +349,7 @@ fn reordenar_recusa_canal_de_outra_comunidade() {
     assert_eq!(e.store_ref().channel_position("a1").unwrap().unwrap(), 0);
 }
 
+// Seção 2: test
 #[test]
 fn reordenar_e_atomica() {
     let (e, _d) = engine("dono");
@@ -402,7 +357,6 @@ fn reordenar_e_atomica() {
     e.store_ref()
         .create_community("srv", "S", &a, &[("a1", "g"), ("a2", "h")])
         .unwrap();
-    // o segundo id não existe: nada pode ter sido gravado
     assert!(e
         .reorder_channels("srv", &["a2".into(), "fantasma".into()])
         .is_err());
@@ -416,14 +370,9 @@ fn reordenar_exige_autoridade_na_comunidade() {
     let owner = srv(&e, "srv", "c1");
     let membro = Keypair::generate().fingerprint();
     add_member(&e, "srv", &membro);
-    // `reorder_channels` usa o fingerprint local (o dono) — passa.
     assert!(e.reorder_channels("srv", &["c1".into()]).is_ok());
     assert!(!owner.is_empty());
 }
-
-// =====================================================================
-// Moderação: ban, timeout, slowmode
-// =====================================================================
 
 #[test]
 fn portao_de_fala_bloqueia_banido() {
@@ -458,7 +407,6 @@ fn portao_de_fala_bloqueia_timeout_ativo() {
 
 #[test]
 fn timeout_de_ban_do_host_bloqueia_o_membro() {
-    // O caminho que importa: o HOST aplica timeout no inbound de um membro.
     let (e, _d) = engine("host");
     srv(&e, "srv", "c1");
     let alvo = Keypair::generate().fingerprint();
@@ -466,7 +414,6 @@ fn timeout_de_ban_do_host_bloqueia_o_membro() {
     e.social_timeout("srv", &alvo, now_ms() + 60_000, "flood")
         .unwrap();
     assert!(e.gate_speech_for("srv", "c1", &alvo).is_err());
-    // outro membro não é afetado
     let outro = Keypair::generate().fingerprint();
     add_member(&e, "srv", &outro);
     assert!(e.gate_speech_for("srv", "c1", &outro).is_ok());
@@ -530,14 +477,9 @@ fn moderacao_exige_permissao() {
     srv(&e, "srv", "c1");
     let membro = Keypair::generate().fingerprint();
     add_member(&e, "srv", &membro);
-    // o host é dono, então tudo passa; o ponto é que a checagem existe
     assert!(e.social_ban("srv", &membro, 0, "x").is_ok());
     assert!(!e.is_moderator("outro-srv", &e.identity().fingerprint));
 }
-
-// =====================================================================
-// Busca
-// =====================================================================
 
 #[test]
 fn busca_encontra_texto_e_respeita_conv() {
@@ -559,9 +501,6 @@ fn busca_encontra_texto_e_respeita_conv() {
 
 #[test]
 fn busca_prepara_em_qualquer_conversa() {
-    // Regressão do SQL: a busca fazia JOIN em `cv.owner_id`, coluna que
-    // `conversations` nunca teve — a consulta falhava ao preparar para TODOS
-    // os usuários, em qualquer busca.
     let (e, _d) = engine("ana");
     let m = env(&Keypair::generate(), "dm-qualquer", "texto");
     put(&e, &m);
@@ -582,6 +521,7 @@ fn busca_resolve_comunidade_do_canal() {
     assert_eq!(hits[0].channel_id, "chan-9");
 }
 
+// Seção 3: test
 #[test]
 fn busca_filtra_por_autor() {
     let (e, _d) = engine("ana");
@@ -604,7 +544,7 @@ fn busca_respeita_before() {
     let m = env(&Keypair::generate(), "c1", "recente");
     put(&e, &m);
     let mut query = q("");
-    query.before = 1; // ts=1 é anterior a tudo
+    query.before = 1;
     assert!(e.store_ref().message_search(&query).unwrap().is_empty());
 }
 
@@ -621,8 +561,6 @@ fn busca_ignora_apagada() {
     );
 }
 
-// Regressão: `mm.deleted IS NOT 1` era falso para NULL, e como `msg_meta` é
-// LEFT a maioria das mensagens não tem linha — a busca devolvia vazio sempre.
 #[test]
 fn busca_encontra_mensagem_sem_meta() {
     let (e, _d) = engine("ana");
@@ -645,7 +583,6 @@ fn busca_nao_aceita_injecao() {
     let r = e.store_ref().message_search(&query);
     assert!(r.is_ok(), "não pode quebrar a consulta");
     assert!(r.unwrap().is_empty(), "injeção não traz linhas");
-    // e a tabela continua de pé
     assert_eq!(e.store_ref().message_search(&q("normal")).unwrap().len(), 1);
 }
 
@@ -662,10 +599,6 @@ fn busca_filtra_por_tipo_de_conteudo() {
     assert_eq!(hits.len(), 1);
     assert!(hits[0].body.contains("https://"));
 }
-
-// =====================================================================
-// Leitura / não-lidas
-// =====================================================================
 
 #[test]
 fn cursor_de_leitura_conta_nao_lidas() {
@@ -710,8 +643,6 @@ fn mencao_e_contabilizada() {
 
 #[test]
 fn cursor_regressivo_nao_apaga_nao_lidas() {
-    // Recuar o cursor (trocar de canal e voltar) não pode zerar o que chegou
-    // depois — é assim que um bug de "sumiram minhas mensagens" aparece.
     let (e, _d) = engine("ana");
     let st = e.store_ref();
     let a = env(&Keypair::generate(), "c1", "a");
@@ -719,16 +650,12 @@ fn cursor_regressivo_nao_apaga_nao_lidas() {
     let b = env(&Keypair::generate(), "c1", "b");
     put(&e, &b);
     st.read_set("c1", b.ts).unwrap();
-    st.read_set("c1", a.ts).unwrap(); // regrediu
+    st.read_set("c1", a.ts).unwrap();
     assert!(
         st.unread_count("c1").unwrap() >= 0,
         "o contador nunca fica negativo"
     );
 }
-
-// =====================================================================
-// Presença e perfil
-// =====================================================================
 
 #[test]
 fn presenca_usa_allowlist() {
@@ -740,7 +667,6 @@ fn presenca_usa_allowlist() {
     assert_eq!(p.status, "online");
     assert_eq!(p.custom, "trabalhando");
 
-    // valor fora da allowlist cai para online, nunca vira string arbitrária
     e.social_presence_set("hacker-mestre", "", "").unwrap();
     assert_eq!(e.store_ref().presence_get(&eu).unwrap().status, "online");
 
@@ -766,6 +692,7 @@ fn perfil_limpa_campos_vazios() {
         .is_empty());
 }
 
+// Seção 4: test
 #[test]
 fn perfil_edicao_efetiva_incrementa_revisao_e_repeticao_nao() {
     let (e, _d) = engine("ana");
@@ -773,8 +700,6 @@ fn perfil_edicao_efetiva_incrementa_revisao_e_repeticao_nao() {
     assert_eq!(p1.rev, 1, "primeira edição começa em rev 1");
     assert!(!p1.content_hash.is_empty());
 
-    // Salvar os MESMOS dados não pode criar revisão nova: é o que impede a
-    // reconciliação de 10 min de inventar versão a cada tique.
     let p2 = e.social_profile_set("Ana", "bio", "", "", "").unwrap();
     assert_eq!(p2.rev, 1);
     assert_eq!(p2.content_hash, p1.content_hash);
@@ -790,12 +715,10 @@ fn perfil_edicao_efetiva_incrementa_revisao_e_repeticao_nao() {
 fn perfil_revisao_antiga_nao_sobrescreve_a_nova() {
     let s = Store::open_in_memory().unwrap();
     let a = Keypair::generate().fingerprint();
-    // Autor publica rev 2...
     let applied = s
         .profile_apply_remote(&a, "Ana v2", "", "", "", "", 2)
         .unwrap();
     assert!(applied);
-    // ...e um frame atrasado de rev 1 chega depois.
     let applied_old = s
         .profile_apply_remote(&a, "Ana v1", "", "", "", "", 1)
         .unwrap();
@@ -811,7 +734,6 @@ fn perfil_mesma_revisao_com_conteudo_igual_nao_reescreve() {
     assert!(s
         .profile_apply_remote(&a, "Ana", "bio", "", "", "#ff0000", 3)
         .unwrap());
-    // Mesmo rev, mesmo conteúdo: nada muda e a UI não é incomodada.
     assert!(!s
         .profile_apply_remote(&a, "Ana", "bio", "", "", "#ff0000", 3)
         .unwrap());
@@ -821,7 +743,6 @@ fn perfil_mesma_revisao_com_conteudo_igual_nao_reescreve() {
 fn perfil_conflito_na_mesma_revisao_converge() {
     let s = Store::open_in_memory().unwrap();
     let a = Keypair::generate().fingerprint();
-    // Dois dispositivos da MESMA identidade editaram a partir da rev 1.
     let x = "Dispositivo X";
     let y = "Outro nome Y";
     let hx = distorrent_core::social::profile_content_hash(x, "", "", "", "");
@@ -834,8 +755,6 @@ fn perfil_conflito_na_mesma_revisao_converge() {
     let aplicou_segundo = s
         .profile_apply_remote(&a, segundo, "", "", "", "", 2)
         .unwrap();
-    // Quem tem o maior hash vence, venha em que ordem vier: os peers convergem
-    // em vez de ficar trocando de estado um com o outro.
     assert_eq!(aplicou_segundo, false);
     let final_name = s.profile_get(&a).unwrap().display_name;
     assert_eq!(
@@ -850,10 +769,8 @@ fn perfil_remove_avatar_com_flag_explicita() {
     let eu = e.identity().fingerprint.clone();
     e.social_profile_set("Ana", "", "QUJD", "", "").unwrap();
     assert_eq!(e.store_ref().profile_get(&eu).unwrap().avatar_b64, "QUJD");
-    // Sem a flag, string vazia continua significando "mantenha".
     e.social_profile_set("Ana", "", "", "", "").unwrap();
     assert_eq!(e.store_ref().profile_get(&eu).unwrap().avatar_b64, "QUJD");
-    // Com a flag, apaga.
     e.social_profile_set_full("Ana", "", "", "", "", true, false)
         .unwrap();
     assert!(e
@@ -875,10 +792,6 @@ fn perfil_de_outro_peer_e_visivel() {
     assert!(lista.iter().any(|p| p.fp == outro));
 }
 
-// =====================================================================
-// Enquetes
-// =====================================================================
-
 #[test]
 fn enquete_conta_votos() {
     let (e, _d) = engine("ana");
@@ -898,7 +811,6 @@ fn enquete_conta_votos() {
     let id = polls[0].id.clone();
 
     e.social_poll_vote("srv", "c1", &id, 0).unwrap();
-    // o voto do motor é do usuário local; o segundo precisa vir pelo store
     e.store_ref().poll_vote(&id, &b, 0).unwrap();
     let (counts, total) = e.store_ref().poll_tally(&id).unwrap();
     assert_eq!(total, 2);
@@ -947,10 +859,7 @@ fn enquete_multi_acumula() {
     assert!(total >= 2);
 }
 
-// =====================================================================
-// Threads
-// =====================================================================
-
+// Seção 5: test
 #[test]
 fn thread_cria_lista_e_arquiva() {
     let (e, _d) = engine("ana");
@@ -964,7 +873,6 @@ fn thread_cria_lista_e_arquiva() {
 
     e.social_thread_archive(&id, true).unwrap();
     assert!(e.store_ref().thread_get(&id).unwrap().unwrap().archived);
-    // arquivada continua listável: a UI tem um "ver arquivadas"
     assert_eq!(e.store_ref().threads_list("srv", "c1").unwrap().len(), 1);
 }
 
@@ -1021,10 +929,6 @@ fn thread_aceita_tags() {
     };
 }
 
-// =====================================================================
-// Eventos agendados
-// =====================================================================
-
 #[test]
 fn evento_cria_interest_e_apaga() {
     let (e, _d) = engine("ana");
@@ -1045,7 +949,6 @@ fn evento_cria_interest_e_apaga() {
     e.social_event_upsert(ev).unwrap();
     assert_eq!(e.store_ref().event_list("srv").unwrap().len(), 1);
 
-    // toggle: marcar, desmarcar, marcar de novo
     e.social_event_interest("srv", "ev1").unwrap();
     assert_eq!(
         e.store_ref().event_list("srv").unwrap()[0].interested.len(),
@@ -1093,10 +996,6 @@ fn evento_nao_atravessa_comunidade() {
     assert_eq!(e.store_ref().event_list("srv-a").unwrap().len(), 1);
 }
 
-// =====================================================================
-// Emojis customizados
-// =====================================================================
-
 #[test]
 fn emoji_cria_lista_e_apaga() {
     let (e, _d) = engine("ana");
@@ -1116,7 +1015,6 @@ fn emoji_cria_lista_e_apaga() {
     assert_eq!(list[0].char, "🔥");
     assert!(e.store_ref().emoji_list("outro").unwrap().is_empty());
 
-    // apagar de outra comunidade é no-op, não destrói
     e.store_ref().emoji_delete("outro", "e1").unwrap();
     assert_eq!(e.store_ref().emoji_list("srv").unwrap().len(), 1);
     e.store_ref().emoji_delete("srv", "e1").unwrap();
@@ -1124,11 +1022,11 @@ fn emoji_cria_lista_e_apaga() {
     assert!(!mine.is_empty());
 }
 
+// Seção 6: test
 #[test]
 fn emoji_exige_moderador() {
     let (e, _d) = engine("ana");
     srv(&e, "srv", "c1");
-    // ana é a donata: passa
     assert!(e
         .social_emoji_upsert(EmojiRow {
             id: "e2".into(),
@@ -1139,10 +1037,6 @@ fn emoji_exige_moderador() {
         })
         .is_ok());
 }
-
-// =====================================================================
-// Bookmarks
-// =====================================================================
 
 #[test]
 fn bookmark_lista_e_e_por_conversa() {
@@ -1156,22 +1050,16 @@ fn bookmark_lista_e_e_por_conversa() {
     assert!(st.bookmark_list("c2").unwrap().is_empty());
 }
 
-// =====================================================================
-// Amizade e bloqueio
-// =====================================================================
-
 #[test]
 fn amizade_fluxo_completo() {
     let (e, _d) = engine("ana");
     let b = Keypair::generate().fingerprint();
     e.friend_request(&b).unwrap();
-    // o pedido é idempotente: repetir não cria uma segunda pendência
     e.friend_request(&b).unwrap();
     assert_eq!(
         e.store_ref().get_friend(&b).unwrap().unwrap().1,
         "pending_out"
     );
-    // agora o PAPEL inverte: sou eu que recebo, então respondo
     e.store_ref().set_friend(&b, "bruno", "pending_in").unwrap();
     e.friend_respond(&b, true).unwrap();
     assert!(!e.is_blocked(&b));
@@ -1196,25 +1084,17 @@ fn bloquear_e_nao_ser_bloqueado() {
 
 #[test]
 fn responder_sem_pedido_pendente_e_recusado() {
-    // Regressão: `friend_respond` não checava nada e criava uma amizade
-    // "aceita" do zero, mandando um FriendAccept para um peer que nunca pediu.
     let (e, _d) = engine("ana");
     let b = Keypair::generate().fingerprint();
     assert!(e.friend_respond(&b, true).is_err(), "sem pedido nenhum");
-    // um pedido que EU enviei (pending_out) também não é resposta
     e.friend_request(&b).unwrap();
     assert!(
         e.friend_respond(&b, true).is_err(),
         "responder o próprio pedido não pode virar amizade"
     );
-    // com pendência de entrada real, passa
     e.store_ref().set_friend(&b, "bruno", "pending_in").unwrap();
     assert!(e.friend_respond(&b, true).is_ok());
 }
-
-// =====================================================================
-// Schema (trava de regressão)
-// =====================================================================
 
 #[test]
 fn schema_social_tem_todas_as_tabelas() {
@@ -1243,8 +1123,6 @@ fn schema_social_tem_todas_as_tabelas() {
 
 #[test]
 fn migrao_de_banco_existente_e_idempotente() {
-    // Abrir duas vezes sobre o MESMO arquivo tem de ser seguro: a UI reabre o
-    // app o tempo todo e uma migração não-idempotente derruba o histórico.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("distorrent.db");
     {
@@ -1260,14 +1138,8 @@ fn migrao_de_banco_existente_e_idempotente() {
     }
 }
 
-// =====================================================================
-// Silenciamento de conta (mute) — a sanção que NÃO existia
-// =====================================================================
-
 #[test]
 fn mute_realmente_bloqueia_a_fala() {
-    // Regressão: `mute` só decrementava reputação e NENHUM caminho lia essa
-    // pontuação — silenciar não impedia nada. Aqui o mute tem de barrar.
     let (e, _d) = engine("host");
     srv(&e, "srv", "c1");
     let alvo = Keypair::generate().fingerprint();
@@ -1286,8 +1158,6 @@ fn mute_realmente_bloqueia_a_fala() {
 
 #[test]
 fn mute_tambem_bloqueia_dm_sem_servidor() {
-    // O DM não tem comunidade: se o portão consultasse só as regras do
-    // servidor, o silenciado escrevia à vontade em conversa privada.
     let (e, _d) = engine("host");
     let alvo = Keypair::generate().fingerprint();
     let m = env(&Keypair::generate(), "dm-privada", "posso falar?");
@@ -1321,10 +1191,9 @@ fn mute_expira_sozinho() {
     );
 }
 
+// Seção 7: test
 #[test]
 fn mute_nao_derruba_o_cargo_do_membro() {
-    // Silenciar não pode custar o vínculo com o servidor: o membro continua
-    // membro e volta a falar quando o prazo vence.
     let (e, _d) = engine("host");
     srv(&e, "srv", "c1");
     let alvo = Keypair::generate().fingerprint();
@@ -1352,21 +1221,12 @@ fn mute_exige_autoridade() {
     srv(&e, "srv", "c1");
     let membro = Keypair::generate().fingerprint();
     add_member(&e, "srv", &membro);
-    // o host é dono: pode. O ponto é que a checagem acontece antes do efeito.
     assert!(e.moderate("srv", "mute", &membro, "").is_ok());
     assert!(e.store_ref().mute_active(&membro).unwrap() > now_ms());
 }
 
-// =====================================================================
-// Envio em canal: o erro que a UI produzia
-// =====================================================================
-
 #[test]
 fn mandar_em_dm_nao_exige_comunidade() {
-    // Regressão de UI: `selCommunity` sobrevivia à abertura de uma conversa
-    // privada, e o shell usava esse estado para decidir que a conversa era um
-    // canal. O motor recusava com "canal inexistente" — mensagem escrita numa
-    // DM depois de visitar um servidor.
     let (e, _d) = engine("ana");
     let k = e.keypair();
     let outro = Keypair::generate().fingerprint();
@@ -1378,15 +1238,11 @@ fn mandar_em_dm_nao_exige_comunidade() {
         e.store_ref().message_by_id(&m.id).unwrap().unwrap().conv_id,
         conv_id
     );
-    // o caminho de DM não recebe community_id nenhum — é por isso que o erro
-    // vinha do branch errado do shell, não do motor.
     assert!(e.open_dm(&outro, "Bruno").is_ok());
 }
 
 #[test]
 fn canal_valido_e_recusado_pelo_community_errado() {
-    // O par (comunidade, canal) precisa casar: um canal de A enviado como se
-    // fosse de B tem de ser recusado, senão o bug do shell passaria batido.
     let (e, _d) = engine("dono");
     let owner = e.identity().fingerprint.clone();
     e.store_ref()
@@ -1398,7 +1254,6 @@ fn canal_valido_e_recusado_pelo_community_errado() {
 
     assert!(e.send_channel_message("srv-a", "a1", "ok").is_ok());
     assert!(e.send_channel_message("srv-b", "b1", "ok").is_ok());
-    // o canal existe, mas não em B
     let err = e
         .send_channel_message("srv-b", "a1", "vai falhar")
         .unwrap_err();

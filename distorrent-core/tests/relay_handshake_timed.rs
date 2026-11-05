@@ -1,12 +1,3 @@
-//! HANDSHAKE RELAY CRONOMETRADO POR FASE (MemRelay) — mede o caminho feliz:
-//! dial→Hello→Ack→Ok→Online→flush→RequestIn→Accepted→DM→ACK.
-//!
-//! `TimedRelay` embrulha `MemRelay` e classifica cada POST decodificando o
-//! envelope (1 chunk = frame completo p/ Hello/Ack/Ok): registra o instante
-//! do 1º Hello, 1º Ack, 1º HelloOk e 1º frame de sessão (flush). Eventos do
-//! engine dão Online/RequestIn/Accepted/DM/ACK. Tudo impresso em ms desde o
-//! `friend_request` (t0 = dial). Sem sleeps próprios — mede o motor puro.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -43,7 +34,6 @@ impl TimedRelay {
     fn arm(&self, t0: Instant) {
         *self.t0.lock().unwrap_or_else(|e| e.into_inner()) = Some(t0);
     }
-    /// Classifica um chunk postado: Hello / HelloAck / HelloOk / sessão.
     fn classify(&self, body: &str) {
         let t0opt = self.t0.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let t0 = match t0opt {
@@ -54,7 +44,6 @@ impl TimedRelay {
             Ok(v) => v,
             Err(_) => return,
         };
-        // Só frames de 1 chunk têm o frame completo neste post.
         if env.get("total").and_then(|v| v.as_u64()) != Some(1) {
             return;
         }
@@ -75,7 +64,6 @@ impl TimedRelay {
         }
         let frame: serde_json::Value = match serde_json::from_slice(&raw[4..]) {
             Ok(f) => f,
-            // ciphertext de sessão (não parseia como HandshakeFrame)
             Err(_) => {
                 let mut ph = self.phases.lock().unwrap_or_else(|e| e.into_inner());
                 if ph.t_session.is_none() {
@@ -97,7 +85,6 @@ impl TimedRelay {
 }
 
 fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
-    // base64 padrão sem dependência extra (tabela manual, só p/ teste)
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut lut = [255u8; 256];
     for (i, c) in T.iter().enumerate() {
@@ -177,8 +164,8 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Seção 1: relay_handshake_phases_timed
 async fn relay_handshake_phases_timed() {
-    // Relay-only determinístico (ver tests/relay_adverse.rs).
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     let hub = MemRelay::new();
     let timed = TimedRelay::new(hub);
@@ -221,7 +208,6 @@ async fn relay_handshake_phases_timed() {
     )
     .await;
 
-    // B aceita; A vê o aceite (flush imediato/atrasado do respondente)
     b.friend_respond(&fp_a, true).unwrap();
     let (_, t_acc) = wait_event(
         &mut ev_a,
@@ -232,7 +218,6 @@ async fn relay_handshake_phases_timed() {
     )
     .await;
 
-    // DM + ACK pelo relay
     let dm = a.open_dm(&fp_b, "TimedB").unwrap();
     let m1 = a.send_dm(&dm.id, "fase cronometrada").unwrap();
     let (_, t_dm) = wait_event(

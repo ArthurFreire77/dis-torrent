@@ -1,6 +1,3 @@
-// Conjunto de emojis por categoria (estilo Discord) — dados estáticos, sem
-// dependência externa. Usado pelo seletor de emoji (composer + reações).
-
 export interface EmojiGroup {
   id: string
   label: string
@@ -96,27 +93,15 @@ export const EMOJI_GROUPS: EmojiGroup[] = [
   },
 ]
 
-/** Reações rápidas da barra flutuante (as mesmas do Discord em 1 toque). */
 export const QUICK_REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥']
 
-/** Emojis "clássicos" do Discord para a reaction bar. */
 export const REACTION_POOL = [
   '👍','👎','❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','✨','⭐️','🔥','🎉',
   '😂','🤣','😅','😆','😮','😲','😢','😭','😡','🤔','😐','🙃','😴','🤯','🥳','🤩',
   '👀','🙈','👍🏻','👎🏻','💯','✅','❌','⚡️','🚀','🍕','🎮','📌','🐛','🧠','☕️','🌚',
 ]
 
-/** Flat com todos (pra busca). */
 export const ALL_EMOJI = Array.from(new Set(EMOJI_GROUPS.filter(g => g.id !== 'recentes').flatMap(g => g.emojis)))
-
-// ---------------------------------------------------------------------------
-// Índice por NOME
-//
-// Sem isto a busca do seletor é inútil: o dataset guarda só o caractere, e
-// digitar "risada" nunca casaria com "😂". Este índice liga cada emoji aos
-// nomes em inglês e português (o app é pt-BR), e é dele que saem tanto a busca
-// quanto o autocompletar `:nome:` do composer.
-// ---------------------------------------------------------------------------
 
 export interface NamedEmoji { char: string; names: string[] }
 
@@ -257,17 +242,15 @@ const NAME_TABLE: [string, string[]][] = [
   ['🧂', ['sal', 'salt']],
 ]
 
-/** Índice nome->emoji, gerado da tabela acima. */
+// Seção 1: EMOJI_NAME_INDEX
 export const EMOJI_NAME_INDEX: Map<string, string> = (() => {
   const m = new Map<string, string>()
   for (const [ch, names] of NAME_TABLE) for (const n of names) if (!m.has(n)) m.set(n, ch)
   return m
 })()
 
-/** Todos os emojis COM nome — base do autocompletar `:nome:`. */
 export const NAMED_EMOJI: NamedEmoji[] = NAME_TABLE.map(([char, names]) => ({ char, names }))
 
-/** Busca por nome (pt-BR e en). Retorna emojis, não nomes. */
 export function searchEmojis(q: string, limit = 24): string[] {
   const s = q.trim().toLowerCase()
   if (!s) return []
@@ -280,8 +263,6 @@ export function searchEmojis(q: string, limit = 24): string[] {
   return out
 }
 
-/** Resolve `:nome:` para o caractere. */
 export function emojiByName(name: string): string | null {
   return EMOJI_NAME_INDEX.get(name.trim().toLowerCase()) ?? null
 }
-

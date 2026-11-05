@@ -1,8 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// Reusa padrao de live.spec.ts: amizade ao vivo via BroadcastChannel, sem restart.
 async function createAccount(page: Page, name: string) {
-  // Fontes externas não devem travar o fluxo E2E em máquinas sem acesso à internet.
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
@@ -20,19 +18,14 @@ async function fpOf(page: Page): Promise<string> {
 async function befriendLive(a: Page, b: Page) {
   const fpB = await fpOf(b);
   const fpA = await fpOf(a);
-  // A pede amizade a B
   await a.getByRole('button', { name: 'Adicionar amigo' }).click();
   await a.getByPlaceholder('Digite o fingerprint do seu amigo').fill(fpB);
   await a.getByRole('button', { name: 'Enviar solicitação' }).click();
-  // B ve o pedido AO VIVO (sem reload)
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
-  // B aceita
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
-  // A ve o amigo AO VIVO na lista Todos (sem reload)
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
-  // DM aparece AO VIVO na lista de conversas (sem reload)
   await expect(a.locator('.nav-row', { hasText: 'Bob' }).first()).toBeVisible({ timeout: 15000 });
   return { fpA, fpB };
 }
@@ -64,7 +57,6 @@ test('chamada de voz mantém conversa visível no painel lateral sem crash (ou m
   await createAccount(b, 'Bob');
   const { fpA, fpB } = await befriendLive(a, b);
 
-  // Abre a DM com Bob para exibir a toolbar de chamada
   await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
 
   const hasRTC = await a.evaluate(() => typeof RTCPeerConnection !== 'undefined');
@@ -73,7 +65,6 @@ test('chamada de voz mantém conversa visível no painel lateral sem crash (ou m
   );
 
   if (!hasRTC || !hasMedia) {
-    // Sem WebRTC NÃO existe relay: botões desabilitados com diagnóstico honesto.
     const honest = a.getByTitle(/indisponíveis/).first();
     await expect(honest).toBeVisible({ timeout: 10000 });
     await expect(honest).toBeDisabled();
@@ -82,13 +73,11 @@ test('chamada de voz mantém conversa visível no painel lateral sem crash (ou m
     return;
   }
 
-  // Com WebRTC: botao habilitado, clica e o painel lateral abre sem esconder a DM.
   const voiceBtn = a.getByTitle('Iniciar chamada de voz');
   await expect(voiceBtn).toBeVisible({ timeout: 15000 });
   await expect(voiceBtn).toBeEnabled();
   await voiceBtn.click();
 
-  // Painel ativo ao lado da conversa e com controles de tamanho reversíveis.
   const panel = a.getByTestId('call-panel');
   await expect(panel).toBeVisible({ timeout: 15000 });
   await expect(a.getByLabel('Mensagem')).toBeVisible();
@@ -104,31 +93,22 @@ test('chamada de voz mantém conversa visível no painel lateral sem crash (ou m
   await localTile.getByRole('button', { name: /Ampliar participante fixado/ }).click();
   await expect(localTile).toBeVisible();
 
-  // O painel ainda mostra contagem de participantes.
   await expect(a.getByText(/1 participante/)).toBeVisible({ timeout: 15000 });
 
-  // B recebe o convite AO VIVO (modal "está ligando…")
   await expect(b.getByText(/está ligando/)).toBeVisible({ timeout: 15000 });
-  // Sanidade: fp truncado do chamador aparece no modal
   void fpB;
 
-  // Nenhum crash de WebRTC em nenhuma aba
   assertNoWebRTCrash([...errsA, ...errsB]);
 
-  // Fecha direto (sem clicar em "Sair": o rodape tambem expoe title="Sair"
-  // e o first() poderia deslogar em vez de encerrar a chamada).
   await ctx.close();
 });
 
 test('sem WebRTC: clique mostra diagnóstico detalhado honesto (sem crash)', async ({ browser }) => {
   const ctx = await browser.newContext();
-  // Mock: remove WebRTC ANTES de qualquer script da pagina rodar.
   await ctx.addInitScript(() => {
     try {
       (window as unknown as Record<string, unknown>).RTCPeerConnection = undefined;
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   });
   const a = await ctx.newPage();
   const b = await ctx.newPage();
@@ -143,26 +123,20 @@ test('sem WebRTC: clique mostra diagnóstico detalhado honesto (sem crash)', asy
 
   await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
 
-  // typeof RTCPeerConnection === 'undefined' dentro da pagina mockada
   const rtcType = await a.evaluate(() => typeof RTCPeerConnection);
   expect(rtcType).toBe('undefined');
 
   const HONEST = 'chamadas de voz/vídeo indisponíveis neste aparelho';
 
-  // 'none' é o ÚNICO nível sem WebRTC (relay foi removido de propósito):
-  // o botão fica com o título honesto e o clique mostra o diagnóstico.
   const voiceHonest = a.getByTitle(/indisponíveis/).first();
   await expect(voiceHonest).toBeVisible({ timeout: 10000 });
-  // Tooltip detalhado diz O QUE falta + ação (atualize o WebView).
   const titleAttr = await voiceHonest.getAttribute('title').catch(() => '');
   expect(String(titleAttr ?? '')).toContain(HONEST);
   expect(String(titleAttr ?? '').toLowerCase()).toContain('atualize o webview');
 
-  // Clicar nao pode gerar "Can't find variable" — mostra o erro honesto na tela
   await voiceHonest.click({ force: true }).catch(() => {});
   await a.waitForTimeout(500);
   assertNoWebRTCrash([...errsA, ...errsB]);
-  // o diagnóstico honesto aparece visível para o usuário (banner de erro)
   const bodyText = await a.locator('body').innerText().catch(() => '');
   expect(bodyText).toContain(HONEST);
 

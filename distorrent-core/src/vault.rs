@@ -1,7 +1,3 @@
-//! Cofre local: a senha do usuário criptografa a chave privada no device.
-//! Sem servidor, sem reset remoto — quem tem a senha, tem a identidade.
-//! KDF: Argon2id (OWASP: m=19MiB, t=2, p=1) → ChaCha20Poly1305.
-
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use rand::RngCore;
@@ -11,7 +7,6 @@ use crate::{DistorrentError, Result};
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 
-/// blob = salt(16) || nonce(12) || ciphertext
 pub fn seal_secret(secret_hex: &str, password: &str) -> Result<Vec<u8>> {
     if password.len() < 8 {
         return Err(DistorrentError::Crypto(
@@ -79,7 +74,6 @@ mod tests {
     fn seal_open_roundtrip() {
         let secret = "ab".repeat(32);
         let blob = seal_secret(&secret, "minha-senha-123").unwrap();
-        // blob não contém o segredo em claro
         assert!(!hex::encode(&blob).contains(&secret[..16]));
         let opened = open_sealed(&blob, "minha-senha-123").unwrap();
         assert_eq!(opened, secret);

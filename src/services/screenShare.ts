@@ -21,12 +21,6 @@ export const SCREEN_QUALITY_STEPS: ScreenQualityStep[] = [
   { key: '480p', width: 854, height: 480, maxBitrateKbps: 2000, minBitrateKbps: 400, scaleDown: 4, label: '480p' },
   { key: '720p', width: 1280, height: 720, maxBitrateKbps: 4000, minBitrateKbps: 800, scaleDown: 2, label: '720p' },
   { key: '1080p', width: 1920, height: 1080, maxBitrateKbps: 8000, minBitrateKbps: 1500, scaleDown: 1, label: '1080p' },
-  // 1440p/4K/8K: tela é TEXTO. 1080p num monitor grande vira borrão ilegível —
-  // o teto antigo de 6 Mbps não sustentava nem o 1080p em movimento. Bitrate
-  // alto de propósito: a captura sai em resolução nativa e o
-  // `maintain-resolution` preserva o detalhe em vez de derrubar para 720p no
-  // primeiro aperto. 8K só entrega se o monitor e o encoder aguentarem — o
-  // pedido sai como `ideal`, nunca como exigência (ver `screenConstraints`).
   { key: '1440p', width: 2560, height: 1440, maxBitrateKbps: 16000, minBitrateKbps: 2500, scaleDown: 1, label: '1440p' },
   { key: '4K', width: 3840, height: 2160, maxBitrateKbps: 28000, minBitrateKbps: 4000, scaleDown: 1, label: '4K' },
   { key: '8K', width: 7680, height: 4320, maxBitrateKbps: 60000, minBitrateKbps: 6000, scaleDown: 1, label: '8K' },
@@ -34,11 +28,6 @@ export const SCREEN_QUALITY_STEPS: ScreenQualityStep[] = [
 
 export const SCREEN_MIN_OPERATIONAL = '480p'
 export const SCREEN_FPS_OPTIONS: ScreenFpsKey[] = ['auto', '30', '60', '120']
-/**
- * Padrão AUTOMÁTICO: o engine entrega a resolução nativa da tela e o FPS que a
- * máquina sustentar (o `auto` não impõe teto — ver `fpsOf`). Fixar 1080p/60 por
- * padrão derrubava tela 4K/8K para 1080p sem o usuário ter pedido.
- */
 export const SCREEN_DEFAULT_QUALITY: ScreenQualityKey = 'auto'
 export const SCREEN_DEFAULT_FPS: ScreenFpsKey = 'auto'
 
@@ -47,9 +36,7 @@ export interface ScreenShareOptions {
   audio: ScreenAudioMode
   quality: ScreenQualityKey
   fps: ScreenFpsKey
-  /** Identificador do monitor escolhido (id do Tauri's available_monitors) quando source='monitor'. */
   monitorId?: string | null
-  /** Rótulo do monitor/janela para exibir na UI. */
   monitorLabel?: string | null
 }
 
@@ -107,8 +94,6 @@ export function classifyScreenShareError(e: unknown): ScreenShareError {
   else if (name === 'AbortError') code = 'cancelled'
   else if (name === 'NotFoundError' || name === 'OverconstrainedError') code = 'no-source'
   else if (name === 'NotReadableError' || name === 'TrackStartError') code = 'unavailable'
-  // ANTES do teste de getDisplayMedia: TypeError de constraint do Chromium
-  // também cita getDisplayMedia — cair em `unsupported` mentia sobre o aparelho.
   else if (name === 'TypeError' && /constraint/i.test(String(anyE?.message ?? ''))) code = 'constraints'
   else if (/getDisplayMedia/i.test(String(anyE?.message ?? ''))) code = 'unsupported'
   const retryable = RETRYABLE_CODES.has(code)
@@ -130,7 +115,6 @@ export type ScreenBackend = 'display-media' | 'native' | 'none'
 
 export interface ScreenEnvironment {
   platform: ScreenRuntimePlatform
-  /** Quem captura de fato: `getDisplayMedia` no WebView ou o pipeline nativo em Rust. */
   backend: ScreenBackend
   hasDisplayMedia: boolean
   secureContext: boolean
@@ -177,15 +161,10 @@ export function detectPlatformHint(): 'windows' | 'linux' | 'android' | 'ios' | 
       if (os === 'ios') return 'ios'
       if (os === 'macos') return 'macos'
     }
-  } catch { /* ignore */ }
+  } catch {  }
   return 'unknown'
 }
 
-/**
- * `nativeAvailable` = o core em Rust assume a captura (Linux/WebKitGTK).
- * Quem sabe disso é o `callManager`; aqui não o importamos para o módulo
- * continuar carregável nos testes em node puro.
- */
 export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironment {
   const notes: string[] = []
   let platform: ScreenRuntimePlatform = 'unknown'
@@ -196,16 +175,12 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
   else if (detectPlatformHint() === 'macos') platform = 'macos'
 
   const md = (typeof navigator !== 'undefined' ? (navigator as unknown as { mediaDevices?: Record<string, unknown> }).mediaDevices : null) ?? null
-  // Android: o WebView EXPÕE getDisplayMedia mas ela lança TypeError na captura
-  // (sem MediaProjection no wry 0.57) — presença da função não promete nada;
-  // sem captura nativa em Rust, o backend é NENHUM.
   const androidNoCapture = platform === 'android' && !nativeAvailable
   const hasDisplayMedia = !androidNoCapture && typeof md?.getDisplayMedia === 'function'
+  // Seção 1: secureContext
   let secureContext: boolean
   try { secureContext = typeof isSecureContext === 'undefined' ? true : !!isSecureContext } catch { secureContext = true }
 
-  // Caminho nativo só entra quando o WebView NÃO tem getDisplayMedia (mesmo
-  // teste do `startScreenShare`) — sem isso a UI do Linux mentia.
   const backend: ScreenBackend = hasDisplayMedia ? 'display-media' : (nativeAvailable ? 'native' : 'none')
 
   const displaySurfaces: ScreenSourceKind[] = ['screen']
@@ -213,7 +188,6 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
   let surfaceSwitching = false
 
   if (backend === 'native') {
-    // Captura nativa (ximagesrc/xcap): root window / screenshot do portal.
     notes.push('captura nativa em Rust: envia a tela inteira; janela específica e áudio do sistema ainda não são suportados neste caminho')
     if (platform === 'linux') {
       notes.push('Wayland depende do portal de screenshot do desktop — sem PipeWire/ScreenCast contínuo, a taxa de quadros pode cair')
@@ -233,8 +207,6 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
       notes.push('Linux: este WebView (WebKitGTK 4.x) não implementa getDisplayMedia — a captura usa o pipeline nativo em Rust')
     }
   } else if (platform === 'android') {
-    // Chromium no Android NÃO entrega áudio do sistema (exigiria MediaProjection
-    // + foreground service, que o app não tem).
     surfaceSwitching = false
     notes.push('Android: o WebView do sistema não entrega captura de tela (getDisplayMedia existe mas lança erro) — compartilhar tela ainda não é possível neste aparelho')
   } else if (platform === 'ios') {
@@ -266,7 +238,6 @@ export function hasDisplayMedia(): boolean {
 }
 
 export function supportsScreenSource(env: ScreenEnvironment, kind: ScreenSourceKind): boolean {
-  // Caminho nativo (Linux/WebKitGTK): só existe captura da tela inteira.
   if (env.backend === 'native') return kind === 'screen'
   if (!env.hasDisplayMedia) return false
   return env.displaySurfaces.includes(kind)
@@ -276,38 +247,21 @@ export function buildDisplayMediaConstraints(
   opts: ScreenShareOptions,
   env: ScreenEnvironment,
 ): Record<string, unknown> {
-  // `getDisplayMedia` só entrega o ÁUDIO DO SISTEMA. O microfone vem sempre do
-  // `getUserMedia` (trilha separada) — por isso `audio` só liga nos modos que
-  // pedem som do sistema, e não nos que pedem só o mic.
   const wantsSystemAudio = opts.audio === 'system' || opts.audio === 'system+mic'
   const displaySurface = opts.source === 'window' ? 'window' : 'monitor'
   const constraints: Record<string, unknown> = {
-    // SEM `min` aqui: o Chromium (WebView2 incluso) recusa constraint obrigatória
-    // com TypeError e a captura não abria. `ideal` é dica; o piso de fps é
-    // perseguido depois em `applyScreenConstraints` (que aceita `max`).
     video: { displaySurface, ...displayConstraintsFor(opts) },
     audio: wantsSystemAudio,
     systemAudio: wantsSystemAudio ? 'include' : 'exclude',
-    // Loopback inclui a voz dos próprios participantes (eco); engines antigos ignoram.
-    // `restrictOwnAudio` é BOOLEANO no getDisplayMedia: `true` filtra o áudio
-    // produzido pela própria aba (evita o loopback devolver a voz dos
-    // participantes que toca aqui dentro). Passar string fazia o engine
-    // ignorar a proteção — era o risco de eco ao compartilhar o sistema.
     restrictOwnAudio: wantsSystemAudio,
     selfBrowserSurface: 'exclude',
     surfaceSwitching: env.surfaceSwitching ? 'include' : 'exclude',
-    // `exclude` remove monitores do seletor (e o áudio do sistema junto) — só
-    // vale para captura de janela (bug: o modo padrão escondia os monitores).
     monitorTypeSurfaces: opts.source === 'window' ? 'exclude' : 'include',
     preferCurrentTab: false,
   }
   return constraints
 }
 
-/**
- * Constraints relaxadas para quando o engine recusa o pedido original;
- * `null` quando não há nada a relaxar.
- */
 export function derivedDisplayConstraints(
   constraints: Record<string, unknown>,
 ): Record<string, unknown> | null {
@@ -336,7 +290,6 @@ export function resolveStep(opts: ScreenShareOptions): ScreenQualityStep | null 
 export function fpsOf(step: ScreenQualityStep | null, opts: ScreenShareOptions): number | null {
   const explicit = resolveFps(opts)
   if (explicit !== null) return explicit
-  // `auto` = sem teto nenhum (antes devolvia 60 e virava teto de "Automático").
   void step
   return null
 }
@@ -346,12 +299,6 @@ export function screenConstraints(opts: ScreenShareOptions): MediaTrackConstrain
   const fps = fpsOf(step, opts)
   const c: Record<string, unknown> = {}
   if (step) {
-    // `ideal` (não `max`) em width/height preserva a proporção da fonte — `max`
-    // esticava 16:10/21:9 para 16:9. `resizeMode: 'none'` impede reescala do engine.
-    //
-    // 8K: pedir 7680 de largura como `ideal` num monitor 1080p não é exigência —
-    // o engine entrega a resolução REAL da fonte. Quem tem tela 8K e GPU capaz
-    // recebe 8K; quem não tem segue na nativa, sem erro de constraint.
     c.width = { ideal: step.width }
     c.height = { ideal: step.height }
     c.resizeMode = 'none'
@@ -360,7 +307,6 @@ export function screenConstraints(opts: ScreenShareOptions): MediaTrackConstrain
   return c as MediaTrackConstraints
 }
 
-/** Escape do `getDisplayMedia` com o FPS escolhido; `auto` não pede teto nenhum. */
 export function displayConstraintsFor(opts: ScreenShareOptions): Record<string, unknown> {
   const fps = fpsOf(resolveStep(opts), opts)
   return fps ? { frameRate: { ideal: fps } } : {}
@@ -376,17 +322,13 @@ export async function applyScreenConstraints(track: MediaStreamTrack, opts: Scre
 export function setScreenContentHint(track: MediaStreamTrack | null, kind: ScreenSourceKind): void {
   try {
     ;(track as unknown as { contentHint?: string }).contentHint = kind === 'window' ? 'text' : 'detail'
-  } catch { /* hint é best-effort */ }
+  } catch {  }
 }
 
-/**
- * `contentHint: 'motion'` na câmera: sem hint o encoder trata rosto em
- * movimento como texto e gasta bitrate em detalhe estático.
- */
 export function setCameraContentHint(track: MediaStreamTrack | null): void {
   try {
     ;(track as unknown as { contentHint?: string }).contentHint = 'motion'
-  } catch { /* hint é best-effort */ }
+  } catch {  }
 }
 
 export interface ScreenSenderTuning {
@@ -401,14 +343,10 @@ export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning 
   const step = resolveStep(opts)
   const fps = fpsOf(step, opts)
   const bitrateFactor = fps && fps >= 120 ? 1.6 : (fps && fps <= 30 ? 0.6 : 1)
-  // `auto` (padrão) não tem degrau: teto de 12 Mbps para o engine entregar a
-  // resolução nativa com folga — 6 Mbps achatava 1440p/4K em borrão.
   const maxKbps = step ? Math.round(step.maxBitrateKbps * bitrateFactor) : 12000
   const minKbps = step ? Math.round(step.minBitrateKbps * bitrateFactor) : 1500
   return {
-    // Tela é texto/detalhe: manter resolução (antes era `window`, invertido).
     degradationPreference: 'maintain-resolution',
-    // Resolução JÁ aplicada na captura — escalar aqui era escala dupla.
     scaleResolutionDownBy: 1,
     maxBitrate: maxKbps * 1000,
     minBitrate: minKbps * 1000,
@@ -416,14 +354,13 @@ export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning 
   }
 }
 
-/** Degraus da CÂMERA (a tela tem os próprios — ver `SCREEN_QUALITY_STEPS`). */
+// Seção 2: CameraTuning
 export interface CameraTuning {
   maxBitrate: number
   minBitrate: number
   scaleResolutionDownBy: number
 }
 
-/** Bitrate da câmera por resolução: sem teto o engine fica em ~300 kbps. */
 export function buildCameraTuning(quality: '480p' | '720p' | '1080p' | '4K'): CameraTuning {
   const kbps: Record<string, { max: number; min: number }> = {
     '480p': { max: 1200, min: 300 },
@@ -435,13 +372,10 @@ export function buildCameraTuning(quality: '480p' | '720p' | '1080p' | '4K'): Ca
   return { maxBitrate: v.max * 1000, minBitrate: v.min * 1000, scaleResolutionDownBy: 1 }
 }
 
-/** Aplica bitrate na câmera; `false` quando o engine não aceita (não inventa). */
 export async function applyCameraTuning(sender: RTCRtpSender, quality: '480p' | '720p' | '1080p' | '4K'): Promise<boolean> {
   try {
     const tuning = buildCameraTuning(quality)
     const params = sender.getParameters()
-    // `getParameters()` volta vazio antes do answer — mexer ali joga a config
-    // fora e o encoder fica no padrão achando que foi afinado.
     if (!params.encodings || params.encodings.length === 0) return false
     params.degradationPreference = 'balanced'
     const enc = params.encodings[0] as RTCRtpEncodingParameters & { minBitrate?: number }
@@ -459,17 +393,12 @@ export async function applySenderTuning(sender: RTCRtpSender, opts: ScreenShareO
   try {
     const tuning = buildSenderTuning(opts)
     const params = sender.getParameters()
-    // Sem `encodings` o `setParameters` não tem onde gravar o bitrate: fingir
-    // sucesso deixava a tela no padrão do engine (~1 Mbps) achando que estava
-    // afinada. Quem chama reaplica depois do answer (`getParameters` vazio
-    // antes dele).
     if (!params.encodings || params.encodings.length === 0) return false
     params.degradationPreference = tuning.degradationPreference
     const target = params.encodings[0]
     const enc = target as RTCRtpEncodingParameters & { minBitrate?: number }
     enc.scaleResolutionDownBy = tuning.scaleResolutionDownBy
     enc.maxBitrate = tuning.maxBitrate
-    // minBitrate não existe em todo engine; quem não entende, ignora.
     enc.minBitrate = tuning.minBitrate
     if (tuning.priority) target.priority = tuning.priority
     target.networkPriority = 'high'
@@ -518,7 +447,7 @@ export class ScreenCaptureMonitor {
         const play = el.play()
         if (play && typeof (play as Promise<void>).catch === 'function') (play as Promise<void>).catch(() => {})
       }
-    } catch { /* monitor é acessório: sem vídeo oculto segue contando por settings */ }
+    } catch {  }
     this.started = true
     this.schedule()
   }
@@ -545,10 +474,10 @@ export class ScreenCaptureMonitor {
       const el = this.el as HTMLVideoElement & {
         cancelVideoFrameCallback?: (h: number) => void
       }
-      try { if (typeof el.cancelVideoFrameCallback === 'function') el.cancelVideoFrameCallback(this.rvfcHandle) } catch { /* ignore */ }
+      try { if (typeof el.cancelVideoFrameCallback === 'function') el.cancelVideoFrameCallback(this.rvfcHandle) } catch {  }
     }
     this.rvfcHandle = null
-    try { if (this.el) { this.el.srcObject = null } } catch { /* ignore */ }
+    try { if (this.el) { this.el.srcObject = null } } catch {  }
     this.el = null
     this.stream = null
   }
@@ -562,7 +491,7 @@ export class ScreenCaptureMonitor {
       const st = this.track?.getSettings() ?? {}
       width = typeof st.width === 'number' ? st.width : null
       height = typeof st.height === 'number' ? st.height : null
-    } catch { /* settings indisponível */ }
+    } catch {  }
     return { fps, width, height, frames: this.frames, elapsedMs, presentedFrames: this.frames, dropped: null }
   }
 }
@@ -591,6 +520,7 @@ export interface ScreenShareMetrics {
   qualityLimitationReason: string | null
 }
 
+// Seção 3: emptyScreenMetrics
 export function emptyScreenMetrics(): ScreenShareMetrics {
   return {
     capturedFps: null, sentFps: null, receivedFps: null,
@@ -636,10 +566,6 @@ export class ScreenStatsCollector {
     this.baseline = newBaseline()
   }
 
-  /**
-   * Lê uma amostra de `RTCStatsReport` e devolve métricas REAIS por delta.
-   * `nowMs` só para teste determinístico (em produção usa Date.now).
-   */
   read(stats: RTCStatsReport | null | undefined, capture: ScreenFpsSample | null, previousRttMs: number | null, nowMs?: number): ScreenShareMetrics {
     const out = emptyScreenMetrics()
     if (capture) {
@@ -670,7 +596,7 @@ export class ScreenStatsCollector {
           if (typeof r.mimeType === 'string' && String(r.mimeType).startsWith('video/')) codec = String(r.mimeType).split('/')[1] ?? null
         }
       })
-    } catch { /* stats parcial */ }
+    } catch {  }
     this.prevCodec = codec ?? this.prevCodec
     out.codec = this.prevCodec
     out.qualityLimitationReason = limitation
@@ -760,21 +686,12 @@ export function isScreenSampleBad(m: ScreenShareMetrics): boolean {
   return false
 }
 
-/**
- * Teto da recuperação automática para um degrau escolhido.
- *
- * `auto` não é degrau (não entra em `compareQuality`): vale o mais alto, porque
- * é isso que "automático" significa — o engine decide, não o adaptador.
- */
+// Seção 4: ceilingOf
 export function ceilingOf(q: ScreenQualityKey): ScreenQualityKey {
   if (q === 'auto') return SCREEN_QUALITY_STEPS[SCREEN_QUALITY_STEPS.length - 1].key
   return q
 }
 
-/**
- * Ordem dos degraus: negativo quando `a` é mais leve que `b`. `auto` não entra
- * na escala — quem compara `auto` deve tratar antes.
- */
 export function compareQuality(a: ScreenQualityKey, b: ScreenQualityKey): number {
   const i = SCREEN_QUALITY_STEPS.findIndex(s => s.key === a)
   const j = SCREEN_QUALITY_STEPS.findIndex(s => s.key === b)
@@ -796,7 +713,6 @@ export function raiseScreenQuality(q: ScreenQualityKey): ScreenQualityKey {
   return SCREEN_QUALITY_STEPS[i + 1].key
 }
 
-/** Aceita só degraus que existem: lista fixa até 1080p fazia 4K/8K voltar em silêncio. */
 const QUALITY_KEYS: ReadonlySet<string> = new Set<string>([
   'auto',
   ...SCREEN_QUALITY_STEPS.map((s) => s.key),
@@ -855,11 +771,6 @@ export function pickMonitorLabel(monitors: MonitorInfo[] | null | undefined, id:
   return m ? `${m.name ?? 'monitor'} ${m.width}x${m.height}` : null
 }
 
-/**
- * Monitores realmente plugged, via `availableMonitors()` do Tauri 2.
- * Devolve `[]` fora do app nativo (import dinâmico: não carrega Tauri nos
- * testes node). A ESCOLHA final é do seletor nativo do sistema.
- */
 export async function listShareableMonitors(): Promise<MonitorInfo[]> {
   try {
     const g = globalThis as Record<string, unknown>
@@ -884,7 +795,6 @@ export async function listShareableMonitors(): Promise<MonitorInfo[]> {
       const width = Number(m?.size?.width ?? 0)
       const height = Number(m?.size?.height ?? 0)
       return {
-        // id estável para a UI (rótulo, não id de captura do Web).
         id: `${i}:${name ?? 'monitor'}`,
         name,
         width,

@@ -1,8 +1,3 @@
-// Sanitização de texto — espelho TS de distorrent-core/src/names.rs.
-// Puro, sem dependências, seguro em WebView Android/iOS e desktop.
-// O CORE (Rust) re-valida tudo — isto é só feedback instantâneo na UI.
-
-/** Normaliza NFC + remove controles/invisíveis + limita + colapsa espaços. */
 export function sanitizeText(input: string, maxChars: number): string {
   let s: string
   try {
@@ -20,13 +15,11 @@ export function sanitizeText(input: string, maxChars: number): string {
   for (const c of s) {
     if (count >= maxChars) break
     const code = c.codePointAt(0) ?? 0
-    // controles (exceto \n e \t) e invisíveis caem fora
     if (c !== '\n' && c !== '\t' && (code < 0x20 || (code >= 0x7f && code <= 0x9f))) continue
     if (invisible.has(c)) continue
     out += c
     count++
   }
-  // colapsa espaços, no máximo 2 quebras seguidas
   const lines = out.split('\n')
   const cleaned = lines
     .map((l) => l.replace(/[ \t]+/g, ' '))
@@ -36,7 +29,6 @@ export function sanitizeText(input: string, maxChars: number): string {
   return cleaned
 }
 
-/** Escapa para HTML — nomes vindos da rede nunca entram crus no DOM. */
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, '&amp;')

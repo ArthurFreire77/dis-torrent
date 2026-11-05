@@ -1,9 +1,3 @@
-// Mesclagem de tracks remotas de um peer (ver callRemoteTracks.ts).
-//
-// O caso real que estes testes travam: o peer troca de fonte (câmera ↔ tela)
-// na MESMA m-line de vídeo. A track antiga continuava no stream e o `<video>`
-// toca sempre a primeira — o quadrado da TELA exibia a câmera antiga ("liguei
-// a câmera e ela apareceu no lugar da tela").
 import test from 'node:test'
 import assert from 'node:assert/strict'
 

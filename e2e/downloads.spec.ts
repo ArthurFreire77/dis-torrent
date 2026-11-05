@@ -1,9 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// v6 — downloads: clicar Baixar enfileira no downloadManager e abre o painel
-// (progresso/pausa/resume/cancel). O card do chat continua lendo o fileSwarm,
-// que o manager sincroniza — os dois progressos são o mesmo swarm.
-
 async function createAccount(page: Page, name: string) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
@@ -39,7 +35,6 @@ test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não q
   await createAccount(b, 'Bob');
   await befriend(a, b);
 
-  // A abre DM e anexa arquivo
   await a.locator('.friend-row', { hasText: 'Bob' }).first().getByTitle('Conversar').click();
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
   await a.locator('input[type="file"]').setInputFiles({
@@ -49,17 +44,14 @@ test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não q
   });
   await expect(a.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
 
-  // B abre a DM e clica Baixar → painel abre com o item na fila
   await b.locator('.nav-row', { hasText: 'Alice' }).first().click();
   await expect(b.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: /Baixar/ }).first().click();
   const panel = b.getByRole('dialog', { name: 'Downloads' });
   await expect(panel).toBeVisible({ timeout: 10000 });
   await expect(panel.getByText('fila.bin')).toBeVisible({ timeout: 10000 });
-  // estado honesto: baixando/na fila/concluído — nunca inventa sucesso
   await expect(panel.getByText(/baixando|na fila|concluído|verificando/).first()).toBeVisible({ timeout: 20000 });
 
-  // pausar → vira "pausado"; resumir → volta ao ciclo (transições da máquina)
   const pauseBtn = panel.getByRole('button', { name: 'Pausar' }).first();
   if (await pauseBtn.isVisible().catch(() => false)) {
     await pauseBtn.click();
@@ -71,8 +63,7 @@ test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não q
     }
   }
 
-  // fechar o painel não cancela nada (a fila vive no manager, não no modal)
-  await b.keyboard.press('Escape').catch(() => { /* painel fecha por clique fora também */ });
+  await b.keyboard.press('Escape').catch(() => {  });
 });
 
 test('botão Downloads do cabeçalho abre o painel vazio sem crash', async ({ page }) => {

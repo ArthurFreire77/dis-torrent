@@ -1,13 +1,3 @@
-//! Uma sessão recusada não pode deixar ninguém preso no microfone.
-//!
-//! ARQUIVO PRÓPRIO de propósito: o hub de áudio é um singleton do PROCESSO e o
-//! `subscriber_count()` é global. Noutro arquivo de teste o runner (paralelo)
-//! poderia estar contando a assinatura de outra sessão ao mesmo tempo, e a
-//! asserção viraria flakiness em vez de prova.
-//!
-//! `media_voice` só existe em `cfg(target_os = "linux")` (ver `net/mod.rs`).
-//! Sem este gate o alvo não compilava no Windows e derrubava `cargo test` e o
-//! `cargo clippy --all-targets`.
 #![cfg(target_os = "linux")]
 
 use distorrent_core::net::media_voice::{audio, VoiceMedia};

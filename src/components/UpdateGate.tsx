@@ -1,9 +1,3 @@
-// TELA DE ATUALIZAÇÃO DO BOOT: checagem em paralelo com o carregamento da
-// identidade; sem versão nova (ou pulada/falha) não aparece; com `auto` ligado
-// faz o fluxo automático com progresso honesto; em modo manual/link mostra
-// cartão com botão — nunca download silencioso. O texto de estado é sempre o
-// que está ACONTECENDO.
-
 import React from 'react'
 import { services } from '../services'
 import {
@@ -30,23 +24,16 @@ export type UpdatePhase =
 export interface UpdateGateState {
   phase: UpdatePhase
   info: UpdateInfo | null
-  /** Versão do app em execução (mostrada no cartão). */
   current: string
   message: string
-  /** 0..1 quando o Rust informar; `null` = indeterminado (honesto). */
   progress: number | null
 }
 
 export interface UpdateGateApi extends UpdateGateState {
-  /** Mostra o cartão de update (usuário recusou o automático). */
   show: () => void
-  /** Baixa/instala agora. */
   apply: () => void
-  /** Pula ESTA versão (não incomoda mais até sair outra). */
   skip: () => void
-  /** Fecha o cartão e segue para o app. */
   dismiss: () => void
-  /** Abre a página da release no navegador. */
   openPage: () => void
 }
 
@@ -58,18 +45,11 @@ const IDLE: UpdateGateState = {
   progress: null,
 }
 
-/**
- * Hook do gate. Barato quando não há update: uma chamada de rede com timeout de
- * 15 s no Rust, que não segura a UI.
- *
- * `enabled=false` (ex.: build de navegador, ou já passou do boot) desliga tudo.
- */
 export function useUpdateGate(enabled = true): UpdateGateApi {
   const [state, setState] = React.useState<UpdateGateState>(IDLE)
   const started = React.useRef(false)
   const mounted = React.useRef(true)
   const depsRef = React.useRef(nativeUpdateDeps())
-  /** Último estado, para o timer periódico decidir sem depender do closure. */
   const stateRef = React.useRef(state)
   stateRef.current = state
   const intervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
@@ -104,7 +84,6 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       if (!mounted.current) return outcome
       switch (outcome.kind) {
         case 'none':
-          // Sem update: volta para idle e o boot continua sem overlay.
           setState(IDLE)
           return outcome
         case 'later':
@@ -129,8 +108,6 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
           })
           return outcome
         case 'stalled':
-          // Versão já instalada sem efeito: parar e dizer a verdade (o fix real
-          // é corrigir o instalador publicado — o botão leva à release).
           setState({
             phase: 'stalled',
             info: outcome.info,
@@ -141,7 +118,6 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
           })
           return outcome
         case 'error':
-          // Falha de rede NÃO aparece como erro de tela cheia: o app abre.
           setState((s) =>
             s.info
               ? { ...s, phase: 'error', message: outcome.message }
@@ -158,11 +134,9 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
     started.current = true
     const deps = depsRef.current
     if (!deps) {
-      // Navegador puro: nada a fazer, e não inventamos "atualizado".
       return
     }
     void (async () => {
-      // Preferência falha (banco trancado) = "não automático" — nunca o contrário.
       let auto = false
       try {
         auto = await services.updateAutoGet()
@@ -170,8 +144,6 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
         auto = false
       }
 
-      // CHECAGEM NO BOOT COM RETENTATIVA: falha de rede no login (VPN/Wi-Fi/Tor
-      // subindo) não pode deixar a sessão sem checar — insiste com backoff.
       let outcome = await run({ autoApply: auto, auto })
       for (let tentativa = 1; tentativa <= 3 && outcome?.kind === 'error'; tentativa++) {
         await new Promise((r) => setTimeout(r, 4000 * tentativa))
@@ -179,18 +151,12 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
         outcome = await run({ autoApply: auto, auto })
       }
 
-      // Nada encontrado → tela de boot sai (não fica presa em "verificando").
       if (mounted.current && stateRef.current.phase === 'checking') {
-        // `run` já deixa `later`/`error`/`applied`; só o `none` não muda nada.
-        // Aqui garantimos que a tela não fique presa.
         setState((s) => (s.phase === 'checking' ? { ...s, phase: 'idle' } : s))
       }
 
-      // Recheca periodicamente com o app aberto (protocolo antigo degrada voz).
       const intervalo = setInterval(() => {
         if (!mounted.current) return
-        // Só recheca com nada pendente na tela (cartão/download não troca; e
-        // `stalled` não reabre — seria o loop mais devagar).
         const p = stateRef.current.phase
         if (p !== 'idle' && p !== 'checking') return
         void run({ autoApply: auto, auto })
@@ -199,6 +165,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
     })()
   }, [enabled, run])
 
+  // Seção 1: apply
   const apply = React.useCallback(() => {
     const deps = depsRef.current
     if (!deps) return
@@ -241,16 +208,10 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
 
 const MONO = "'JetBrains Mono', ui-monospace, monospace"
 
-/**
- * Overlay de atualização: `blocking` cobre a tela; cartão "tem versão nova" é
- * menor com botão de pular. Estilo inline porque os shells usam assim e o CSS
- * global não tem classe de overlay.
- */
 export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
   if (api.phase === 'idle' || api.phase === 'checking') return null
 
   const blocking = api.phase === 'downloading' || api.phase === 'installing'
-  // `stalled` é cartão informativo: o app está bem; o instalador publicado não.
   const stalled = api.phase === 'stalled'
   const info = api.info
   const mode = info ? updateModeFor(info.platform, info.asset_name) : 'link'
@@ -418,6 +379,7 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
   )
 }
 
+// Seção 2: ghostBtn
 const ghostBtn: React.CSSProperties = {
   padding: '10px 12px',
   borderRadius: 9,

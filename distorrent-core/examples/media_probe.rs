@@ -1,11 +1,3 @@
-//! Probe de MEDICAO REAL da captura de midia nativa (Linux).
-//!
-//! Nao e teste de unidade: liga o dispositivo de verdade e imprime o que
-//! aconteceu. Existe para responder, com numero, "por que a chamada nativa
-//! nao captura audio/camera/tela nesta maquina?".
-//!
-//!   cargo run --example media_probe
-
 use distorrent_core::net::media_video::{self, VideoCodec};
 use distorrent_core::net::media_voice::VoiceMedia;
 use std::time::{Duration, Instant};
@@ -16,7 +8,6 @@ fn main() {
     match VoiceMedia::new() {
         Ok(v) => {
             let h = distorrent_core::net::media_voice::audio::hub();
-            // 1a: abertura preguicosa, como o app faz no invite/accept.
             v.retry_mic();
             println!(
                 "  retry_mic()            = has_capture={} err={:?}",
@@ -25,7 +16,6 @@ fn main() {
             );
             println!("  mic_name()             = {}", h.mic_name());
             println!("  has_speaker()          = {}", h.has_speaker());
-            // 2a: o microfone ENTREGA samples? (sem subs o callback descarta.)
             match h.subscribe() {
                 Ok((id, mut rx)) => {
                     let t0 = Instant::now();
@@ -55,10 +45,8 @@ fn main() {
                 }
                 Err(e) => println!("  subscribe()            = ERRO: {e}"),
             }
-            // 3a: garante a abertura (ensure_mic direto) e repete a medicao.
             let _ = h.ensure_mic();
             println!("  ensure_mic()           = has_capture={}", v.has_capture());
-            // Alto-falante: o build_session chama ensure_speaker (falha nao impede).
             match h.ensure_speaker() {
                 Ok(()) => println!("  ensure_speaker()       = OK (has_speaker=true)"),
                 Err(e) => println!("  ensure_speaker()       = ERRO: {e}"),
@@ -118,7 +106,6 @@ fn main() {
         }
         None => println!("  grab_screen_frame()   = None (falhou)"),
     }
-    // O caminho de PRODUCAO da tela: encoder alimentado pelo xcap.
     match media_video::new_screen(VideoCodec::Vp8, 30) {
         Ok(mut enc) => {
             let t0 = Instant::now();
@@ -135,8 +122,6 @@ fn main() {
                 while enc.poll_encoded_frame(Duration::from_millis(1)).is_some() {
                     got += 1;
                 }
-                // sem sleep: mede o teto real do encoder (o laco de envio real
-                // tem 33 ms de passo = 30 fps).
             }
             println!(
                 "  encoder de tela       = {pushed} empurrados, {got} VP8 saida = {:.1} fps",
@@ -150,7 +135,6 @@ fn main() {
 
 #[allow(dead_code)]
 fn extra() {
-    // Custo isolado de cada etapa da captura de tela.
     let mons = xcap::Monitor::all().expect("sem monitores");
     let m = mons
         .iter()
@@ -172,6 +156,7 @@ fn extra() {
             bytes += img.as_raw().len();
         }
     }
+    // Seção 1: el
     let el = t0.elapsed().as_secs_f64();
     println!(
         "XCAP capture_image puro: {ok} em {el:.1}s = {:.2} fps ({} bytes/frame)",
@@ -179,7 +164,6 @@ fn extra() {
         bytes / ok.max(1)
     );
 
-    // Custo do resize (1920x1080 -> 640x480) sobre um frame REAL.
     let img = m.capture_image().expect("sem frame");
     let t0 = Instant::now();
     let mut n = 0usize;
@@ -190,7 +174,6 @@ fn extra() {
     }
     println!("RESIZE 1920x1080->640x480: {n} em 1s = {n} fps");
 
-    // E com o filtro Nearest (mais barato)?
     let t0 = Instant::now();
     let mut n = 0usize;
     while t0.elapsed() < Duration::from_secs(1) {

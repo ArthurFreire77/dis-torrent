@@ -1,12 +1,3 @@
-// Cartão de arquivo — regras de APRESENTAÇÃO puras.
-//
-// O card mudou de "habitar dois componentes diferentes" para um só, e as
-// decisões que ele toma (texto do botão, velocidade legível, o que mostrar)
-// são justamente as que já erraram: botão dizendo "Baixar" com download
-// ativo, "0 KB/s" fingindo velocidade, "Baixar (43%)" congelado ao pausar.
-//
-// Testar aqui (sem WebView) trava essas regressões.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { downloadButtonLabel, formatSpeed, type FileCardProgress } from '../src/components/fileCardRules.ts'

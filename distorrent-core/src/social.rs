@@ -1,28 +1,8 @@
-//! Camada social (paridade Discord) — schema + operações.
-//!
-//! Tudo aqui é estado LOCAL persistido em SQLite e sincronizado por frames
-//! assinados dentro da sessão AEAD (ver `protocol::SecureFrame`). Nenhuma
-//! operação depende da UI: o motor valida autor/permissão antes de aplicar.
-//!
-//! Grupos de features:
-//!  - mensagem: reações, respostas, edição, exclusão, encaminhamento, pins
-//!  - leitura: cursor de leitura, menções, não-lidas
-//!  - pessoas: presença estendida, status/display name/bio/avatar/banner
-//!  - servidor: threads, fóruns, bans, timeouts, slowmode, emojis, enquetes,
-//!    eventos agendados
-
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-/// Validade da presença anunciada por push (`PresenceSet`).
-/// 90 s = 3× o heartbeat de 30 s: tolera jitter sem fazer amigos piscarem
-/// offline↔online (era o bug do TTL=30 s).
 pub const PRESENCE_TTL_MS: i64 = 90_000;
 
-// ================================ SCHEMA ================================
-
-/// `column_exists` local: o helper de `storage.rs` não aceita `profiles`
-/// (devolveria `false` sempre e o ALTER estouraria "duplicate column").
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let sql = format!("PRAGMA table_info({table})");
     let Ok(mut stmt) = conn.prepare(&sql) else {
@@ -31,13 +11,10 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) else {
         return false;
     };
-    // Materializar antes de devolver: sem isto o `stmt` era dropado com o
-    // iterador ainda vivo (E0597).
     let found = rows.filter_map(|r| r.ok()).any(|c| c == column);
     found
 }
 
-/// Cria as tabelas da camada social. Idempotente — pode rodar em todo boot.
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS msg_reactions (
@@ -209,11 +186,6 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          );",
     )?;
 
-    // ---------------------------------------------------------------
-    // Revisão de perfil (sincronização P2P): `rev` é contador monotônico
-    // do autor (receptor só aceita rev maior) e `content_hash` desempata
-    // edições concorrentes sem depender de relógio de quem recebe.
-    // ---------------------------------------------------------------
     for column in ["rev", "content_hash"] {
         if !column_exists(conn, "profiles", column) {
             let ddl = if column == "rev" {
@@ -227,8 +199,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-// ================================ TIPOS ================================
-
+// Seção 1: derive
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReactionRow {
     pub msg_id: String,
@@ -238,7 +209,6 @@ pub struct ReactionRow {
     pub created_at: i64,
 }
 
-/// Reactions agregadas por mensagem+emoji (contagem + lista de quem reagiu).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReactionSummary {
     pub msg_id: String,
@@ -265,7 +235,6 @@ pub struct MsgMetaView {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PresenceView {
     pub fp: String,
-    /// "online" | "idle" | "dnd" | "invisible" | "offline"
     pub status: String,
     pub custom: String,
     pub custom_emoji: String,
@@ -281,18 +250,12 @@ pub struct ProfileView {
     pub banner_b64: String,
     pub accent: String,
     pub updated_at: i64,
-    /// Revisão monotônica do autor (0 = perfil legado, sem revisão). Usada
-    /// para decidir quem vence quando duas versões se cruzam na rede.
     #[serde(default)]
     pub rev: i64,
-    /// blake3 do conteúdo público — detecta "nada mudou" e desempata
-    /// edições concorrentes sem depender de relógio.
     #[serde(default)]
     pub content_hash: String,
 }
 
-/// Campos públicos do perfil, na ordem do hash de conteúdo.
-/// `updated_at` NÃO entra (relógio de quem grava); `rev` entra (conflito real).
 pub fn profile_content_hash(
     display_name: &str,
     about: &str,
@@ -302,7 +265,6 @@ pub fn profile_content_hash(
 ) -> String {
     let mut h = blake3::Hasher::new();
     for part in [display_name, about, avatar_b64, banner_b64, accent] {
-        // separador de tamanho: sem isto "ab"+"c" e "a"+"bc" colidiriam
         h.update(&(part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
     }
@@ -318,7 +280,6 @@ pub struct ThreadRow {
     pub author_fp: String,
     pub created_at: i64,
     pub archived: bool,
-    /// "thread" (a partir de mensagem) | "forum" (post de fórum)
     pub kind: String,
     pub tags: String,
 }
@@ -329,7 +290,6 @@ pub struct BanRow {
     pub reason: String,
     pub actor_fp: String,
     pub created_at: i64,
-    /// 0 = permanente
     pub until_ms: i64,
 }
 
@@ -358,7 +318,6 @@ pub struct EventRow {
     pub ends_at: i64,
     pub channel_id: String,
     pub entity_fp: String,
-    /// "scheduled" | "active" | "completed" | "canceled"
     pub status: String,
     pub interested: Vec<String>,
 }
@@ -394,20 +353,14 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SearchQuery {
     pub text: String,
-    /// fingerprint do autor (filtro `from:`)
     pub from: String,
-    /// conversa específica (filtro `in:`)
     pub conv: String,
-    /// "link" | "file" | "mention" | "poll" — filtro `has:`
     pub has: String,
-    /// ts máximo (filtro `before:`)
     pub before: i64,
     pub limit: i64,
 }
 
 impl crate::storage::Store {
-    // ======================= MENSAGEM: REAÇÕES =======================
-
     pub fn reaction_toggle(
         &self,
         msg_id: &str,
@@ -415,6 +368,7 @@ impl crate::storage::Store {
         emoji: &str,
         reactor_fp: &str,
     ) -> Result<bool, String> {
+        // Seção 2: conn
         let conn = self.locked();
         let existing: Option<i64> = conn
             .query_row(
@@ -475,8 +429,6 @@ impl crate::storage::Store {
         Ok(out)
     }
 
-    /// Reações de várias mensagens: consulta única com `IN` (o laço fazia
-    /// 100 travessias por render); ids são vinculados, sem injeção.
     pub fn reactions_for_msgs(&self, msg_ids: &[String]) -> Result<Vec<ReactionSummary>, String> {
         if msg_ids.is_empty() {
             return Ok(Vec::new());
@@ -485,8 +437,6 @@ impl crate::storage::Store {
             return Err("lote de reações grande demais".into());
         }
         let conn = self.locked();
-        // IN montado com placeholder fixo porque rusqlite não tem tamanho
-        // variável; ids VINCULADOS (nunca concatenados).
         let placeholders = vec!["?"; msg_ids.len()].join(",");
         let sql = format!(
             "SELECT msg_id, emoji, reactor_fp FROM msg_reactions
@@ -537,9 +487,6 @@ impl crate::storage::Store {
         rows
     }
 
-    /// Aplica reação VINDO DO PEER com `add` explícito (idempotente):
-    /// reenvio legítimo não pode inverter o estado — retry/duplicata era
-    /// bug com `reaction_toggle`.
     pub fn reaction_apply(
         &self,
         msg_id: &str,
@@ -567,8 +514,6 @@ impl crate::storage::Store {
         }
     }
 
-    /// Enfileira reação p/ peer offline (último estado vence; teto 200 por
-    /// peer para não inflar o banco).
     pub fn queue_pending_react(
         &self,
         peer_fp: &str,
@@ -593,8 +538,7 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Retira (e apaga) tudo pendente para o peer — o chamador envia.
-    /// Retorna (conv_id, msg_id, emoji, add).
+    // Seção 3: take_pending_reacts
     pub fn take_pending_reacts(
         &self,
         peer_fp: &str,
@@ -627,8 +571,6 @@ impl crate::storage::Store {
         .map_err(|e| e.to_string())?;
         Ok(out)
     }
-
-    // ======================= MENSAGEM: META =======================
 
     fn meta_load(&self, msg_id: &str) -> Result<Option<MsgMetaView>, String> {
         let conn = self.locked();
@@ -672,7 +614,6 @@ impl crate::storage::Store {
         Ok(out)
     }
 
-    /// Grava referência de resposta (idempotente: repetir não sobrescreve).
     pub fn msg_set_reply(&self, msg_id: &str, conv_id: &str, reply_to: &str) -> Result<(), String> {
         let conn = self.locked();
         conn.execute(
@@ -706,8 +647,6 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Edição: guarda o novo corpo + timestamp. Chamado só pelo motor depois de
-    /// validar `author_fp == peer`.
     pub fn msg_edit(&self, msg_id: &str, conv_id: &str, body: &str) -> Result<(), String> {
         let conn = self.locked();
         conn.execute(
@@ -719,8 +658,6 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Exclusão lógica: o corpo some mas a malha do histórico sobrevive
-    /// (mesma UX do Discord: "Esta mensagem foi apagada").
     pub fn msg_delete(&self, msg_id: &str, conv_id: &str) -> Result<(), String> {
         let conn = self.locked();
         conn.execute(
@@ -732,7 +669,6 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Corpo efetivo de uma mensagem: editado > original.
     pub fn effective_body(&self, msg_id: &str, original: &str) -> Result<String, String> {
         Ok(match self.meta_load(msg_id)? {
             Some(m) if !m.edited_body.is_empty() => m.edited_body,
@@ -766,6 +702,7 @@ impl crate::storage::Store {
                  FROM msg_meta WHERE conv_id=?1 AND pinned=1 ORDER BY pinned_at DESC",
             )
             .map_err(|e| e.to_string())?;
+        // Seção 4: rows
         let rows = stmt
             .query_map(params![conv_id], |r| {
                 Ok(MsgMetaView {
@@ -785,8 +722,6 @@ impl crate::storage::Store {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
     }
-
-    // ======================= LEITURA / NÃO-LIDAS =======================
 
     pub fn read_cursor(&self, conv_id: &str) -> Result<i64, String> {
         let conn = self.locked();
@@ -846,7 +781,6 @@ impl crate::storage::Store {
         Ok(n)
     }
 
-    /// Badge de menções não lidas: só de outros autores e após o cursor.
     pub fn unread_mentions(&self, fp: &str) -> Result<i64, String> {
         if fp.is_empty() {
             return Ok(0);
@@ -868,8 +802,6 @@ impl crate::storage::Store {
             .unwrap_or(0);
         Ok(n)
     }
-
-    // ======================= PRESENÇA =======================
 
     pub fn presence_set(
         &self,
@@ -927,8 +859,6 @@ impl crate::storage::Store {
             custom_emoji: String::new(),
             updated_at: 0,
         });
-        // Sem heartbeat, peer que fechou o app expira após PRESENCE_TTL
-        // (bug do TTL=30 s: amigos piscavam offline↔online).
         if presence.status != "offline"
             && presence.updated_at < crate::identity::now_ms() - PRESENCE_TTL_MS
         {
@@ -939,7 +869,7 @@ impl crate::storage::Store {
         Ok(presence)
     }
 
-    /// Status local sem expirar — usado pelo heartbeat (não perde idle/dnd).
+    // Seção 5: presence_get_live
     pub fn presence_get_live(&self, fp: &str) -> Result<PresenceView, String> {
         let conn = self.locked();
         let r = conn
@@ -997,11 +927,6 @@ impl crate::storage::Store {
         Ok(rows)
     }
 
-    // ======================= PERFIL =======================
-
-    /// Grava perfil local incrementando `rev`. Retorna `None` se nada mudou
-    /// (não cria revisão nem reanuncia). `clear_*` permite remover foto/banner
-    /// (antes vazio = manter era impossível limpar).
     pub fn profile_set_local(
         &self,
         fp: &str,
@@ -1031,7 +956,6 @@ impl crate::storage::Store {
             .optional()
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
-        // vazio = mantém a foto atual; remoção explícita via `clear_avatar`.
         let av = if clear_avatar {
             String::new()
         } else if avatar_b64.is_empty() {
@@ -1057,7 +981,6 @@ impl crate::storage::Store {
         };
 
         let new_hash = profile_content_hash(display_name, about, &av, &bn, accent);
-        // Hash igual ⇒ nada mudou. Não incrementa revisão (idempotência).
         let old_hash: String = conn
             .query_row(
                 "SELECT content_hash FROM profiles WHERE fp=?1",
@@ -1098,10 +1021,6 @@ impl crate::storage::Store {
         Ok(Some(self.profile_get(fp)?))
     }
 
-    /// Aplica perfil vindo da rede, sem relógio: `rev` maior vence; menor é
-    /// descartado; mesmo `rev` + hash igual = nada a fazer; hash diferente =
-    /// desempate determinístico pelo maior hash (rede converge).
-    /// Retorna `true` quando o estado local mudou.
     pub fn profile_apply_remote(
         &self,
         fp: &str,
@@ -1112,6 +1031,7 @@ impl crate::storage::Store {
         accent: &str,
         rev: i64,
     ) -> Result<bool, String> {
+        // Seção 6: conn
         let conn = self.locked();
         let cur = conn
             .query_row(
@@ -1122,8 +1042,6 @@ impl crate::storage::Store {
             .optional()
             .map_err(|e| e.to_string())?;
 
-        // Avatar/banner vazios do peer = "não tenho a foto", não "apague"
-        // (apagar é decisão do autor).
         let (cur_rev, cur_hash) = cur.unwrap_or((0, String::new()));
         let new_hash = profile_content_hash(display_name, about, avatar_b64, banner_b64, accent);
 
@@ -1132,12 +1050,11 @@ impl crate::storage::Store {
         } else if rev < cur_rev {
             false
         } else if !cur_hash.is_empty() && cur_hash == new_hash {
-            false // mesmo estado: evita escrita e notificação inúteis
+            false
         } else if rev == 0 {
-            // Perfis legados (sem revisão): comportamento antigo, LWW simples.
             cur_hash != new_hash
         } else {
-            new_hash > cur_hash // desempate determinístico entre edições concorrentes
+            new_hash > cur_hash
         };
         if !accept {
             return Ok(false);
@@ -1167,7 +1084,6 @@ impl crate::storage::Store {
         Ok(true)
     }
 
-    /// Grava sem tocar em `rev`/`content_hash` — compat com chamadas antigas.
     pub fn profile_set(
         &self,
         fp: &str,
@@ -1282,8 +1198,7 @@ impl crate::storage::Store {
             .unwrap_or_default())
     }
 
-    // ======================= THREADS =======================
-
+    // Seção 7: thread_upsert
     pub fn thread_upsert(&self, t: &ThreadRow) -> Result<(), String> {
         let conn = self.locked();
         conn.execute(
@@ -1358,8 +1273,6 @@ impl crate::storage::Store {
         .map_err(|e| e.to_string())?;
         Ok(())
     }
-
-    // ======================= MODERAÇÃO =======================
 
     pub fn ban_set(
         &self,
@@ -1444,6 +1357,7 @@ impl crate::storage::Store {
                 })
             })
             .map_err(|e| e.to_string())?;
+        // Seção 8: all
         let all: Vec<BanRow> = rows.flatten().collect();
         let expired: Vec<String> = all
             .iter()
@@ -1491,7 +1405,6 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Timeout ativo? (0 = sem timeout; expirado é removido na consulta)
     pub fn timeout_active(&self, community_id: &str, fp: &str) -> Result<i64, String> {
         let now = crate::identity::now_ms();
         let until: Option<i64> = self
@@ -1533,8 +1446,6 @@ impl crate::storage::Store {
         Ok(rows.flatten().filter(|b| b.until_ms > now).collect())
     }
 
-    // ======================= SLOWMODE / CFG DE CANAL =======================
-
     pub fn channel_cfg_slowmode(&self, channel_id: &str) -> Result<i64, String> {
         let conn = self.locked();
         let v: Option<i64> = conn
@@ -1566,8 +1477,6 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Registro de "última mensagem por fingerprint" — base do slowmode.
-    /// Retorna quanto falta (ms) para o autor poder falar de novo; 0 = liberto.
     pub fn slowmode_gate(
         &self,
         channel_id: &str,
@@ -1610,8 +1519,7 @@ impl crate::storage::Store {
         Ok(0)
     }
 
-    // ======================= ENQUETES =======================
-
+    // Seção 9: poll_upsert
     pub fn poll_upsert(&self, p: &PollRow) -> Result<(), String> {
         let conn = self.locked();
         let opts = serde_json::to_string(&p.options).unwrap_or_else(|_| "[]".into());
@@ -1666,9 +1574,6 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Registra voto: `multi` vem da enquete (simples substitui, múltipla
-    /// acumula — a versão antiga apagava sempre e "múltipla" nunca passava
-    /// de 1 voto por pessoa).
     pub fn poll_vote(&self, poll_id: &str, voter_fp: &str, option_idx: i64) -> Result<(), String> {
         let conn = self.locked();
         let multi: Option<i64> = conn
@@ -1681,8 +1586,6 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())?;
         let multi = multi.ok_or_else(|| "enquete inexistente".to_string())?;
 
-        // opção precisa existir: índice fora da faixa inflaria o total
-        // com um voto invisível na UI.
         let options: String = conn
             .query_row(
                 "SELECT options FROM polls WHERE id=?1",
@@ -1702,7 +1605,6 @@ impl crate::storage::Store {
             )
             .map_err(|e| e.to_string())?;
         } else {
-            // múltipla: clicar de novo na MESMA opção desmarca (toggle)
             let ja_votou: Option<i64> = conn
                 .query_row(
                     "SELECT 1 FROM poll_votes WHERE poll_id=?1 AND voter_fp=?2 AND option_idx=?3",
@@ -1728,7 +1630,6 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    /// Contagem por opção + total de votos (não de voters distintos).
     pub fn poll_tally(&self, poll_id: &str) -> Result<(Vec<i64>, i64), String> {
         let conn = self.locked();
         let mut stmt = conn
@@ -1765,8 +1666,6 @@ impl crate::storage::Store {
         Ok(rows.flatten().collect())
     }
 
-    // ======================= EVENTOS AGENDADOS =======================
-
     pub fn event_upsert(&self, e: &EventRow) -> Result<(), String> {
         let conn = self.locked();
         let interested = serde_json::to_string(&e.interested).unwrap_or_else(|_| "[]".into());
@@ -1794,6 +1693,7 @@ impl crate::storage::Store {
         Ok(())
     }
 
+    // Seção 10: event_list
     pub fn event_list(&self, community_id: &str) -> Result<Vec<EventRow>, String> {
         let conn = self.locked();
         let mut stmt = conn
@@ -1848,8 +1748,6 @@ impl crate::storage::Store {
         self.event_upsert(&ev)
     }
 
-    // ======================= EMOJIS =======================
-
     pub fn emoji_upsert(&self, e: &EmojiRow) -> Result<(), String> {
         let conn = self.locked();
         conn.execute(
@@ -1891,16 +1789,10 @@ impl crate::storage::Store {
         Ok(())
     }
 
-    // ======================= BUSCA =======================
-
-    /// Busca textual com filtros no estilo Discord: `from:`, `has:`, `before:`.
-    /// O texto puro é escaneado no Rust (nunca montado como SQL).
     pub fn message_search(&self, q: &SearchQuery) -> Result<Vec<SearchHit>, String> {
         let needle = q.text.trim().to_lowercase();
         let limit = if q.limit <= 0 { 50 } else { q.limit.min(500) };
         let conn = self.locked();
-        // comunidade vem do canal (`msg_meta` é LEFT: "não deletada"
-        // precisa aceitar NULL).
         let mut sql = String::from(
             "SELECT g.id, g.conv_id, g.author_fp, g.body, g.ts, g.direction,
                     IFNULL(ch.community_id, ''), IFNULL(ch.id, '')
@@ -1971,19 +1863,15 @@ impl crate::storage::Store {
         Ok(out)
     }
 
-    /// Janela de mensagens ao redor de um timestamp (pular para data).
+    // Seção 11: messages_around
     pub fn messages_around(
         &self,
         conv_id: &str,
         ts: i64,
         limit: i64,
     ) -> Result<Vec<crate::storage::StoredMessage>, String> {
-        // clamp: `limit` do frontend negativo virava número gigante no `take`.
         let limit = limit.clamp(1, 500) as usize;
         let conn = self.locked();
-        // `thread_id` PRECISA estar no SELECT: o mapper lê `r.get(9)` e, sem
-        // a 10ª coluna, TODAS as linhas falhavam em silêncio no `.flatten()`
-        // ("pular para mensagem" vinha vazio).
         let mut stmt = conn
             .prepare("SELECT id,conv_id,author_fp,body,ts,sig,direction,status,bot_id,thread_id FROM messages WHERE conv_id=?1 ORDER BY ts ASC")
             .map_err(|e| e.to_string())?;
@@ -2013,7 +1901,6 @@ impl crate::storage::Store {
             .cloned()
             .collect();
         let mut before: Vec<_> = before.into_iter().rev().collect();
-        // O resto vai para o "depois" (com `limit` ímpar, 1 vira 1 em vez de 0).
         let depois = limit - before.len();
         let after: Vec<_> = all
             .into_iter()
@@ -2023,8 +1910,6 @@ impl crate::storage::Store {
         before.extend(after);
         Ok(before)
     }
-
-    // ======================= BOOKMARKS =======================
 
     pub fn bookmark_set(&self, conv_id: &str, name: &str, payload: &str) -> Result<(), String> {
         let conn = self.locked();
@@ -2048,7 +1933,6 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())
     }
 
-    /// Apaga TODO o estado social de uma conversa (usado ao deletar conversa).
     pub fn purge_conv(&self, conv_id: &str) -> Result<(), String> {
         let conn = self.locked();
         for t in [

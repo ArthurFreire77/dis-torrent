@@ -17,11 +17,6 @@ const ch = (id: string, name: string, over: Partial<ChannelMeta> = {}): ChannelM
   ...over,
 })
 
-// ---------- o bug real ----------
-
-// `communities_list` e `channel_list` devolvem a MESMA tabela `channels`.
-// A UI juntava as duas listas. Com filtro, ficava certo; sem filtro (o painel
-// de bot), o mesmo canal aparecia duas vezes.
 test('canal presente nas DUAS listas aparece uma vez só', () => {
   const summary = [['cid-geral', 'geral'], ['cid-random', 'random']] as const
   const full = [ch('cid-geral', 'geral'), ch('cid-random', 'random')]
@@ -32,7 +27,6 @@ test('canal presente nas DUAS listas aparece uma vez só', () => {
 })
 
 test('sem filtro de duplicata o painel de bot mostrava o dobro', () => {
-  // Reproduz o bug exato do ThemeShell.tsx:2725 antes da correção.
   const summary = [['cid-geral', 'geral']] as const
   const full = [ch('cid-geral', 'geral')]
 
@@ -42,8 +36,6 @@ test('sem filtro de duplicata o painel de bot mostrava o dobro', () => {
   const novo = mergeChannels(summary, full)
   assert.equal(novo.length, 1, 'mergeChannels não duplica')
 })
-
-// ---------- precedência ----------
 
 test('lista completa vence: traz tipo, categoria, tópico e posição', () => {
   const summary = [['cid-v', 'voz']] as const
@@ -86,10 +78,7 @@ test('listas vazias e indefinidas não quebram', () => {
   assert.equal(mergeChannels([['a', 'a']], undefined).length, 1)
 })
 
-// ---------- deduplicação por nome ----------
-
 test('mesmo nome com id diferente deduplica (usuário vê um canal só)', () => {
-  // Convite de outro host pode ter dado ao mesmo canal um id prefixado.
   const summary = [['outrocid-geral', 'geral']] as const
   const full = [ch('cid-geral', 'geral')]
 
@@ -115,8 +104,6 @@ test('nomes realmente diferentes convivem', () => {
   assert.equal(mergeChannels(undefined, full).length, 3)
 })
 
-// ---------- ordenação ----------
-
 test('ordena por posição e desempata por nome', () => {
   const full = [
     ch('c', 'zebra', { position: 2 }),
@@ -136,8 +123,6 @@ test('ordem é determinística com posições iguais e nomes iguais em caixa dif
   const r2 = mergeChannels(undefined, [...full].reverse()).map((c) => c.id)
   assert.deepEqual(r1, r2)
 })
-
-// ---------- agrupamento ----------
 
 test('groupByCategory preserva ordem de aparição e junta iguais', () => {
   const list = [
@@ -167,13 +152,10 @@ test('channelsOfKind separa texto, voz e vídeo; ausente = texto', () => {
   assert.deepEqual(channelsOfKind(list, 'video').map((c) => c.id), ['3'])
 })
 
-// ---------- o contrato que a UI realmente usa ----------
-
 test('contagem bate com a lista deduplicada (o contador somava as duas listas)', () => {
   const summary = [['c1', 'geral'], ['c2', 'random'], ['c3', 'voz']] as const
   const full = [ch('c1', 'geral'), ch('c2', 'random'), ch('c3', 'voz')]
   const merged = mergeChannels(summary, full)
   assert.equal(merged.length, 3)
-  // a UI antiga exibia `summary.length + full.length` = 6 para 3 canais
   assert.notEqual(summary.length + full.length, merged.length)
 })

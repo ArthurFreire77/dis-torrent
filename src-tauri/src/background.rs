@@ -1,6 +1,3 @@
-//! Segundo plano do desktop: bandeja, autostart e notificações nativas,
-//! sempre de forma visível ao usuário (plugins oficiais, sem evasão de AV).
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -12,30 +9,18 @@ use tauri_plugin_notification::NotificationExt;
 
 use crate::AppState;
 
-/// Preferência: fechar a janela esconde para a bandeja (não encerra).
 const KV_CLOSE_TO_TRAY: &str = "ui.close_to_tray";
-/// Preferência: abrir já minimizado (bandeja) na inicialização automática.
 const KV_START_MINIMIZED: &str = "ui.start_minimized";
-/// Usuário já decidiu sobre autostart? Sem a marca, o boot religaria o que ele desligou.
 const KV_AUTOSTART_DECIDED: &str = "ui.autostart_decided";
 
-/// Estado do segundo plano do desktop. Um único `manage()` no setup.
 pub struct Background {
-    /// `true` = fechar a janela esconde para a bandeja em vez de sair.
     pub close_to_tray: AtomicBool,
-    /// `true` = ao iniciar pelo autostart, abre só na bandeja.
     pub start_minimized: AtomicBool,
-    /// `true` = estamos saindo de propósito (o close event não deve esconder).
     pub quitting: AtomicBool,
-    /// `true` enquanto o toque de chamada recebida está ativo.
     ring_active: AtomicBool,
-    /// Chamada cujo toque está ativo (só para diagnóstico/limpeza).
     ring_call: Mutex<Option<String>>,
-    /// id da notificação → conversa (id estável: mensagem nova substitui a anterior).
     notif_targets: Mutex<HashMap<i32, String>>,
-    /// Não-lidas agregadas mostradas no tooltip da bandeja.
     unread: AtomicUsize,
-    /// Último estado de rede visto (só para o tooltip — nunca para presença).
     connection: Mutex<String>,
     #[cfg(desktop)]
     tray: Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>,
@@ -94,21 +79,14 @@ impl Default for Background {
     }
 }
 
-/// Preferências de segundo plano, lidas pela UI no boot.
 #[derive(Debug, Serialize)]
 pub struct BackgroundPrefs {
     pub close_to_tray: bool,
     pub start_minimized: bool,
     pub autostart: bool,
-    /// `true` quando existe ícone de bandeja de verdade nesta plataforma.
     pub tray: bool,
-    /// `"granted"` / `"denied"` / `"prompt"` — permissão de notificação do SO.
     pub notification_permission: String,
 }
-
-// ------------------------------------------------------------------
-// persistência (kv no mesmo SQLite do app)
-// ------------------------------------------------------------------
 
 fn kv_bool(state: &AppState, key: &str, fallback: bool) -> bool {
     distorrent_core::storage::Store::open(&state.data_dir.join("distorrent.db"))
@@ -124,10 +102,6 @@ fn kv_set_bool(state: &AppState, key: &str, value: bool) {
     }
 }
 
-// ------------------------------------------------------------------
-// comandos
-// ------------------------------------------------------------------
-
 #[tauri::command]
 pub fn background_prefs_get(app: AppHandle, bg: State<Background>) -> BackgroundPrefs {
     BackgroundPrefs {
@@ -137,6 +111,37 @@ pub fn background_prefs_get(app: AppHandle, bg: State<Background>) -> Background
         tray: tray_available(&bg),
         notification_permission: permission_state(&app),
     }
+}
+
+/// Chamado pelo frontend quando a interface já desenhou a primeira tela.
+///
+/// POR QUE: no boot do autostart a janela é criada escondida (senão abre e
+/// recolhe — o "pisca" que o usuário vê). Aqui ela aparece só ao abrir pelo
+/// atalho, e NUNCA fica invisível: se algo falhar no caminho, este comando
+/// também é a rede de segurança que mostra a janela.
+#[tauri::command]
+pub fn app_ui_ready(app: AppHandle) {
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let visivel = w.is_visible().unwrap_or(true);
+    if visivel {
+        return;
+    }
+    let iniciou_minimizado = std::env::args().any(|a| a == "--minimized");
+    let pediu_bandeja = app
+        .try_state::<Background>()
+        .map(|b| b.start_minimized.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    if iniciou_minimizado && pediu_bandeja && tray_available(app.state::<Background>().inner()) {
+        return; // veio do login e a pessoa quer escondido
+    }
+    let _ = w.show();
+    #[cfg(desktop)]
+    {
+        let _ = w.unminimize();
+    }
+    let _ = w.set_focus();
 }
 
 #[tauri::command]
@@ -169,12 +174,10 @@ pub fn autostart_set(
     enabled: bool,
 ) -> Result<bool, String> {
     autostart_apply(&app, enabled)?;
-    // Decisão explícita: o boot deixa de mexer nisso.
     kv_set_bool(&state, KV_AUTOSTART_DECIDED, true);
     autostart_is_enabled(&app)
 }
 
-/// Reconcilia o autostart de forma idempotente e devolve o estado REAL do SO.
 #[tauri::command]
 pub fn autostart_ensure(app: AppHandle, state: State<AppState>) -> Result<bool, String> {
     if kv_bool(&state, KV_AUTOSTART_DECIDED, false) {
@@ -189,21 +192,19 @@ pub fn autostart_ensure(app: AppHandle, state: State<AppState>) -> Result<bool, 
             Ok(autostart_is_enabled(&app).unwrap_or(false))
         }
         Err(e) => {
-            // Honesto: não finge que ligou. O usuário ainda pode ligar na UI.
             tracing::warn!(error = %e, "não consegui ligar o autostart");
             Ok(false)
         }
     }
 }
 
-/// Marca a decisão do usuário sobre autostart (evita religar a cada boot).
+// Seção 1: tauri
 #[tauri::command]
 pub fn autostart_mark_decided(state: State<AppState>, enabled: bool) -> Result<(), String> {
     kv_set_bool(&state, KV_AUTOSTART_DECIDED, enabled);
     Ok(())
 }
 
-/// Id estável e positivo por chave (mesma fórmula do JS) para substituir avisos.
 pub fn notification_id_for(key: &str) -> i32 {
     let mut h: i32 = 5381;
     for b in key.as_bytes() {
@@ -212,7 +213,6 @@ pub fn notification_id_for(key: &str) -> i32 {
     (h.unsigned_abs() % 2_000_000_000) as i32 + 1
 }
 
-/// Mostra a notificação do sistema com id estável (substitui, não empilha).
 #[tauri::command]
 pub fn notification_show(
     app: AppHandle,
@@ -226,7 +226,6 @@ pub fn notification_show(
     notification_show_inner(&app, id, title, body, conversation, silent, false)
 }
 
-/// Versão sem `State` para o pump do motor notificar com a janela escondida.
 pub fn notification_show_inner(
     app: &AppHandle,
     id: i32,
@@ -240,10 +239,8 @@ pub fn notification_show_inner(
         bg.remember_target(id, conversation.as_deref());
     }
     let mut builder = app.notification().builder().id(id).title(title).body(body);
-    // Android: canais separados (mensagem × chamada) para silenciar um sem o outro.
     #[cfg(target_os = "android")]
     {
-        // O toque no aviso remove a notificação na hora.
         builder = builder
             .channel_id(if is_call {
                 "distorrent_calls"
@@ -262,7 +259,6 @@ pub fn notification_show_inner(
     builder.show().map_err(|e| e.to_string())
 }
 
-/// Cancela um aviso pelo id (usado quando a chamada termina).
 pub fn notification_cancel_inner(app: &AppHandle, id: i32) {
     if let Some(bg) = app.try_state::<Background>() {
         bg.forget_target(id);
@@ -276,8 +272,6 @@ pub fn notification_cancel(app: AppHandle, bg: State<Background>, id: i32) {
     let _ = app.notification().remove_active(vec![id]);
 }
 
-/// Espelha as preferências de aviso do localStorage para o Rust (o motor não
-/// vê a WebView). `policy`: `{"default":..., "channels":{id:level},"servers":[id]}`.
 #[tauri::command]
 pub fn notify_prefs_set(
     state: State<AppState>,
@@ -294,7 +288,6 @@ pub fn notify_prefs_set(
         .kv_set("notify.preview", if preview { "1" } else { "0" })
         .map_err(|e| e.to_string())?;
     if let Some(p) = policy {
-        // Teto defensivo: é um mapa de ids curtos; acima disso é lixo/ataque.
         if p.len() <= 256 * 1024 {
             store
                 .kv_set("notify.policy", &p)
@@ -328,13 +321,11 @@ pub fn notification_request_permission(app: AppHandle) -> String {
     }
 }
 
-/// Abre (e foca) a janela principal — bandeja e clique na notificação.
 #[tauri::command]
 pub fn app_show_window(app: AppHandle) {
     show_window(&app);
 }
 
-/// Esconde a janela mantendo o processo (e a conexão P2P) vivo.
 #[tauri::command]
 pub fn app_hide_to_tray(app: AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -343,14 +334,6 @@ pub fn app_hide_to_tray(app: AppHandle) {
     emit_hidden(&app);
 }
 
-/// Alterna a tela cheia da janela principal (atalho F11).
-///
-/// Devolve o estado NOVO para a UI mostrar o ícone certo — nunca chuta:
-/// `is_fullscreen` pode divergir do que o atalho pediu (usuário saiu com Esc,
-/// gerenciador de janelas recusou).
-///
-/// `set_fullscreen` só existe em desktop (no Android a janela é a Activity, e
-/// o tauri não expõe esse controle) — sem o `cfg` o build Android não compila.
 #[tauri::command]
 pub fn window_toggle_fullscreen(app: AppHandle) -> bool {
     #[cfg(desktop)]
@@ -367,14 +350,11 @@ pub fn window_toggle_fullscreen(app: AppHandle) -> bool {
     }
     #[cfg(not(desktop))]
     {
-        // Mobile não tem janela redimensionável: devolve `false` (não entrou),
-        // em vez de fingir sucesso.
         let _ = app;
         false
     }
 }
 
-/// Sair DE VERDADE: derruba a rede, remove a bandeja e encerra o processo.
 #[tauri::command]
 pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {
     bg.quitting.store(true, Ordering::Relaxed);
@@ -383,7 +363,7 @@ pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {
             engine.shutdown();
         }
     }
-    // Remover a bandeja antes evita ícone órfão no Windows por alguns segundos.
+    // Seção 2: cfg
     #[cfg(desktop)]
     {
         if let Ok(mut t) = bg.tray.lock() {
@@ -395,19 +375,14 @@ pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {
     app.exit(0);
 }
 
-/// Intervalo de um toque de chamada.
 const RING_INTERVAL: Duration = Duration::from_millis(1800);
-/// Teto de segurança: se a UI não parar o toque, o Rust para sozinho.
 const RING_MAX: Duration = Duration::from_secs(90);
 
-/// Toque de chamada dirigido pelo RUST: timers de página oculta sofrem
-/// throttling do Chromium; a thread nativa não sofre throttling.
 #[tauri::command]
 pub fn call_ring_start(app: AppHandle, bg: State<Background>, call_id: String) {
     if let Ok(mut c) = bg.ring_call.lock() {
         *c = Some(call_id);
     }
-    // Já tocando: mantém o loop (evita dois toques sobrepostos).
     if bg.ring_active.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -428,7 +403,6 @@ pub fn call_ring_start(app: AppHandle, bg: State<Background>, call_id: String) {
     });
 }
 
-/// Para o toque (atendeu, recusou, chamada encerrou, overlay fechou).
 #[tauri::command]
 pub fn call_ring_stop(bg: State<Background>) {
     bg.ring_active.store(false, Ordering::SeqCst);
@@ -437,7 +411,6 @@ pub fn call_ring_stop(bg: State<Background>) {
     }
 }
 
-/// Estado REAL da rede para o tooltip da bandeja (não é presença).
 #[tauri::command]
 pub fn background_set_connection(
     bg: State<Background>,
@@ -454,10 +427,6 @@ pub fn background_set_connection(
     }
     refresh_tray(bg.inner());
 }
-
-// ------------------------------------------------------------------
-// plataforma
-// ------------------------------------------------------------------
 
 fn permission_string(p: tauri_plugin_notification::PermissionState) -> String {
     use tauri_plugin_notification::PermissionState as P;
@@ -493,7 +462,6 @@ fn autostart_apply<R: tauri::Runtime>(app: &AppHandle<R>, enabled: bool) -> Resu
     }
 }
 
-/// No Android não existe autostart: erro honesto em vez de botão que finge.
 #[cfg(mobile)]
 fn autostart_is_enabled<R: tauri::Runtime>(_app: &AppHandle<R>) -> Result<bool, String> {
     Ok(false)
@@ -518,21 +486,18 @@ fn tray_available(bg: &Background) -> bool {
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
-        // `unminimize` só existe no desktop (Android: E0599); lá basta mostrar/focar.
         #[cfg(desktop)]
         {
             let _ = w.unminimize();
         }
         let _ = w.set_focus();
     }
-    // Janela voltou: a camada de presença sobe de "ausente" para o estado escolhido.
     let _ = app.emit(
         "distorrent://activity",
         serde_json::json!({ "active": true }),
     );
 }
 
-/// Avisa a UI que a janela saiu da tela (bandeja).
 pub fn emit_hidden(app: &AppHandle) {
     let _ = app.emit(
         "distorrent://activity",
@@ -553,7 +518,6 @@ fn refresh_tray(bg: &Background) {
         "DEGRADED" => ("conexão instável", "🟡"),
         _ => ("sem conexão", "⚪"),
     };
-    // Tooltip mostra só o estado da REDE; presença fica na UI.
     let tip = if unread > 0 {
         format!("DisTorrent — {net} · {unread} não lida(s)")
     } else {
@@ -571,6 +535,7 @@ fn refresh_tray(bg: &Background) {
     }
 }
 
+// Seção 3: cfg
 #[cfg(mobile)]
 fn refresh_tray(_bg: &Background) {}
 
@@ -640,7 +605,6 @@ fn install_tray(app: &AppHandle, bg: &Background) -> tauri::Result<()> {
             _ => {}
         });
 
-    // Ícone: o do bundle (já embutido). Sem ele, a bandeja ficaria invisível.
     if let Some(icon) = app.default_window_icon().cloned() {
         builder = builder.icon(icon);
     }
@@ -654,9 +618,7 @@ fn install_tray(app: &AppHandle, bg: &Background) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Chamado no `setup()`, depois de `AppState`/`Background` gerenciados.
 pub fn init(app: &AppHandle) {
-    // Preferências persistidas (fonte de verdade entre reinícios).
     if let Some(state) = app.try_state::<AppState>() {
         if let Some(bg) = app.try_state::<Background>() {
             bg.close_to_tray
@@ -668,9 +630,6 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Autostart (padrão LIGADO): mensageiro que só recebe com o app aberto não
-    // serve. Liga só no primeiro boot e respeita `KV_AUTOSTART_DECIDED`;
-    // falha aqui não pode impedir o app de abrir.
     #[cfg(desktop)]
     {
         use tauri_plugin_autostart::ManagerExt;
@@ -689,7 +648,6 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Bandeja: sem suporte na plataforma, o app segue sem fechar-para-bandeja.
     #[cfg(desktop)]
     if let Some(bg) = app.try_state::<Background>() {
         if let Err(e) = install_tray(app, bg.inner()) {
@@ -697,7 +655,6 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Android: criar canais é idempotente (escolhas do usuário são preservadas).
     #[cfg(mobile)]
     {
         use tauri_plugin_notification::{Channel, Importance};
@@ -708,7 +665,6 @@ pub fn init(app: &AppHandle) {
         if let Err(e) = app.notification().create_channel(messages) {
             tracing::warn!("canal de mensagens não criado: {e}");
         }
-        // Canal separado de chamada: sem ele a chamada caía como mensagem comum.
         let calls = Channel::builder("distorrent_calls", "Chamadas")
             .description("Chamadas de voz e vídeo recebidas")
             .importance(Importance::High)
@@ -718,7 +674,6 @@ pub fn init(app: &AppHandle) {
         }
     }
 
-    // Clique na notificação → abre a janela; o Rust só informa, a UI roteia.
     let handle = app.clone();
     let _ = app.notification().on_action(move |p| {
         let action = p.action_id().to_string();
@@ -727,7 +682,6 @@ pub fn init(app: &AppHandle) {
             (Some(i), Some(bg)) => bg.conversation_of(i),
             _ => None,
         };
-        // `dismiss` (iOS) não abre nada — o usuário fechou de propósito.
         if action != "dismiss" {
             show_window(&handle);
         }
@@ -743,19 +697,30 @@ pub fn init(app: &AppHandle) {
         }
     });
 
-    // BUG REAL corrigido: `--minimized` do autostart sozinho escondia a janela;
-    // agora só minimiza se o usuário DECIDIU isso na preferência.
     let pediu_minimizado = std::env::args().any(|a| a == "--minimized");
-    let deve_minimizar = pediu_minimizado
-        && app
-            .try_state::<Background>()
-            .map(|b| b.start_minimized.load(Ordering::Relaxed))
-            .unwrap_or(false);
+    // `--minimized` = veio do autostart; sem ele, abrir pelo atalho é ação do
+    // usuário e a janela precisa aparecer mesmo com a opção ligada.
+    let quer_minimizado = app
+        .try_state::<Background>()
+        .map(|b| b.start_minimized.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    // Sem bandeja não existe jeito de reabrir a janela escondida: nesse caso
+    // nunca minimiza, senão o app "abre e não aparece" (o usuário só vê o
+    // processo no gerenciador). Erro honesto > janela fantasma.
+    let tem_bandeja = app
+        .try_state::<Background>()
+        .map(|b| tray_available(b.inner()))
+        .unwrap_or(false);
+    let deve_minimizar = pediu_minimizado && quer_minimizado && tem_bandeja;
     if let Some(w) = app.get_webview_window("main") {
         if deve_minimizar {
+            // Esconder AQUI não elimina o flash: a janela já foi criada visível.
+            // Com `visible: false` no tauri.conf.json ela nasce escondida e o
+            // frontend chama `app_ui_ready` depois do primeiro render (que a
+            // mostra se não for o autostart). Não há janela fantasma: o
+            // `app_ui_ready` é a rede de segurança.
             let _ = w.hide();
         } else {
-            // Boot deve MOSTRAR o app; `unminimize` só existe no desktop (E0599).
             let _ = w.show();
             #[cfg(desktop)]
             {

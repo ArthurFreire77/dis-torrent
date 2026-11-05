@@ -1,23 +1,12 @@
-// Configuração do canal (slowmode, NSFW, emojis).
-//
-// Extraído de `Social.tsx` (que tinha 1508 linhas e 27 exports) por
-// `scripts/split-social.mjs`. O conteúdo é o MESMO — a divisão é só de
-// responsabilidade: um arquivo por assunto, para achar e revisar sem rolar
-// 1,5 mil linhas. `Social.tsx` continua reexportando tudo, então nenhum
-// importador precisou mudar.
-
 import React, { useEffect, useState } from 'react'
 import type { ChannelMeta, EmojiView } from '../../services/models'
 import { T } from './socialTheme'
 import { Field, Modal, btnPrimary, inputStyle } from './socialPrimitives'
 
-// Cabeçalho de grupo dentro do seletor de emoji.
 const pickerHead: React.CSSProperties = {
   fontSize: 10, fontWeight: 800, color: T.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6,
 }
 import { services } from '../../services'
-
-// ============================== SLOWMODE / EMOJI ==============================
 
 export function ChannelSettingsModal({ communityId, channel, isOwner, onClose, onToast }: {
   communityId: string
@@ -80,4 +69,3 @@ export function ChannelSettingsModal({ communityId, channel, isOwner, onClose, o
     </Modal>
   )
 }
-

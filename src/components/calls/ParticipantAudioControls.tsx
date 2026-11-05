@@ -5,22 +5,6 @@ import {
   saveParticipantPlaybackSettings,
 } from '../../services/callPlayback'
 
-/**
- * Controles de áudio LOCAL de um participante (volume + silenciar só para mim).
- *
- * BUGS REAIS corrigidos:
- *
- * 1. O PAINEL NATIVO DE DETALHES FECHAVA SOZINHO. Era um elemento `details` e o
- *    tile remonta a cada evento da chamada (novo stream, `onUpdate`, re-render
- *    do palco). Resultado: arrastar o slider fechava o painel no meio do gesto
- *    — "o volume não funciona". Agora o aberto/fechado é estado do React e o
- *    clique no painel não propaga para o card (que tem `onPin`/`onExpand`).
- *
- * 2. O valor não voltava se o `<audio>` ainda não existisse (stream chegando).
- *    `applyMountedParticipantPlayback` reaplica em todos os elementos
- *    montados com o mesmo `data-call-audio-fp`; aqui também guardamos no
- *    localStorage, que é lido no `ref` de cada `<audio>` ao montar.
- */
 export function ParticipantAudioControls({
   fp,
   nickname,
@@ -34,7 +18,6 @@ export function ParticipantAudioControls({
   const [aberto, setAberto] = useState(false)
   const label = nickname || fp.slice(0, 8)
 
-  // Se o `fp` mudar (tile reaproveitado), recarrega a preferência daquele peer.
   useEffect(() => {
     setSettings(getParticipantPlaybackSettings(fp))
   }, [fp])
@@ -49,8 +32,6 @@ export function ParticipantAudioControls({
 
   return (
     <div
-      // O card inteiro tem `onPin`/`onExpand`: sem parar a propagação um clique
-      // no volume também fixava/expandia o quadrado.
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
       style={{ position: 'absolute', top: 8, right: 8, zIndex: 6 }}

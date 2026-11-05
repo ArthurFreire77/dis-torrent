@@ -3,19 +3,6 @@ import { getPrefs, setPrefs } from '../shared/prefs'
 import { services } from '../services'
 import { notificationPermission, requestNotificationPermission } from '../services/notifications'
 
-/**
- * Pergunta contextual, UMA vez, depois de ~1 minuto de uso.
- *
- * Por que 1 minuto: pedir notificação na primeira tela é o padrão que treina o
- * usuário a negar no susto. Depois de um minuto ele já viu o app funcionando e
- * entende o que ganha.
- *
- * Por que nunca repete: a resposta fica em `prefs.notifPromptDone`. Quem quiser
- * mudar depois usa Configurações → Notificações (lá está o botão real).
- *
- * No Android 13+ o texto é o pedido de permissão; no desktop (onde o SO não
- * pede permissão) a pergunta é sobre continuar recebendo com a janela fechada.
- */
 export function NotificationPrompt() {
   const [open, setOpen] = useState(false)
   const [needsPermission, setNeedsPermission] = useState(false)
@@ -29,7 +16,6 @@ export function NotificationPrompt() {
       void (async () => {
         const p = await notificationPermission()
         if (!alive) return
-        // Já concedida e ligada = nada a perguntar.
         if (p === 'granted' && getPrefs().notifySystem) return
         setNeedsPermission(p !== 'granted')
         setOpen(true)
@@ -51,7 +37,6 @@ export function NotificationPrompt() {
       if (needsPermission) {
         const p = await requestNotificationPermission()
         if (p !== 'granted') {
-          // Negou no diálogo do sistema: respeitamos e não insistimos.
           close()
           return
         }

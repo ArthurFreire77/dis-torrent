@@ -1,11 +1,3 @@
-// Layout UNIFICADO da tela de chamada (canal de voz/vídeo).
-//
-// Relato do dono, com print: "a interface tá uma merda na tela de servidores;
-// unifica, faz um padrão que pega a tela do lado direito mais completa, tudo
-// completo unificado". Antes existiam três desenhos para a mesma chamada:
-// cartão de 520 px (fora), palco + painel de 300 px (canal) e painel de até
-// 56vw (DM/grupo) — e a tela "pulava" ao entrar/sair.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -21,15 +13,11 @@ const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
 const stage = readFileSync('src/components/calls/VoiceStage.tsx', 'utf8')
 const mobileChannel = readFileSync('src/mobile/MobileCallChannel.tsx', 'utf8')
 
-// ---------- regra pura ----------
-
 test('dentro da chamada o palco preenche e o painel é estreito e fixo', () => {
   const l = resolveVoiceLayout({ isChannel: true, inThisCall: true, hasActiveCall: true, widthPx: 1600 })
   assert.equal(l.mode, 'in-call')
   assert.equal(l.stageFill, true, 'a mídia ocupa o centro todo')
   assert.equal(l.controlsWidthPx, CONTROLS_WIDTH_PX)
-  // A largura NÃO pode virar fração da janela: era o painel de 56vw que
-  // espremia o vídeo numa tela grande.
   assert.ok(l.controlsWidthPx <= 360, 'painel de controles estreito')
   assert.equal(l.showText, false, 'canal de chamada não tem compositor')
 })
@@ -73,13 +61,10 @@ test('contagem de participantes é honesta no singular e no plural', () => {
   assert.equal(participantsLabel(3), '3 pessoas na chamada')
 })
 
-// ---------- integração nos shells ----------
-
 test('o desktop tem UMA tela de chamada para lobby e chamada', () => {
   assert.match(shell, /import VoiceStage from/, 'o componente único é importado')
   assert.match(shell, /<VoiceStage/, 'é renderizado')
   assert.match(shell, /resolveVoiceLayout\(/, 'o layout vem da regra pura')
-  // O palco NÃO é escolhido por ternário espalhado no shell.
   assert.doesNotMatch(shell, /inThisCall \? \(\s*<CallTilesGrid/, 'sem dois layouts concorrentes')
 })
 
@@ -101,11 +86,10 @@ test('o palco monta os quadrados (áudio/vídeo vivem neles)', () => {
 })
 
 test('os controles são os mesmos nos dois estados', () => {
-  // Sair/entrar no mesmo lugar, e mic/áudio/câmera sempre na mesma ordem.
   for (const rotulo of ['Ativar microfone', 'Ensurdecer', 'Ligar câmera', 'Sair da chamada']) {
     assert.match(stage, new RegExp(rotulo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `existe o controle "${rotulo}"`)
   }
-  assert.match(stage, /NA CHAMADA/, 'a coluna lista quem está na chamada')
+  assert.match(stage, /Na chamada · \{peers\.length\}/, 'a coluna lista quem está na chamada')
 })
 
 test('no celular a mídia domina a tela e os controles ficam na barra inferior', () => {

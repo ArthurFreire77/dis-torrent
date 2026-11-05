@@ -1,8 +1,3 @@
-// Painel de diagnóstico da chamada em tempo real (P2P, sem servidor central).
-// Mostra por peer: connectionState, iceConnectionState, signalingState,
-// candidate pair, tipo de candidate, RTT, bitrates, resolução, FPS, frames,
-// packet loss, codec, jitter, câmera/mic — + causa técnica real da falha.
-// Atualiza a cada 2s via callManager.getCallDiagnostics(); nunca derruba a chamada.
 import { useEffect, useState } from 'react'
 import {
   callManager,
@@ -37,31 +32,30 @@ export default function CallDiagnostics({ compact = false }: { compact?: boolean
         const d = await callManager.getCallDiagnostics().catch(() => [] as PeerDiag[])
         if (!alive) return
         setRows(Array.isArray(d) ? d : [])
-        try { setCause(callManager.getCallFailureReason()) } catch { /* ignore */ }
-        try { setRung(callManager.getRungSummary()) } catch { /* ignore */ }
+        try { setCause(callManager.getCallFailureReason()) } catch {  }
+        try { setRung(callManager.getRungSummary()) } catch {  }
         try {
           const anyMgr = callManager as any
           const stream: MediaStream | null = anyMgr?.localStream ?? null
           const track = stream?.getVideoTracks()?.[0] ?? null
           setLimits(formatVideoLimits(probeVideoLimits(track)))
-        } catch { /* ignore */ }
-      } catch { /* painel nunca derruba */ }
+        } catch {  }
+      } catch {  }
     }
     void poll()
     try { timer = setInterval(() => { setTick((n) => n + 1); void poll() }, 2000) } catch { timer = null }
     return () => {
       alive = false
-      try { if (timer) clearInterval(timer) } catch { /* ignore */ }
+      try { if (timer) clearInterval(timer) } catch {  }
     }
   }, [tick > 100000 ? 1 : 0])
 
-  // Re-poll imediato quando a chamada muda (o intervalo de 2s cobre o resto).
   useEffect(() => { void (async () => {
     try {
       const d = await callManager.getCallDiagnostics().catch(() => [])
       setRows(Array.isArray(d) ? d : [])
-      try { setCause(callManager.getCallFailureReason()) } catch { /* ignore */ }
-    } catch { /* ignore */ }
+      try { setCause(callManager.getCallFailureReason()) } catch {  }
+    } catch {  }
   })() }, [])
 
   return (
@@ -111,12 +105,6 @@ export default function CallDiagnostics({ compact = false }: { compact?: boolean
   )
 }
 
-/**
- * Modo interno "Screen Share Debug": métricas REAIS do compartilhamento de
- * tela (FPS capturado/enviado/recebido, resolução, bitrate, RTT, jitter,
- * perda, frames, congelas, codec). Nada aqui é estimado — campo vazio
- * significa que o engine ainda não reportou, e o painel mostra "—".
- */
 function ScreenShareDebug({ compact }: { compact: boolean }) {
   const [snap, setSnap] = useState(() => {
     try { return callManager.getScreenShareMetrics() } catch { return null }
@@ -128,13 +116,13 @@ function ScreenShareDebug({ compact }: { compact: boolean }) {
       try {
         const m = callManager.getScreenShareMetrics()
         if (alive) setSnap(m)
-      } catch { /* painel nunca derruba */ }
+      } catch {  }
     }
     poll()
     try { timer = setInterval(poll, 1000) } catch { timer = null }
     return () => {
       alive = false
-      try { if (timer) clearInterval(timer) } catch { /* ignore */ }
+      try { if (timer) clearInterval(timer) } catch {  }
     }
   }, [])
 
@@ -185,3 +173,4 @@ function ScreenShareDebug({ compact }: { compact: boolean }) {
     </div>
   )
 }
+// Seção 1: fim

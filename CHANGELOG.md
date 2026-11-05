@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## [1.1.58-pre-alpha] - 2026-11-05
+
+### Configuração de bot dentro do servidor, sem segunda janela
+
+**O painel do bot não abre mais por cima.** Ele era um `<div role="dialog">` com
+overlay próprio, disparado enquanto as Configurações do servidor continuavam
+abertas atrás. Resultado: dois fundos escuros empilhados, o painel parecendo
+"flutuando" no meio da tela e o cabeçalho do servidor duplicado nas costas.
+Agora ele ocupa a área de conteúdo das configurações: a lista de bots é
+substituída pelo editor, a barra de abas vira horizontal no topo e "Voltar"
+retorna à lista. Trocar de seção no menu lateral também fecha o editor.
+
+**Bot recém-criado não é mais "config inválida".** O core grava `config` vazia
+ao criar o bot, e o `parseBotConfig` tratava string vazia como JSON inválido —
+todo bot novo nascia marcado em vermelho na lista. Vazio agora é a config
+padrão (`!`, sem comandos), igual ao `parse_config` do core. O resumo
+(`botSummary`) também distingue "sem config ainda" de "JSON gravado e ilegível".
+
+**Token, cargo e status voltaram para o painel.** Ao trocar o painel pelo novo,
+a tela perdeu a única forma de ver/copiar/regenerar o token, escolher o cargo e
+ligar/desligar o bot — tudo isso existia no componente antigo. A aba
+**Credenciais** devolve os três, com confirmação destrutiva antes de gerar outro
+token e o cuidado de só enviar `roleId`/`online` no salvar.
+
+**"Criar o primeiro" abre o comando criado.** O comando novo era adicionado com
+o id de expansão errado (`cmd-<nome>` contra `cmd-<índice>` no render), então
+nascia fechado e o formulário não aparecia. Também deixou de gerar nome
+provisório repetido quando um comando anterior tinha sido apagado.
+
+**Testes.** `botCommands` trava config vazia como válida; o E2E de bots passa a
+esperar o painel embutido (`role="region"`), cobre token/cargo/copy e ganhou um
+caso que falha se "config inválida" voltar num bot novo.
+
 ## [1.1.57-pre-alpha] - 2026-11-05
 
 ### Painel de bot, fonte e clique em link

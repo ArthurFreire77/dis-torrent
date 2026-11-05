@@ -1,9 +1,3 @@
-// NOTIFICAÇÕES DO SISTEMA — o aviso que aparece fora do DisTorrent.
-// Regras: só notifica o que o motor RECEBEU; 1 notificação por conversa
-// (atualiza contador+prévia); dedupe por id; prévia genérica se desligada;
-// em primeiro plano quem avisa é a UI. O clique abre a conversa guardada
-// pelo Rust (`distorrent://notification-action`).
-
 import { services } from './index'
 import { appStateSnapshot, setTrayUnread } from './appState'
 import { getPrefs, levelFor } from '../shared/prefs'
@@ -15,22 +9,18 @@ import {
   notificationIdFor, reactionNoticeBody, reactionNoticeKey, truncate,
 } from './notificationRules'
 
-/** Janela em uso? Quando ativa, quem avisa é a UI, não o sistema. */
 function inForeground(): boolean {
   return appStateSnapshot().activity === 'active'
 }
 
-/** Conversa aberta agora — não faz sentido notificar o que está na tela. */
 let openConversation: string | null = null
 export function setOpenConversation(convId: string | null) {
   openConversation = convId
   if (convId) void clearConversation(convId)
 }
 
-// ---------- dedupe ----------
 const seen = createSeenTracker(600)
 
-/** Para testes: limpa memória de dedupe/agregação. */
 export function resetNotificationState() {
   seen.clear()
   perConv.clear()
@@ -39,7 +29,6 @@ export function resetNotificationState() {
   publishUnread()
 }
 
-// ---------- agregação por conversa ----------
 interface ConvAgg { count: number; preview: string; ts: number }
 const perConv = new Map<string, ConvAgg>()
 
@@ -52,31 +41,22 @@ function publishUnread() {
 export { notificationIdFor }
 
 export interface MessageNotice {
-  /** id único da mensagem (dedupe). */
   id: string
   conversationId: string
-  /** Nome do remetente ou do canal — vem de quem conhece o contexto. */
   title: string
-  /** Prévia do texto (só é usada se o usuário permitir prévias). */
   preview: string
   mentioned: boolean
   serverId?: string
   ts: number
 }
 
-/**
- * Registra uma mensagem recebida e, se fizer sentido, mostra o aviso do SO.
- * Retorna `true` quando uma notificação foi realmente enviada.
- */
 export function notifyMessage(n: MessageNotice): boolean {
   if (!n.conversationId || !n.id) return false
   if (seen.seen(`msg:${n.id}`)) return false
 
-  // Preferência por canal/servidor — mesma decisão que a UI usa.
   const level = levelFor(n.conversationId, n.serverId)
   if (!levelAllows(level, n.mentioned)) return false
 
-  // Em primeiro plano NA conversa aberta o usuário está lendo: sem aviso.
   if (inForeground() && openConversation === n.conversationId) return false
 
   const prev = perConv.get(n.conversationId)
@@ -109,38 +89,21 @@ export function notifyMessage(n: MessageNotice): boolean {
 }
 
 export interface ReactionNotice {
-  /** Id da mensagem reagida (dedupe por mensagem+emoji+pessoa). */
   msgId: string
   conversationId: string
   emoji: string
-  /** Quem reagiu. */
   reactorFp: string
-  /** MEU fingerprint (para ignorar a própria reação). */
   myFp?: string
-  /** Nome de quem reagiu (o chamador resolve; fp é o fallback). */
   reactorNome?: string
-  /** A mensagem reagida é MINHA? (sem isso não se avisa). */
   minhaMensagem: boolean
-  /** Adicionou (`true`) ou removeu (`false`). */
   add: boolean
   serverId?: string
 }
 
-/**
- * Notifica uma REAÇÃO recebida na minha mensagem.
- *
- * POR QUE EXISTE: reagir é uma resposta silenciosa ("curti", "concordo") e o
- * app não dava nenhum sinal quando a janela estava minimizada — a pessoa só
- * descobria abrindo a conversa. Segue as mesmas regras do resto: só na minha
- * mensagem, nunca a minha própria reação, nunca remoção, respeita o nível do
- * canal e não avisa com a conversa aberta em primeiro plano.
- *
- * Retorna `true` quando o aviso do SO foi realmente enviado.
- */
 export function notifyReaction(n: ReactionNotice): boolean {
   if (!n.conversationId || !n.msgId || !n.reactorFp) return false
   const eu = n.myFp ?? ''
-  if (eu && n.reactorFp === eu) return false // minha própria reação
+  if (eu && n.reactorFp === eu) return false
   if (seen.seen(reactionNoticeKey(n.msgId, n.emoji, n.reactorFp))) return false
 
   const level = levelFor(n.conversationId, n.serverId)
@@ -176,8 +139,6 @@ interface ShowArgs {
 
 function show(a: ShowArgs): boolean {
   if (services.kind !== 'native') return false
-  // ANDROID: plugin próprio (`msgnotif`) com foto do remetente e
-  // MessagingStyle (nome em destaque). Falha cai no aviso comum.
   if (isAndroidRuntime()) {
     const avatar = buscarAvatarDoAviso(a.conversation)
     void invoke('plugin:msgnotif|show', {
@@ -187,14 +148,13 @@ function show(a: ShowArgs): boolean {
       avatarB64: avatar,
       silent: a.silent ?? false,
     }).catch(() => {
-      // Plugin ausente (build antigo): o aviso genérico ainda serve.
       void services.notificationShow({
         id: a.id,
         title: a.title,
         body: a.body,
         conversation: a.conversation ?? null,
         silent: a.silent ?? false,
-      }).catch(() => { /* permissão negada / SO sem suporte */ })
+      }).catch(() => {  })
     })
     return true
   }
@@ -204,19 +164,15 @@ function show(a: ShowArgs): boolean {
     body: a.body,
     conversation: a.conversation ?? null,
     silent: a.silent ?? false,
-  }).catch(() => { /* permissão negada / SO sem suporte: a UI segue normal */ })
+  }).catch(() => {  })
   return true
 }
 
-/**
- * Foto (base64) do remetente, do cache de avatares; aquece o cache em
- * background se faltar. Não bloqueia o aviso.
- */
 function buscarAvatarDoAviso(convId: string | undefined): string {
   if (!convId) return ''
+  // Seção 1: fp
   const fp = peerFpDaConversa(convId)
   if (!fp) {
-    // Sem mapa ainda: aquece o cache e segue.
     void services.profileList()
       .then((list) => {
         for (const p of list) {
@@ -238,23 +194,17 @@ function buscarAvatarDoAviso(convId: string | undefined): string {
   return ''
 }
 
-/** fp do peer de uma conversa, quando o shell registrou (ver `registerConversationPeer`). */
 function peerFpDaConversa(convId: string): string | null {
   return conversationPeers.get(convId) ?? null
 }
 
 const conversationPeers = new Map<string, string>()
 
-/**
- * O shell informa de quem é cada conversa DM (o módulo de notificação não tem
- * acesso ao banco). Chamado ao abrir a conversa e no boot.
- */
 export function registerConversationPeer(convId: string, fp: string) {
   if (!convId || !fp) return
   conversationPeers.set(convId, fp)
 }
 
-/** Conversa aberta/lida → some o aviso e zera o contador dela. */
 export async function clearConversation(convId: string) {
   const had = perConv.delete(convId)
   publishUnread()
@@ -264,17 +214,11 @@ export async function clearConversation(convId: string) {
   }
 }
 
-/** Chamadas em andamento/notificadas: call_id → título (para "perdida"). */
 const callsInFlight = new Map<string, { title: string; since: number }>()
 const missedNotified = new Set<string>()
 
-/**
- * Chamada recebida. Em segundo plano vira notificação do sistema; em primeiro
- * plano quem toca é o overlay da UI (sem duplicar aviso).
- */
 export function notifyIncomingCall(a: { callId: string; title: string }): boolean {
   if (!a.callId) return false
-  // Chamada repetida (frame reenviado) não cria segunda entrada.
   if (callsInFlight.has(a.callId)) return false
   callsInFlight.set(a.callId, { title: a.title, since: Date.now() })
 
@@ -283,8 +227,6 @@ export function notifyIncomingCall(a: { callId: string; title: string }): boolea
   const body = getPrefs().notifyPreview
     ? 'Chamada recebida — abra o DisTorrent para atender ou recusar'
     : 'Chamada recebida'
-  // ANDROID: notificação de CHAMADA própria (tela cheia + Atender/Recusar);
-  // falha cai no aviso comum.
   void services
     .callNotifyShow(a.callId, a.title, body)
     .catch(() => {})
@@ -296,23 +238,18 @@ export function notifyIncomingCall(a: { callId: string; title: string }): boolea
   })
 }
 
-/** Atendeu/recusou na UI: não é mais "perdida". */
 export function markCallHandled(callId: string) {
   callsInFlight.delete(callId)
   if (services.kind === 'native') {
-    // O aviso de chamada do Android continua na tela se o usuário atendeu por
-    // dentro do app (o overlay), não pela notificação.
     void services.callNotifyCancel(callId).catch(() => {})
   }
 }
 
-/** Fim da sinalização: cancela o aviso e, se ninguém atendeu, avisa perdida. */
 export function endCallNotice(callId: string) {
   const was = callsInFlight.get(callId)
   callsInFlight.delete(callId)
   if (services.kind === 'native') {
     void services.notificationCancel(notificationIdFor(`call:${callId}`)).catch(() => {})
-    // A notificação de chamada do Android (full-screen + botões) some junto.
     void services.callNotifyCancel(callId).catch(() => {})
   }
   if (!was) return
@@ -328,7 +265,6 @@ export function endCallNotice(callId: string) {
   })
 }
 
-// ---------- clique → abrir conversa ----------
 type OpenHandler = (convId: string) => void
 const openHandlers = new Set<OpenHandler>()
 
@@ -339,16 +275,12 @@ export function onOpenConversation(cb: OpenHandler): () => void {
 
 function dispatchOpen(convId: string) {
   for (const h of openHandlers) {
-    try { h(convId) } catch { /* handler quebrado não impede os outros */ }
+    try { h(convId) } catch {  }
   }
 }
 
 let startWired = false
 
-  /**
-   * Liga o ouvinte do clique na notificação. Idempotente; o Rust emite
-   * `distorrent://notification-action` com a conversa que ele mesmo guardou.
-   */
 export function initNotifications() {
   if (startWired) return
   startWired = true
@@ -364,11 +296,8 @@ export function initNotifications() {
         }
       },
     ))
-    .catch(() => { /* shell sem o evento: clique só foca a janela */ })
+    .catch(() => {  })
 
-  // ANDROID — "Atender"/"Recusar" da notificação: via plugin (app vivo) ou
-  // drenando a intenção guardada UMA vez (boot a frio), senão a chamada
-  // continuava tocando com o processo morto.
   void import('@tauri-apps/api/core')
     .then(async ({ addPluginListener }) => {
       await addPluginListener<{ call_id?: string; action?: string }>(
@@ -377,9 +306,8 @@ export function initNotifications() {
         (p) => dispatchCallAction(p?.call_id ?? '', p?.action ?? 'open'),
       )
     })
-    .catch(() => { /* desktop/shell sem o plugin: nada a fazer */ })
+    .catch(() => {  })
 
-  // Boot a frio (uma vez): pequeno atraso para o shell montar o listener.
   setTimeout(() => {
     void services
       .callPendingAction()
@@ -390,14 +318,9 @@ export function initNotifications() {
   }, 1200)
 }
 
-// ---------- ação de chamada vinda da notificação ----------
 type CallActionHandler = (callId: string, action: string) => void
 const callActionHandlers = new Set<CallActionHandler>()
 
-/**
- * Registra quem sabe atender/recusar uma chamada a partir da notificação.
- * Usado pelos shells (que têm o `callManager` e a navegação).
- */
 export function onCallNotificationAction(cb: CallActionHandler): () => void {
   callActionHandlers.add(cb)
   return () => { callActionHandlers.delete(cb) }
@@ -406,11 +329,10 @@ export function onCallNotificationAction(cb: CallActionHandler): () => void {
 function dispatchCallAction(callId: string, action: string) {
   if (!callId) return
   for (const h of callActionHandlers) {
-    try { h(callId, action) } catch { /* handler quebrado não impede os outros */ }
+    try { h(callId, action) } catch {  }
   }
 }
 
-/** Permissão do SO (Android 13+ pergunta; desktop é sempre concedida). */
 export async function notificationPermission(): Promise<string> {
   if (services.kind !== 'native') return 'unsupported'
   try { return await services.notificationPermission() } catch { return 'unknown' }
@@ -421,7 +343,7 @@ export async function requestNotificationPermission(): Promise<string> {
   try { return await services.notificationRequestPermission() } catch { return 'denied' }
 }
 
-/** Botão "testar som" das configurações. */
+// Seção 2: testNotificationSound
 export function testNotificationSound(): void {
   void show({
     id: notificationIdFor(`test:${Date.now()}`),

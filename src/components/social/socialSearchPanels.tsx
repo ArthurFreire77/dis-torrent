@@ -1,19 +1,9 @@
-// Busca, fixadas, enquetes e threads.
-//
-// Extraído de `Social.tsx` (que tinha 1508 linhas e 27 exports) por
-// `scripts/split-social.mjs`. O conteúdo é o MESMO — a divisão é só de
-// responsabilidade: um arquivo por assunto, para achar e revisar sem rolar
-// 1,5 mil linhas. `Social.tsx` continua reexportando tudo, então nenhum
-// importador precisou mudar.
-
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChannelMeta, MsgMetaView, PollTally, PollView, ProfileView, SearchHit, StoredMessage, ThreadView } from '../../services/models'
 import { Ic } from '../../shared/icons'
 import { T, displayNameOf, fmtClock, fmtDay } from './socialTheme'
 import { Avatar, Modal, RichText, btnGhost, btnPrimary, inputStyle } from './socialPrimitives'
 import { services } from '../../services'
-
-// ============================== BUSCA ==============================
 
 export function SearchPanel({ convId, convLabel, profiles, onClose, onJump }: {
   convId: string
@@ -75,8 +65,6 @@ export function SearchPanel({ convId, convLabel, profiles, onClose, onJump }: {
   )
 }
 
-// ============================== FIXADOS ==============================
-
 export function PinsPanel({ convId, messages, onClose, onJump }: {
   convId: string
   messages: StoredMessage[]
@@ -114,8 +102,6 @@ export function PinsPanel({ convId, messages, onClose, onJump }: {
   )
 }
 
-// ============================== ENQUETE ==============================
-
 export function PollCard({ poll, tally, onVote, communityId, channelId }: {
   poll: PollView
   tally: PollTally
@@ -151,8 +137,6 @@ export function PollCard({ poll, tally, onVote, communityId, channelId }: {
     </div>
   )
 }
-
-// ============================== THREADS ==============================
 
 export function ThreadList({ communityId, parentChannel, channels, onOpen }: {
   communityId: string
@@ -203,6 +187,7 @@ export function ThreadList({ communityId, parentChannel, channels, onOpen }: {
   )
 }
 
+// Seção 1: ThreadViewModal
 export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
   communityId: string
   thread: ThreadView
@@ -215,12 +200,6 @@ export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
   const [erro, setErro] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
 
-  // Carga única + AO VIVO.
-  //
-  // BUG REAL: a dependência era `[thread.id, msgs.length]`, então cada mensagem
-  // recebida disparava OUTRA busca (e a resposta anterior chegava depois,
-  // sobrescrevendo a lista). E não havia assinatura nenhuma: mensagem de outra
-  // pessoa na discussão só aparecia fechando e abrindo o modal.
   useEffect(() => {
     let vivo = true
     const load = () => {
@@ -238,9 +217,8 @@ export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
     return () => { vivo = false; off() }
   }, [thread.id])
 
-  // Rola para a última mensagem (a conversa abria no topo e parecia vazia).
   useEffect(() => {
-    try { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) } catch { /* ignore */ }
+    try { endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) } catch {  }
   }, [msgs.length])
 
   async function send() {
@@ -253,7 +231,6 @@ export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
       setMsgs((a) => (a.some((x) => x.id === m.id) ? a : [...a, m]))
       setInput('')
     } catch (e) {
-      // Antes era `catch {}`: o botão "Enviar" não fazia nada e ninguém sabia.
       setErro((e as Error)?.message ?? String(e))
     } finally {
       setBusy(false)
@@ -288,4 +265,3 @@ export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
     </Modal>
   )
 }
-

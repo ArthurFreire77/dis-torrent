@@ -1,13 +1,3 @@
-//! Cofre portável `.stormvault` — conta inteira num arquivo cifrado migrável
-//! sem servidor. Formato v1: magic "DSVT" | versão | header JSON (plaintext,
-//! entra como AAD — anti-adulteração) | salt || nonce || ChaCha20Poly1305.
-//! Hash/len do payload dão detecção rápida de truncamento antes da KDF.
-//! Chave: Argon2id + HKDF ("stormvault/v1"); modo "key" deriva de chave em
-//! RAM para backup automático. Payload comprimido com zstd quando compensa.
-//! Import mescla sem sobrescrever dados recentes (mensagens por id dedup,
-//! upsert "não-vazio vence", settings locais têm precedência); fp diferente
-//! é recusado.
-
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use rand::RngCore;
@@ -21,28 +11,19 @@ pub const FORMAT_VERSION: u16 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const HKDF_INFO: &[u8] = b"distorrent/stormvault/v1";
-/// Compressão só quando o ganho passa esse limiar (evita crescer payload já denso).
 const COMPRESS_MIN_GAIN: f64 = 0.15;
-/// Teto de mensagens por export (padrão de segurança contra cofres gigantes;
-/// None = sem limite, escolha explícita do usuário na UI).
 pub const DEFAULT_MAX_MESSAGES: usize = 200_000;
 
-/// Chaves kv que migram entre dispositivos. Segredos NUNCA entram aqui.
 const SETTINGS_WHITELIST: &[&str] = &["privacy.mode", "privacy.proxy_addr", "privacy.tor_addr"];
-
-// ---------------- header (plaintext, versionado) ----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StormVaultHeader {
     pub v: u16,
     pub app: String,
     pub created_ms: i64,
-    /// Fingerprint da identidade — permite identificar o cofre ANTES de abrir
-    /// (é um hash público, não segredo).
     pub fp: String,
     pub nickname: String,
     pub msg_count: usize,
-    /// "argon2id" (senha) | "key" (chave derivada em RAM — backup automático)
     pub kdf: String,
     #[serde(default)]
     pub kdf_params: serde_json::Value,
@@ -57,8 +38,6 @@ pub struct StormVaultMeta {
     pub app_version: Option<String>,
     pub messages_truncated: bool,
 }
-
-// ---------------- dados do cofre (plaintext interno) ----------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FriendRow {
@@ -113,8 +92,6 @@ pub struct GroupExport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StormVaultData {
     pub identity: crate::identity::Identity,
-    /// Chave privada (hex) — presente só quando o usuário exportou COM
-    /// identidade. Fica cifrada no arquivo; nunca em texto plano no disco.
     pub secret_hex: Option<String>,
     pub conversations: Vec<crate::storage::Conversation>,
     pub messages: Vec<crate::storage::StoredMessage>,
@@ -151,10 +128,6 @@ pub struct ImportReport {
     pub messages_truncated: bool,
 }
 
-// ---------------- coleta (export) ----------------
-
-/// Chave de backup automático: blake3 do segredo em RAM — mesmo device
-/// desbloqueado deriva a mesma chave; a proteção real é o cofre local.
 pub fn backup_key_for(secret_hex: &str) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"distorrent/stormvault/backup-key/v1");
@@ -163,8 +136,6 @@ pub fn backup_key_for(secret_hex: &str) -> [u8; 32] {
     out
 }
 
-/// Coleta a conta inteira do Store; `secret_hex` = Some quando o export
-/// deve carregar a identidade.
 pub fn collect(
     store: &Store,
     secret_hex: Option<String>,
@@ -173,7 +144,6 @@ pub fn collect(
     store.stormvault_collect(secret_hex, max_messages, SETTINGS_WHITELIST)
 }
 
-/// Serializa → comprime (se valer a pena) → cifra → monta o container.
 pub fn seal_with_password(data: &StormVaultData, password: &str) -> Result<Vec<u8>> {
     if password.chars().count() < 8 {
         return Err(DistorrentError::Crypto(
@@ -193,8 +163,8 @@ pub fn seal_with_password(data: &StormVaultData, password: &str) -> Result<Vec<u
     )
 }
 
-/// Cifra com chave direta (backup automático — sem KDF cara no caminho).
 pub fn seal_with_key(data: &StormVaultData, key: &[u8; 32]) -> Result<Vec<u8>> {
+    // Seção 1: mut
     let mut salt = [0u8; SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
     let derived = hkdf_expand(key, &salt);
@@ -210,7 +180,6 @@ fn seal_container(
 ) -> Result<Vec<u8>> {
     let plain = serde_json::to_vec(data)
         .map_err(|e| DistorrentError::Protocol(format!("serializar cofre: {e}")))?;
-    // compressão adaptativa: só quando o ganho é real
     let (body, compressed) = {
         let z = zstd::stream::encode_all(plain.as_slice(), 3).map_err(DistorrentError::Io)?;
         if plain.len() > 4096 && (z.len() as f64) < plain.len() as f64 * (1.0 - COMPRESS_MIN_GAIN) {
@@ -222,8 +191,6 @@ fn seal_container(
     let mut nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    // header entra no AAD (anti-tamper); payload_hash cobre o body como
-    // defesa em profundidade.
     let header = StormVaultHeader {
         v: FORMAT_VERSION,
         app: "distorrent".into(),
@@ -271,7 +238,6 @@ fn aad_bytes(header_json: &[u8]) -> Vec<u8> {
     aad
 }
 
-/// Lê o header sem descriptografar (a UI mostra de quem é o cofre; fp é público).
 pub fn read_header(bytes: &[u8]) -> Result<StormVaultHeader> {
     let (header_json, _payload) = split_container(bytes)?;
     serde_json::from_slice(&header_json)
@@ -302,7 +268,6 @@ fn split_container(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
     Ok((&bytes[10..hdr_end], &bytes[hdr_end..]))
 }
 
-/// Abre com senha (export manual / import).
 pub fn open_with_password(bytes: &[u8], password: &str) -> Result<StormVaultData> {
     let (header_json, payload) = split_container(bytes)?;
     let header: StormVaultHeader = serde_json::from_slice(&header_json)
@@ -320,7 +285,6 @@ pub fn open_with_password(bytes: &[u8], password: &str) -> Result<StormVaultData
     open_payload(&header, &key, rest, &header_json)
 }
 
-/// Abre com chave derivada (modo backup automático, sem KDF caro).
 pub fn open_with_key(bytes: &[u8], key: &[u8; 32]) -> Result<StormVaultData> {
     let (header_json, payload) = split_container(bytes)?;
     let header: StormVaultHeader = serde_json::from_slice(&header_json)
@@ -353,7 +317,6 @@ fn open_payload(
             },
         )
         .map_err(|_| DistorrentError::Crypto("senha incorreta ou cofre adulterado".into()))?;
-    // hash do body (defesa em profundidade: AEAD já autenticou)
     if header.payload_hash != blake3_hex(&body) {
         return Err(DistorrentError::Protocol(
             "cofre adulterado (hash do conteúdo não confere)".into(),
@@ -368,8 +331,7 @@ fn open_payload(
         .map_err(|e| DistorrentError::Protocol(format!("conteúdo do cofre inválido: {e}")))
 }
 
-/// Checagem de forma ANTES da KDF: tamanho declarado no header confere com o
-/// arquivo real (truncamento/concatenação de cofres não gasta Argon2 à toa).
+// Seção 2: verify_container_shape
 fn verify_container_shape(header: &StormVaultHeader, payload: &[u8]) -> Result<()> {
     if header.payload_len != payload.len() as u64 {
         return Err(DistorrentError::Protocol(
@@ -379,11 +341,6 @@ fn verify_container_shape(header: &StormVaultHeader, payload: &[u8]) -> Result<(
     Ok(())
 }
 
-// ---------------- mesclagem (import) ----------------
-
-/// Importa `.stormvault` com senha: device limpo instala a identidade (a
-/// senha do arquivo vira a do cofre local); mesma conta só mescla; conta
-/// diferente → recusa.
 pub fn import_with_password(store: &Store, bytes: &[u8], password: &str) -> Result<ImportReport> {
     let data = open_with_password(bytes, password)?;
     let installing = store.load_identity().is_none();
@@ -404,7 +361,6 @@ pub fn import_with_password(store: &Store, bytes: &[u8], password: &str) -> Resu
     Ok(report)
 }
 
-/// Mescla sem instalar identidade (device já tem a mesma conta).
 pub fn import_merge_only(store: &Store, data: &StormVaultData) -> Result<ImportReport> {
     let mut report = ImportReport {
         fp: data.identity.fingerprint.clone(),
@@ -440,14 +396,10 @@ pub fn import_merge_only(store: &Store, data: &StormVaultData) -> Result<ImportR
     Ok(report)
 }
 
-// ---------------- cripto helpers ----------------
-
 fn derive_password_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
     derive_password_key_with_params(password, salt, 19_456, 2, 1)
 }
 
-/// Parâmetros KDF do header, com limites — cofres futuros com m/t/p
-/// diferentes abrem; valores absurdos viram erro honesto em vez de OOM.
 fn kdf_params_from(header: &StormVaultHeader) -> Result<(u32, u32, u32)> {
     let v = &header.kdf_params;
     let m = v.get("m").and_then(|x| x.as_u64()).unwrap_or(19_456) as u32;
@@ -483,7 +435,7 @@ fn hkdf_expand(master: &[u8; 32], salt: &[u8]) -> [u8; 32] {
     use sha2::Sha256;
     let hk = Hkdf::<Sha256>::new(Some(salt), master);
     let mut okm = [0u8; 32];
-    let _ = hk.expand(HKDF_INFO, &mut okm); // 32 bytes: nunca falha
+    let _ = hk.expand(HKDF_INFO, &mut okm);
     okm
 }
 
@@ -491,12 +443,10 @@ fn blake3_hex(bytes: &[u8]) -> String {
     hex::encode(blake3::hash(bytes).as_bytes())
 }
 
-/// Helper: nome canônico do arquivo de backup para um instante.
 pub fn backup_file_name(unix_ms: i64) -> String {
     format!("stormvault-{unix_ms}.stormvault")
 }
 
-/// Lista os snapshots `.stormvault` de um diretório (mais novos primeiro).
 pub fn list_backup_files(dir: &std::path::Path) -> Vec<(String, i64, u64)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -521,8 +471,6 @@ pub fn list_backup_files(dir: &std::path::Path) -> Vec<(String, i64, u64)> {
     out
 }
 
-/// Apaga snapshots além da retenção (dias). Os 2 mais novos nunca saem.
-/// Retorna quantos arquivos foram removidos.
 pub fn prune_backup_files(
     dir: &std::path::Path,
     retention_days: i64,
@@ -545,6 +493,7 @@ pub fn prune_backup_files(
 
 #[cfg(test)]
 mod tests {
+    // Seção 3: use
     use super::*;
     use crate::storage::Store;
 
@@ -557,13 +506,11 @@ mod tests {
         let kp = crate::identity::Keypair::generate();
         let identity = kp.identity("tester");
         store.save_identity(&identity, &kp.secret_hex()).unwrap();
-        // conversa + mensagem
         let conv = store
             .ensure_dm_conversation(&identity.fingerprint, "aabbccddeeff", "amigo")
             .unwrap();
         let env = crate::protocol::MessageEnvelope::new(&kp, &conv.id, "histórico portável");
         store.insert_message(&env, "out", "sent").unwrap();
-        // amigo
         store
             .set_friend("aabbccddeeff", "amigo", "accepted")
             .unwrap();
@@ -575,7 +522,6 @@ mod tests {
         let store = seeded_store();
         let data = sample_data(&store);
         let sealed = seal_with_password(&data, "senha-forte-123").unwrap();
-        // magic + versão
         assert_eq!(&sealed[..4], &MAGIC[..]);
         assert_eq!(u16::from_be_bytes([sealed[4], sealed[5]]), 1);
         let opened = open_with_password(&sealed, "senha-forte-123").unwrap();
@@ -583,7 +529,6 @@ mod tests {
         assert_eq!(opened.messages.len(), 1);
         assert_eq!(opened.messages[0].body, "histórico portável");
         assert_eq!(opened.secret_hex.as_deref(), Some("ab".repeat(32).as_str()));
-        // chave privada não aparece em claro no arquivo
         assert!(!sealed.windows(16).any(|w| w == [0xabu8; 16]));
     }
 
@@ -610,12 +555,10 @@ mod tests {
     fn tamper_no_payload_e_no_header_falham() {
         let store = seeded_store();
         let sealed = seal_with_password(&sample_data(&store), "senha12345").unwrap();
-        // bit flip no meio do ciphertext
         let mut bad = sealed.clone();
         let mid = bad.len() / 2;
         bad[mid] ^= 0xFF;
         assert!(open_with_password(&bad, "senha12345").is_err());
-        // bit flip no header (AAD detecta)
         let mut bad2 = sealed;
         bad2[12] ^= 0x01;
         assert!(open_with_password(&bad2, "senha12345").is_err());
@@ -636,7 +579,7 @@ mod tests {
     fn versao_futura_rejeitada() {
         let store = seeded_store();
         let mut sealed = seal_with_password(&sample_data(&store), "senha12345").unwrap();
-        sealed[5] = 0x63; // versão 299
+        sealed[5] = 0x63;
         assert!(open_with_password(&sealed, "senha12345")
             .unwrap_err()
             .to_string()
@@ -651,10 +594,8 @@ mod tests {
         let sealed = seal_with_key(&data, &key).unwrap();
         let opened = open_with_key(&sealed, &key).unwrap();
         assert_eq!(opened.identity.fingerprint, data.identity.fingerprint);
-        // chave errada não abre
         let wrong = backup_key_for("outra");
         assert!(open_with_key(&sealed, &wrong).is_err());
-        // cofre de senha não abre como key e vice-versa
         let pass_sealed = seal_with_password(&data, "senha12345").unwrap();
         assert!(open_with_key(&pass_sealed, &key).is_err());
         assert!(open_with_password(&sealed, "senha12345").is_err());
@@ -662,10 +603,8 @@ mod tests {
 
     #[test]
     fn import_mescla_sem_perder_recentes() {
-        // device A exporta
         let a = seeded_store();
         let data = sample_data(&a);
-        // device B: MESMA conta (identidade do cofre), mensagem LOCAL que não pode sumir
         let b = Store::open_in_memory().unwrap();
         b.save_identity(&data.identity, "x").unwrap();
         let kp = crate::identity::Keypair::from_secret_hex("cd".repeat(32).as_str()).unwrap();
@@ -674,20 +613,18 @@ mod tests {
             .unwrap();
         let env_local = crate::protocol::MessageEnvelope::new(&kp, &conv_b.id, "msg local nova");
         b.insert_message(&env_local, "out", "sent").unwrap();
-        // mesma ID da mensagem do cofre, mas com corpo LOCAL diferente:
-        // simula edição local posterior — o merge NÃO pode sobrescrever
         let mut clash = crate::protocol::MessageEnvelope::new(&kp, &conv_b.id, "versão local de B");
         clash.id = data.messages[0].id.clone();
         b.insert_message(&clash, "out", "sent").unwrap();
 
         let report = import_merge_only(&b, &data).unwrap();
-        assert_eq!(report.messages_merged, 0); // nada novo: id_Y é local, id_X conflita
-        assert_eq!(report.message_conflicts, 1); // id_X: cópia local vence
+        assert_eq!(report.messages_merged, 0);
+        assert_eq!(report.message_conflicts, 1);
         let msgs = b.list_messages(&conv_b.id, 100).unwrap();
         assert_eq!(msgs.len(), 2);
         assert!(msgs.iter().any(|m| m.body == "msg local nova"));
         assert!(msgs.iter().any(|m| m.body == "versão local de B"));
-        assert!(!msgs.iter().any(|m| m.body == "histórico portável")); // cofre não sobrescreveu
+        assert!(!msgs.iter().any(|m| m.body == "histórico portável"));
     }
 
     #[test]
@@ -700,13 +637,11 @@ mod tests {
         let report = import_with_password(&b, &sealed, "senha-forte-123").unwrap();
         assert!(report.identity_installed);
         assert_eq!(report.messages_merged, 1);
-        // identidade instalada + cofre local ligado com a MESMA senha
         assert_eq!(b.kv_get("vault.on").as_deref(), Some("1"));
         let blob_hex = b.load_secret_hex().unwrap();
         let secret =
             crate::vault::open_sealed(&hex::decode(&blob_hex).unwrap(), "senha-forte-123").unwrap();
         assert_eq!(secret, data.secret_hex.unwrap());
-        // mensagem presente
         let identity = b.load_identity().unwrap();
         let convs = b.list_conversations().unwrap();
         assert_eq!(convs.len(), 1);
@@ -725,6 +660,7 @@ mod tests {
         assert!(import_merge_only(&b, &data).is_err());
     }
 
+    // Seção 4: test
     #[test]
     fn export_sem_chave_nao_instala_em_device_limpo() {
         let a = seeded_store();
@@ -754,7 +690,6 @@ mod tests {
         let sealed = seal_with_password(&data, "senha12345").unwrap();
         let h = read_header(&sealed).unwrap();
         assert!(h.compressed, "histórico grande deve comprimir");
-        // payload cifrado+comprimido menor que o plaintext JSON
         let plain = serde_json::to_vec(&data).unwrap();
         assert!(sealed.len() < plain.len());
         let opened = open_with_password(&sealed, "senha12345").unwrap();

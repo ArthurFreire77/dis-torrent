@@ -1,15 +1,12 @@
 import { generateKeypair, fingerprintOf, hex } from './crypto'
 
-// Mesma forma do distorrent-core::identity::Identity (serde snake_case) —
-// o modo navegador espelha exatamente o contrato do motor nativo.
 export type UserIdentity = {
-  fingerprint: string // 12 hex
-  pubkey_hex: string // 64 hex (32 bytes)
+  fingerprint: string
+  pubkey_hex: string
   nickname: string
   created_at: number
 }
 
-// priv nunca sai daqui serializado para UI; armazenado separado e não exportado para componentes
 export function createIdentity(nickname: string): { identity: UserIdentity, privHex: string } {
   const { priv, pub } = generateKeypair()
   const fp = fingerprintOf(pub)

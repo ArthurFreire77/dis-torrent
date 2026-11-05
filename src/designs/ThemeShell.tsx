@@ -33,7 +33,6 @@ import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import { FileCard } from '../components/FileCard'
 import CreateServerWizard from '../components/CreateServerWizard'
-import BotPanel from '../components/server/BotPanel'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import ServerSettings from '../components/server/ServerSettings'
@@ -3372,19 +3371,6 @@ export default function ThemeShell({ designId }: {designId:string}){
       />
 
       {}
-      {(() => {
-        const cb = configBotId ? bots.find(b => b.id === configBotId) ?? null : null
-        if (!cb || !selCommunity) return null
-        return (
-          <BotPanel
-            communityId={selCommunity}
-            bot={cb}
-            channels={mergeChannels(activeComm?.channels, extraChannels)}
-            onSaved={() => { refreshExtras(selCommunity) }}
-            onClose={() => setConfigBotId(null)}
-          />
-        )
-      })()}
 
       {}
       {channelMenu && (
@@ -3511,6 +3497,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               : undefined
           }
           onConfigBot={setConfigBotId}
+          configBotId={configBotId}
           onMakeInvite={async () =>
             services.makeInvite(selCommunity, identity?.fingerprint ?? '000000000000')
           }

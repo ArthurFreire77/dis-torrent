@@ -6,17 +6,6 @@ import { services } from '../../services'
 import { notificationPermission, requestNotificationPermission, testNotificationSound } from '../../services/notifications'
 import { canQuitNow, formatQuitLock, quitLockRemaining, resolveSessionStart } from '../../services/appUptime'
 
-/**
- * Notificações DO SISTEMA e segundo plano.
- *
- * Tudo aqui é ligado a algo real:
- *  • "Notificações do sistema" chama `notification_show` (plugin oficial do
- *    Tauri) — no Windows é toast nativo, no Android é NotificationManager.
- *  • "Iniciar com o Windows" grava a chave Run do USUÁRIO via plugin oficial
- *    (nada de script/reg.exe) e só aparece no desktop.
- *  • "Fechar para a bandeja" é lido pelo Rust no evento de fechar a janela.
- *  • O que a plataforma não suporta NÃO aparece (nada de botão morto).
- */
 export function SystemNotificationSettings({ T, inputBg, borderColor, text, muted }: {
   T: Record<string, string>
   inputBg: string
@@ -31,8 +20,6 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
   const [tray, setTray] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
-  // Trava de saída (15 min): mesma regra do QuitDialog, e a mesma marca de
-  // início do processo — senão a tela mostraria dois prazos diferentes.
   const [appStartedAt] = useState(() => resolveSessionStart(Date.now(), typeof sessionStorage !== 'undefined' ? sessionStorage : null))
   const [quitNow, setQuitNow] = useState(() => Date.now())
   useEffect(() => {
@@ -56,7 +43,7 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
         setPermission(p.notification_permission)
         setPrefs({ autostart: p.autostart })
       })
-      .catch(() => { /* shell antigo: seção fica oculta */ })
+      .catch(() => {  })
   }, [native])
 
   const head: React.CSSProperties = { fontSize: 10, fontWeight: 800, letterSpacing: 1, color: muted, marginBottom: 8, marginTop: 4 }
@@ -73,7 +60,6 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
     setNote(null)
     try {
       let p = await notificationPermission()
-      // Android 13+: a permissão só é pedida de fato quando o usuário pede.
       if (p !== 'granted') p = await requestNotificationPermission()
       setPermission(p)
       if (p === 'granted' || !isAndroid) {
@@ -91,8 +77,6 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
       const on = await services.autostartSet(!autostart)
       setAutostart(on)
       setPrefs({ autostart: on })
-      // O Rust já gravou a decisão (`autostart_set` marca); nada automático
-      // sobrescreve mais esse checkbox a cada boot.
       if (on !== !autostart) setNote('O sistema não permitiu alterar a inicialização automática.')
     } catch (e) {
       setNote(String((e as Error)?.message ?? e))
@@ -186,6 +170,7 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
       </label>
       <select
         id="presence-bg"
+        // Seção 1: value
         value={prefs.presenceInBackground}
         onChange={(e) => setPrefs({ presenceInBackground: e.target.value as PresencaEmSegundoPlano })}
         style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '10px 12px', color: text, fontSize: 12, marginBottom: 8 }}
@@ -212,9 +197,25 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
             </span>
           </button>
 
-          <button onClick={() => { const v = !prefs.startMinimized; setPrefs({ startMinimized: v }); void services.backgroundPrefsSet({ startMinimized: v }).catch(() => {}) }} aria-pressed={prefs.startMinimized} style={row}>
+          <button
+            onClick={() => {
+              if (!tray) { setNote('sem bandeja não dá para iniciar escondido: o app abriria sem janela e sem ícone'); return }
+              const v = !prefs.startMinimized
+              setPrefs({ startMinimized: v })
+              void services.backgroundPrefsSet({ startMinimized: v }).catch((e) => setNote(String((e as Error)?.message ?? e)))
+            }}
+            aria-pressed={prefs.startMinimized}
+            style={row}
+          >
             <span style={{ display: 'flex', flexShrink: 0, color: muted }}><Icon d={Icons.chevronRight} size={15} /></span>
-            <span style={{ flex: 1, fontSize: 12, fontWeight: 700 }}>Iniciar minimizado na bandeja</span>
+            <span style={{ flex: 1, fontSize: 12, fontWeight: 700 }}>
+              Iniciar minimizado na bandeja
+              <span style={{ display: 'block', fontWeight: 400, fontSize: 11, color: muted, marginTop: 2 }}>
+                {tray
+                  ? 'ao ligar o PC, o app começa escondido e abre pelo ícone da bandeja'
+                  : 'precisa da bandeja: sem ela a janela escondida não teria como voltar'}
+              </span>
+            </span>
             <span style={{ fontSize: 11, fontWeight: 800, color: prefs.startMinimized ? T.accent : muted }}>
               {prefs.startMinimized ? 'ON' : 'OFF'}
             </span>

@@ -10,17 +10,6 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.Plugin
 
-/**
- * Ponte `plugin:callfg|start` / `plugin:callfg|stop` → [CallForegroundService].
- *
- * O contrato já existia no frontend (`callManager.startCallForeground`, chamado
- * no início/aceite da chamada e na entrada de canal de voz, e
- * `stopCallForeground` na saída). Faltava o lado nativo — o `invoke` falhava em
- * silêncio e a chamada morria ao minimizar no Android 14+.
- *
- * Nada aqui é oculto: o serviço mostra notificação permanente enquanto roda e
- * para quando a chamada termina.
- */
 @TauriPlugin
 class CallForegroundPlugin(private val activity: android.app.Activity) : Plugin(activity) {
 
@@ -41,16 +30,6 @@ class CallForegroundPlugin(private val activity: android.app.Activity) : Plugin(
     }
   }
 
-  /**
-   * Toque de chamada recebida com o Ringtone do SISTEMA.
-   *
-   * Por que não WebAudio: com a tela bloqueada / app em segundo plano o WebView
-   * tem os timers estrangulados (e pode estar pausado). Um `Ringtone`/MediaPlayer
-   * nativo continua tocando, respeita o volume/silencioso/DND do aparelho e não
-   * precisa de permissão nenhuma. É o mesmo mecanismo que o discador usa.
-   *
-   * Idempotente: chamar de novo só reinicia o toque (nunca empilha dois).
-   */
   @Command
   fun ringStart(invoke: Invoke) {
     try {
@@ -93,7 +72,6 @@ class CallForegroundPlugin(private val activity: android.app.Activity) : Plugin(
   @Command
   fun stop(invoke: Invoke) {
     try {
-      // Chamada terminou: nada de toque órfão.
       stopRingtone()
       activity.stopService(Intent(activity, CallForegroundService::class.java))
       invoke.resolve()

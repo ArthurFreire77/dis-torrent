@@ -1,14 +1,3 @@
-// COMPATIBILIDADE ENTRE VERSÕES DO APP (janela de 5 releases).
-//
-// Pedido do dono: "eu tô na 1.47 e meu amigo na 1.43 — ele deve conectar.
-// Cinco versões de distância tem que funcionar, em chamada e tudo. Depois de
-// cinco, não tem tanto problema."
-//
-// O risco real que estes testes travam: o `SecureFrame` é um enum serde
-// "externally tagged". Receber uma variante que o binário antigo não conhece
-// faz o `from_slice` FALHAR e derruba a sessão inteira — em vez de só ignorar
-// o recurso novo. Quem está 5 versões atrás tem que continuar conversando.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -23,8 +12,6 @@ import {
 
 const engine = readFileSync('distorrent-core/src/net/engine.rs', 'utf8')
 const protocol = readFileSync('distorrent-core/src/protocol.rs', 'utf8')
-
-// ---------- distância e janela ----------
 
 test('a janela é de 5 releases', () => {
   assert.equal(JANELA_COMPAT, 5)
@@ -61,8 +48,6 @@ test('o aviso honesto diz o que fazer', () => {
   assert.ok(aviso && /5 versões/.test(aviso), `aviso: ${aviso}`)
 })
 
-// ---------- gate por recurso ----------
-
 test('recurso novo NÃO vai para peer antigo que não o entende', () => {
   const min = RECURSO_MIN_VERSAO.voiceVideoFrame
   assert.equal(podeUsarRecurso('voiceVideoFrame', min), true, 'na versão mínima: pode')
@@ -76,11 +61,7 @@ test('recurso disponível só a partir da versão que o introduziu', () => {
   assert.equal(podeUsarRecurso('reciboLeitura', '1.1.47'), true, 'mais novo também pode')
 })
 
-// ---------- garantias no core ----------
-
 test('o handshake anuncia a versão do protocolo (campo com default)', () => {
-  // Sem `#[serde(default)]`, um peer antigo que não manda o campo faria o
-  // handshake INTEIRO falhar.
   const hello = protocol.slice(protocol.indexOf('pub struct Hello'), protocol.indexOf('pub struct HelloAck'))
   assert.match(hello, /proto_v: u32/)
   assert.match(hello, /#\[serde\(default\)\]/, 'default para peers antigos')
@@ -92,8 +73,6 @@ test('o handshake tolera peer sem proto_v (legado = 0)', () => {
 })
 
 test('frame desconhecido é IGNORADO, não derruba a sessão', () => {
-  // O caminho do túnel já faz isso (`Err(_) => return`). O teste trava a
-  // regra: desserializar frame NUNCA pode ser fatal para a conexão.
   const i = engine.indexOf('let frame: SecureFrame = match serde_json::from_slice(&payload)')
   assert.ok(i > 0, 'achou o ponto de desserialização')
   const bloco = engine.slice(i, i + 240)
@@ -101,9 +80,6 @@ test('frame desconhecido é IGNORADO, não derruba a sessão', () => {
 })
 
 test('campos novos em frames são OPCIONAIS para o outro lado', () => {
-  // Um campo obrigatório novo quebra o parse do lado antigo — e derruba a
-  // sessão. Duas formas válidas de tornar opcional: `#[serde(default)]` ou
-  // `Option<T>` (que o serde trata como ausente = None).
   const bloco = protocol.slice(protocol.indexOf('FileAnnounce'), protocol.indexOf('FileAnnounce') + 900)
   assert.match(bloco, /chunk_hashes/)
   const opcional = /#\[serde\(default\)\]/.test(bloco) || /chunk_hashes: Option</.test(bloco)

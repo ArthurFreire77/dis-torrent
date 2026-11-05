@@ -1,5 +1,3 @@
-// Hooks que ligam a UI DisTorrent aos services reais. Nenhum dado fictício aqui.
-
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { services } from '../services'
 import type {
@@ -46,17 +44,6 @@ export function useNetwork(pollMs = 30000) {
   const [status, setStatus] = useState<NetworkStatusView | null>(null)
   const [peers, setPeers] = useState<PeerView[]>([])
 
-  /**
-   * Lê o estado real do motor.
-   *
-   * O `document.hidden` bloqueava TODA leitura com a janela escondida — e é
-   * exatamente a situação de quem minimiza para a bandeja. Resultado: o app
-   * continuava conectado e trocando mensagens, mas o último estado lido ficava
-   * congelado na tela (o clássico "diz CONECTANDO mas meu amigo recebeu a
-   * mensagem"). Agora só o POLL é pausado quando oculto; um evento do motor
-   * (`peer_online`, `state_changed`) sempre força a leitura, porque nesse caso
-   * há mudança real para mostrar e o custo é uma chamada.
-   */
   const refresh = useCallback(async (opts?: { force?: boolean }) => {
     const oculto = typeof document !== 'undefined' && document.hidden
     if (oculto && !opts?.force) return
@@ -65,7 +52,6 @@ export function useNetwork(pollMs = 30000) {
       setStatus(s)
       setPeers(p)
     } catch {
-      // sem engine (sem identidade) — estado real: offline
       setStatus({ state: 'DISCONNECTED', online_peers: 0, listen_port: 0 })
       setPeers([])
     }
@@ -77,8 +63,6 @@ export function useNetwork(pollMs = 30000) {
     safe()
     if (pollMs <= 0) return () => { alive = false }
     const t = setInterval(safe, pollMs)
-    // Ao voltar para a frente, relê na hora: durante a ausência o poll foi
-    // pulado, e o primeiro número que o usuário vê precisa ser o atual.
     const onVis = () => { if (!document.hidden) void refresh({ force: true }) }
     if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVis)
     return () => {
@@ -88,7 +72,6 @@ export function useNetwork(pollMs = 30000) {
     }
   }, [refresh, pollMs])
 
-  // Push-only: atualiza na hora via eventos, sem esperar o poll (0 delay percebido).
   useEffect(() => services.subscribe((ev) => {
     if (ev.type === 'state_changed' || ev.type === 'peer_online' || ev.type === 'peer_offline' || ev.type === 'peer_discovered') {
       void refresh({ force: true })
@@ -111,7 +94,6 @@ export function useConversations(open: boolean) {
     try {
       const list = await services.conversationsList()
       setConversations((prev) => {
-        // evita re-render se nada mudou (0 delay no composer)
         if (prev.length === list.length && prev.every((c, i) => c.id === list[i]?.id && c.title === list[i]?.title)) return prev
         return list
       })
@@ -124,7 +106,6 @@ export function useConversations(open: boolean) {
     if (!open) return
     let alive = true
     refresh()
-    // coalesce: eventos em rajada viram 1 refresh
     let t: ReturnType<typeof setTimeout> | null = null
     const schedule = () => {
       if (!alive || t) return
@@ -145,11 +126,9 @@ export function useConversations(open: boolean) {
     return () => { alive = false; if (t) clearTimeout(t); un() }
   }, [open, refresh])
 
-  // Ao vivo: conversa nova atualiza a lista SEM restart (coalescido).
   return { conversations, refresh }
 }
 
-/** Tamanho da página de mensagens (janela por ts — 5.4). */
 export const MESSAGES_PAGE = 100
 
 export function useMessages(convId: string | null) {
@@ -157,7 +136,6 @@ export function useMessages(convId: string | null) {
   const [hasOlder, setHasOlder] = useState(false)
   const seq = useRef(0)
   const loadingOlder = useRef(false)
-  // espelho síncrono para o cursor de paginação (refs não esperam render)
   const messagesRef = useRef<StoredMessage[]>([])
   useEffect(() => {
     messagesRef.current = messages
@@ -171,10 +149,7 @@ export function useMessages(convId: string | null) {
     }
     const my = ++seq.current
     try {
-      // janela: só as mais recentes — conversa grande não trava a UI.
-      // Pede PAGE+1 para saber se há mais sem mentir no "carregar mais".
       const over = await services.messagesWindow(convId, null, MESSAGES_PAGE + 1)
-      // guarda race: resposta lenta de conversa antiga não sobrescreve a atual
       if (seq.current === my) {
         setMessages(over.slice(0, MESSAGES_PAGE))
         setHasOlder(over.length > MESSAGES_PAGE)
@@ -187,13 +162,12 @@ export function useMessages(convId: string | null) {
     }
   }, [convId])
 
-  // Carrega a página anterior (mensagens mais antigas) e prefixa sem duplicar.
   const loadOlder = useCallback(async () => {
     if (!convId || loadingOlder.current) return
     loadingOlder.current = true
     const my = ++seq.current
     try {
-      // ts mínimo das mensagens reais (ignora ecos otimistas pending-*)
+      // Seção 1: oldest
       let oldest: number | null = null
       for (const m of messagesRef.current) {
         if (m.id.startsWith('pending-')) continue
@@ -217,9 +191,7 @@ export function useMessages(convId: string | null) {
         return [...fresh, ...prev].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1))
       })
       setHasOlder(over.length > MESSAGES_PAGE)
-    } catch {
-      // mantém o que há; o usuário tenta de novo
-    } finally {
+    } catch {} finally {
       loadingOlder.current = false
     }
   }, [convId])
@@ -228,8 +200,6 @@ export function useMessages(convId: string | null) {
     refresh()
   }, [refresh])
 
-  // patchStatus cobre mensagens otimistas: apos replaceOptimistic o id definitivo
-  // esta na lista, entao message_status delivered (msg_id definitivo) atualiza o ✓✓.
   const patchStatus = useCallback((msgId: string, status: StoredMessage['status']) => {
     setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, status } : m)))
   }, [])
@@ -238,10 +208,6 @@ export function useMessages(convId: string | null) {
     setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]))
   }, [])
 
-  // T1 eco otimista: substitui o pending-<ts> pelo definitivo.
-  // - Caso comum: troca por tempId (closure do send).
-  // - Caso corrida (message_new ja anexou o definitivo via subscribe): remove o temp.
-  // - Fallback: match por body+ts proximo (mesmo body, ts dentro de 10s).
   const replaceOptimistic = useCallback((tempId: string, definitive: StoredMessage) => {
     setMessages((prev) => {
       if (prev.some((x) => x.id === definitive.id)) {
@@ -271,8 +237,6 @@ export function useMessages(convId: string | null) {
     setMessages((prev) => prev.map((m) => (m.id === tempId ? { ...m, status: 'failed' as const } : m)))
   }, [])
 
-  // Ao vivo: mensagem da conversa aberta entra sem reload; status atualiza junto.
-  // (append/patchStatus dedupam por id — seguro com os handlers dos shells.)
   const convRef = useRef(convId)
   convRef.current = convId
   const appendRef = useRef(append)

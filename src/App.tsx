@@ -1,12 +1,16 @@
 import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom'
-import ThemeShell from './designs/ThemeShell'
-import MobileShell from './mobile/MobileShell'
 import { NotificationPrompt } from './components/NotificationPrompt'
 import { initAppState } from './services/appState'
 import { initNotifications } from './services/notifications'
 import { offerInvite, tokenFromInviteUrl } from './services/deepLink'
 import { installExternalLinkHandler, OPEN_EXTERNAL_FAILED_EVENT, type OpenExternalFailure } from './shared/installExternalLinks'
+
+// As duas interfaces são carregadas SOB DEMANDA: juntas davam um único chunk de
+// ~1 MB, que travava o boot em PC fraco (e agravava a "tela branca"). Agora o
+// shell que a tela vai usar baixa sozinho, com a splash ainda visível.
+const ThemeShell = React.lazy(() => import('./designs/ThemeShell'))
+const MobileShell = React.lazy(() => import('./mobile/MobileShell'))
 
 const MOBILE_MAX_WIDTH = 768
 
@@ -32,10 +36,24 @@ function AutoRoute(){
   return <Navigate to="/d/distorrent" replace />
 }
 
+/** Splash enquanto o chunk do shell baixa (não é tela branca). */
+function ShellFallback(){
+  return (
+    <div className="boot" data-testid="shell-loading">
+      <div className="boot-logo">DisTorrent</div>
+      <div className="boot-bar"><i /></div>
+      <div className="boot-sub">carregando a interface…</div>
+    </div>
+  )
+}
+
 function DesktopRoute(){
   const isMobile = useIsMobile()
-  if(isMobile) return <MobileShell />
-  return <ThemeShell designId="distorrent" />
+  return (
+    <React.Suspense fallback={<ShellFallback />}>
+      {isMobile ? <MobileShell /> : <ThemeShell designId="distorrent" />}
+    </React.Suspense>
+  )
 }
 
 function InviteRoute({ token }: { token: string }){
@@ -122,8 +140,8 @@ function AppRoutes(){
       <Routes>
         <Route path="/" element={<AutoRoute />} />
         <Route path="/d/distorrent" element={<DesktopRoute />} />
-        <Route path="/m" element={<MobileShell />} />
-        <Route path="/mobile" element={<MobileShell />} />
+        <Route path="/m" element={<React.Suspense fallback={<ShellFallback />}><MobileShell /></React.Suspense>} />
+        <Route path="/mobile" element={<React.Suspense fallback={<ShellFallback />}><MobileShell /></React.Suspense>} />
         <Route path="/invite/:token" element={<InviteRouteWrapper />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

@@ -1,20 +1,10 @@
-//! Mídia de voz NATIVA (Rust/webrtc-rs + cpal + Opus) — motor de áudio Linux;
-//! fala SDP/trickle ICE padrão, conversa com navegador sem tradutor. Decisões
-//! fixas (não reverter sem medir): jitter 50 ms, buffer cpal EXPLÍCITO 960
-//! frames, Opus 20 ms/48 kHz/mono/VOIP sem DTX, `Sample::new` = instante real
-//! de captura, sem AGC na captura. REGRA: este módulo nunca decide chamada por
-//! conta própria — só atua em (call_id, peer_fp) registrados no engine;
-//! sem registro, o WebRTC do navegador é o dono (mantém Win/Android/macOS).
-
 pub mod probe {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
-    /// (link, índice do frame de 20 ms) — distingue direções no mesmo processo.
     type Key = (u32, u64);
 
-    /// Janela de retenção de capturas ainda não pareadas com um playout.
     const MAX_PENDING: usize = 8192;
 
     #[derive(Default)]
@@ -23,7 +13,6 @@ pub mod probe {
         played: Mutex<HashMap<Key, Instant>>,
         released: Mutex<HashMap<Key, Instant>>,
         deltas: Mutex<Vec<Duration>>,
-        /// (captura -> liberacao do jitter buffer) e (liberacao -> playout).
         seg_a: Mutex<Vec<Duration>>,
         seg_b: Mutex<Vec<Duration>>,
     }
@@ -42,12 +31,10 @@ pub mod probe {
             self.seg_b.lock().unwrap().clear();
         }
 
-        /// Instante em que o jitter buffer entregou o frame a aplicacao.
         pub fn stamp_release(&self, link: u32, idx: u64, at: Instant) {
             self.released.lock().unwrap().insert((link, idx), at);
         }
 
-        /// Medianas (ms) dos segmentos captura→liberação e liberação→playout.
         pub fn segments_ms(&self) -> Option<((f64, f64), (f64, f64))> {
             let pct = |v: &[Duration], p: f64| -> f64 {
                 if v.is_empty() {
@@ -66,11 +53,9 @@ pub mod probe {
             Some(((pct(&a, 0.5), pct(&a, 0.95)), (pct(&b, 0.5), pct(&b, 0.95))))
         }
 
-        /// Instante de captura do frame `idx` da direcao `link`.
         pub fn stamp_capture(&self, link: u32, idx: u64, at: Instant) {
             let mut m = self.captured.lock().unwrap();
             if m.len() >= MAX_PENDING {
-                // Esquece os mais antigos: frame nunca pareado não cresce sem limite.
                 let mut keys: Vec<Key> = m.keys().copied().collect();
                 keys.sort_unstable_by_key(|k| k.1);
                 for k in keys.into_iter().take(MAX_PENDING / 2) {
@@ -80,7 +65,6 @@ pub mod probe {
             m.insert((link, idx), at);
         }
 
-        /// Instante de playout do frame `idx`. Casa com a captura e guarda o delta.
         pub fn stamp_play(&self, link: u32, idx: u64, at: Instant) {
             let captured = self.captured.lock().unwrap().remove(&(link, idx));
             let released = self.released.lock().unwrap().remove(&(link, idx));
@@ -113,7 +97,6 @@ pub mod probe {
             self.deltas.lock().unwrap().clone()
         }
 
-        /// (mediana, p95) em ms. `None` enquanto nenhum frame foi pareado.
         pub fn median_p95_ms(&self) -> Option<(f64, f64)> {
             let mut v: Vec<u64> = self
                 .deltas
@@ -136,7 +119,6 @@ pub mod probe {
 
     static PROBE: OnceLock<LatencyProbe> = OnceLock::new();
 
-    /// Singleton: callback cpal (thread realtime) e tasks de áudio chegam nela.
     pub fn probe() -> &'static LatencyProbe {
         PROBE.get_or_init(LatencyProbe::new)
     }
@@ -156,36 +138,27 @@ pub mod audio {
 
     pub const SAMPLE_RATE: u32 = 48_000;
     pub const FRAME_MS: u32 = 20;
-    pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * FRAME_MS as usize; // 960
+    pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * FRAME_MS as usize;
     pub const FRAME: Duration = Duration::from_millis(FRAME_MS as u64);
 
-    /// Buffer cpal EXPLÍCITO (20 ms @ 48 kHz). `Default` nunca — em ALSA/PipeWire
-    /// pode resolver para 1024..=u32::MAX frames e quebrar 1 callback = 1 frame.
-    pub const DEVICE_BUFFER: u32 = FRAME_SAMPLES as u32; // 960
+    pub const DEVICE_BUFFER: u32 = FRAME_SAMPLES as u32;
 
-    /// Frame capturado, datado com o instante do PRIMEIRO sample (não da callback).
     #[derive(Clone)]
     pub struct MicFrame {
         pub pcm: Arc<Vec<i16>>,
         pub captured_at: Instant,
     }
 
-    /// Quadro decodificado; `id` = (link, idx) para a sonda de latência.
     pub struct PcmFrame {
         pub pcm: Arc<Vec<i16>>,
         pub id: Option<(u32, u64)>,
     }
 
-    // `cpal::Stream` 0.18 é struct por backend; tipo = `DeviceTrait::Stream`.
     type HStream = <cpal::Device as cpal::traits::DeviceTrait>::Stream;
     type SpkStream = Box<HStream>;
     type MicStream = Box<HStream>;
     type Inbox = Arc<Mutex<VecDeque<PcmFrame>>>;
 
-    // ---------------------------------------------------------------- resampler
-
-    /// Resampler linear com FASE PERSISTENTE: por-callback perdia fase e o
-    /// frame de 960 nunca fechava em taxa não-inteira (44.1 kHz).
     struct Resampler {
         step: f64,
         pos: f64,
@@ -201,7 +174,7 @@ pub mod audio {
             }
         }
 
-        /// Consome mono i16 @ `from` Hz e devolve mono i16 @ 48 kHz.
+        // Seção 1: process
         fn process(&mut self, input: &[i16]) -> Vec<i16> {
             if (self.step - 1.0).abs() < 1e-9 {
                 return input.to_vec();
@@ -227,9 +200,6 @@ pub mod audio {
         }
     }
 
-    /// Amplificador de pico do mic (alvo -6 dBFS): device a 31% chegava como
-    /// sussurro ("não captura áudio"). Só amplifica, teto 12x, com noise gate
-    /// (sem gate o AGC subia ganho entre palavras e o par ouvia chiado).
     pub(super) struct MicGain {
         pub(super) gain: f32,
     }
@@ -239,16 +209,12 @@ pub mod audio {
             Self { gain: 1.0 }
         }
 
-        /// Alvo de pico: -6 dBFS.
         pub(super) const TARGET: f32 = 0.5;
-        /// Teto de amplificação.
         pub(super) const MAX_GAIN: f32 = 12.0;
-        /// Piso de ruído (-48 dBFS): abaixo disso é silêncio, não voz baixa.
         pub(super) const NOISE_FLOOR: f32 = 0.004;
 
         pub(super) fn process(&mut self, mono: &mut [i16]) {
             let peak = mono.iter().fold(0i16, |m, s| m.max(s.abs())) as f32 / i16::MAX as f32;
-            // Bloco de silêncio real: não mexe no ganho (e desce devagar para 1.0).
             if peak < Self::NOISE_FLOOR {
                 self.gain += (1.0 - self.gain) * 0.05;
                 if self.gain <= 1.001 {
@@ -257,7 +223,6 @@ pub mod audio {
                 return;
             }
             let want = (Self::TARGET / peak).min(Self::MAX_GAIN);
-            // Ataque rápido (não corta sílaba inicial), liberação lenta (não "bomba").
             let coef = if want > self.gain { 0.35 } else { 0.03 };
             self.gain += (want - self.gain) * coef;
             if self.gain <= 1.001 {
@@ -266,7 +231,6 @@ pub mod audio {
             }
             for s in mono.iter_mut() {
                 let v = *s as f32 * self.gain / i16::MAX as f32;
-                // Limitador suave: linear até 0.7, comprimido acima — sem clip reto.
                 let limited = if v.abs() <= 0.7 {
                     v
                 } else {
@@ -278,18 +242,12 @@ pub mod audio {
         }
     }
 
-    // ---------------------------------------------------------------- hub
-
-    /// Partes compartilhadas com os callbacks do cpal (threads de device).
     #[derive(Default)]
     struct HubShared {
         subs: Mutex<Vec<(u64, UnboundedSender<MicFrame>)>>,
         inboxes: Mutex<Vec<(u64, Inbox)>>,
         name: Mutex<String>,
-        /// Inboxes ensurdecidas: o playout pula E drena (sem acumular backlog).
         deafened: std::sync::Mutex<std::collections::HashSet<u64>>,
-        /// REFERÊNCIA do AEC: exatamente o áudio escrito no speaker — sem isso
-        /// o filtro adaptativo não tem o que subtrair do mic.
         play_ref: Arc<crate::net::media_dsp::RefRing>,
     }
 
@@ -298,8 +256,6 @@ pub mod audio {
         mic: Mutex<Option<MicStream>>,
         spk: Mutex<Option<SpkStream>>,
         mic_error: Mutex<Option<String>>,
-        /// Último erro de abertura do speaker — sem ele a recepção ficava muda
-        /// com métricas saudáveis e sem diagnóstico.
         spk_error: Mutex<Option<String>>,
         has_capture: AtomicBool,
         mic_attempted: AtomicBool,
@@ -342,18 +298,14 @@ pub mod audio {
             self.inner.mic_error.lock().unwrap().clone()
         }
 
-        /// Último erro de abertura do ALTO-FALANTE (`None` = tocando).
         pub fn speaker_error(&self) -> Option<String> {
             self.inner.spk_error.lock().unwrap().clone()
         }
 
-        /// Abre o mic se ainda não abriu; sem mic a sessão funciona só recebendo
-        /// (erro guardado, não propagado).
         pub fn ensure_mic(&self) -> Result<(), String> {
             if self.inner.has_capture.load(Ordering::SeqCst) {
                 return Ok(());
             }
-            // Permite exercitar o caminho "sem microfone" sem desligar o device.
             if std::env::var("VOICE_NO_CAPTURE").as_deref() == Ok("1") {
                 let e = "VOICE_NO_CAPTURE=1: microfone desabilitado de proposito".to_string();
                 *self.inner.mic_error.lock().unwrap() = Some(e.clone());
@@ -361,9 +313,6 @@ pub mod audio {
                 return Err(e);
             }
             if self.inner.mic_attempted.swap(true, Ordering::SeqCst) {
-                // Abertura em curso/falhada: devolver Ok() aqui fazia o sender
-                // nascer com mic fechado (packets_out=0, "Linux não envia").
-                // Espera a abertura terminar (abrir device leva ~1 s).
                 let deadline = Instant::now() + Duration::from_secs(3);
                 loop {
                     if self.inner.has_capture.load(Ordering::SeqCst) {
@@ -386,19 +335,17 @@ pub mod audio {
             Ok(())
         }
 
-        /// Re-tenta abrir o microfone (ver `VoiceMedia::retry_mic`).
         pub fn retry_mic(&self) {
             if self.inner.has_capture.load(Ordering::SeqCst) {
                 return;
             }
             self.inner.mic_attempted.store(false, Ordering::SeqCst);
             if self.ensure_mic().is_ok() {
-                // Limpa erro velho: painel não mostra falha que já passou.
                 *self.inner.mic_error.lock().unwrap() = None;
             }
         }
 
-        /// Assina o fluxo do microfone. Devolve (id para `unsubscribe`, receptor).
+        // Seção 2: subscribe
         pub fn subscribe(&self) -> Result<(u64, UnboundedReceiver<MicFrame>), String> {
             self.ensure_mic()?;
             let (tx, rx) = unbounded_channel();
@@ -416,12 +363,10 @@ pub mod audio {
                 .retain(|(i, _)| *i != id);
         }
 
-        /// Quantos peers assinam o microfone agora (deve cair a 0 apos hangup).
         pub fn subscriber_count(&self) -> usize {
             self.inner.shared.subs.lock().unwrap().len()
         }
 
-        /// Registra uma caixa de playout; o callback de saida mistura todas.
         pub fn register_inbox(&self) -> u64 {
             let id = self.next_id(false);
             let inbox: Inbox = Arc::new(Mutex::new(VecDeque::new()));
@@ -453,7 +398,6 @@ pub mod audio {
             self.inner.spk.lock().unwrap().is_some()
         }
 
-        /// Inbox ensurdecida: playout pula e drena (antes o "deafen" só calava o mic).
         pub fn set_inbox_muted(&self, id: u64, muted: bool) {
             let mut set = self.inner.shared.deafened.lock().unwrap();
             if muted {
@@ -463,7 +407,6 @@ pub mod audio {
             }
         }
 
-        /// Anel de referencia do alto-falante, para o AEC.
         pub fn play_ref(&self) -> Arc<crate::net::media_dsp::RefRing> {
             self.inner.shared.play_ref.clone()
         }
@@ -478,8 +421,6 @@ pub mod audio {
             *n += 1;
             id
         }
-
-        // ---------------------------------------------------------------- microfone
 
         fn open_mic(&self) -> Result<(), String> {
             let host = cpal::default_host();
@@ -520,8 +461,6 @@ pub mod audio {
             let mut resampler = Resampler::new(hw_rate, SAMPLE_RATE);
             let mut agc = MicGain::new();
             let mut acc: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES * 4);
-            // Ancora de tempo: frame datado pela callback que o entregou,
-            // avançando +FRAME por frame emitido.
             let mut next_frame_wall: Option<Instant> = None;
 
             let stream = build_input_with_buffer_fallback(&device, cfg, move |data: &[f32]| {
@@ -537,7 +476,6 @@ pub mod audio {
                         .map(|s| ((*s).clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                         .collect()
                 };
-                // Ganho antes do resampler: volume independente do volume do sistema.
                 agc.process(&mut mono);
                 if next_frame_wall.is_none() {
                     next_frame_wall = Some(Instant::now());
@@ -553,7 +491,6 @@ pub mod audio {
                     }
                     let shared_pcm = Arc::new(frame);
                     for (_, tx) in list.iter() {
-                        // Canal ilimitado: `send` não bloqueia a thread realtime.
                         let _ = tx.send(MicFrame {
                             pcm: shared_pcm.clone(),
                             captured_at: at,
@@ -568,19 +505,16 @@ pub mod audio {
             Ok(())
         }
 
-        // ------------------------------------------------------------ alto-falante
-
         pub fn ensure_speaker(&self) -> Result<(), String> {
             if self.inner.spk.lock().unwrap().is_some() {
                 return Ok(());
             }
             let r = self.open_speaker();
-            // Guarda o motivo: `let _ = ensure_speaker()` engoliava "nenhum
-            // alto-falante" e a recepção ficava muda sem diagnóstico.
             *self.inner.spk_error.lock().unwrap() = r.as_ref().err().cloned();
             r
         }
 
+        // Seção 3: open_speaker
         fn open_speaker(&self) -> Result<(), String> {
             let host = cpal::default_host();
             let outs: Vec<cpal::Device> = host
@@ -633,7 +567,6 @@ pub mod audio {
             let ch = hw_channels as usize;
             let step = f64::from(SAMPLE_RATE) / f64::from(hw_rate);
             let same_rate = (step - 1.0).abs() < 1e-9;
-            // buffer 48k persistente: sobra do callback anterior + amostras novas
             let mut buf: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 16);
             let mut phase: f64 = 0.0;
             let mut hw: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 16);
@@ -642,16 +575,12 @@ pub mod audio {
             let stream =
                 build_output_with_buffer_fallback(&device, cfg, move |out: &mut [f32]| {
                     let need = (out.len() / ch).max(1);
-                    // Alvo consumido por esta callback derivado da FASE acumulada (fração
-                    // anterior conta; alvo constante vazava ~2 amostras/callback). +2 = âncoras.
                     let target = if same_rate {
                         need
                     } else {
                         (phase + (need as f64) * step).floor() as usize + 2
                     };
 
-                    // 1) Completa o buffer até o alvo com as inboxes (mesh).
-                    //    Ensurdecidas: pula e drena.
                     {
                         let fill_from = buf.len();
                         if target > fill_from {
@@ -688,7 +617,6 @@ pub mod audio {
                         }
                     }
 
-                    // 2) Resample 48k -> hw; `phase` no domínio da entrada.
                     hw.clear();
                     let consumed;
                     if same_rate {
@@ -713,8 +641,6 @@ pub mod audio {
                         }
                     }
 
-                    // 3) Referência do AEC a 48 kHz (pré-resample) — outra taxa
-                    //    não converge (filtro roda na taxa do mic).
                     {
                         let mut ref_buf: Vec<i16> = Vec::with_capacity(consumed);
                         for &v in buf.iter().take(consumed) {
@@ -726,7 +652,6 @@ pub mod audio {
                     }
                     buf.drain(..consumed);
 
-                    // 4) mono -> canais intercalados
                     for (i, o) in out.iter_mut().enumerate() {
                         *o = hw[i / ch].clamp(-1.0, 1.0);
                     }
@@ -737,8 +662,6 @@ pub mod audio {
             Ok(())
         }
     }
-
-    // ---------------------------------------------------------------- device cfg
 
     fn pick_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
         let ranges: Vec<_> = dev
@@ -759,19 +682,18 @@ pub mod audio {
                 return Ok(r.clone().with_sample_rate(sr));
             }
         }
+        // Seção 4: r
         let r = &ranges[0];
         let rate = r.max_sample_rate().min(sr).max(r.min_sample_rate());
         Ok(r.clone().with_sample_rate(rate))
     }
 
-    /// StreamConfig com buffer EXPLÍCITO (`BufferSize::Default` nunca entra).
     fn config_with_buffer(cfg: cpal::SupportedStreamConfig, buffer: u32) -> cpal::StreamConfig {
         let mut sc = cfg.config();
         sc.buffer_size = cpal::BufferSize::Fixed(buffer);
         sc
     }
 
-    /// Tenta 960 frames e, se o backend recusar, outros tamanhos EXPLÍCITOS.
     const FALLBACK_BUFFERS: [u32; 4] = [DEVICE_BUFFER, 480, 240, 1920];
 
     fn build_input_with_buffer_fallback<F>(
@@ -782,7 +704,6 @@ pub mod audio {
     where
         F: FnMut(&[f32]) + Send + 'static,
     {
-        // Callback sobrevive a tentativa que falhou (fase do resampler etc.).
         let cb = Arc::new(Mutex::new(cb));
         let mut last = String::new();
         for buffer in FALLBACK_BUFFERS {
@@ -861,7 +782,6 @@ fn dbg_on() -> bool {
     std::env::var("VOICE_DEBUG_LAT").is_ok_and(|v| v == "1")
 }
 
-/// Caminho "sem microfone" testável via env (lista de `peer_fp` separados por vírgula).
 fn sem_mic(peer_fp: &str) -> bool {
     if std::env::var("VOICE_NO_CAPTURE").as_deref() == Ok("1") {
         return true;
@@ -902,34 +822,21 @@ use webrtc::peer_connection::{
 };
 use webrtc::rtp_transceiver::RtpSender;
 
-// ---------------------------------------------------------------- parametros
-
-/// Profundidade-alvo do jitter buffer: 50 ms = 2-3 pacotes de 20 ms.
 const JITTER_DEPTH: Duration = Duration::from_millis(50);
-/// Pacotes retidos por stream (independente da profundidade).
 const JITTER_CAPACITY: usize = 64;
-/// Bitrate Opus 48 kbps: 32 kbps chegava abafado em fone; fullband mono em P2P.
 const BITRATE_BPS: i32 = 48_000;
 const STUN_DEFAULT: &str = "stun:stun.l.google.com:19302";
-/// TURN público padrão (mesmo do navegador); sem relay, CGNAT simétrico não fecha.
 const TURN_DEFAULT_HOST: &str = "openrelay.metered.ca";
 const TURN_DEFAULT_PORT: u16 = 80;
 const TURN_DEFAULT_USER: &str = "openrelayproject";
 const TURN_DEFAULT_SECRET: &str = "openrelayprojectsecret";
 const SDP_WAIT: Duration = Duration::from_millis(1500);
-/// fmtp Opus: 20 ms e FEC in-band (RFC 7587 5.1).
 const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
-/// Teto de frames PLC seguidos (mantido para testes de contrato).
 #[allow(dead_code)]
 const MAX_PLC_BURST: u32 = 50;
 
-/// Buraco de `seq` acima disso = mute/troca de SSRC, não perda: re-sincroniza
-/// sem sintetizar áudio (10 frames = 200 ms).
 const PLC_RESYNC_GAP: u32 = 10;
 
-// ---------------------------------------------------------------- API publica
-
-/// Sinal de sinalizacao que a aplicacao deve encaminhar ao outro lado.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutboundSignal {
     Offer { sdp: String },
@@ -939,28 +846,21 @@ pub enum OutboundSignal {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct VoiceStats {
-    pub state: String, // "idle"|"connecting"|"connected"|"failed"
-    pub route: String, // "LAN"|"STUN"|"TURN"|"n/d"
+    pub state: String,
+    // Seção 5: pub
+    pub route: String,
     pub jitter_depth_ms: u32,
     pub packets_in: u64,
     pub packets_out: u64,
-    /// Escritas na track que falharam; `packets_out` alto + `write_errors` alto
-    /// = problema desta máquina.
     #[serde(default)]
     pub write_errors: u64,
-    pub plc_frames: u64, // frames mascarados por perda
+    pub plc_frames: u64,
     pub decode_errors: u64,
     pub rtt_ms: Option<u64>,
-    /// Último erro de abertura do mic; `Some` + `packets_out == 0` = este lado
-    /// não envia (painel mostra o motivo em vez de "conectando" mudo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_error: Option<String>,
-    /// Último erro de abertura do speaker; `Some` + `packets_in` crescendo =
-    /// áudio chega e não sai desta máquina.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_error: Option<String>,
-    /// "off"|"starting"|"live"|"failed". "live" com `frames_out == 0` não é
-    /// saúde: watchdog de 15 s converte em "failed" com motivo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -975,15 +875,12 @@ pub struct VoiceStats {
     pub frames_in: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frames_out: Option<u64>,
-    /// Pares em `connected` AGORA: o `state` agregado é o PIOR caso — num mesh
-    /// de 3, um par failed derrubava a chamada inteira sem estes campos.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers_connected: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers_total: Option<u32>,
 }
 
-/// Gerenciador de mídia de voz; estado por (call_id, peer_fp) — mesh de áudio.
 pub struct VoiceMedia {
     inner: Arc<Inner>,
 }
@@ -991,12 +888,9 @@ pub struct VoiceMedia {
 type Inbox = Arc<Mutex<VecDeque<PcmFrame>>>;
 type Key = (String, String);
 
-// ---------------------------------------------------------------- estado
-
 struct Shared {
     packets_in: AtomicU64,
     packets_out: AtomicU64,
-    /// Escritas na track que FALHARAM; sem o contador `packets_out` mentia.
     write_errors: AtomicU64,
     plc_frames: AtomicU64,
     decode_errors: AtomicU64,
@@ -1008,27 +902,16 @@ struct Shared {
     route: Mutex<String>,
     rtt_ms: Mutex<Option<u64>>,
 
-    /// Fila de trickle ICE drenada por `drain_outbound`.
     out: Mutex<VecDeque<OutboundSignal>>,
     connected: Arc<tokio::sync::Notify>,
-    /// PC da sessão, para ICE restart automático no handler de estado.
     pc: Mutex<Option<std::sync::Arc<dyn PeerConnection>>>,
-    /// ICE restarts já tentados nesta sessão (teto anti-loop).
     ice_restarts: AtomicU32,
 
-    /// Caixa de playout deste peer (decode escreve, callback do cpal lê).
     inbox: Inbox,
-    /// Id da direção instrumentada (ver `VoiceMedia::attach_probe`).
     in_link: Mutex<Option<u32>>,
-    /// 1º timestamp RTP da direção: `idx = (ts - ts_0)/960` identifica o frame
-    /// sem tocar no payload (Opus puro, navegador entende).
     base_ts: Mutex<Option<u32>>,
-    /// SDP remoto: só para `sprop-parameter-sets` do H264 (senão ficava preto).
     remote_sdp: Mutex<Option<String>>,
-    // ---- video nativo ----
-    /// Pedido de video pendente/ativo: ("camera"|"screen", monitor).
     video_want: Mutex<Option<(String, Option<u32>)>>,
-    /// "off" | "starting" | "live" | "failed".
     video_state: Mutex<String>,
     video_codec: Mutex<Option<String>>,
     video_error: Mutex<Option<String>>,
@@ -1037,12 +920,8 @@ struct Shared {
     frames_in: AtomicU64,
     frames_out: AtomicU64,
     video_seq: AtomicU64,
-    /// Ultimo frame remoto decodificado (a UI faz polling).
     video_frame: Mutex<Option<VideoFrame>>,
-    /// Tasks de RECEBIMENTO: sem abortá-las no close, o decode GStreamer
-    /// sobrevivia ao hangup e cada renegociação abria outro decoder.
     recv_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
-    /// Track local de video (criada na renegociacao; a task de envio escreve nela).
     video_track: Mutex<Option<Arc<TrackLocalStaticSample>>>,
 }
 
@@ -1107,7 +986,6 @@ impl Shared {
             video_packets_in: Some(self.video_packets_in.load(Ordering::Relaxed)),
             frames_in: Some(self.frames_in.load(Ordering::Relaxed)),
             frames_out: Some(self.frames_out.load(Ordering::Relaxed)),
-            // Contagem por estado: `stats()` é de UMA sessão (1/1 se conectada).
             peers_connected: Some(if self.state.lock().unwrap().as_str() == "connected" {
                 1
             } else {
@@ -1129,25 +1007,23 @@ struct Session {
     sh: Arc<Shared>,
     pc: Arc<dyn PeerConnection>,
     inbox_id: u64,
-    mic_id: u64, // 0 = sem assinatura do mic
+    mic_id: u64,
     mic_sub: Mutex<Option<UnboundedReceiver<MicFrame>>>,
     out_link: Mutex<Option<u32>>,
     muted: AtomicBool,
     closed: AtomicBool,
     tx: TxState,
-    /// Trilha de vídeo (sendrecv) desde o build: m=video já na oferta inicial,
-    /// ligar a captura só escreve samples (nada de renegociação).
     vtx: TxState,
     tasks: Mutex<Vec<tokio::task::AbortHandle>>,
     probe: &'static LatencyProbe,
 }
 
+// Seção 6: Inner
 struct Inner {
     core: Arc<Core>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     probe_out: Mutex<Option<u32>>,
     probe_in: Mutex<Option<u32>>,
-    /// Receptores do teste de microfone (mic_test_*), por id de subscribe.
     mic_tests: Mutex<HashMap<u64, UnboundedReceiver<MicFrame>>>,
 }
 
@@ -1157,21 +1033,15 @@ impl Session {
     }
 }
 
-// ---------------------------------------------------------------- handler
-
 struct H {
     sh: Arc<Shared>,
 }
 
 impl H {
-    /// ICE restart nativo: nova offer com `ice_restart` na fila `out` (teto de 3);
-    /// troca de rede deixa de matar a chamada.
     fn schedule_ice_restart(&self) {
         let sh = self.sh.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(1)).await; // flap curto se resolve sozinho
-                                                              // `reconnecting` também conta (é o estado de `Disconnected`); flap
-                                                              // que se resolveu sozinho já voltou a "connected" e sai aqui.
+            tokio::time::sleep(Duration::from_secs(1)).await;
             {
                 let atual = sh.state.lock().unwrap().clone();
                 if atual != "failed" && atual != "reconnecting" {
@@ -1179,7 +1049,7 @@ impl H {
                 }
             }
             if sh.remote_sdp.lock().unwrap().is_none() {
-                return; // nunca negociou: não há o que reiniciar
+                return;
             }
             if sh.ice_restarts.fetch_add(1, Ordering::SeqCst) >= 3 {
                 return;
@@ -1225,10 +1095,6 @@ impl PeerConnectionEventHandler for H {
             }
             RTCPeerConnectionState::Connecting => self.sh.set_state("connecting"),
             RTCPeerConnectionState::Disconnected => {
-                // ROTA CAIU: antes caía no `_ => {}` e a sessão seguia
-                // "connected" com `packets_out` subindo sobre rota morta
-                // ("aparece conectado mas não se ouve"). Tratado como
-                // recuperável e agenda ICE restart (teto de 3 evita rajada).
                 self.sh.connected_flag.store(false, Ordering::SeqCst);
                 self.sh.set_state("reconnecting");
                 self.sh.connected.notify_waiters();
@@ -1241,17 +1107,13 @@ impl PeerConnectionEventHandler for H {
                 self.schedule_ice_restart();
             }
             RTCPeerConnectionState::Closed => {
-                // Fechamos de propósito (hangup): NÃO agendar restart — a task
-                // detached criava offer em PC já fechada e sobrescrevia "idle"→"failed".
                 self.sh.connected_flag.store(false, Ordering::SeqCst);
             }
             RTCPeerConnectionState::New => self.sh.set_state("idle"),
-            // `#[non_exhaustive]`: sem este braço o crate não compila no Linux.
             _ => {}
         }
     }
 
-    /// Trickle ICE: cada candidato vira um sinal na fila de `drain_outbound`.
     async fn on_ice_candidate(&self, ev: RTCPeerConnectionIceEvent) {
         match ev.candidate.to_json() {
             Ok(init) => {
@@ -1270,7 +1132,6 @@ impl PeerConnectionEventHandler for H {
 
     async fn on_ice_gathering_state_change(&self, s: RTCIceGatheringState) {
         if s == RTCIceGatheringState::Complete {
-            // Fim de candidatos, como o navegador sinaliza.
             let mid = self.sh.mid.lock().unwrap().clone();
             self.sh.out.lock().unwrap().push_back(OutboundSignal::Ice {
                 candidate: String::new(),
@@ -1292,10 +1153,6 @@ impl PeerConnectionEventHandler for H {
     }
 }
 
-// ---------------------------------------------------------------- nucleo
-
-/// Thread dedicada com runtime tokio: API síncrona sem conflitar com runtime
-/// externo; `create_offer` usável de qualquer lugar.
 struct Core {
     tx: mpsc::Sender<Box<dyn FnOnce() + Send>>,
     handle: tokio::runtime::Handle,
@@ -1319,7 +1176,6 @@ impl Core {
                         return;
                     }
                 };
-                // Handle permite `block_on` de FORA de qualquer runtime.
                 if htx.send(rt.handle().clone()).is_err() {
                     return;
                 }
@@ -1329,6 +1185,7 @@ impl Core {
                 drop(rt);
             })
             .expect("voice-core thread");
+        // Seção 7: handle
         let handle = match hrx.recv() {
             Ok(h) => h,
             Err(_) => {
@@ -1339,7 +1196,6 @@ impl Core {
         Arc::new(Core { tx, handle })
     }
 
-    /// Envia um futuro para a thread do core e bloqueia ate o resultado.
     fn run<T: Send + 'static>(
         &self,
         fut: impl std::future::Future<Output = T> + Send + 'static,
@@ -1373,11 +1229,7 @@ fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-// ---------------------------------------------------------------- impl
-
 impl VoiceMedia {
-    /// Cria o gerenciador. NÃO abre devices aqui (abertura é lazy — abrir
-    /// device de áudio pode levar segundos/travar o engine no nascimento).
     pub fn new() -> Result<Arc<Self>, String> {
         let core = Core::new();
         Ok(Arc::new(VoiceMedia {
@@ -1391,8 +1243,6 @@ impl VoiceMedia {
         }))
     }
 
-    /// Teste de microfone SEM chamada (config no Linux, sem getUserMedia):
-    /// abre o mic e devolve id; UI lê `mic_test_level(id)` e fecha com stop.
     pub fn mic_test_start(&self) -> Result<u64, String> {
         let hub = self::audio::hub();
         hub.ensure_mic()?;
@@ -1405,7 +1255,6 @@ impl VoiceMedia {
         Ok(id)
     }
 
-    /// Pico 0..1 desde a última leitura; drena a fila (canal ilimitado cresce).
     pub fn mic_test_level(&self, id: u64) -> f32 {
         let mut peak = 0f32;
         if let Some(rx) = self
@@ -1427,7 +1276,6 @@ impl VoiceMedia {
         peak.clamp(0.0, 1.0)
     }
 
-    /// Fecha o teste e libera o mic (idempotente).
     pub fn mic_test_stop(&self, id: u64) {
         let dropped = self
             .inner
@@ -1441,7 +1289,6 @@ impl VoiceMedia {
         }
     }
 
-    /// Nome do device de entrada atual (best-effort: tenta abrir antes).
     pub fn mic_name(&self) -> String {
         let hub = self::audio::hub();
         let _ = hub.ensure_mic();
@@ -1452,15 +1299,12 @@ impl VoiceMedia {
         self::audio::hub().has_capture()
     }
 
-    /// Cria offer para (call_id, peer_fp) e devolve o SDP.
     pub fn create_offer(&self, call_id: &str, peer_fp: &str) -> Result<String, String> {
         let (i, c, p) = (self.inner.clone(), call_id.to_owned(), peer_fp.to_owned());
         let key: Key = (c.clone(), p.clone());
         let fresh = Arc::new(AtomicBool::new(false));
         let fresh_flag = fresh.clone();
         let out: Result<String, String> = self.inner.core.run(async move {
-            // Sessão viva? REUSA (renegociação/ICE restart na mesma PC; criar
-            // outra vazava mic, tasks e PC antiga).
             let sess = match i.get(&(c.clone(), p.clone())) {
                 Some(s) if !s.closed.load(Ordering::SeqCst) => s.clone(),
                 _ => match build_session(&i, &c, &p).await {
@@ -1483,8 +1327,6 @@ impl VoiceMedia {
         match out {
             Ok(sdp) => Ok(sdp),
             Err(e) => {
-                // Só desfaz o que FOI construído agora (fechar sessão viva por
-                // renegociação falha matava a chamada em curso).
                 if fresh.load(Ordering::SeqCst) {
                     self.close_key(key);
                 }
@@ -1493,7 +1335,6 @@ impl VoiceMedia {
         }
     }
 
-    /// Atende um offer e devolve o answer.
     pub fn handle_offer(&self, call_id: &str, peer_fp: &str, sdp: &str) -> Result<String, String> {
         let (i, c, p, s) = (
             self.inner.clone(),
@@ -1505,8 +1346,7 @@ impl VoiceMedia {
         let fresh = Arc::new(AtomicBool::new(false));
         let fresh_flag = fresh.clone();
         let out: Result<String, String> = self.inner.core.run(async move {
-            // Idem `create_offer`: reusa a sessão (offer de ICE restart do par
-            // cai na MESMA PC, senão estado ICE/DTLS se perdia).
+            // Seção 8: sess
             let sess = match i.get(&(c.clone(), p.clone())) {
                 Some(s) if !s.closed.load(Ordering::SeqCst) => s.clone(),
                 _ => match build_session(&i, &c, &p).await {
@@ -1537,7 +1377,6 @@ impl VoiceMedia {
         match out {
             Ok(sdp) => Ok(sdp),
             Err(e) => {
-                // Idem create_offer: só desfaz sessão construída AGORA.
                 if fresh.load(Ordering::SeqCst) {
                     self.close_key(key);
                 }
@@ -1563,7 +1402,6 @@ impl VoiceMedia {
         })?
     }
 
-    /// trickle ICE. `cand` vazio = fim de candidatos.
     pub fn add_ice_candidate(
         &self,
         call_id: &str,
@@ -1593,7 +1431,6 @@ impl VoiceMedia {
         })?
     }
 
-    /// Esvazia a fila de trickle ICE (SDPs não passam aqui: já saem por valor).
     pub fn drain_outbound(&self, call_id: &str, peer_fp: &str) -> Vec<OutboundSignal> {
         match self.inner.get(&(call_id.to_owned(), peer_fp.to_owned())) {
             Some(s) => s.sh.out.lock().unwrap().drain(..).collect(),
@@ -1607,14 +1444,12 @@ impl VoiceMedia {
         }
     }
 
-    /// Ensurdecer: cala o playout das sessões (mute normal cuida do mic).
     pub fn set_deafened(&self, call_id: &str, deafened: bool) {
         for s in self.inner.of_call(call_id) {
             self::audio::hub().set_inbox_muted(s.inbox_id, deafened);
         }
     }
 
-    /// Fecha as PeerConnections, aborta as tasks de audio e limpa o estado.
     pub fn hangup(&self, call_id: &str) {
         let keys: Vec<Key> = self
             .inner
@@ -1627,21 +1462,16 @@ impl VoiceMedia {
         }
     }
 
-    /// Fecha a sessão com UM par da chamada (o `CallEnd` dele) — as demais
-    /// sessões do mesh continuam de pé.
     pub fn hangup_peer(&self, call_id: &str, peer_fp: &str) {
         self.close_key((call_id.to_owned(), peer_fp.to_owned()));
     }
 
-    /// Fecha UMA sessão e a tira do mapa (hangup ou falha de negociação) —
-    /// sem isto a sessão falha deixava mic assinado para sempre (vazamento).
     fn close_key(&self, k: Key) {
         if let Some(sess) = self.inner.remove(&k) {
             sess.closed.store(true, Ordering::SeqCst);
             for h in sess.tasks.lock().unwrap().drain(..) {
                 h.abort();
             }
-            // Tasks de receive/decode de vídeo também morrem aqui (vazava GStreamer).
             for h in sess.sh.recv_tasks.lock().unwrap().drain(..) {
                 h.abort();
             }
@@ -1653,15 +1483,12 @@ impl VoiceMedia {
             }
             self::audio::hub().unregister_inbox(sess.inbox_id);
             sess.sh.set_state("idle");
-            // `pc.close()` é async; sessão fora do mapa e tasks abortadas,
-            // então falha aqui só resta ao driver no último Arc.
             let _ = self.inner.core.run(async move {
                 sess.pc.close().await.ok();
             });
         }
     }
 
-    /// Estado do primeiro peer da call (só existe um; `stats_agg` soma todos).
     pub fn stats(&self, call_id: &str) -> Option<VoiceStats> {
         self.inner
             .of_call(call_id)
@@ -1670,8 +1497,6 @@ impl VoiceMedia {
             .map(|s| s.sh.stats())
     }
 
-    /// Estado agregado: contadores somados; vídeo do peer com mídia fluindo
-    /// tem precedência (não depende da ordem do HashMap).
     pub fn stats_agg(&self, call_id: &str) -> Option<VoiceStats> {
         aggregate_stats(
             self.inner
@@ -1687,7 +1512,7 @@ impl VoiceMedia {
             .map(|s| s.sh.stats())
     }
 
-    /// Liga a sonda: `out` = direção enviada, `in` = recebida; `None` = sem medição.
+    // Seção 9: attach_probe
     pub fn attach_probe(&self, out: Option<u32>, inbound: Option<u32>) {
         *self.inner.probe_out.lock().unwrap() = out;
         *self.inner.probe_in.lock().unwrap() = inbound;
@@ -1697,14 +1522,10 @@ impl VoiceMedia {
         }
     }
 
-    /// Profundidade do jitter buffer em uso, em ms.
     pub fn jitter_depth_ms() -> u32 {
         JITTER_DEPTH.as_millis() as u32
     }
 
-    /// Re-tenta abrir o mic (falha no boot marcava `mic_attempted` para sempre
-    /// e todas as chamadas nasciam só-recebendo). Passa pela fila do core:
-    /// chamar direto abriria device na main thread e travava a UI.
     pub fn retry_mic(&self) {
         let _ = self
             .inner
@@ -1712,14 +1533,6 @@ impl VoiceMedia {
             .run(async { self::audio::hub().retry_mic() });
     }
 
-    // ---------------- video nativo ----------------
-    //
-    // O encoder e o decoder vivem em `media_video` (GStreamer). Aqui so' mora
-    // o ESTADO por sessao e o laco que liga o encoder a PeerConnection.
-
-    /// Liga o envio de vídeo ("camera"|"screen", `monitor_id` só p/ tela).
-    /// Idempotente (2 encoders no mesmo stream congelavam o vídeo); troca de
-    /// fonte com vídeo no ar reinicia a task (senão o botão ficava morto).
     pub fn video_start(
         &self,
         call_id: &str,
@@ -1737,12 +1550,8 @@ impl VoiceMedia {
             .get(&(call_id.to_owned(), peer_fp.to_owned()))
             .ok_or_else(|| "sessao inexistente".to_string())?;
         {
-            // Check-then-act ATÔMICO (mesmo Mutex de `video_state`); "starting"
-            // gravado antes de qualquer `await`.
             let mut st = sess.sh.video_state.lock().unwrap();
             if st.as_str() == "live" || st.as_str() == "starting" {
-                // TROCA DE FONTE: recomeçar é a única forma — devolver o codec
-                // sem fazer nada deixava o botão morto sem erro.
                 let atual = sess.sh.video_want.lock().unwrap().clone();
                 let mesma_fonte = atual.as_ref().map(|(f, _)| f == source).unwrap_or(false);
                 if mesma_fonte {
@@ -1755,7 +1564,6 @@ impl VoiceMedia {
                         .unwrap_or_else(|| "video/VP8".to_string());
                     return Ok(codec);
                 }
-                // Solta o lock: `video_purge_source` também usa `video_state`.
                 drop(st);
                 self.video_purge_source(&sess);
                 let mut st = sess.sh.video_state.lock().unwrap();
@@ -1777,8 +1585,6 @@ impl VoiceMedia {
             *st = "starting".to_string();
             *sess.sh.video_error.lock().unwrap() = None;
         }
-        // `Session` é Arc: clona para a task e para o handle de aborto (sem o
-        // registro em `sess.tasks`, a task sobrevivia ao hangup).
         let for_task = sess.clone();
         let for_abort = sess.clone();
         let want = source.to_string();
@@ -1790,15 +1596,10 @@ impl VoiceMedia {
         Ok("starting".to_string())
     }
 
-    /// Purga a task/encoder da fonte atual para troca de fonte reabrir o device
-    /// (sem isto a task antiga rodava e a nova nunca assumia).
     fn video_purge_source(&self, sess: &Session) {
-        // Estado "off" quebra o laço de `video_send_task`; tasks abortadas no
-        // close. Folga de 120 ms antes de reabrir: 2 capturas simultâneas brigam.
         std::thread::sleep(Duration::from_millis(120));
     }
 
-    /// Desliga o envio de video (o recebimento continua; o tile some na UI).
     pub fn video_stop(&self, call_id: &str, peer_fp: &str) {
         if let Some(sess) = self.inner.get(&(call_id.to_owned(), peer_fp.to_owned())) {
             *sess.sh.video_state.lock().unwrap() = "off".to_string();
@@ -1806,7 +1607,6 @@ impl VoiceMedia {
         }
     }
 
-    /// Último frame remoto decodificado (JPEG + dims + seq); polling ~10 fps.
     pub fn video_frame(&self, call_id: &str, peer_fp: &str) -> Option<VideoFrame> {
         self.inner
             .get(&(call_id.to_owned(), peer_fp.to_owned()))?
@@ -1820,8 +1620,6 @@ impl VoiceMedia {
 
 fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceStats> {
     let all = stats.into_iter().collect::<Vec<_>>();
-    // Estado agregado: o PIOR peer decide (HashMap não tem ordem estável —
-    // um par failed derrubava a chamada dos outros; conecting escondia connected).
     let gravidade = |peer: &VoiceStats| match peer.state.as_str() {
         "failed" => 4,
         "connecting" => 3,
@@ -1833,12 +1631,9 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
     let worst = all.iter().max_by_key(|peer| gravidade(peer))?;
     let mut out = worst.clone();
 
-    // Contagem por estado ANTES de somar: o que evita matar a chamada por UM par.
     out.peers_total = Some(all.len() as u32);
     out.peers_connected = Some(all.iter().filter(|peer| peer.state == "connected").count() as u32);
 
-    // Soma contadores UMA vez, pulando o pior por `ptr::eq` (o antigo `skip(1)`
-    // contava o pior duas vezes quando ele não era o primeiro).
     for peer in all.iter() {
         if std::ptr::eq(peer, worst) {
             continue;
@@ -1850,7 +1645,6 @@ fn aggregate_stats(stats: impl IntoIterator<Item = VoiceStats>) -> Option<VoiceS
         out.decode_errors = out.decode_errors.saturating_add(peer.decode_errors);
     }
 
-    // `route` vem do peer escolhido (a rota que decide o estado).
     let best_video = all
         .iter()
         .max_by_key(|peer| match peer.video_state.as_deref() {
@@ -1880,6 +1674,7 @@ fn sum_optional_stat(
     field: impl Fn(&VoiceStats) -> Option<u64>,
 ) -> Option<u64> {
     let mut found = false;
+    // Seção 10: mut
     let mut sum = 0u64;
     for peer in all {
         if let Some(value) = field(peer) {
@@ -1944,8 +1739,6 @@ mod stats_aggregation_tests {
 
     #[test]
     fn aggregate_does_not_double_count_the_worst_peer() {
-        // Pior peer failed não é o primeiro: era o caso em que `skip(1)` somava
-        // o pior duas vezes.
         let mut primeiro = peer("off", None, 1);
         primeiro.state = "connected".into();
         primeiro.packets_in = 10;
@@ -1963,8 +1756,6 @@ mod stats_aggregation_tests {
 
     #[test]
     fn aggregate_counts_connected_peers_so_one_bad_peer_does_not_kill_the_call() {
-        // `state` agregado é o pior par; `peers_connected` distingue
-        // "um par caiu" de "a chamada acabou".
         let mut a = peer("off", None, 0);
         a.state = "connected".into();
         let mut b = peer("off", None, 0);
@@ -1999,7 +1790,6 @@ mod stats_aggregation_tests {
     }
 }
 
-/// Último frame remoto decodificado (UI faz polling; sem eventos).
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct VideoFrame {
     pub jpeg: Vec<u8>,
@@ -2032,8 +1822,6 @@ impl Inner {
     }
 }
 
-// ---------------------------------------------------------------- construcao
-
 fn ice_servers() -> Vec<RTCIceServer> {
     let mut v: Vec<RTCIceServer> = Vec::new();
     let stun = std::env::var("VOICE_STUN_URLS").unwrap_or_else(|_| STUN_DEFAULT.to_string());
@@ -2043,13 +1831,8 @@ fn ice_servers() -> Vec<RTCIceServer> {
             ..Default::default()
         });
     }
-    // TURN é OBRIGATÓRIO atrás de CGNAT (STUN só revela IP mapeado; CGNAT
-    // simétrico nunca fecha). BUG corrigido: TURN vinha só de env var que
-    // ninguém definia — agora usa o mesmo padrão do caminho JS.
-    let turn_urls = std::env::var("VOICE_TURN_URLS").unwrap_or_else(|_| {
-        // openrelay: TURN público com credencial estática documentada.
-        format!("{TURN_DEFAULT_HOST}:{TURN_DEFAULT_PORT}")
-    });
+    let turn_urls = std::env::var("VOICE_TURN_URLS")
+        .unwrap_or_else(|_| format!("{TURN_DEFAULT_HOST}:{TURN_DEFAULT_PORT}"));
     let turn_user =
         std::env::var("VOICE_TURN_USER").unwrap_or_else(|_| TURN_DEFAULT_USER.to_string());
     let turn_pass =
@@ -2066,6 +1849,7 @@ fn ice_servers() -> Vec<RTCIceServer> {
         };
         v.push(RTCIceServer {
             urls,
+            // Seção 11: username
             username: turn_user.clone(),
             credential: turn_pass.clone(),
             ..Default::default()
@@ -2078,7 +1862,6 @@ fn mdns_mode() -> MulticastDnsMode {
     match std::env::var("VOICE_MDNS").unwrap_or_default().as_str() {
         "disabled" | "off" => MulticastDnsMode::Disabled,
         "query-and-gather" | "queryandgather" => MulticastDnsMode::QueryAndGather,
-        // Default de navegador: publica hostnames .local e resolve os do par.
         _ => MulticastDnsMode::QueryOnly,
     }
 }
@@ -2086,12 +1869,10 @@ fn mdns_mode() -> MulticastDnsMode {
 fn udp_addrs() -> Vec<String> {
     match std::env::var("VOICE_BIND") {
         Ok(v) if !v.trim().is_empty() => v.split(',').map(|s| s.trim().to_string()).collect(),
-        // Sem VOICE_BIND: todas as interfaces (o que um app de chat quer).
         _ => vec!["0.0.0.0:0".to_string(), "[::]:0".to_string()],
     }
 }
 
-/// SSRC estável por par: único dentro da PC é suficiente (hash FNV).
 fn ssrc_for(call_id: &str, peer_fp: &str) -> u32 {
     let mut h: u32 = 0x811C_9DC5;
     for b in call_id
@@ -2105,8 +1886,6 @@ fn ssrc_for(call_id: &str, peer_fp: &str) -> u32 {
     h | 0x8000_0000
 }
 
-/// SSRC do VÍDEO, distinto do de áudio: SSRCs iguais confundem o demux RTP
-/// (o áudio do par "sumia" ao ligar a câmera).
 fn ssrc_for_video(call_id: &str, peer_fp: &str) -> u32 {
     ssrc_for(&format!("{call_id}|video"), peer_fp)
 }
@@ -2125,8 +1904,6 @@ async fn build_session(
         .with_multicast_dns_mode(mdns_mode())
         .build();
 
-    // Jitter buffer na cadeia REAL (Slot::JitterBuffer): o driver do PC já roda
-    // os timeouts, então o playout por tempo não precisa de tick manual.
     let ir = register_default_interceptors(Default::default(), &mut me).map_err(err)?;
     let ir = ir.with(
         Slot::JitterBuffer,
@@ -2138,22 +1915,16 @@ async fn build_session(
 
     let cfg = RTCConfigurationBuilder::new()
         .with_ice_servers(ice_servers())
-        // `iceTransportPolicy: all` — relay so' entra se TURN estiver configurado.
         .with_ice_transport_policy(RTCIceTransportPolicy::All)
         .build();
 
-    // Caixa de playout; falha no speaker não impede a sessão (só não sai áudio).
     let inbox_id = hub.register_inbox();
-    // GUARDA DE LIMPEZA: inbox/mic eram registrados antes dos awaits de rede;
-    // se o build falhava, ficavam para sempre (mic "ocupado",
-    // subscriber_count nunca a zero).
     struct LimpezaNoErro {
         inbox_id: Option<u64>,
         mic_id: u64,
     }
     impl Drop for LimpezaNoErro {
         fn drop(&mut self) {
-            // Desarma quando o build dá certo (campos viram None/0).
             let hub = audio::hub();
             if self.mic_id != 0 {
                 hub.unsubscribe(self.mic_id);
@@ -2189,7 +1960,6 @@ async fn build_session(
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
     *sh.pc.lock().unwrap() = Some(pc.clone());
 
-    // Faixa de saída: criada mesmo sem mic (sessão só recebe).
     let (mic_id, mic_rx) = if sem_mic(peer_fp) {
         eprintln!("[voice] {peer_fp}: sem microfone; sessao so vai receber");
         (0, None)
@@ -2235,9 +2005,6 @@ async fn build_session(
         .await
         .map_err(err)?;
 
-    // Trilha de VÍDEO criada desde o início (sendrecv): antes era adicionada
-    // no meio da chamada sem renegociação — o par nunca via a m-line e o RTP
-    // ia a lugar nenhum. Navegador também anuncia audio+video (ensureMlines).
     let vcodec = RTCRtpCodec {
         mime_type: "video/VP8".to_owned(),
         clock_rate: 90_000,
@@ -2263,6 +2030,7 @@ async fn build_session(
         ),
     )
     .map_err(err)?;
+    // Seção 12: vtl
     let vtl: Arc<TrackLocalStaticSample> = Arc::new(vtl);
     let vsender = pc
         .add_track(Arc::clone(&vtl) as Arc<dyn TrackLocal>)
@@ -2294,7 +2062,6 @@ async fn build_session(
         tasks.push(spawn_send_loop(sess.clone()));
         tasks.push(spawn_stats_loop(sess.clone()));
     }
-    // Sessão entregue com sucesso: o guard NÃO desfaz os registros.
     limpeza.inbox_id = None;
     limpeza.mic_id = 0;
     Ok(sess)
@@ -2319,7 +2086,6 @@ async fn wait_connected(sh: &Arc<Shared>, timeout: Duration) -> bool {
         if sh.connected_flag.load(Ordering::SeqCst) {
             return true;
         }
-        // `notified()` criado ANTES de checar a flag: sinal pré-listener se perde.
         let n = sh.connected.notified();
         if sh.connected_flag.load(Ordering::SeqCst) {
             return true;
@@ -2335,15 +2101,11 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e}")
 }
 
-// ---------------------------------------------------------------- envio
-
 fn new_encoder() -> Result<opus::Encoder, String> {
     let mut enc = opus::Encoder::new(SAMPLE_RATE, opus::Channels::Mono, opus::Application::Voip)
         .map_err(err)?;
     enc.set_bitrate(opus::Bitrate::Bits(BITRATE_BPS))
         .map_err(err)?;
-    // DTX DESLIGADO: com DTX o Opus manda 1 frame/~400 ms no silêncio (20x o
-    // frame) e mata a interatividade.
     enc.set_dtx(false).map_err(err)?;
     let _ = enc.set_inband_fec(true);
     let _ = enc.set_packet_loss_perc(5);
@@ -2352,9 +2114,6 @@ fn new_encoder() -> Result<opus::Encoder, String> {
 
 fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-        // Espera conectar SEM TETO: desistir em silêncio virava "só recebe"
-        // até o fim com TURN lento/ICE restart tardio. Quem decide "nunca
-        // conectou" é a UI (watchdogs); aqui a missão é viver com a sessão.
         let mut silent_ticks: u32 = 0;
         loop {
             if sess.closed.load(Ordering::SeqCst) {
@@ -2365,31 +2124,24 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             }
             silent_ticks = silent_ticks.saturating_add(1);
             if silent_ticks == 150 {
-                // ~30s sem rota: um log honesto (NAO desiste).
                 eprintln!("[voice] envio aguardando ICE conectar (>30s; TURN/CGNAT demoram)");
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        // PT/SSRC só existem depois do answer: tenta ~10 s e, se nada, marca
-        // `failed` com motivo (antes morria em silêncio com "connected").
         let mut attempt: u32 = 0;
         let (pt, ssrc) = loop {
             if sess.closed.load(Ordering::SeqCst) {
                 return;
             }
             let pt = match sess.tx.sender.get_parameters().await {
-                Ok(p) => {
-                    // PRIORIZA o Opus negociado: com fmtp divergente ele cai no
-                    // balde parcial e `.first()` escolhia PT=0 (PCMU) — ruído
-                    // alto no receptor com packets_out normal.
-                    p.rtp_parameters
-                        .codecs
-                        .iter()
-                        .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))
-                        .or_else(|| p.rtp_parameters.codecs.first())
-                        .map(|c| c.payload_type)
-                }
+                Ok(p) => p
+                    .rtp_parameters
+                    .codecs
+                    .iter()
+                    .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case("audio/opus"))
+                    .or_else(|| p.rtp_parameters.codecs.first())
+                    .map(|c| c.payload_type),
                 Err(e) => {
                     tracing::debug!("[voice] get_parameters ainda nao pronto: {e}");
                     None
@@ -2421,9 +2173,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
 
         let mut mic_rx = sess.mic_sub.lock().unwrap().take();
         if mic_rx.is_none() {
-            // Sessão só-recebe (mic ainda não abriu): antes `return` imediato —
-            // `retry_mic` reabria o device mas não re-assinava, e quem entrava
-            // antes do mic ficar pronto ficava MUDO. Tenta assinar por 60 s.
             let hub_mic = self::audio::hub();
             for _ in 0..30 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -2437,8 +2186,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 }
             }
             if mic_rx.is_none() {
-                // Honesto: segue recebendo, mas ninguém nos ouve (mic_error já
-                // publicado em VoiceStats).
                 eprintln!(
                     "[voice] {}/{}: segue só recebendo (sem microfone)",
                     sess.call_id, sess.peer_fp
@@ -2446,11 +2193,9 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 return;
             }
         }
-        // `idx` conta PACOTES ESCRITOS (o packetizer só avança o RTP por sample).
+        // Seção 13: mut
         let mut idx: u64 = 0;
 
-        // Descarta o backlog de ~1.5 s acumulado durante o ICE (despejar de uma
-        // vez estoura o jitter buffer e a latência medida vira a idade do backlog).
         let mut descartados = 0usize;
         if let Some(rx) = mic_rx.as_mut() {
             while rx.try_recv().is_ok() {
@@ -2464,13 +2209,9 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             );
         }
 
-        // Envio DISPARADO pelo frame, não por relógio de slots (slots repetiam
-        // frame antigo e ficavam permanentemente atrasados).
         let mut pkt = vec![0u8; 4000];
         DBG.with(|d| d.set(dbg_on()));
 
-        // AEC só com ALTO-FALANTE (fone não tem eco; filtro aprendia a voz
-        // local). RefRing compartilhado: referência é o mesmo áudio p/ todos.
         let hub = self::audio::hub();
         let aec_ref = hub.play_ref();
         let mut aec = crate::net::media_dsp::EchoCanceller::new(aec_ref.clone(), hub.has_speaker());
@@ -2487,8 +2228,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             if sess.closed.load(Ordering::SeqCst) {
                 return;
             }
-            // Mudo: não escreve (clock RTP para, receptor usa PLC) e DRENA o
-            // canal — sem drenar: ~360 MB/h mutado + rajada ao desmutar.
             if sess.muted.load(Ordering::SeqCst) {
                 if let Some(rx) = mic_rx.as_mut() {
                     while rx.try_recv().is_ok() {}
@@ -2501,9 +2240,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 Some(r) => r,
                 None => return,
             };
-            // Espera o frame com janela 1.5x o período: janela exata descartava
-            // frame atrasado e o clock RTP andava mais devagar que o real
-            // (áudio picado sob carga, sem erro nos contadores).
             let Ok(Some(frame)) = tokio::time::timeout(FRAME + FRAME / 2, rx.recv()).await else {
                 continue;
             };
@@ -2514,8 +2250,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 continue;
             }
 
-            // AEC antes de codificar (eco nunca vira RTP; sem referência o
-            // áudio passa intacto).
             aec.maybe_rearm(hub.has_speaker());
             let limpo = aec.process(&pcm);
 
@@ -2558,9 +2292,7 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 .sample_writer(ssrc, pt)
                 .write_sample(&Sample {
                     data: Bytes::from(pkt.clone()),
-                    // Duração de wall clock: dela derivam as 960 ticks/frame.
                     duration: FRAME,
-                    // timestamp = instante de geração no mic
                     ..Sample::new(at)
                 })
                 .await;
@@ -2573,19 +2305,8 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 );
             }
             idx += 1;
-            // `packets_out` só conta o que REALMENTE entrou na track.
-            //
-            // Antes o `Result` era descartado e o contador subia sempre: o
-            // painel mostrava "enviando" com a escrita falhando (track fechada
-            // por hangup, PT inválido) — e o diagnóstico concluía que o
-            // problema era sempre do outro lado.
             match write_res {
                 Ok(()) => {
-                    // Só conta com ROTA VIVA. Durante `reconnecting`/`failed` a
-                    // track aceita a escrita e o ICE descarta depois; somar ali
-                    // fazia o painel mostrar "pacotes saindo" numa sessão que
-                    // não entrega nada — a mentira que o `Disconnected` acima
-                    // existe para evitar.
                     if sess.sh.connected_flag.load(Ordering::Relaxed) {
                         sess.sh.packets_out.fetch_add(1, Ordering::Relaxed);
                     }
@@ -2602,8 +2323,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
                 }
             }
 
-            // Alinha o próximo envio no RELOGIO DE CAPTURA (at + FRAME):
-            // ritmo de 50 pacotes/s sem acumular atraso.
             let wait = (at + FRAME).saturating_duration_since(Instant::now());
             if !wait.is_zero() {
                 tokio::time::sleep(wait).await;
@@ -2613,9 +2332,6 @@ fn spawn_send_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
     .abort_handle()
 }
 
-// ---------------------------------------------------------------- recepcao
-
-/// Estende o sequence number de 16 bits para 32, tolerando o wrap.
 fn extend_seq(expected: Option<u32>, seq: u32) -> u32 {
     match expected {
         None => seq,
@@ -2637,8 +2353,6 @@ fn spawn_recv(
     in_link: Option<u32>,
 ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
-        // Decoder DENTRO da task: opus::Decoder nao e' Sync e nao ha motivo para
-        // compartilhar.
         let mut dec = match opus::Decoder::new(SAMPLE_RATE, opus::Channels::Mono) {
             Ok(d) => d,
             Err(e) => {
@@ -2646,6 +2360,7 @@ fn spawn_recv(
                 return;
             }
         };
+        // Seção 14: mut
         let mut pcm = vec![0i16; FRAME_SAMPLES];
         DBG.with(|d| d.set(dbg_on()));
         let mut expected: Option<u32> = None;
@@ -2678,21 +2393,11 @@ fn spawn_recv(
             let ext = extend_seq(expected, seq);
             if let Some(e) = expected {
                 if ext > e {
-                    // BURACO LONGO = MUTE/SSRC NOVO, NÃO PERDA.
-                    //
-                    // O mute do remetente PARA de escrever RTP, então o `seq`
-                    // salta N. Sintetizar `min(N, 50)` frames de concealment
-                    // (1 s) empurrava 1 s de áudio inventado na inbox de uma
-                    // vez e deixava o receptor 1 s atrasado até drenar — o
-                    // "embaralha/some quando alguém desmuta".
-                    // Acima de ~200 ms é silêncio honesto: re-sincroniza sem
-                    // fabricar áudio.
                     let gap = ext - e;
                     if gap > PLC_RESYNC_GAP {
                         sh.plc_frames.fetch_add(u64::from(gap), Ordering::Relaxed);
                     } else {
                         for _ in 0..gap {
-                            // PLC de verdade: payload vazio = concealment do decoder.
                             match dec.decode(&[], &mut pcm, false) {
                                 Ok(n) => {
                                     sh.plc_frames.fetch_add(1, Ordering::Relaxed);
@@ -2706,7 +2411,6 @@ fn spawn_recv(
                         }
                     }
                 } else if ext < e {
-                    // Duplicata/replay: o jitter buffer já entregou em ordem.
                     continue;
                 }
             }
@@ -2736,7 +2440,6 @@ fn push_pcm(sh: &Arc<Shared>, pcm: &[i16], n: usize, id: Option<(u32, u64)>) {
         return;
     }
     let mut q = sh.inbox.lock().unwrap();
-    // Teto de ~4 s de fila: playout parado não vira latência infinita.
     while q.len() > 200 {
         q.pop_front();
     }
@@ -2746,38 +2449,24 @@ fn push_pcm(sh: &Arc<Shared>, pcm: &[i16], n: usize, id: Option<(u32, u64)>) {
     });
 }
 
-// ---------------------------------------------------------------- stats
-
-// ---------------------------------------------------------------- video
-
-/// Marca falha de video com motivo (o painel mostra em vez de tile preto).
 fn video_fail(sh: &Arc<Shared>, msg: String) {
     tracing::warn!("[video] {msg}");
     *sh.video_state.lock().unwrap() = "failed".to_string();
     *sh.video_error.lock().unwrap() = Some(msg);
 }
 
-/// Teto de FPS do envio de video.
 const VIDEO_FPS: u32 = 30;
-/// Intervalo entre quadros: 30 fps => ~33 ms.
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_millis(33);
-/// Janela do watchdog: encoder "live" sem pacote por 15 s = envio morto
-/// (câmera escura ainda gera frames).
 const VIDEO_STALL: Duration = Duration::from_secs(15);
 
-/// Envia vídeo pela MESMA PC da voz: espera conectar → lê PT negociado →
-/// encoder → laço com watchdog de 15 s.
 async fn video_send_task(sess: Arc<Session>, want_source: String) {
     let sh = sess.sh.clone();
-    // ORDEM DE LOCK ÚNICA (state → want): o antigo let-else invertia a ordem de
-    // `video_start`/`stop`/`purge` e travava a UI em entrelaçamento.
     let want = sh.video_want.lock().unwrap().clone();
     let Some((_, want_monitor)) = want else {
         *sh.video_state.lock().unwrap() = "off".to_string();
         return;
     };
     let is_screen = want_source == "screen";
-    // Sem teto: vídeo só começa após a rota; watchdog cuida de "conectou e morreu".
     let mut vticks: u32 = 0;
     loop {
         if sess.closed.load(Ordering::SeqCst)
@@ -2794,12 +2483,10 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    // Re-avalia: o usuario pode ter desligado a camera enquanto o ICE subia.
     if sh.video_state.lock().unwrap().as_str() != "starting" {
         return;
     }
 
-    // Transceiver já veio do `build_session`: só lemos codec/PT aceito pelo par.
     let params = match sess.vtx.sender.get_parameters().await {
         Ok(p) => p,
         Err(e) => {
@@ -2807,9 +2494,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             return;
         }
     };
-    // Escolhe o PT de codec que o ENCODER realmente produz (VP8, depois H264):
-    // pegar o primeiro do SDP dava PT de VP9/AV1 recebendo bitstream VP8
-    // (o par decodificava lixo); nenhum dos dois = erro explícito.
     let neg = &params.rtp_parameters.codecs;
     let pick = neg
         .iter()
@@ -2842,6 +2526,7 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         );
         return;
     };
+    // Seção 15: mime
     let mime = c.rtp_codec.mime_type.clone();
     let pt = c.payload_type;
     let vtl = sess.vtx.track.clone();
@@ -2859,7 +2544,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     sh.frames_out.store(0, Ordering::Relaxed);
     tracing::debug!("[video] enviando ({want}, {want_source}) pt={pt}");
 
-    // Encoder: construção bloqueante (abre device), fora do laço quente.
     let built = tokio::task::spawn_blocking(move || {
         if is_screen {
             crate::net::media_video::new_screen(codec, VIDEO_FPS)
@@ -2882,7 +2566,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
 
     let mut last_progress = Instant::now();
     let mut grab_miss: u32 = 0;
-    // SSRC buscado UMA vez: por quadro custava ~20 ms e travava em ~15 fps.
     let ssrc = vtl.ssrcs().await.first().copied();
     if ssrc.is_none() {
         video_fail(&sh, "vídeo: a track local ficou sem ssrc".into());
@@ -2896,14 +2579,10 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         if !matches!(sh.video_state.lock().unwrap().as_str(), "starting" | "live") {
             break;
         }
-        // `take()`: encoder movido para a `spawn_blocking`; Option evita usar
-        // valor já movido num `break` do meio do laço.
         let t_iter = Instant::now();
         let Some(mut enc2) = enc.take() else { break };
-        // Captura/encode fora do worker tokio; mantém só o quadro mais recente.
         let pumped = tokio::task::spawn_blocking(
             move || -> (Option<Vec<u8>>, Option<String>, bool, crate::net::media_video::VideoEncoder) {
-            // `ximagesrc` captura sozinho: só puxar, sem alimentar por cima.
             let needs_feed = is_screen && !enc2.self_feeding();
             let mut grab_ok = !needs_feed;
             let mut capture_error = None;
@@ -2936,8 +2615,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             Ok(v) => v,
             Err(_) => break,
         };
-        // Devolve o encoder ao laço ANTES de qualquer break (senão o `enc.stop()`
-        // final não acha o encoder e o device fica aberto).
         enc = Some(encoder);
         if let Some(e) = enc_err {
             video_fail(&sh, e);
@@ -2951,7 +2628,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         let sent = usize::from(frame.is_some());
         if let Some(frame) = frame {
             let sample = Sample {
-                // TrackLocalStaticSample packetiza em RTP; aqui não entram pacotes.
                 data: Bytes::from(frame),
                 duration: VIDEO_FRAME_INTERVAL,
                 timestamp: Instant::now(),
@@ -2973,7 +2649,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         if sent > 0 {
             last_progress = Instant::now();
         } else if last_progress.elapsed() > VIDEO_STALL {
-            // 15 s sem pacote: captura morta (Wayland sem portal, device removido).
             let msg = if is_screen {
                 format!(
                     "tela sem frames há {} s (captura vazia em {grab_miss} ticks — Wayland sem portal/permissão, ou o monitor sumiu)",
@@ -2988,8 +2663,6 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             video_fail(&sh, msg);
             break;
         }
-        // Passo adaptativo: dormir só o que falta do intervalo (33 ms cheios
-        // + custo do frame travavam em ~15 fps).
         let gasto = t_iter.elapsed();
         if gasto < VIDEO_FRAME_INTERVAL {
             tokio::time::sleep(VIDEO_FRAME_INTERVAL - gasto).await;
@@ -2998,15 +2671,10 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
         }
     }
 
-    // FECHA o device: sem `set_state(Null)` a próxima câmera falha "device busy".
     if let Some(mut e) = enc {
         e.stop();
     }
 
-    // NÃO chamar `vtl.stop()` aqui: a track pertence à sessão e já foi
-    // negociada; `stop()` a deixava sem SSRC — era o bug "câmera só liga
-    // uma vez" (só hangup + nova chamada recuperava). Quem encerra é o
-    // `close_key`/drop junto com a PC.
     let mut state = sh.video_state.lock().unwrap();
     if matches!(state.as_str(), "starting" | "live") {
         *state = "off".to_string();
@@ -3014,14 +2682,13 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     tracing::debug!("[video] envio encerrado");
 }
 
-/// Timestamp RTP de video (relogio de 90 kHz, ancorado no processo).
 fn rtp_ts_video() -> u32 {
+    // Seção 16: ANCHOR
     static ANCHOR: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let a = ANCHOR.get_or_init(std::time::Instant::now);
     (a.elapsed().as_micros() as u64 / 11_111) as u32
 }
 
-/// Recebimento: pacotes RTP -> decode GStreamer -> JPEG mais recente p/ a UI.
 fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task::AbortHandle {
     let h = tokio::spawn(async move {
         let mut dec: Option<crate::net::media_video::VideoDecoder> = None;
@@ -3059,8 +2726,6 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                         break;
                     }
                 };
-                // PT NEGOCIADO + sprop do SDP remoto: sem os dois, o depay
-                // rejeita tudo (PT != 96) ou H264 fica preto até SPS in-band.
                 let pt = pkt.header.payload_type;
                 let sprop = sh
                     .remote_sdp
@@ -3104,9 +2769,6 @@ fn spawn_video_recv(track: Arc<dyn TrackRemote>, sh: Arc<Shared>) -> tokio::task
                     video_fail(&sh, e);
                     return;
                 }
-                // Drena frames sem bloquear (só o mais recente). JPEG de cada
-                // frame sai por `spawn_blocking` DEDICADO (2-4 ms de CPU cada;
-                // aqui embaixo engasgava o áudio quando o vídeo ligava).
                 while let Some((rgb, w, h)) = d.poll_frame(Duration::ZERO) {
                     let rgb = std::sync::Arc::new(rgb);
                     let sh_task = sh.clone();
@@ -3149,7 +2811,6 @@ fn spawn_stats_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             }
             let report = pc.get_stats(Instant::now(), StatsSelector::None).await;
 
-            // Melhor par: nominado, ou o que mais transportou mídia.
             let mut best: Option<(u64, String, f64)> = None;
             for e in report.iter() {
                 if let RTCStatsReportEntry::IceCandidatePair(p) = e {
@@ -3196,9 +2857,8 @@ fn spawn_stats_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
             }
             for e in report.iter() {
                 if let RTCStatsReportEntry::LocalCandidate(c) = e {
-                    // Par referencia o candidato por id cru; report traz id
-                    // prefixado com o tipo do objeto.
                     if e.id() == local_id || e.id().ends_with(&local_id) {
+                        // Seção 17: route
                         let route = match c.candidate_type {
                             RTCIceCandidateType::Relay => "TURN",
                             RTCIceCandidateType::Srflx | RTCIceCandidateType::Prflx => "STUN",
@@ -3219,12 +2879,10 @@ fn spawn_stats_loop(sess: Arc<Session>) -> tokio::task::AbortHandle {
 mod mic_gain_tests {
     use super::audio::MicGain;
 
-    /// Pico em i32: `i16::MIN.abs()` estoura em i16 e panica em debug.
     fn peak(samples: &[i16]) -> i32 {
         samples.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
     }
 
-    /// Aplica o ganho a `n` callbacks novos (cada bloco = áudio novo, mesmo pico).
     fn rodar(agc: &mut MicGain, n: usize, bloco: &[i16]) -> i32 {
         let mut ultimo = 0;
         for _ in 0..n {
@@ -3237,9 +2895,8 @@ mod mic_gain_tests {
 
     #[test]
     fn amplifica_voz_baixa_ate_o_alvo() {
-        // Caso medido: device a 31% de volume, pico -33 dBFS.
         let mut agc = MicGain::new();
-        let bloco = vec![4000i16; 960]; // pico 0.122
+        let bloco = vec![4000i16; 960];
         let saida = rodar(&mut agc, 40, &bloco);
         let alvo = saida as f32 / i16::MAX as f32;
         assert!(
@@ -3262,7 +2919,6 @@ mod mic_gain_tests {
     #[test]
     fn nunca_estoura_acima_de_full_scale() {
         let mut agc = MicGain::new();
-        // Sinal já alto: ganho volta a 1.0, limitador segura full scale.
         let bloco: Vec<i16> = (0..960)
             .map(|i| if i % 2 == 0 { i16::MAX } else { 30000 })
             .collect();
@@ -3273,7 +2929,6 @@ mod mic_gain_tests {
 
     #[test]
     fn limitador_nao_estoura_com_pico_minimo() {
-        // Pico baixo: o limitador suave tem de segurar sem clip reto.
         let mut agc = MicGain::new();
         let bloco: Vec<i16> = (0..960).map(|i| 300 + (i % 7) as i16 * 10).collect();
         let saida = rodar(&mut agc, 100, &bloco);
@@ -3312,8 +2967,6 @@ mod aggregate_priority_tests {
 
     #[test]
     fn aggregate_state_is_the_worst_case_not_an_arbitrary_peer() {
-        // Regressão: `all.first()` sorteado pela ordem do HashMap reportava
-        // `connected` com um par `failed`.
         let s = aggregate_stats(vec![peer("connected"), peer("failed"), peer("connected")])
             .expect("agregado");
         assert_eq!(s.state, "failed", "um par failed decide o estado do mesh");
@@ -3327,7 +2980,6 @@ mod aggregate_priority_tests {
 
     #[test]
     fn aggregate_state_connecting_pinned_even_after_a_connected_peer() {
-        // A ordem do Vec não pode mudar o resultado (connecting > connected).
         for v in [
             vec![peer("connected"), peer("connecting")],
             vec![peer("connecting"), peer("connected")],

@@ -1,5 +1,3 @@
-//! Testes de integração: pedidos de amizade REAIS entre dois nós.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,7 +50,6 @@ fn connect(a: &Arc<NetworkEngine>, b: &Arc<NetworkEngine>) {
     a.add_manual_peer(addr_b, Some(b.identity().fingerprint.clone()));
 }
 
-/// Como `spawn_engine`, mas devolve também o `Store` (p/ simular estado).
 fn spawn_engine_store(nick: &str) -> (Arc<NetworkEngine>, Arc<Store>, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
@@ -68,7 +65,6 @@ fn spawn_engine_store(nick: &str) -> (Arc<NetworkEngine>, Arc<Store>, TempDir) {
     (engine, store, dir)
 }
 
-/// Estado real de amizade no storage, via listas públicas do engine.
 fn friend_status(engine: &Arc<NetworkEngine>, fp: &str) -> String {
     for status in ["pending_in", "pending_out", "accepted", "blocked"] {
         if engine.friends(Some(status)).iter().any(|f| f.fp == fp) {
@@ -99,7 +95,6 @@ async fn friend_request_accept_flow() {
     )
     .await;
 
-    // A pede amizade → B recebe evento REAL
     a.friend_request(&b.identity().fingerprint).unwrap();
     let req = wait_event(
         &mut ev_b,
@@ -116,7 +111,6 @@ async fn friend_request_accept_flow() {
     assert_eq!(friend_status(&b, &fp), "pending_in");
     assert_eq!(friend_status(&a, &b.identity().fingerprint), "pending_out");
 
-    // B aceita → A recebe FriendAccepted e ambos ficam 'accepted'
     b.friend_respond(&fp, true).unwrap();
     let acc = wait_event(
         &mut ev_a,
@@ -165,7 +159,6 @@ async fn friend_request_reject_flow() {
     )
     .await;
 
-    // B recusa → A é avisado e o pedido some dos dois lados
     b.friend_respond(&a.identity().fingerprint, false).unwrap();
     wait_event(
         &mut ev_a,
@@ -178,16 +171,15 @@ async fn friend_request_reject_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Seção 1: friend_request_queued_when_offline_and_flushed_on_connect
 async fn friend_request_queued_when_offline_and_flushed_on_connect() {
     let (a, _ka, _da) = spawn_engine("Alice");
-    // B não existe ainda — pedido fica pending_out REAL
     let kp_b = distorrent_core::identity::Keypair::generate();
     let fp_b = kp_b.identity("Bob").fingerprint;
 
     a.friend_request(&fp_b).unwrap();
     assert_eq!(friend_status(&a, &fp_b), "pending_out");
 
-    // B entra no ar; A conecta; pedido sai no flush automático
     let dir = tempfile::tempdir().unwrap();
     let store_b = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let engine_b = NetworkEngine::new(store_b, kp_b, "Bob".into(), dir.path().to_path_buf());
@@ -235,16 +227,13 @@ async fn blocked_peer_messages_are_rejected() {
     )
     .await;
 
-    // B bloqueia A no CORE — a partir daqui mensagens de A são rejeitadas pelo motor
     b.friend_block(&a.identity().fingerprint).unwrap();
     assert!(b.is_blocked(&a.identity().fingerprint));
 
-    // A tenta mandar mensagem (não sabe do bloqueio — a UI nunca decide isso)
     let conv = a.open_dm(&b.identity().fingerprint, "Bob").unwrap();
     a.send_dm(&conv.id, "você não deveria receber isso")
         .unwrap();
 
-    // espera e confirma que NADA chegou em B
     let mut got = false;
     for _ in 0..10 {
         match tokio::time::timeout(Duration::from_millis(100), ev_b.recv()).await {
@@ -257,13 +246,10 @@ async fn blocked_peer_messages_are_rejected() {
     }
     assert!(!got, "mensagem de bloqueado não pode chegar");
 
-    // e não persistiu em B
     let conv_b_id = Store::dm_conversation_id(&a.identity().fingerprint, &b.identity().fingerprint);
     assert!(b.messages(&conv_b_id).is_empty());
 }
 
-/// Confiabilidade: se os DOIS se adicionam (até "ao mesmo tempo"), ninguém
-/// fica travado em "aguardando" — convergem para aceito sem clicar aceitar.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn friend_request_cruzado_aceita_sozinho() {
     let (a, _ka, _da) = spawn_engine("Alice");
@@ -286,12 +272,9 @@ async fn friend_request_cruzado_aceita_sozinho() {
 
     let fp_a = a.identity().fingerprint.clone();
     let fp_b = b.identity().fingerprint.clone();
-    // os DOIS se adicionam (cruzado)
     a.friend_request(&fp_b).unwrap();
     b.friend_request(&fp_a).unwrap();
 
-    // 30s: o tick de amizade é 5s e a suíte roda dezenas de engines em
-    // paralelo — 15s estourava só por CPU starvation (flaky, não bug).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if friend_status(&a, &fp_b) == "accepted" && friend_status(&b, &fp_a) == "accepted" {
@@ -307,9 +290,6 @@ async fn friend_request_cruzado_aceita_sozinho() {
     }
 }
 
-/// Confiabilidade: se o FriendAccept se perde (A volta a 'pending_out'),
-/// o reenvio do pedido faz B reenviar o aceite — SEM rebaixar B para pendente.
-/// É a auto-cura que o tick de 15s faz em produção.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn friend_resync_apos_aceite_perdido() {
     let (a, sa, _da) = spawn_engine_store("Alice");
@@ -349,11 +329,9 @@ async fn friend_resync_apos_aceite_perdido() {
     assert_eq!(friend_status(&a, &fp_b), "accepted");
     assert_eq!(friend_status(&b, &fp_a), "accepted");
 
-    // SIMULA o aceite perdido no caminho: A regride para 'pending_out'.
     sa.set_friend(&fp_b, "", "pending_out").unwrap();
     assert_eq!(friend_status(&a, &fp_b), "pending_out");
 
-    // Reenvio (o que o tick de 15s faz): B já 'accepted' NÃO desce e reenvia aceite.
     a.friend_request(&fp_b).unwrap();
     wait_event(
         &mut ev_a,
@@ -369,3 +347,4 @@ async fn friend_resync_apos_aceite_perdido() {
         "B não pode ser rebaixado para pending_in"
     );
 }
+// Seção 2: fim

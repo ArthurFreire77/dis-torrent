@@ -1,9 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { createServerViaWizard } from './helpers/server'
 
-// Regressão dos bugs achados auditando a camada social v3 contra o app real.
-// Cada teste abaixo falhava antes do fix e trava a correção.
-
 async function createAccount(page: Page, name: string) {
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 })
@@ -36,8 +33,6 @@ async function seedServerWithMessage(page: Page, name: string, text = 'mensagem 
 test('canal não aparece duplicado na sidebar', async ({ page }) => {
   await seedServerWithMessage(page, 'SemDuplicata')
 
-  // O bug: createCommunity criava o canal na tupla da comunidade E nos extras,
-  // com ids DIFERENTES. O merge casa por id, então os dois apareciam.
   const nomes = await page.locator('.chan-row').allTextContents()
   const canais = nomes.map((t) => t.trim()).filter((t) => t && !t.includes('Nova thread'))
   expect(canais).toEqual(['geral'])
@@ -51,7 +46,6 @@ test('bloco de código renderiza uma única vez', async ({ page }) => {
 
   const bloco = page.locator('[data-mid]').last()
   await expect(bloco.locator('pre').first()).toBeVisible()
-  // "fn main()" deve aparecer UMA vez: dentro do <pre>, não também solto abaixo.
   const texto = await bloco.innerText()
   const ocorrencias = texto.split('fn main()').length - 1
   expect(ocorrencias).toBe(1)
@@ -72,8 +66,6 @@ test('composer volta a uma linha depois de mensagem longa', async ({ page }) => 
   await ta.press('Enter')
   await page.waitForTimeout(400)
 
-  // O bug: o auto-resize só rodava no onChange, e limpar após o envio é um
-  // setInput('') programático — a caixa ficava alta para sempre.
   const alturaDepois = (await page.getByLabel('Mensagem').boundingBox())!.height
   expect(alturaDepois).toBeLessThan(alturaLonga)
   expect(alturaDepois).toBeLessThan(alturaAntes + 12)
@@ -87,8 +79,6 @@ test('menu do composer abre dentro da janela', async ({ page }) => {
 
   const item = page.getByRole('button', { name: 'Criar enquete' })
   await expect(item).toBeVisible({ timeout: 5000 })
-  // O bug: o popover usava bottom:calc(100%) sem ancestral position:relative,
-  // então era posicionado pelo viewport e caía com y negativo (fora da tela).
   const box = (await item.boundingBox())!
   expect(box.y).toBeGreaterThanOrEqual(0)
   expect(box.height).toBeGreaterThan(0)
@@ -103,15 +93,11 @@ test('enquete criada aparece na conversa e aceita voto com percentual', async ({
   await page.getByPlaceholder(/Opções/).fill('Tokio\nAxum\nSmol')
   await page.getByRole('button', { name: 'criar', exact: true }).click()
 
-  // O bug: a âncora da enquete na lista dava índice negativo, então nenhuma
-  // aparecia mesmo com o poll criado no motor.
   const cartao = page.locator('[data-mid]').last()
   await expect(cartao.getByText('Qual runtime prefere?')).toBeVisible({ timeout: 8000 })
   await expect(cartao.getByRole('button', { name: /Tokio/ })).toBeVisible()
 
   await cartao.getByRole('button', { name: /Tokio/ }).click()
-  // O bug 2: o tally devolvia os índices escolhidos como se fossem contagens,
-  // então 1 voto produzia 0% em todas as opções.
   await expect(cartao.getByText('100%')).toBeVisible({ timeout: 8000 })
   await expect(cartao.getByText('0%').first()).toBeVisible()
 })
@@ -171,8 +157,6 @@ test('painel de pins lista a mensagem fixada', async ({ page }) => {
 
   await page.getByTitle(/Mensagens fixadas/).click()
   await expect(page.getByText(/Mensagens fixadas \(1\)/)).toBeVisible({ timeout: 8000 })
-  // O texto aparece duas vezes (a conversa atrás e o card do pin): o que
-  // importa é o card do painel.
   await expect(page.getByRole('button', { name: /fixado por/ })).toContainText('mensagem importante', { timeout: 8000 })
 })
 

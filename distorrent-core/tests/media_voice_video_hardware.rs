@@ -1,8 +1,3 @@
-//! Exercita câmera/tela Linux reais, GStreamer, SDP e RTP entre dois peers locais.
-//!
-//! É ignorado no CI porque requer webcam V4L2 e plugins GStreamer. Para rodar
-//! numa máquina com câmera: `cargo test --test media_voice_video_hardware -- --ignored --nocapture`.
-
 #![cfg(target_os = "linux")]
 
 use std::sync::Mutex;

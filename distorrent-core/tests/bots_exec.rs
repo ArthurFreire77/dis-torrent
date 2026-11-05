@@ -337,18 +337,29 @@ fn o_bot_troca_a_propria_config_mas_nao_se_da_permissao() {
         .create_community("Servidor", &["geral".to_string()])
         .expect("criar");
     let bot = e.bot_create(&cid, "Plugin", None, None).expect("bot");
-    let nova = r#"{"prefix":"/","commands":[{"name":"ping","reply":"pong"}],"events":["member_joined"]}"#;
+    let nova =
+        r#"{"prefix":"/","commands":[{"name":"ping","reply":"pong"}],"events":["member_joined"]}"#;
     let n = e
         .bot_replace_config(&cid, &bot.id, nova)
         .expect("config válida");
     assert_eq!(n, 1);
-    let salvo = e.bots_list(&cid).unwrap().into_iter().find(|b| b.id == bot.id).unwrap();
+    let salvo = e
+        .bots_list(&cid)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.id == bot.id)
+        .unwrap();
     assert!(salvo.config.contains("pong"));
     assert_eq!(salvo.perms, 0, "o bot NUNCA se concede permissão");
 
     // Config inválida é recusada e não sobrescreve a boa.
     assert!(e.bot_replace_config(&cid, &bot.id, "{lixo").is_err());
-    let salvo = e.bots_list(&cid).unwrap().into_iter().find(|b| b.id == bot.id).unwrap();
+    let salvo = e
+        .bots_list(&cid)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.id == bot.id)
+        .unwrap();
     assert!(salvo.config.contains("pong"), "config boa preservada");
 }
 

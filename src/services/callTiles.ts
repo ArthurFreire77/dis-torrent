@@ -1,41 +1,25 @@
-// callTiles — modelo ÚNICO dos quadrados da chamada (pessoa e tela).
-// Separa identidade do PARTICIPANTE (`fp`) da TRANSMISSÃO (`id`: `p:<fp>`
-// câmera, `s:<fp>` tela) — antes o mesmo campo `stream` fazia tela e câmera
-// brigarem, o tile local dependia de stream remoto inexistente e fixar/expandir
-// não distinguia a tela da pessoa. Módulo puro (sem React/DOM/Tauri), testável
-// em node:test e compartilhado pelas duas UIs.
-
-/** Tipo de transmissão representada pelo quadrado. */
 export type CallTileKind = 'participant' | 'screen'
 
-/** Entrada vinda do `CallState.participants` (campos opcionais de propósito). */
 export interface CallTileParticipantInput {
   fp: string
   nickname?: string
-  /** Câmera/áudio remoto. No caminho nativo pode não existir (frames em JPEG). */
   stream?: MediaStream | null
-  /** Tela remota quando chega num m-line próprio (dois vídeos simultâneos). */
   screenStream?: MediaStream | null
-  /** Último frame JPEG decodificado pelo core (Linux nativo). */
   videoUrl?: string | null
-  /** Último frame de TELA no caminho nativo (quando a fonte é a tela). */
   screenVideoUrl?: string | null
   sharing?: boolean
-  /** Câmera LIGADA do outro lado; `false` = desligada, `undefined` = sem info. */
   cameraOn?: boolean
   muted?: boolean
   speaking?: boolean
   disconnected?: boolean
 }
 
-/** Tudo que a UI sabe sobre a própria mídia (fonte da verdade do "eu"). */
 export interface CallTileLocalInput {
   stream?: MediaStream | null
   screenStream?: MediaStream | null
   sharing?: boolean
   cameraOn?: boolean
   muted?: boolean
-  /** `true` no caminho nativo (Linux): não há MediaStream local na página. */
   nativeMedia?: boolean
 }
 
@@ -45,49 +29,22 @@ export interface BuildCallTilesInput {
   local?: CallTileLocalInput | null
 }
 
-/** Quadrado renderizável. `id` é a identidade ESTÁVEL da transmissão. */
 export interface CallTile {
-  /** `p:<fp>` (pessoa) ou `s:<fp>` (tela). Nunca muda enquanto durar. */
   id: string
   kind: CallTileKind
-  /** Dono da transmissão — a MESMA pessoa nos dois quadrados. */
   fp: string
   nickname: string
-  /** Nome exibido (na tela: "Tela de Fulano" / "Sua tela"). */
   label: string
-  /** Stream a desenhar; ausente = avatar (pessoa) ou "aguardando" (tela). */
   stream?: MediaStream
-  /**
-   * Stream que carrega o ÁUDIO remoto.
-   *
-   * POR QUE SEPARADO DE `stream`: `stream` só existe com vídeo (câmera ligada),
-   * porque um `<video>` sem trilha viva mostra preto. Numa chamada de voz — ou
-   * com a câmera do outro desligada — `stream` era `undefined` e o `<audio>`
-   * nem era montado: a chamada "conectava" e ficava MUDA. O áudio é
-   * independente do vídeo e precisa do próprio campo.
-   */
   audioStream?: MediaStream
-  /**
-   * Chave de VOLUME/mudo local desta transmissão.
-   *
-   * POR QUE NÃO USAR `fp`: a voz e o áudio da TELA são transmissões distintas
-   * da mesma pessoa, mas compartilhavam a chave `fp` — mexer no volume da tela
-   * mexia na voz (e vice-versa), e mutar um silenciava o outro. Usa o `id`
-   * estável da transmissão (`p:<fp>` / `s:<fp>`), então cada uma tem seu
-   * próprio controle. Sem isso cai em `fp` (compatível com preferências já
-   * salvas de quem nunca compartilhou tela).
-   */
   audioKey?: string
-  /** Frame JPEG (caminho nativo) quando não há MediaStream. */
   videoUrl?: string
   isLocal: boolean
   sharing: boolean
   muted: boolean
   speaking: boolean
   disconnected: boolean
-  /** Câmera ligada (para o selo e a foto de perfil sumir). */
   cameraOn: boolean
-  /** Caminho nativo jura que há mídia viva, mas a página não recebe frames locais. */
   localPreviewUnavailable: boolean
 }
 
@@ -99,14 +56,12 @@ export function screenTileId(fp: string): string {
   return `s:${fp}`
 }
 
-/** Nome do quadro da tela. Mantém a autoria visível (item 2.7 da spec). */
 export function screenTileLabel(nickname: string, isLocal: boolean): string {
   const who = (nickname || '').trim()
   if (isLocal) return 'Sua tela'
   return who ? `Tela de ${who}` : 'Tela compartilhada'
 }
 
-/** Um MediaStream só conta como mídia se tiver trilha VIVA de vídeo. */
 export function streamHasLiveVideo(stream: MediaStream | null | undefined): boolean {
   try {
     if (!stream || typeof stream.getVideoTracks !== 'function') return false
@@ -130,17 +85,11 @@ function pickString(...values: Array<string | null | undefined>): string | undef
   return undefined
 }
 
-/**
- * Consolida participantes em quadrados: dedupe por `fp`, o "eu" usa mídia
- * local, tela só existe com `sharing`, e câmera/tela nunca repetem o mesmo
- * stream nos dois quadrados (testado em `tests/callTiles.test.ts`).
- */
 export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
   const myFp = typeof input.myFp === 'string' && input.myFp ? input.myFp : null
   const local = input.local ?? null
   const participants = Array.isArray(input.participants) ? input.participants : []
 
-  // Dedupe com merge: prefere o registro com stream; evento mais recente vence.
   const byFp = new Map<string, CallTileParticipantInput>()
   for (const raw of participants) {
     if (!raw || typeof raw.fp !== 'string' || !raw.fp) continue
@@ -157,7 +106,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       videoUrl: raw.videoUrl ?? prev.videoUrl ?? null,
       screenVideoUrl: raw.screenVideoUrl ?? prev.screenVideoUrl ?? null,
       nickname: raw.nickname || prev.nickname,
-      // `undefined` do evento novo não apaga estado já conhecido.
       sharing: pickBoolean(raw.sharing, prev.sharing),
       cameraOn: pickBoolean(raw.cameraOn, prev.cameraOn),
       muted: pickBoolean(raw.muted, prev.muted),
@@ -166,7 +114,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
     })
   }
 
-  // O "eu" existe mesmo sem roster do motor (chamada nativa entra assim).
   if (myFp && !byFp.has(myFp)) {
     byFp.set(myFp, { fp: myFp, nickname: '' })
   }
@@ -186,18 +133,9 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
     const remoteCameraStream = !isLocal ? p.stream ?? null : null
     const cameraStream = localCameraStream ?? remoteCameraStream
 
-    // Tela: local usa o stream de captura; remota prefere stream dedicado,
-    // caindo para o vídeo único do participante.
     const localScreenStream = isLocal ? local?.screenStream ?? null : null
     const remoteScreenStream = !isLocal ? p.screenStream ?? null : null
     const dedicatedScreen = localScreenStream ?? remoteScreenStream
-    // FALLBACK: existe UM vídeo remoto e o peer está compartilhando tela.
-    //
-    // Quem manda é a TELA, porque é ela que a pessoa está tentando mostrar.
-    // Antes o vídeo único era reaproveitado nos dois quadrados ("a câmera fica
-    // no lugar da tela"): o quadrado da pessoa mostrava o mesmo stream da tela
-    // e a tela aparecia vazia/demorando. Agora a tela consome o stream e a
-    // pessoa fica no avatar — honesto: não há câmera chegando.
     const fallbackScreen = !dedicatedScreen && sharing ? cameraStream : null
     const screenStream = dedicatedScreen ?? fallbackScreen
 
@@ -207,19 +145,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         ? pickString(p.screenVideoUrl, p.videoUrl)
         : undefined
 
-    // Vídeo único consumido pela tela → quadrado da pessoa fica no avatar
-    // (o bug era "dois quadrados com o mesmo vídeo").
     const cameraConsumedByScreen = !isLocal && !!fallbackScreen && !remoteScreenStream
-    // ÁUDIO DA TELA: quando o vídeo único vai para a tela, esse MESMO stream
-    // costuma carregar o áudio do sistema. O <audio> só era montado no tile da
-    // PESSOA — que nesse caso não tem stream e pode nem ser renderizado. Sem
-    // elemento tocando, o som da transmissão só aparecia depois de mexer em
-    // algum controle (o "tem que abaixar e subir o volume para pegar o áudio").
-    // Aqui o áudio acompanha o tile que REALMENTE tem mídia — e só um deles,
-    // porque montar <audio> nos dois tocava o som em dobro.
     const audioOwnerIsScreen = !isLocal && cameraConsumedByScreen
-    // LOCAL: vídeo só com câmera LIGADA E trilha viva — as duas juntas são o
-    // estado honesto (evita `<video>` preto e frame congelado).
     const participantStream = isLocal
       ? (cameraOn && streamHasLiveVideo(localCameraStream) ? localCameraStream ?? undefined : undefined)
       : (cameraConsumedByScreen || p.cameraOn === false ? undefined : cameraStream ?? undefined)
@@ -237,13 +164,9 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       nickname,
       label: nickname,
       stream: participantStream ?? undefined,
-      // ÁUDIO: usa o stream remoto BRUTO, mesmo sem vídeo. Era o defeito do
-      // "conectado e mudo" quando a câmera do outro estava desligada.
-      // Quando a tela ficou com o vídeo único, o áudio vai junto para ela.
       audioStream: isLocal || audioOwnerIsScreen
         ? undefined
         : (remoteCameraStream ?? cameraStream ?? undefined) ?? undefined,
-      // Voz e tela têm controles de volume SEPARADOS (id da transmissão).
       audioKey: participantTileId(p.fp),
       videoUrl: participantVideoUrl,
       isLocal,
@@ -252,7 +175,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       speaking: p.speaking === true,
       disconnected: p.disconnected === true && !isLocal,
       cameraOn,
-      // Nativo: cameraOn sem stream na página — avisar em vez de retângulo preto.
       localPreviewUnavailable: isLocal && !participantStream && !participantVideoUrl && !!local?.nativeMedia && cameraOn,
     })
 
@@ -265,10 +187,7 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         label: screenTileLabel(nickname, isLocal),
         stream: screenStream ?? undefined,
         videoUrl: screenVideoUrl,
-        // Áudio do sistema: quando o vídeo único caiu na tela, o stream carrega
-        // também o som — e é ESTE tile que o <audio> do receptor usa.
         audioStream: audioOwnerIsScreen ? (screenStream ?? undefined) : undefined,
-        // Volume/mudo da TELA é independente da voz (ver `audioKey`).
         audioKey: screenTileId(p.fp),
         isLocal,
         sharing: true,
@@ -281,7 +200,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
     }
   }
 
-  // Ordem determinística: "eu" primeiro, depois por nome/fp (a UI fixa por cima).
   tiles.sort((a, b) => {
     if (a.isLocal !== b.isLocal) return a.isLocal ? -1 : 1
     if (a.fp !== b.fp) return a.fp < b.fp ? -1 : 1
@@ -290,13 +208,12 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
   return tiles
 }
 
-/** Mantém fixado/expandido só enquanto a transmissão existir. */
+// Seção 1: resolveTileId
 export function resolveTileId(id: string | null | undefined, tiles: CallTile[]): string | null {
   if (!id) return null
   return tiles.some((t) => t.id === id) ? id : null
 }
 
-/** Coloca o fixado em primeiro (sem alterar os demais). */
 export function sortTilesForPin(tiles: CallTile[], pinnedId: string | null): CallTile[] {
   if (!pinnedId) return tiles
   const index = tiles.findIndex((t) => t.id === pinnedId)
@@ -304,15 +221,10 @@ export function sortTilesForPin(tiles: CallTile[], pinnedId: string | null): Cal
   return [tiles[index], ...tiles.slice(0, index), ...tiles.slice(index + 1)]
 }
 
-/**
- * Chave estável da lista de quadrados — usada por `useEffect` para limpar
- * fixação/expansão quando um stream termina, sem reagir a cada re-render.
- */
 export function tilesKey(tiles: CallTile[]): string {
   return tiles.map((t) => t.id).join('|')
 }
 
-/** Fixar e expandir são independentes; quadrado que sai devolve o layout. */
 export function nextTileSelection(
   action: 'pin' | 'unpin' | 'expand' | 'collapse',
   current: { pinnedId: string | null; expandedId: string | null },

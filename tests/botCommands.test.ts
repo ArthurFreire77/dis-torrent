@@ -93,6 +93,17 @@ test('parseBotConfig: JSON inválido / raw nulo → null', () => {
   assert.equal(parseBotConfig(undefined), null)
 })
 
+test('parseBotConfig: config vazia é config padrão (bot recém-criado não é "inválido")', () => {
+  // O core devolve config "" ao criar o bot e o parse_config aceita vazio como
+  // padrão. Marcar isso como inválido pintava todo bot novo de "config inválida".
+  for (const vazio of ['', '   ', '\n']) {
+    const cfg = parseBotConfig(vazio)
+    assert.ok(cfg, `config ${JSON.stringify(vazio)} precisa ser válida`)
+    assert.equal(cfg.prefix, '!')
+    assert.deepEqual(cfg.commands, [])
+  }
+})
+
 test('parseBotConfig: config acima de 64KB → null', () => {
   const big = JSON.stringify({ prefix: '!', pad: 'a'.repeat(70_000) })
   assert.ok(big.length > 64 * 1024)

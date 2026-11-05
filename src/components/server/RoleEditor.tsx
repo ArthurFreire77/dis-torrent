@@ -1,14 +1,3 @@
-// Criação e edição de cargo.
-//
-// Antes: uma caixa de 200px ao lado de um formulário, com os 10 checkboxes de
-// permissão empilhados e um botão "Excluir" vermelho ao lado de "Salvar".
-// O nome era um `<input>` solto sem validação (dava para criar cargo sem nome
-// ou com nome de 3 letras), e não havia ideia de posição/hierarquia.
-//
-// Agora: diálogo largo, com nome validado, cor, permissões agrupadas
-// (PermissionEditor), posição explícita com explicação de hierarquia, e
-// pré-visualização de quem é afetado.
-
 import { useMemo, useState } from 'react'
 import {
   DEFAULT_ROLE_COLORS,
@@ -27,7 +16,6 @@ import {
 } from '../../shared/ui'
 import { ALL_PERM_BITS, PermissionEditor, describePerms } from './PermissionEditor'
 
-/** Regras de nome. Ditas ao usuário no erro, não só no código. */
 export function validateRoleName(
   nome: string,
   existentes: { id: string; name: string }[],
@@ -48,9 +36,7 @@ export function RoleEditor({
   open,
   onClose,
   roles,
-  /** Cargo em edição, ou null para criar. */
   role,
-  /** Nº de membros por cargo, para a pré-visualização de hierarquia. */
   memberCount,
   onSave,
   onDelete,
@@ -83,8 +69,6 @@ export function RoleEditor({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [tocou, setTocou] = useState(false)
 
-  // Hierarquia: um cargo aparece acima dos outros conforme a posição. Menor
-  // número = mais alto na lista.
   const opcoesPosicao = useMemo(() => {
     const maior = roles.reduce((acc, r) => Math.max(acc, r.position), 0)
     const arr: { value: string; label: string }[] = []
@@ -209,9 +193,10 @@ export function RoleEditor({
         </div>
       )}
 
-      {/* --- Identidade --- */}
+      {}
       <TextField
         label="Nome do cargo"
+        // Seção 1: value
         value={nome}
         onChange={(v) => {
           setNome(v)
@@ -280,7 +265,7 @@ export function RoleEditor({
         </div>
       </div>
 
-      {/* --- Pré-visualização --- */}
+      {}
       <div
         style={{
           background: ui.input,
@@ -312,13 +297,13 @@ export function RoleEditor({
         </div>
       </div>
 
-      {/* --- Permissões --- */}
+      {}
       <div style={{ marginBottom: ui.lg }}>
         <label style={LABEL}>Permissões</label>
         <PermissionEditor value={perms} onChange={setPerms} />
       </div>
 
-      {/* --- Hierarquia --- */}
+      {}
       <Select
         label="Posição na hierarquia"
         value={posicao}
@@ -397,6 +382,7 @@ function CheckRow({
   )
 }
 
+// Seção 2: LABEL
 const LABEL: React.CSSProperties = {
   display: 'block',
   fontSize: 11,
@@ -407,7 +393,6 @@ const LABEL: React.CSSProperties = {
   textTransform: 'uppercase',
 }
 
-/** Lista lateral de cargos, com contagem e destaque da posição. */
 export function RoleList({
   roles,
   selectedId,

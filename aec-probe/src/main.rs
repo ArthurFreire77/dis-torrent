@@ -1,24 +1,11 @@
-//! Mede o AEC: ANTES e DEPOIS, e prova que a voz NAUTIL (near-end) sobrevive.
-//!
-//! Usa o arquivo de PRODUCAO via `#[path]`, nao uma copia.
-
 #[path = "../../distorrent-core/src/net/media_dsp.rs"]
 mod media_dsp;
 
 use media_dsp::*;
 use std::sync::Arc;
 
-const PULAR: usize = 150; // 3 s de convergencia do filtro adaptativo
+const PULAR: usize = 150;
 
-/// Fonte-filtro de voz: ruido -> 3 formantes ressonantes, envelope silabico
-/// com PAUSAS, normalizado no RMS pedido.
-///
-/// Duas versoes ruins aconteceram aqui e ambasinflaram o numero:
-///  1) harmonicos puros (mesmo gerador da referencia): patologico, o filtro
-///     adaptativo trava e "voz apagada" era artefato do TESTE;
-///  2) voz broadband sem normalizar, batendo em -16 dBFS com clipping:
-///     o AEC DIVERGE (972 resets) e a saida vira silencio.
-/// Voz real e' broadband, NAO-estacionaria, com pauses e RMS de -25 dBFS.
 fn voz_real(n: usize, semente: u32, rms_alvo: f32) -> Vec<f32> {
     let mut x: u32 = semente | 1;
     let mut bruto = Vec::with_capacity(n);
@@ -26,7 +13,6 @@ fn voz_real(n: usize, semente: u32, rms_alvo: f32) -> Vec<f32> {
         x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         bruto.push(((x >> 8) as f32 / 8_388_608.0) - 1.0);
     }
-    // envelope silabico (~4 Hz) com pausas; a fala real nao e' continua
     let env: Vec<f32> = (0..n)
         .map(|i| {
             let t = i as f64 / SAMPLE_RATE as f64;
@@ -35,7 +21,6 @@ fn voz_real(n: usize, semente: u32, rms_alvo: f32) -> Vec<f32> {
             (syl * pausas) as f32
         })
         .collect();
-    // 3 ressonadores em serie, formantesmoveis
     let mut saida = Vec::with_capacity(n);
     let (mut y1a, mut y2a) = (0.0f32, 0.0f32);
     let (mut y1b, mut y2b) = (0.0f32, 0.0f32);
@@ -58,13 +43,11 @@ fn voz_real(n: usize, semente: u32, rms_alvo: f32) -> Vec<f32> {
         }
         saida.push(y);
     }
-    // normaliza no RMS alvo (sem clipping duro)
     let rms = (saida.iter().map(|v| v * v).sum::<f32>() / n as f32).sqrt().max(1e-9);
     let g = rms_alvo / rms;
     saida.iter().map(|v| (v * g).clamp(-1.0, 1.0)).collect()
 }
 
-/// Correlacao normalizada no lag ZERO (pega quanto do eco sobrou).
 fn correlacao0(a: &[i16], b: &[i16], lag: i64) -> f64 {
     let n = a.len().min(b.len());
     let (mut sa, mut sb, mut sab) = (0.0f64, 0.0f64, 0.0f64);
@@ -89,8 +72,6 @@ struct Metricas {
     c_mic_falante: f64, c_out_falante: f64,
 }
 
-/// `eco_gain`: quanto do playout volta no microfone.
-/// `falante`: amplitude da fala local (near-end), que o AEC nao pode apagar.
 fn rodar(usar_aec: bool, delay_ms: usize, eco_gain: f32, falante: f32, ns: bool, quadros: usize) -> Metricas {
     let delay = (SAMPLE_RATE as usize / 1000) * delay_ms;
     let total = delay + 2 * FRAME_SAMPLES;
@@ -101,10 +82,9 @@ fn rodar(usar_aec: bool, delay_ms: usize, eco_gain: f32, falante: f32, ns: bool,
     let mut m = Metricas::default();
     let mut conta = 0usize;
 
-    // playout = voz do PAR remoto; near-end = voz do usuario local (independente)
     let total_n = quadros * FRAME_SAMPLES;
-    let v_ref = voz_real(total_n, 0xA5A5_1234, 0.09); // -21 dBFS
-    let v_near = voz_real(total_n, 0x1357_9BDF, 0.05); // -26 dBFS
+    let v_ref = voz_real(total_n, 0xA5A5_1234, 0.09);
+    let v_near = voz_real(total_n, 0x1357_9BDF, 0.05);
 
     for q in 0..quadros {
         let mut ref_f = vec![0i16; FRAME_SAMPLES];
@@ -187,17 +167,16 @@ fn main() {
     cenario(12, 0.00, 1.0, false, "so fala, sem eco");
     cenario(12, 0.00, 1.0, true,  "so fala, sem eco");
 
-    // --------------------------------------------------------------- CPU
     println!("### 6. CUSTO DE CPU POR QUADRO (20 ms de audio a 48 kHz)\n");
     let casos: [(bool, &str); 2] = [(false, "sem AEC (pass-through)"), (true, "com AEC (filtro 200 ms)")];
     for (rot, rotulo) in casos.into_iter().collect::<Vec<_>>() {
+        // Seção 1: ring
         let ring = Arc::new(RefRing::new());
         let mut ec = EchoCanceller::new_opts(ring.clone(), rot, rot);
         let mut mic = vec![3000i16; FRAME_SAMPLES];
         for i in 0..FRAME_SAMPLES { mic[i] = ((i as f32 * 0.05).sin() * 8000.0) as i16; }
         let mut ref_f = vec![0i16; FRAME_SAMPLES];
         for i in 0..FRAME_SAMPLES { ref_f[i] = ((i as f32 * 0.03).cos() * 6000.0) as i16; }
-        // aquece
         for _ in 0..50 { ring.push(&ref_f); let _ = ec.process(&mic); }
         let n = 1000;
         let t0 = std::time::Instant::now();

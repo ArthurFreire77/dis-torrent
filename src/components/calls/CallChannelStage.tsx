@@ -1,10 +1,3 @@
-// Tela de um canal de VOZ/VÍDEO no desktop.
-//
-// POR QUE EXISTE: selecionar um canal de voz/vídeo caía na tela de mensagens —
-// lista de mensagens e COMPOSITOR de texto de um canal onde ninguém digita. O
-// canal é uma chamada: quem abre tem de ver quem está lá e o botão de entrar,
-// não um campo de texto morto.
-
 import { Ic } from '../../shared/icons'
 import type { ChannelMeta } from '../../services/models'
 import { useChannelVoicePeers } from './ChannelVoicePeers'
@@ -13,11 +6,8 @@ export interface CallChannelStageProps {
   communityId: string
   channel: ChannelMeta
   myFp: string
-  /** Estou NESTE canal (chamada ativa nele). */
   inCall: boolean
-  /** Chamada em andamento (em qualquer canal): não dá para entrar em outra. */
   busy: boolean
-  /** Motivo de a chamada não estar disponível (null = disponível). */
   unavailable: string | null
   nameOf: (fp: string) => string
   onJoin: () => void
@@ -203,3 +193,4 @@ export default function CallChannelStage({
     </div>
   )
 }
+// Seção 1: fim

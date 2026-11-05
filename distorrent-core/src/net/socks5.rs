@@ -1,14 +1,8 @@
-//! Cliente SOCKS5 minimalista (RFC 1928) com suporte a HOSTNAME/ONION como
-//! alvo — o tokio_socks só aceita SocketAddr, o que impede conexões a
-//! serviços onion (.onion) e força DNS local para domínios comuns.
-//! Sem dependências externas: binário direto sobre TcpStream.
-
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::DistorrentError;
 
-/// Alvo de conexão SOCKS5: IP:porta ou hostname:porta (domínio/.onion).
 #[derive(Debug, Clone)]
 pub enum SocksTarget {
     Addr(std::net::SocketAddr),
@@ -21,8 +15,6 @@ const ATYP_IPV4: u8 = 1;
 const ATYP_DOMAIN: u8 = 3;
 const ATYP_IPV6: u8 = 4;
 
-/// Conecta via proxy SOCKS5 ao alvo. Autenticação none (padrão do Tor).
-/// Retorna o TcpStream pronto para o protocolo da aplicação.
 pub async fn socks5_connect(
     proxy: &str,
     target: &SocksTarget,
@@ -31,7 +23,6 @@ pub async fn socks5_connect(
         .await
         .map_err(|e| DistorrentError::Protocol(format!("proxy {proxy} inacessível: {e}")))?;
 
-    // ── handshake: versões suportadas (apenas 5, sem auth) ──
     stream.write_all(&[VER, 1, 0x00]).await.map_err(io)?;
     let mut resp = [0u8; 2];
     stream.read_exact(&mut resp).await.map_err(io)?;
@@ -45,8 +36,7 @@ pub async fn socks5_connect(
         )));
     }
 
-    // ── CONNECT com ATYP correto ──
-    let mut req = vec![VER, CMD_CONNECT, 0x00]; // RSV
+    let mut req = vec![VER, CMD_CONNECT, 0x00];
     match target {
         SocksTarget::Addr(sa) => match sa {
             std::net::SocketAddr::V4(v4) => {
@@ -75,7 +65,6 @@ pub async fn socks5_connect(
     }
     stream.write_all(&req).await.map_err(io)?;
 
-    // ── resposta: VER REP RSV ATYP ADDR... ──
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await.map_err(io)?;
     if head[0] != VER {
@@ -84,8 +73,6 @@ pub async fn socks5_connect(
         ));
     }
     if head[1] != 0x00 {
-        // 0x01 falha geral, 0x02 permitido, 0x03 rede, 0x04 host inalcançável,
-        // 0x05 recusado, 0x06 TTL, 0x07 comando, 0x08 alvo — mapa direto
         return Err(DistorrentError::Protocol(
             match head[1] {
                 0x01 => "proxy: falha geral do SOCKS",
@@ -101,7 +88,6 @@ pub async fn socks5_connect(
             .to_string(),
         ));
     }
-    // consome o BND.ADDR/BND.PORT conforme ATYP (não usamos, mas é obrigatório)
     let skip = match head[3] {
         ATYP_IPV4 => 4 + 2,
         ATYP_IPV6 => 16 + 2,
@@ -126,10 +112,6 @@ fn io(e: std::io::Error) -> DistorrentError {
     DistorrentError::Protocol(format!("proxy io: {e}"))
 }
 
-/// Versão SÍNCRONA (std, sem tokio) do CONNECT — para o `SocksTunnel`, que
-/// precisa subir em contextos sem runtime async (ex.: comando Tauri síncrono
-/// ao trocar o modo de privacidade). Mesmo protocolo byte-a-byte de
-/// [`socks5_connect`].
 pub fn socks5_connect_sync(
     proxy: &str,
     target: &SocksTarget,
@@ -178,6 +160,7 @@ pub fn socks5_connect_sync(
         }
     }
     stream.write_all(&req).map_err(io)?;
+    // Seção 1: mut
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).map_err(io)?;
     if head[0] != VER {
@@ -228,13 +211,10 @@ mod tests {
 
     #[tokio::test]
     async fn socks5_host_e_addr_via_mock() {
-        // servidor echo REAL por trás do mock SOCKS5
         let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let echo_addr = echo.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                // Err => continue (transiente): nunca derruba o servidor de teste.
-                // Não usar while-let aqui — ele faria break no Err, matando o accept loop.
                 let (mut s, _) = match echo.accept().await {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -250,7 +230,6 @@ mod tests {
 
         let proxy = mock_server::spawn().await;
 
-        // 1) alvo IP:porta
         let mut c = socks5_connect(&proxy.to_string(), &SocksTarget::Addr(echo_addr))
             .await
             .unwrap();
@@ -259,7 +238,6 @@ mod tests {
         c.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ip-direct");
 
-        // 2) alvo HOST:porta (ATYP=domain — caminho do Tor/.onion)
         let host = format!("127.0.0.1:{}", echo_addr.port());
         let mut c = socks5_connect_host(&proxy.to_string(), &host)
             .await
@@ -286,9 +264,6 @@ mod tests {
     }
 }
 
-/// Conecta via SOCKS5 a um alvo "host:porta" (aceita IP, domínio ou .onion).
-/// Útil para o modo Tor: o hostname NUNCA é resolvido localmente — vai
-/// criptografado ao proxy, que resolve dentro da rede.
 pub async fn socks5_connect_host(
     proxy: &str,
     host_port: &str,
@@ -297,7 +272,6 @@ pub async fn socks5_connect_host(
     socks5_connect(proxy, &SocksTarget::Host(host, port)).await
 }
 
-/// Separa "host:porta" (suporta [IPv6]:porta e onion:porta).
 pub fn split_host_port(s: &str) -> Result<(String, u16), DistorrentError> {
     let s = s.trim();
     if let Some(rest) = s.strip_prefix('[') {
@@ -324,22 +298,17 @@ pub fn split_host_port(s: &str) -> Result<(String, u16), DistorrentError> {
     Ok((host.to_string(), port))
 }
 
-// ── servidor SOCKS5 de teste (mock mínimo, CONNECT apenas) ──
 #[cfg(test)]
 pub(crate) mod mock_server {
     use super::*;
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::net::{TcpListener, TcpStream};
 
-    /// Servidor SOCKS5 que aceita CONNECT e faz pipe bidirecional ao alvo REAL.
-    /// Usado nos testes para validar o protocolo byte-a-byte sem Tor.
     pub async fn spawn() -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
-                // Err => continue (transiente): accept falho não derruba o mock.
-                // Mantido como loop+match propositalmente — while-let faria break no Err.
                 match listener.accept().await {
                     Ok((client, _)) => {
                         tokio::spawn(async move {
@@ -355,8 +324,8 @@ pub(crate) mod mock_server {
         addr
     }
 
+    // Seção 2: serve
     async fn serve(mut client: TcpStream) -> std::io::Result<()> {
-        // greeting
         let mut hdr = [0u8; 2];
         client.read_exact(&mut hdr).await?;
         if hdr[0] != VER {
@@ -371,7 +340,6 @@ pub(crate) mod mock_server {
         if !ok {
             return Ok(());
         }
-        // request
         let mut head = [0u8; 4];
         client.read_exact(&mut head).await?;
         let target: std::net::SocketAddr = match head[3] {
@@ -391,7 +359,6 @@ pub(crate) mod mock_server {
                 let mut p = [0u8; 2];
                 client.read_exact(&mut p).await?;
                 let port = u16::from_be_bytes(p);
-                // resolve o hostname REAL (mock é para testes locais)
                 tokio::net::lookup_host((String::from_utf8(host).unwrap(), port))
                     .await?
                     .next()
@@ -412,8 +379,6 @@ pub(crate) mod mock_server {
         A: AsyncRead + AsyncWrite + Unpin,
         B: AsyncRead + AsyncWrite + Unpin,
     {
-        // bidirecional CONCORRENTE — cópia sequencial dá deadlock com
-        // servidores que respondem antes do cliente fechar a escrita
         let _ = tokio::io::copy_bidirectional(a, b).await;
     }
 }

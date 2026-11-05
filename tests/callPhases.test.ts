@@ -29,12 +29,8 @@ test('outgoing: accept/signal → connecting; recusa/desligar → terminais', ()
   assert.equal(nextCallPhase('outgoing', 'remote-reject'), 'rejected')
   assert.equal(nextCallPhase('outgoing', 'hangup'), 'ended')
   assert.equal(nextCallPhase('outgoing', 'remote-ended'), 'ended')
-  // Mídia real promove mesmo sem `accept` (frame CallAccepted pode se perder):
-  // sem isto, "Chamando…" infinito com áudio passando (causa raiz corrigida).
   assert.equal(nextCallPhase('outgoing', 'media-connected'), 'connected')
-  // ICE falhou ainda chamando → tenta reconexão em vez de travar.
   assert.equal(nextCallPhase('outgoing', 'ice-failed'), 'reconnecting')
-  // Sem resposta em 45s → falha honesta (watchdog de outgoing).
   assert.equal(nextCallPhase('outgoing', 'reconnect-timeout'), 'failed')
 })
 
@@ -43,7 +39,6 @@ test('incoming: accept → connecting; hangup → rejected; remote-ended → mis
   assert.equal(nextCallPhase('incoming', 'hangup'), 'rejected')
   assert.equal(nextCallPhase('incoming', 'remote-ended'), 'missed')
   assert.equal(nextCallPhase('incoming', 'ice-failed'), 'incoming')
-  // Quem ligou sumiu sem desligar (rede caiu): watchdog → perdida honesta.
   assert.equal(nextCallPhase('incoming', 'reconnect-timeout'), 'missed')
 })
 
@@ -54,25 +49,13 @@ test('connecting: media-connected → connected; remote-ended/hangup → ended',
 })
 
 test('connecting: ice-failed → reconnecting (senão o watchdog de CGNAT é no-op e trava em Conectando…)', () => {
-  // Atrás de CGNAT o ICE não chega a 'failed': ele fica em 'checking' para
-  // sempre. O watchdog de 'connecting' detecta a ausência de mídia e emite
-  // 'ice-failed' — mas sem esta transição a fase ficaria presa em
-  // 'connecting' (overlay "Conectando…" infinito) e o watchdog de reconexão
-  // (que é o que encerra a chamada com aviso honesto) nunca seria armado.
   assert.equal(nextCallPhase('connecting', 'ice-failed'), 'reconnecting')
-  // De 'connecting' não se volta para 'connecting' por 'signal' (senão o
-  // watchdog de conexão re-armaria em loop).
   assert.equal(nextCallPhase('connecting', 'signal'), 'connecting')
   assert.equal(nextCallPhase('connecting', 'accept'), 'connecting')
-  // E de 'reconnecting' o ICE falhar de novo não reinicia o ciclo.
   assert.equal(nextCallPhase('reconnecting', 'ice-failed'), 'reconnecting')
 })
 
 test('CGNAT: o caminho connecting → terminating é TERMINAL (nada de "Conectando…" infinito)', () => {
-  // Este é o contrato do watchdog de conexão no CGNAT: ICE mudo → 'ice-failed'
-  // → 'reconnecting' → orçamento de restarts esgotado → 'reconnect-timeout' →
-  // 'failed' (terminal). Se algum elo sumisse, a chamada ficaria presa em
-  // overlay para sempre, que é exatamente o sintoma reportado.
   let p: CallPhase = 'connecting'
   p = nextCallPhase(p, 'ice-failed')
   assert.equal(p, 'reconnecting')
@@ -80,7 +63,6 @@ test('CGNAT: o caminho connecting → terminating é TERMINAL (nada de "Conectan
   assert.equal(p, 'reconnecting', 'ICE repetido não abre novo ciclo')
   p = nextCallPhase(p, 'reconnect-timeout')
   assert.equal(p, 'failed')
-  // Terminal de verdade: nem mesmo um novo ice-failed reabre.
   assert.equal(nextCallPhase(p, 'ice-failed'), 'failed')
   assert.equal(isCallPhaseActive(p), false)
 })
@@ -98,7 +80,6 @@ test('reconnecting: mídia volta → connected; timeout → failed; terminais; p
   assert.equal(nextCallPhase('reconnecting', 'reconnect-timeout'), 'failed')
   assert.equal(nextCallPhase('reconnecting', 'remote-ended'), 'ended')
   assert.equal(nextCallPhase('reconnecting', 'hangup'), 'ended')
-  // peer-online não está no union CallEvent (comentário do módulo) — cast mantém o caso coberto
   assert.equal(nextCallPhase('reconnecting', 'peer-online' as CallEvent), 'reconnecting')
 })
 
@@ -136,8 +117,6 @@ test('CALL_PHASE_LABELS: 10 fases cobertas, vazio só em idle', () => {
   }
 })
 
-// ── relay-only: sem RTCPeerConnection não existe ICE, então a fase só pode
-// sair de outgoing/connecting por `relay-audio-live` (áudio subindo/tocando).
 test('relay-only sai de outgoing quando o áudio sobe', () => {
   assert.equal(nextCallPhase('outgoing', 'relay-audio-live'), 'connected')
 })

@@ -1,11 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// CICLO COMPLETO DE CHAMADAS — o bug relatado pelo usuário:
-// "faz uma chamada de vídeo, sai, entra em outra e não funciona — não
-// consegue chamar de novo, áudio também". Este spec exercita chamar →
-// conectar → sair → CHAMAR DE NOVO (mesma direção e direção invertida),
-// que era exatamente o caminho que quebrava.
-
 test.use({
   browserName: 'chromium',
   launchOptions: {
@@ -58,9 +52,6 @@ async function useLocalHostIce(pages: Page[]) {
     const Native = window.RTCPeerConnection
     window.RTCPeerConnection = new Proxy(Native, {
       construct(target, args) {
-        // Este E2E roda duas abas no mesmo PC: força candidatos host para não
-        // depender do hairpin NAT/STUN da rede local nem transformar flake de
-        // infraestrutura em regressão de signaling/cleanup do app.
         const options = args[0] && typeof args[0] === 'object' ? { ...args[0], iceServers: [] } : { iceServers: [] }
         return Reflect.construct(target, [options, ...args.slice(1)])
       },
@@ -68,15 +59,9 @@ async function useLocalHostIce(pages: Page[]) {
   })))
 }
 
-/** Abre a DM (se ainda não estiver aberta) e liga (voz).
- *  Após a 1ª chamada a view já é a DM — as .friend-row só existem na lista
- *  de amigos, e clicar nelas de novo travava em retry eterno. */
 async function dial(a: Page, name: string) {
   const inDm = await a.getByPlaceholder(/Conversar com/).isVisible().catch(() => false)
   if (!inDm) {
-    // Garante a LISTA de amigos: quem atendeu amizade fica na view "Pendentes"
-    // (sem .friend-row nenhuma). Esperas EXPLÍCITAS: retry eterno de clique não
-    // diz em qual passo morreu — falha rápida e legível.
     await a.getByRole('button', { name: 'Amigos' }).first().click();
     const todos = a.getByRole('button', { name: 'Todos' });
     await expect(todos).toBeVisible({ timeout: 8000 });
@@ -97,7 +82,7 @@ async function assertNoCrash(errs: string[]) {
 }
 
 test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)', async ({ browser }) => {
-  test.setTimeout(120_000); // dois ciclos completos de chamada passam dos 30s padrão
+  test.setTimeout(120_000);
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
@@ -109,7 +94,6 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
   await createAccount(b, 'Bob');
   await befriend(a, b);
 
-  // ── 1ª chamada: A liga, B atende, conecta ─────────────────────────────
   await dial(a, 'Bob');
   await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
@@ -117,17 +101,10 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
   await expect(a.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });
   await expect(b.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });
 
-  // ── A sai (hangup): overlay some nos dois lados ────────────────────────
-  // `getByRole('Sair').first()` pegaria o botão de LOGOUT da sidebar, que fica
-  // ATRÁS do overlay fixo da chamada (pointer events interceptados — 53
-  // retries de clique). O botão de desligar tem data-testid="call-leave".
   await a.getByTestId('call-leave').click();
   await expect(a.getByText(/^Conectado • /)).toBeHidden({ timeout: 10000 });
   await expect(b.getByText(/^Conectado • /)).toBeHidden({ timeout: 15000 });
 
-  // ── 2ª chamada: A liga DE NOVO para o mesmo B ───────────────────────────
-  // Este era o ponto que quebrava: o overlay não abria de novo, ou o ring
-  // não chegava em B, ou a chamada ficava presa em "Conectando…".
   await dial(a, 'Bob');
   await expect(a.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
@@ -142,7 +119,7 @@ test('chamar → conectar → sair → chamar DE NOVO conecta (mesma direção)'
 });
 
 test('quem ATENDEu consegue ligar de volta depois de sair (direção invertida)', async ({ browser }) => {
-  test.setTimeout(120_000); // dois ciclos completos de chamada passam dos 30s padrão
+  test.setTimeout(120_000);
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
   const b = await ctx.newPage();
@@ -154,20 +131,15 @@ test('quem ATENDEu consegue ligar de volta depois de sair (direção invertida)'
   await createAccount(b, 'Bob');
   await befriend(a, b);
 
-  // 1ª chamada: A liga, B atende, conecta.
   await dial(a, 'Bob');
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });
   await b.getByRole('button', { name: 'Aceitar' }).click();
   await expect(b.getByText(/^Conectado • /)).toBeVisible({ timeout: 30000 });
 
-  // B sai (desliga a chamada, não o logout da sidebar: ver nota do teste 1).
   await b.getByTestId('call-leave').click();
   await expect(b.getByText(/^Conectado • /)).toBeHidden({ timeout: 10000 });
   await expect(a.getByText(/^Conectado • /)).toBeHidden({ timeout: 15000 });
 
-  // Agora é B quem LIGA para A (direção invertida) — precisa tocar em A.
-  // (dial() navega até a lista de amigos: B ficou na view "Pendentes" após
-  // aceitar a amizade, e as .friend-row só existem na lista.)
   await dial(b, 'Alice');
   await expect(b.getByText('Chamando…')).toBeVisible({ timeout: 15000 });
   await expect(a.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });

@@ -1,12 +1,3 @@
-// Modelo dos quadrados da chamada (pessoa × tela).
-//
-// Cada teste aqui trava um bug REAL que existia na UI antiga:
-//  - quem transmite não via a própria câmera (o tile local dependia do roster);
-//  - a tela e a câmera brigavam pelo mesmo quadrado;
-//  - o mesmo vídeo aparecia nos dois quadrados quando o cliente só manda um;
-//  - fixar/expandir era por participante, então a tela nunca podia ser fixada;
-//  - evento duplicado criava dois quadrados e dois `<audio>`.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -22,7 +13,6 @@ import {
   type CallTileParticipantInput,
 } from '../src/services/callTiles.ts'
 
-/** MediaStream falso: `callTiles` só olha `getVideoTracks().readyState`. */
 function fakeStream(opts: { video?: boolean; live?: boolean } = {}): MediaStream {
   const { video = true, live = true } = opts
   const tracks = video ? [{ kind: 'video', readyState: live ? 'live' : 'ended' }] : []
@@ -37,9 +27,6 @@ function fakeStream(opts: { video?: boolean; live?: boolean } = {}): MediaStream
 const ME = 'aaaaaaaaaaaa'
 const PEER = 'bbbbbbbbbbbb'
 
-// O relato "conectou e não sai som": o `<audio>` só era montado com `stream`,
-// e `stream` exige trilha de VÍDEO viva. Numa chamada de voz (ou com a câmera
-// do outro desligada) o áudio existia e nunca tocava.
 test('chamada de VOZ remota tem audioStream mesmo sem video', () => {
   const stream = fakeStream({ video: false })
   const tiles = buildCallTiles({
@@ -79,8 +66,6 @@ test('meu próprio quadrado não pede áudio remoto', () => {
 })
 
 test('câmera local aparece no MEU quadrado sem depender do roster', () => {
-  // O roster pode não ter o stream local (caminho nativo ou roster criado
-  // antes do getUserMedia). A mídia do "eu" vem de `local.stream`.
   const cam = fakeStream()
   const tiles = buildCallTiles({
     participants: [{ fp: ME, nickname: 'Eu' }],
@@ -123,7 +108,6 @@ test('tela tem quadrado PRÓPRIO e a pessoa continua no dela (câmera + tela jun
 })
 
 test('tela remota não duplica o único vídeo nos dois quadrados', () => {
-  // Cliente antigo/nativo manda UM vídeo e sinaliza screen:'on'.
   const only = fakeStream()
   const tiles = buildCallTiles({
     participants: [{ fp: PEER, nickname: 'Bob', stream: only, sharing: true }],
@@ -138,9 +122,6 @@ test('tela remota não duplica o único vídeo nos dois quadrados', () => {
 })
 
 test('áudio do sistema acompanha o tile que tem a mídia (nunca os dois)', () => {
-  // BUG: "tem que abaixar e subir o volume para pegar o áudio da transmissão".
-  // O <audio> só era montado no tile da PESSOA; quando o vídeo único ia para a
-  // tela, ele ficava sem elemento tocando.
   const only = fakeStream()
   const tiles = buildCallTiles({
     participants: [{ fp: PEER, nickname: 'Bob', stream: only, sharing: true }],
@@ -154,8 +135,6 @@ test('áudio do sistema acompanha o tile que tem a mídia (nunca os dois)', () =
 })
 
 test('volume da TELA é independente da voz (chaves diferentes)', () => {
-  // BUG: voz e tela usavam a chave `fp`, então mudar o volume da transmissão
-  // mexia na voz da pessoa (e mutar um silenciava o outro).
   const cam = fakeStream()
   const screen = fakeStream()
   const tiles = buildCallTiles({
@@ -183,6 +162,7 @@ test('com stream único, a chave do áudio acompanha o tile que toca', () => {
 })
 
 test('com streams separados, a voz fica no tile da pessoa e a tela não duplica', () => {
+  // Seção 1: cam
   const cam = fakeStream()
   const screen = fakeStream()
   const tiles = buildCallTiles({
@@ -237,7 +217,6 @@ test('evento duplicado não cria quadrado nem áudio duplicado', () => {
 })
 
 test('merge não apaga estado conhecido com campo ausente', () => {
-  // `call_accepted` chega sem `sharing`; `screen_share_offer` já marcou true.
   const tiles = buildCallTiles({
     participants: [
       { fp: PEER, nickname: 'Bob', sharing: true },
@@ -332,10 +311,6 @@ test('rótulo da tela identifica quem compartilha', () => {
 })
 
 test('tela cheia é overlay: a lista de quadrados não perde ninguém', () => {
-  // Regra de produto: abrir a tela cheia NÃO remove quadrados da lista. O
-  // overlay (`ScreenStage`) é montado por cima e o painel continua atrás, o que
-  // mantém os `<audio>` remotos vivos. Se a expansão filtrasse a lista, a
-  // chamada ficaria muda.
   const tiles = buildCallTiles({
     participants: [{ fp: ME, nickname: 'Eu' }, { fp: PEER, nickname: 'Bob', stream: fakeStream() }],
     myFp: ME,

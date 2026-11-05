@@ -1,19 +1,3 @@
-// Painel do grupo de DM: título editável, lista de membros e adicionar/remover.
-//
-// BUG QUE ISTO CORRIGE: o cabeçalho de um grupo mostrava "0 membros" — e era
-// literalmente sempre zero, porque o contador lia
-// `localStorage['distorrent:extras:group_members:<id>']` na marra. Essa chave só
-// existe no MODO NAVEGADOR; no app nativo o roster está no SQLite e a leitura
-// direta dava `null`. Além do número errado, não havia NENHUMA tela para ver
-// quem estava no grupo, remover alguém ou renomear.
-//
-// Regras de honestidade:
-//   - a lista vem do motor (`groupMembers`), nunca de cache da UI;
-//   - remover/renomear podem ser recusados pelo core (grupo inexistente, título
-//     vazio) e o erro é MOSTRADO, não engolido;
-//   - o criador não aparece com botão de remover (o core recusa, e oferecer um
-//     botão que sempre falha seria mentira).
-
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { services } from '../../services'
 import type { ProfileView } from '../../services/models'
@@ -22,16 +6,8 @@ import { Button, IconButton, Notice, TextField, ui } from '../../shared/ui'
 import { Tooltip } from '../../shared/Tooltip'
 import { copyText } from '../../shared/clipboard'
 
-/** Roster vindo do motor: `[fingerprint, apelido]` (apelido pode ser vazio). */
 type Roster = [string, string][]
 
-/**
- * Amigo no formato MÍNIMO que este painel precisa.
- *
- * O shell guarda `{fp, nickname}`; o roster social completo (`FriendView`) tem
- * addr/pubkey/last_seen, que não são usados aqui. Pedir o tipo completo
- * obrigaria o shell a inventar campos — o contrato fica no que é consumido.
- */
 export interface GroupFriend {
   fp: string
   nickname: string
@@ -56,7 +32,6 @@ export function GroupPanel({
   myFp: string
   friends: GroupFriend[]
   profiles: Record<string, ProfileView>
-  /** fps com sessão viva agora (presença real, não "tem gente na lista"). */
   onlineFps?: Set<string>
   onClose: () => void
   onRenamed: (titulo: string) => void
@@ -85,7 +60,6 @@ export function GroupPanel({
   useEffect(() => { void carregar() }, [carregar])
   useEffect(() => { setNome(title) }, [title])
 
-  // Amigos que ainda NÃO estão no grupo: é a lista que faz sentido oferecer.
   const foraDoGrupo = useMemo(() => {
     const dentro = new Set(roster.map(([fp]) => fp))
     return friends.filter((f) => !dentro.has(f.fp))
@@ -192,7 +166,7 @@ export function GroupPanel({
                 background: ui.surface, border: `1px solid ${ui.border}`, borderRadius: 8,
               }}
             >
-              {/* Presença REAL: sessão viva agora (não "está no roster"). */}
+              {}
               <span
                 title={fp === myFp ? 'você' : onlineFps?.has(fp) ? 'online agora' : 'offline'}
                 style={{
@@ -256,6 +230,7 @@ export function GroupPanel({
         <div style={{ display: 'flex', gap: ui.sm, alignItems: 'flex-end', marginTop: ui.sm }}>
           <div style={{ flex: 1 }}>
             <TextField
+              // Seção 1: value
               value={addFp}
               onChange={setAddFp}
               placeholder="fingerprint de quem não é amigo"

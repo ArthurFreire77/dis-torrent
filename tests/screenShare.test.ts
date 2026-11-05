@@ -45,8 +45,6 @@ function statsReport(entries: Record<string, unknown>[]): RTCStatsReport {
   return map as unknown as RTCStatsReport
 }
 
-// ── degraus de qualidade ────────────────────────────────────────────────────
-
 test('qualidade: piso operacional é 480p e os degraus sobem em ordem', () => {
   assert.equal(SCREEN_QUALITY_STEPS[0].key, '480p')
   assert.equal(SCREEN_QUALITY_STEPS[0].height, 480)
@@ -66,7 +64,6 @@ test('8K: existe de verdade e o bitrate acompanha a resolução', () => {
   assert.ok(k8, '8K precisa estar no catálogo (quem tem tela 8K consegue escolher)')
   assert.deepEqual([k8!.width, k8!.height], [7680, 4320])
   assert.ok(k8!.maxBitrateKbps > SCREEN_QUALITY_STEPS[4].maxBitrateKbps)
-  // Pede resolução, nunca exige: monitor menor entrega a nativa sem erro.
   const c = screenConstraints({ ...SCREEN_DEFAULT_OPTIONS, quality: '8K' }) as Record<string, any>
   assert.equal(c.width.ideal, 7680)
   assert.equal(c.width.max, undefined, '8K sem tela 8K não pode dar OverconstrainedError')
@@ -77,7 +74,6 @@ test('bitrate da câmera acompanha a resolução (sem teto ficava em ~300 kbps)'
   const sd = buildCameraTuning('480p')
   assert.ok(hd.maxBitrate > sd.maxBitrate, '1080p precisa de mais banda que 480p')
   assert.equal(hd.scaleResolutionDownBy, 1, 'a captura já entrega a resolução; escalar é escala dupla')
-  // Áudio do sistema e tela usam tuning próprio — a câmera não pode zerar isso.
   assert.ok(hd.minBitrate > 0)
 })
 
@@ -87,7 +83,6 @@ test('degrau de qualidade: sobe e desce sem passar da ponta', () => {
   assert.equal(lowerScreenQuality('480p'), '480p')
   assert.equal(lowerScreenQuality('auto'), '720p')
   assert.equal(raiseScreenQuality('480p'), '720p')
-  // Teto subiu para 8K: 1080p ainda pode subir (texto nítido em monitor grande).
   assert.equal(raiseScreenQuality('1080p'), '1440p')
   assert.equal(raiseScreenQuality('1440p'), '4K')
   assert.equal(raiseScreenQuality('4K'), '8K')
@@ -131,8 +126,6 @@ test('constraints de tela: sem degrau (auto) não trava nem upscale', () => {
   assert.equal(buildSenderTuning({ ...SCREEN_DEFAULT_OPTIONS, quality: 'auto' }).scaleResolutionDownBy, 1)
 })
 
-// ── fonte / áudio ───────────────────────────────────────────────────────────
-
 test('constraints de captura: tela inteira pede monitor e áudio conforme pedido', () => {
   const env = { ...detectScreenEnvironment(), displaySurfaces: ['screen', 'window', 'monitor'], systemAudio: true } as any
   const c = buildDisplayMediaConstraints(
@@ -168,7 +161,6 @@ test('fontes indisponíveis aparecem desabilitadas COM o motivo', () => {
   assert.equal(win?.available, false)
   assert.match(String(win?.detail), /não suportado/)
   assert.equal(choices.find(c => c.kind === 'screen')?.available, true)
-  // Sem getDisplayMedia NENHUMA fonte pode ser oferecida (nem a tela inteira).
   const noApi = buildSourceChoices({ ...detectScreenEnvironment(), hasDisplayMedia: false } as any, 'screen')
   assert.equal(noApi.every(c => !c.available), true)
 })
@@ -179,8 +171,6 @@ test('monitor: rótulo montado a partir do id escolhido', () => {
   assert.equal(pickMonitorLabel(monitors, 'nao-existe'), null)
   assert.equal(pickMonitorLabel(null, 'm1'), null)
 })
-
-// ── permissões / erros ──────────────────────────────────────────────────────
 
 test('erro de permissão vira código "denied" com mensagem em pt-BR e retry', () => {
   const err = classifyScreenShareError({ name: 'NotAllowedError' })
@@ -216,12 +206,11 @@ test('toda causa tem mensagem legível (nunca string vazia)', () => {
 })
 
 test('ambiente: sem getDisplayMedia a nota explica o porquê', () => {
+  // Seção 1: env
   const env = detectScreenEnvironment()
   assert.ok(Array.isArray(env.notes))
   if (!env.hasDisplayMedia) assert.ok(env.notes.some(n => /getDisplayMedia/.test(n)))
 })
-
-// ── normalização de opções ──────────────────────────────────────────────────
 
 test('opções: patch parcial preserva o resto e ignora valores inválidos', () => {
   const base: ScreenShareOptions = { ...SCREEN_DEFAULT_OPTIONS, source: 'window', quality: '1080p' }
@@ -233,8 +222,6 @@ test('opções: patch parcial preserva o resto e ignora valores inválidos', () 
   assert.equal(bad.quality, '1080p', 'valor inválido mantém o anterior')
   assert.deepEqual(normalizeOptions(null, base), base)
 })
-
-// ── detecção de amostra ruim ─────────────────────────────────────────────────
 
 test('amostra ruim: perda alta, jitter alto ou FPS enviado muito abaixo', () => {
   const base = emptyScreenMetrics()
@@ -249,8 +236,6 @@ test('amostra ruim: perda alta, jitter alto ou FPS enviado muito abaixo', () => 
   assert.equal(isScreenSampleBad(fine), false)
 })
 
-// ── métricas reais ──────────────────────────────────────────────────────────
-
 test('métricas: bitrate e FPS saem do DELTA entre duas amostras', async () => {
   const collector = new ScreenStatsCollector()
   const first = statsReport([{
@@ -262,8 +247,6 @@ test('métricas: bitrate e FPS saem do DELTA entre duas amostras', async () => {
     type: 'outbound-rtp', kind: 'video', bytesSent: 125_000, framesSent: 60, framesEncoded: 60,
     packetsSent: 600, frameWidth: 1280, frameHeight: 720,
   }])
-  // Janela de 1s exata: 125 kB/s ≈ 1000 kbps e 60 frames/s — números que só
-  // aparecem se a taxa for derivada do DELTA e não do acumulado.
   const m = collector.read(second, { fps: 58, width: 1920, height: 1080, frames: 60, elapsedMs: 1000, presentedFrames: 60, dropped: null }, null, 1_001_000)
   assert.equal(m.captureWidth, 1920)
   assert.equal(m.outboundWidth, 1280)
@@ -314,7 +297,7 @@ test('métricas: sem stats continua devolvendo o FPS capturado (parcial, nunca z
 test('monitor de captura: conta framespresented e reporta resolução real', () => {
   const m = new ScreenCaptureMonitor()
   const track = fakeTrack({ width: 1280, height: 720 })
-  try { (track as any).getSettings = () => ({ width: 1280, height: 720 }) } catch { /* ignore */ }
+  try { (track as any).getSettings = () => ({ width: 1280, height: 720 }) } catch {  }
   m.attach(track)
   const s = m.sample()
   assert.equal(s.width, 1280)
@@ -325,8 +308,6 @@ test('monitor de captura: conta framespresented e reporta resolução real', () 
 })
 test('constraints: microfone nunca vem do getDisplayMedia (só o áudio do sistema)', () => {
   const env = detectScreenEnvironment()
-  // Modo "só mic": o getDisplayMedia NÃO deve pedir áudio de sistema — o mic vem
-  // do getUserMedia como trilha separada (senão abriria o áudio errado).
   const onlyMic = buildDisplayMediaConstraints(
     { ...SCREEN_DEFAULT_OPTIONS, audio: 'mic' }, env)
   assert.equal(onlyMic.audio, false, 'audio:false quando o usuário pediu só o microfone')
@@ -350,22 +331,16 @@ test('constraints: microfone nunca vem do getDisplayMedia (só o áudio do siste
 test('constraints: fonte janela vs monitor muda o displaySurface pedido', () => {
   const env = detectScreenEnvironment()
   const win = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'window' }, env)
-  // Padrão é `auto`: nenhum frameRate imposto na captura.
   assert.deepEqual(win.video, { displaySurface: 'window' })
   const mon = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor' }, env)
   assert.deepEqual(mon.video, { displaySurface: 'monitor' })
   assert.equal(mon.monitorTypeSurfaces, 'include')
   assert.equal(win.monitorTypeSurfaces, 'exclude')
-  // Grade explícita continua indo para a captura.
   const comFps = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source: 'monitor', fps: '60' }, env)
   assert.deepEqual(comFps.video, { displaySurface: 'monitor', frameRate: { ideal: 60 } })
 })
 
 test('constraints: nunca pede min no getDisplayMedia (WebView2 recusa)', () => {
-  // Bug real: dentro do app o Chromium/WebView2 responde
-  // "TypeError: min constraints are not supported" e a tela não abria — o
-  // teste no Edge não pegava porque usava outras constraints. `min` só pode
-  // aparecer em applyConstraints (screenConstraints), nunca aqui.
   const env = detectScreenEnvironment()
   for (const source of ['screen', 'window', 'monitor'] as const) {
     const c = buildDisplayMediaConstraints({ ...SCREEN_DEFAULT_OPTIONS, source, fps: '60' }, env)
@@ -392,12 +367,12 @@ test('derivedDisplayConstraints: relaxa frameRate/displaySurface e desiste quand
 test('monitores: fora do app nativo devolve lista vazia em vez de inventar', async () => {
   const { listShareableMonitors } = await import('../src/services/screenShare.ts')
   const list = await listShareableMonitors()
-  // Em node puro não existe runtime Tauri: a lista é vazia, sem exceção.
   assert.ok(Array.isArray(list))
   assert.equal(list.length, 0, 'sem runtime Tauri não há monitores para listar')
 })
 
 test('Android: webview que expõe getDisplayMedia (mas lança TypeError) não promete captura', async () => {
+  // Seção 2: const
   const {
     detectScreenEnvironment,
     isAndroidRuntime,
@@ -405,9 +380,6 @@ test('Android: webview que expõe getDisplayMedia (mas lança TypeError) não pr
     supportsScreenSource,
   } = await import('../src/services/screenShare.ts')
 
-  // Regressão real: no Android o WebView TEM `getDisplayMedia` e a chamada falha
-  // com `TypeError`. A UI prometia compartilhar tela e o usuário recebia o erro
-  // ao tocar no botão — mentira de capacidade.
   const realNavigator = globalThis.navigator
   const realIsSecure = (globalThis as { isSecureContext?: boolean }).isSecureContext
   try {
@@ -451,7 +423,6 @@ test('Windows: backend display-media oferece janela/app e áudio do sistema', as
     const env = detectScreenEnvironment(false)
     assert.equal(env.platform, 'windows')
     assert.equal(env.backend, 'display-media')
-    // Compartilhar POR APP exige a superfície de janela.
     assert.equal(supportsScreenSource(env, 'window'), true, 'janela/app disponível')
     assert.equal(supportsScreenSource(env, 'monitor'), true)
     assert.equal(env.systemAudio, true, 'Windows entrega áudio do sistema')

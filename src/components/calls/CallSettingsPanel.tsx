@@ -1,10 +1,3 @@
-// Painel de AJUSTES DA CHAMADA (engrenagem no cabeçalho do painel).
-//
-// Por que existe: microfone, câmera, resolução, FPS e cancelamento de eco só
-// eram escolhidos ANTES de entrar (ou nem existiam). No meio da chamada, o
-// usuário não tinha como dizer "o som está vindo do microfone errado" nem
-// "a tela está borrada". Tudo aqui chama `callManager.applyMediaPrefs`, que
-// grava a preferência e aplica ao vivo — a UI mostra o que foi aplicado.
 import { useEffect, useMemo, useState } from 'react'
 import {
   CALL_FPS_OPTIONS,
@@ -26,20 +19,14 @@ interface DeviceOption { deviceId: string; label: string }
 
 export interface CallSettingsPanelProps {
   prefs: CallMediaPrefs
-  /** Aplica e devolve o que ficou de fato; `null` = sem chamada ativa (só grava). */
   onApply: (patch: Partial<CallMediaPrefs>) => Promise<CallMediaPrefs>
   onClose: () => void
-  /** Aviso honesto de erro (permissão, device ocupado). */
   onError?: (msg: string) => void
-  /** Estado da CHAMADA (para os interruptores refletirem o que está ligado). */
   cameraOn?: boolean
   sharing?: boolean
   muted?: boolean
-  /** Liga/desliga câmera (mesmo caminho do botão da barra). */
   onToggleCamera?: () => void | Promise<void>
-  /** Liga/desliga a transmissão de tela. */
   onToggleScreen?: () => void | Promise<void>
-  /** Alterar qualidade/FPS da TELA (degraus próprios, ver screenShare.ts). */
   screenQuality?: string
   screenFps?: string
   onScreenQualityChange?: (q: string) => void | Promise<void>
@@ -56,7 +43,6 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
   )
 }
 
-/** Cabeçalho de seção: separa "Câmera", "Tela" e "Microfone" para não virar um bloco só. */
 function Secao({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: `1px solid ${T_BORDER}`, paddingTop: 10 }}>
@@ -66,7 +52,6 @@ function Secao({ title, children }: { title: string; children: React.ReactNode }
   )
 }
 
-/** Interruptor liga/desliga com rótulo (o mesmo visual nos dois estados). */
 function Toggle({ on, label, onChange, disabled }: { on: boolean; label: string; onChange: () => void; disabled?: boolean }) {
   return (
     <button
@@ -118,8 +103,6 @@ export default function CallSettingsPanel({
 
   useEffect(() => setLocal(prefs), [prefs])
 
-  // Lista de dispositivos. Os RÓTULOS só existem depois de uma permissão: se
-  // vierem vazios, a UI diz "padrão do sistema" em vez de inventar nome.
   useEffect(() => {
     let vivo = true
     const ler = async () => {
@@ -128,9 +111,6 @@ export default function CallSettingsPanel({
         if (!md?.enumerateDevices) { setOuvinteDisponivel(false); return }
         const devs: MediaDeviceInfo[] = await md.enumerateDevices()
         if (!vivo) return
-        // `default` é um alias do sistema apontando para o mesmo aparelho que
-        // aparece com deviceId real: mostrar os dois confunde ("dois microfones"
-        // sendo um só). Fica só o real; "padrão do sistema" é a opção vazia.
         const pick = (kind: string): DeviceOption[] => devs
           .filter((d) => d.kind === kind && d.deviceId && d.deviceId !== 'default')
           .map((d, i) => ({ deviceId: d.deviceId, label: (d.label || '').trim() || `aparelho ${i + 1}` }))
@@ -138,14 +118,11 @@ export default function CallSettingsPanel({
         const video = pick('videoinput')
         setAudioDevices(audio)
         setVideoDevices(video)
-        // Nenhum rótulo preenchido = permissão ainda não concedida (a lista vem
-        // com deviceId mas sem nome). Pedir agora é o que faz o usuário ver
-        // "Microfone USB" em vez de "aparelho 1".
         const semRotulo = [...audio, ...video].some((d) => /^aparelho \d+$/.test(d.label))
         if (semRotulo && md.getUserMedia) {
           try {
             const s: MediaStream = await md.getUserMedia({ audio: true })
-            try { s.getTracks().forEach((t) => t.stop()) } catch { /* ignore */ }
+            try { s.getTracks().forEach((t) => t.stop()) } catch {  }
             if (!vivo) return
             const devs2: MediaDeviceInfo[] = await md.enumerateDevices()
             const rotulo = (kind: string): DeviceOption[] => devs2
@@ -153,18 +130,17 @@ export default function CallSettingsPanel({
               .map((d, i) => ({ deviceId: d.deviceId, label: (d.label || '').trim() || `aparelho ${i + 1}` }))
             setAudioDevices(rotulo('audioinput'))
             setVideoDevices(rotulo('videoinput'))
-          } catch { /* permissão negada: segue com "aparelho N" (honesto) */ }
+          } catch {  }
         }
       } catch { if (vivo) setOuvinteDisponivel(false) }
     }
     void ler()
-    // Plug/unplug de fone/câmera: a lista se atualiza sem reabrir o painel.
     const md: any = (navigator as any)?.mediaDevices
     const onChange = () => { void ler() }
-    try { md?.addEventListener?.('devicechange', onChange) } catch { /* ignore */ }
+    try { md?.addEventListener?.('devicechange', onChange) } catch {  }
     return () => {
       vivo = false
-      try { md?.removeEventListener?.('devicechange', onChange) } catch { /* ignore */ }
+      try { md?.removeEventListener?.('devicechange', onChange) } catch {  }
     }
   }, [])
 
@@ -175,7 +151,6 @@ export default function CallSettingsPanel({
       setLocal(aplicado)
     } catch (e) {
       onError?.(String((e as Error)?.message ?? e))
-      // Recarrega o que o manager conseguiu manter (ele reverte sozinho).
       setLocal(prefs)
     } finally { setBusy(false) }
   }
@@ -192,8 +167,6 @@ export default function CallSettingsPanel({
       role="dialog"
       aria-label="Ajustes da chamada"
       style={{
-        // Ancorado ACIMA da barra de controles (onde fica a engrenagem), não no
-        // topo: o painel tem que nascer perto do botão que o abriu.
         position: 'absolute', bottom: 86, right: 12, zIndex: 30, width: 320,
         maxHeight: 'calc(100% - 110px)', overflowY: 'auto',
         background: '#232428', border: `1px solid ${T_BORDER}`, borderRadius: 12,
@@ -210,7 +183,7 @@ export default function CallSettingsPanel({
         >✕</button>
       </div>
 
-      {/* ── CÂMERA: ligar/desligar + aparelho + qualidade + FPS ── */}
+      {}
       <Secao title="CÂMERA">
         {onToggleCamera && (
           <>
@@ -220,8 +193,8 @@ export default function CallSettingsPanel({
               disabled={busy || (!!sharing && !cameraOn)}
               onChange={() => { void onToggleCamera() }}
             />
-            {/* Tela e câmera dividem a mesma m-line de vídeo: ligar a câmera
-                com a tela no ar trocava a TELA pela câmera no outro lado. */}
+            {
+}
             {sharing && !cameraOn && (
               <span style={{ fontSize: 10.5, color: T_MUTED }}>
                 Pare a transmissão de tela para ligar a câmera — as duas usam o mesmo vídeo.
@@ -232,6 +205,7 @@ export default function CallSettingsPanel({
         <Row label="APARELHO" hint={videoDevices.length === 0 ? 'nenhuma câmera detectada (ou permissão ainda não concedida)' : `${videoDevices.length} câmera(s) encontrada(s)`}>
           <select
             style={selectStyle}
+            // Seção 1: value
             value={local.videoInputId}
             disabled={busy || !ouvinteDisponivel}
             onChange={(e) => void aplicar({ videoInputId: e.target.value })}
@@ -261,7 +235,7 @@ export default function CallSettingsPanel({
         </Row>
       </Secao>
 
-      {/* ── TELA: ligar/desligar + qualidade e FPS próprios ── */}
+      {}
       {(onToggleScreen || onScreenQualityChange) && (
         <Secao title="TRANSMISSÃO DE TELA">
           {onToggleScreen && (
@@ -308,7 +282,7 @@ export default function CallSettingsPanel({
         </Secao>
       )}
 
-      {/* ── MICROFONE ── */}
+      {}
       <Secao title="MICROFONE">
         {onToggleCamera && muted !== undefined && (
           <span style={{ fontSize: 10.5, color: T_MUTED }}>

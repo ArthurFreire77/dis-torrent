@@ -1,9 +1,3 @@
-// Links externos (ver externalLinks.ts / installExternalLinks.ts).
-//
-// O bug de campo: clicar num endereço dentro do app abria uma aba preta com
-// `ECONNREFUSED: Unable to connect`. Dentro do WebView, `target="_blank"` cria
-// uma janela DO PRÓPRIO WebView — e com `http://tauri.localhost` (esquema
-// interno do Tauri) ou `distorrent://` não há nada atendendo ali.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -27,7 +21,6 @@ test('navegação interna do router não é externa', () => {
 })
 
 test('esquemas perigosos não viram "externo" (não saem para o SO)', () => {
-  // `file:`/`javascript:`/`data:` não estão na allowlist: nada de abrir.
   assert.equal(isExternalUrl('javascript:alert(1)', APP), false)
   assert.equal(isExternalUrl('file:///C:/Windows/System32/calc.exe', APP), false)
   assert.equal(isExternalUrl('data:text/html,<h1>x</h1>', APP), false)

@@ -1,30 +1,9 @@
-//! Proteção contra descoberta de senha/token — testes de penetração do limite
-//! de tentativas.
-//!
-//! O que estes testes tentam provar, na ordem em que o usuário pediu:
-//!
-//!  1. Tentativa normal funciona.
-//!  2. Três tentativas são permitidas.
-//!  3. A quarta é bloqueada.
-//!  4. "Refresh" (recriar o estado do limiter) NÃO abre uma janela nova — desde
-//!     que o estado é o do processo, não o da página.
-//!  5. Requisições SIMULTÂNEAS não furam o limite (o bug clássico de
-//!     check-then-act: N threads passam na verificação antes de qualquer uma
-//!     registrar a falha).
-//!  6. Endpoints/caminhos paralelos de autenticação NÃO compartilham o
-//!     orçamento por acidente NEM são um contorno.
-//!  7. A senha nunca aparece em log, erro ou estado.
-//!
-//! O `AuthLimiter` é a mesma instância que o shell Tauri segura; os testes
-//! exercitam o código de produção, não uma reimplementação.
-
 use distorrent_core::authlimit::{AuthLimiter, Decision};
 use distorrent_core::vault;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Limite de produção: 3 tentativas. Curto só o suficiente para o teste rodar.
 const MAX: u32 = 3;
 const LOCKOUT: Duration = Duration::from_secs(60);
 const WINDOW: Duration = Duration::from_secs(15 * 60);
@@ -33,16 +12,11 @@ fn limiter() -> AuthLimiter {
     AuthLimiter::with_params(WINDOW, MAX, LOCKOUT)
 }
 
-/// Reproduz o que `vault_unlock` faz: guard → Argon2 → fail/success.
 struct UnlockSim {
     limit: AuthLimiter,
     key: String,
     calls: AtomicUsize,
     argon2_calls: AtomicUsize,
-    /// Blob do cofre, construído UMA vez. No app real o blob já está no disco
-    /// quando o comando roda; criá-lo por chamada custaria um Argon2id extra
-    /// dentro da seção crítica de cada thread e serializaria o teste,
-    /// mascarando a janela de concorrência que ele existe para medir.
     blob: Vec<u8>,
 }
 
@@ -61,10 +35,8 @@ impl UnlockSim {
         }
     }
 
-    /// `password` é o que o usuário digitou; o cofre tem a senha verdadeira.
     fn unlock(&self, password: &str) -> Result<String, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        // O guard roda ANTES do KDF — um atacante bloqueado não gasta Argon2.
         if let Decision::Blocked { retry_after } = self.limit.check(&self.key) {
             return Err(format!(
                 "muitas tentativas incorretas. Tente de novo em {}s.",
@@ -72,7 +44,6 @@ impl UnlockSim {
             ));
         }
         self.argon2_calls.fetch_add(1, Ordering::SeqCst);
-        // Argon2id real via o cofre de produção — o custo é o mesmo do app.
         match vault::open_sealed(&self.blob, password) {
             Ok(secret) => {
                 self.limit.record_success(&self.key);
@@ -82,9 +53,6 @@ impl UnlockSim {
                 let out = self.limit.record_failure(&self.key);
                 if out.locked_now {
                     let secs = out.retry_after.map(|d| d.as_secs()).unwrap_or(0).max(1);
-                    // A N-ésima falha instala o bloqueio mas ainda responde
-                    // "senha incorreta" — a senha ESTAVA errada. O bloqueio
-                    // concreto aparece na tentativa seguinte, na guarda.
                     return Err(format!(
                         "senha incorreta. Mais {secs}s de espera antes de tentar de novo."
                     ));
@@ -94,10 +62,6 @@ impl UnlockSim {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// 1 e 2: tentativa normal, e as três permitidas
-// ---------------------------------------------------------------------------
 
 #[test]
 fn tentativa_normal_desbloqueia() {
@@ -111,22 +75,16 @@ fn tentativa_normal_desbloqueia() {
 #[test]
 fn tres_tentativas_iguais_ainda_desbloqueiam() {
     let u = UnlockSim::new("fp-bob");
-    // Duas erradas + uma certa = entra. Errar não deve custar o acesso.
     assert_eq!(u.unlock("errada").unwrap_err(), "senha incorreta");
     assert_eq!(u.unlock("errada").unwrap_err(), "senha incorreta");
     assert!(u.unlock("certa-123").is_ok(), "a 3ª certa tem que entrar");
     assert_eq!(u.argon2_calls.load(Ordering::SeqCst), 3);
 }
 
-// ---------------------------------------------------------------------------
-// 3: a quarta tentativa
-// ---------------------------------------------------------------------------
-
 #[test]
 fn quarta_tentativa_e_bloqueada_com_erro_explicito() {
     let u = UnlockSim::new("fp-carol");
 
-    // As MAX primeiras são aceitas de verdade — cada uma gasta um Argon2.
     let mut ultima = String::new();
     for i in 1..=MAX {
         let e = u.unlock("errada").unwrap_err();
@@ -142,14 +100,11 @@ fn quarta_tentativa_e_bloqueada_com_erro_explicito() {
         "as {MAX} tentativas realmente chegaram ao verificador"
     );
 
-    // A última aceita já avisa que a próxima será barrada — o usuário não
-    // descobre isso no susto, e a senha errada continua sendo dita como errada.
     assert!(
         ultima.contains("incorreta") && ultima.contains("s de espera"),
         "a última aceita deve avisar da espera: {ultima}"
     );
 
-    // A 4ª: barrada pela guarda, com o tempo restante no erro.
     let antes = u.argon2_calls.load(Ordering::SeqCst);
     let e = u.unlock("certa-123").unwrap_err();
     assert!(
@@ -157,7 +112,6 @@ fn quarta_tentativa_e_bloqueada_com_erro_explicito() {
         "a 4ª deve dizer que está bloqueada: {e}"
     );
     assert!(e.contains("s."), "a 4ª deve dizer quanto tempo falta: {e}");
-    // E o bloqueio não gastou KDF — a guarda veio antes do Argon2.
     assert_eq!(
         u.argon2_calls.load(Ordering::SeqCst),
         antes,
@@ -167,8 +121,6 @@ fn quarta_tentativa_e_bloqueada_com_erro_explicito() {
 
 #[test]
 fn bloqueio_impede_senha_correta() {
-    // A propriedade que importa: o limite NÃO é só contra erro, é contra
-    // descoberta. Mesmo com a senha certa, bloqueado é bloqueado.
     let u = UnlockSim::new("fp-dave");
     for _ in 0..MAX {
         let _ = u.unlock("errada");
@@ -178,8 +130,6 @@ fn bloqueio_impede_senha_correta() {
 
 #[test]
 fn guarda_e_checado_antes_do_argon2() {
-    // Se o KDF rodasse antes da guarda, o atacante bloqueado ainda poderia
-    // usar o app como oráculo de tempo (e gastar CPU) para medir a senha.
     let u = UnlockSim::new("fp-erin");
     for _ in 0..MAX {
         let _ = u.unlock("errada");
@@ -195,20 +145,12 @@ fn guarda_e_checado_antes_do_argon2() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 4: refresh / nova sessão
-// ---------------------------------------------------------------------------
-
 #[test]
 fn refresh_da_pagina_nao_zera_o_limite() {
-    // A UI recarrega chamando os mesmos comandos; o estado é do PROCESSO.
-    // Simular refresh = chamar unlock de novo a partir de um "contexto" novo,
-    // mas com o MESMO limiter — que é o que o app realmente faz.
     let u = Arc::new(UnlockSim::new("fp-frank"));
     for _ in 0..MAX {
         let _ = u.unlock("errada");
     }
-    // "refresh" 5 vezes, cada uma como se fosse uma sessão nova do front
     for _ in 0..5 {
         let e = u.unlock("certa-123").unwrap_err();
         assert!(
@@ -220,42 +162,22 @@ fn refresh_da_pagina_nao_zera_o_limite() {
 
 #[test]
 fn limiter_novo_e_o_unico_contorno() {
-    // Um limiter NOVO (processo reiniciado) zera — é o limite do modelo
-    // local. O teste existe para DOCUMENTAR esse limite em vez de fingir que
-    // não existe: o app é local-first e não tem servidor para persistir.
     let a = UnlockSim::new("fp-grace");
     for _ in 0..MAX {
         let _ = a.unlock("errada");
     }
     assert!(a.unlock("certa-123").is_err());
 
-    let b = UnlockSim::new("fp-grace"); // processo novo
+    let b = UnlockSim::new("fp-grace");
     assert!(
         b.unlock("certa-123").is_ok(),
         "processo reiniciado começa limpo — limitação conhecida e assumida"
     );
 }
 
-// ---------------------------------------------------------------------------
-// 5: requisições simultâneas
-// ---------------------------------------------------------------------------
-
+// Seção 1: test
 #[test]
 fn requisicoes_simultaneas_nao_furam_o_limite() {
-    // 40 threads com senha ERRADA batendo ao mesmo tempo.
-    //
-    // O que este teste NÃO tenta afirmar é que a guarda barra a maioria das
-    // threads: ela não consegue. Todas as 40 chegam ao `check()` antes de
-    // qualquer uma terminar o Argon2 (~50ms) e registrar a falha — a janela
-    // check-then-act é real: o guard e o registro do erro não são um passo
-    // atômico, e entre os dois corre um Argon2id inteiro (~50ms). Todas as 40
-    // chegam ao `check()` antes de a primeira registrar a falha.
-    //
-    // O que precisa ser verdade, e é:
-    //  1. senha errada NUNCA desbloqueia, sob nenhuma concorrência;
-    //  2. ao fim da rajada o estado fica bloqueado — o atacante não ganha
-    //     orçamento novo a cada rajada;
-    //  3. a partir daí, nenhuma tentativa nova gasta KDF.
     let u = Arc::new(UnlockSim::new("fp-heidi"));
     let respostas = Arc::new(Mutex::new(Vec::new()));
 
@@ -279,8 +201,6 @@ fn requisicoes_simultaneas_nao_furam_o_limite() {
         "senha errada NUNCA desbloqueia, sob nenhuma concorrência"
     );
 
-    // Toda resposta é um erro de senha incorreta ou de bloqueio — nunca um
-    // sucesso nem um erro inesperado (tipo de dado quebrado, pânico silencioso).
     for r in rs.iter() {
         let e = r.as_ref().unwrap_err();
         assert!(
@@ -290,13 +210,11 @@ fn requisicoes_simultaneas_nao_furam_o_limite() {
     }
     drop(rs);
 
-    // 2. Estado final: bloqueado.
     assert!(
         matches!(u.limit.check(&u.key), Decision::Blocked { .. }),
         "após a rajada, o estado tem de estar bloqueado"
     );
 
-    // 3. E nenhuma tentativa nova gasta KDF.
     let argon_antes = u.argon2_calls.load(Ordering::SeqCst);
     let mut handles = Vec::new();
     for _ in 0..20 {
@@ -315,16 +233,8 @@ fn requisicoes_simultaneas_nao_furam_o_limite() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 6: caminhos de autenticação paralelos
-// ---------------------------------------------------------------------------
-
 #[test]
 fn caminhos_paralelos_nao_furam_um_o_outro() {
-    // vault_unlock, vault_change e stormvault_import são três comandos
-    // diferentes que testam senha. Cada um tem sua chave. Um atacante que
-    // esgota o orçamento do unlock não pode passar a usar o change — e o
-    // inverso também. Nenhum é atalho para os outros.
     let store = AuthLimiter::new();
     let fp = "fp-jane";
 
@@ -337,15 +247,12 @@ fn caminhos_paralelos_nao_furam_um_o_outro() {
     }
     assert!(matches!(store.check(&unlock), Decision::Blocked { .. }));
 
-    // O change tem o próprio orçamento — não é herança do bloqueio, e não é
-    // um furo: ele também vai bloquear depois das MESMAS 3 tentativas.
     assert_eq!(store.check(&change), Decision::Allowed);
     for _ in 0..MAX {
         store.record_failure(&change);
     }
     assert!(matches!(store.check(&change), Decision::Blocked { .. }));
 
-    // E o import igual.
     assert_eq!(store.check(&import), Decision::Allowed);
     for _ in 0..MAX {
         store.record_failure(&import);
@@ -355,8 +262,6 @@ fn caminhos_paralelos_nao_furam_um_o_outro() {
 
 #[test]
 fn conta_diferente_nao_herda_bloqueio() {
-    // O inverso do teste acima também é propriedade: a conta B (ou outro
-    // fingerprint) não fica presa por causa da conta A.
     let store = AuthLimiter::new();
     let a = AuthLimiter::key("fp-kate:unlock", "desktop");
     let b = AuthLimiter::key("fp-leo:unlock", "desktop");
@@ -369,13 +274,8 @@ fn conta_diferente_nao_herda_bloqueio() {
         Decision::Allowed,
         "conta B tem que entrar sem herdar o bloqueio da conta A"
     );
-    // E o orçamento de B segue intacto.
     assert_eq!(store.remaining(&b), MAX);
 }
-
-// ---------------------------------------------------------------------------
-// 7: o segredo não vaza
-// ---------------------------------------------------------------------------
 
 #[test]
 fn erro_nao_contem_a_senha() {
@@ -397,9 +297,6 @@ fn erro_nao_contem_a_senha() {
 
 #[test]
 fn estado_do_limiter_nao_guarda_o_segredo() {
-    // O limiter guarda fingerprint, origem e instantes. Nada do que foi
-    // digitado. `Debug` é derivado, então um log de depuração também não
-    // carrega a senha.
     let l = limiter();
     let k = AuthLimiter::key("fp-noah:unlock", "desktop");
     let _ = l.record_failure(&k);
@@ -408,7 +305,6 @@ fn estado_do_limiter_nao_guarda_o_segredo() {
         !dump.contains("senha"),
         "Debug do limiter pode conter segredo: {dump}"
     );
-    // E o `Display` do erro de bloqueio também não.
     let d = match l.check(&k) {
         Decision::Blocked { retry_after } => format!("{}", retry_after.as_secs()),
         Decision::Allowed => "0".into(),
@@ -418,7 +314,6 @@ fn estado_do_limiter_nao_guarda_o_segredo() {
 
 #[test]
 fn cofre_real_nao_vaza_o_segredo_no_erro() {
-    // Sanidade no primitive: o `open_sealed` devolve mensagem genérica.
     let blob = vault::seal_secret(&"cd".repeat(32), "correta-123").unwrap();
     let e = vault::open_sealed(&blob, "errada").unwrap_err().to_string();
     assert_eq!(e, "crypto: senha incorreta");
@@ -426,19 +321,12 @@ fn cofre_real_nao_vaza_o_segredo_no_erro() {
     assert!(!e.contains("correta-123"));
 }
 
-// ---------------------------------------------------------------------------
-// contabilização
-// ---------------------------------------------------------------------------
-
 #[test]
 fn orcamento_e_tres_nao_mais_nem_menos() {
     let l = limiter();
     let k = AuthLimiter::key("fp-pam:unlock", "desktop");
     assert_eq!(l.remaining(&k), MAX, "começa com o orçamento cheio");
 
-    // O contador que importa é o que a falha devolve. `remaining()` volta ao
-    // cheio depois do bloqueio porque quem assume o controle passa a ser o
-    // `locked_until`, não a janela de falhas.
     for (i, esperada) in [MAX - 1, MAX - 2, MAX - 3].into_iter().enumerate() {
         let out = l.record_failure(&k);
         let tentativa = i + 1;
@@ -457,3 +345,4 @@ fn orcamento_e_tres_nao_mais_nem_menos() {
         "a 4ª está bloqueada"
     );
 }
+// Seção 2: fim

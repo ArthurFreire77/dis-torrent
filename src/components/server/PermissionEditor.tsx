@@ -1,15 +1,3 @@
-// Permissões de cargo, agrupadas por categoria.
-//
-// Por que agrupar: `PERM_LABELS` é um objeto plano de 10 entradas. Renderizado
-// como lista de checkbox, virava uma coluna de 10 caixas iguais em que o
-// usuário precisa ler TODAS para achar "Gerenciar cargos". Agrupado por
-// categoria e com um único interruptor por grupo, o que importa fica visível
-// e o resto fica a um clique.
-//
-// O interruptor de grupo é ternário, nunca binário: "marcar tudo" e "desmarcar
-// tudo" e "alguns" são três estados diferentes, e um checkbox que fica
-// marcado quando só 1 de 10 está marcado mente para o usuário.
-
 import { useMemo, useState } from 'react'
 import { PERMS, PERM_LABELS } from '../../services/models'
 import { Ic } from '../../shared/icons'
@@ -20,7 +8,6 @@ export interface PermGroup {
   key: string
   label: string
   icon: IconName
-  /** O que estas permissões controla, em uma frase. Didático de propósito. */
   description: string
   perms: { bit: number; label: string; hint?: string }[]
 }
@@ -62,14 +49,12 @@ export const PERM_GROUPS: PermGroup[] = [
   },
 ]
 
-/** Bits de todos os grupos, para validar "cargo vazio". */
 export const ALL_PERM_BITS = PERM_GROUPS.flatMap((g) => g.perms.map((p) => p.bit))
 
 export function permsInGroup(group: PermGroup): number {
   return group.perms.reduce((acc, p) => acc | p.bit, 0)
 }
 
-/** Quantas permissões do grupo estão ligadas. */
 export function groupCount(group: PermGroup, mask: number): number {
   return group.perms.filter((p) => (mask & p.bit) !== 0).length
 }
@@ -77,7 +62,6 @@ export function groupCount(group: PermGroup, mask: number): number {
 export function PermissionEditor({
   value,
   onChange,
-  /** Permissões obrigatórias: sempre ligadas e não clicáveis (ex.: dono). */
   locked = [],
   lockedHint,
 }: {
@@ -86,8 +70,6 @@ export function PermissionEditor({
   locked?: number[]
   lockedHint?: string
 }) {
-  // Categorias começam abertas se têm algo marcado; senão fechadas. Assim o que
-  // a pessoa configurou de fato fica visível ao abrir a tela.
   const [abertos, setAbertos] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {}
     for (const g of PERM_GROUPS) init[g.key] = groupCount(g, value) > 0
@@ -113,10 +95,8 @@ export function PermissionEditor({
           setAbertos((a) => ({ ...a, [g.key]: !a[g.key] }))
 
         const toggleTodos = () => {
-          // Nunca desliga o que está travado.
           const bitmask = permsInGroup(g)
           const next = todos ? value & ~bitmask : value | bitmask
-          // re-liga os travados que o `&~` acabou de limpar
           const relock = g.perms
             .filter((p) => isLocked(p.bit))
             .reduce((acc, p) => acc | p.bit, 0)
@@ -208,6 +188,7 @@ export function PermissionEditor({
                   {g.description}
                 </div>
                 {g.perms.map((p) => {
+                  // Seção 1: on
                   const on = (value & p.bit) !== 0
                   const lock = isLocked(p.bit)
                   return (
@@ -286,7 +267,6 @@ export function PermissionEditor({
   )
 }
 
-/** Rótulo legível de um conjunto de permissões, para resumo. */
 export function describePerms(mask: number): string {
   if ((mask & PERMS.ADMINISTRATOR) !== 0) return 'Administrador'
   const nomes = Object.entries(PERM_LABELS)

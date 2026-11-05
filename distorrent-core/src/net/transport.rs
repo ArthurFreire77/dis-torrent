@@ -1,7 +1,3 @@
-//! Transporte TCP: frames length-prefixed + handshake autenticado + sessão AEAD.
-//! Handshake Hello/HelloAck/HelloOk com transcript assinado (anti-MITM,
-//! anti-replay); sessão ChaCha20Poly1305 com chave HKDF(X25519).
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,30 +15,15 @@ use crate::protocol::{
 };
 use crate::{DistorrentError, Result};
 
-/// Teto de UM frame (1 MiB): qualquer frame com dado do usuário precisa
-/// respeitá-lo ANTES de enviar — estourar derruba a sessão do RECEPTOR.
-pub const MAX_FRAME: u32 = 1 << 20; // 1 MiB
-/// TCP direto: falha rápido (8s); 4G usa só-relay com timeouts próprios.
+pub const MAX_FRAME: u32 = 1 << 20;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Leitura por perna SÓ-RELAY (4G lento, pior caso ~10s/voo): 30s de folga;
-/// NÃO reduzir (relay_lossy 20% + 0-3s precisa dos 30s; só o estabelecimento).
 pub const RELAY_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Retransmissão do Hello do dial (mesmo transcript) a cada ~1,5s até Ack:
-/// 1 Hello perdido não mata mais a tentativa; duplicatas são dedupadas.
 pub const RELAY_HELLO_RESEND_INTERVAL: Duration = Duration::from_millis(1500);
-/// Teto total do handshake relay (80s; cabe dentro dos 90s do engine).
 pub const RELAY_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_secs(80);
-/// Teto do buffer de frames de sessão que chegam ANTES do HelloOk (flush
-/// imediato do peer + reordenação). Acima disso, aborta (anti-DoS).
 const RELAY_EARLY_STASH_CAP: usize = 4 << 20;
 
-/// Janela de reordenação do receptor de sessão: o relay NÃO preserva ordem e
-/// o nonce é sequencial — sem janela, um reorder dessincronizava e MATAVA a
-/// sessão. Decifra com counters da janela e entrega em ordem.
 pub const SESSION_REORDER_WINDOW: u64 = 256;
-/// Espera do frame "cabeça" antes de pular o gap (frame perdido de verdade);
-/// sessão segue viva — outbox/ACK reenvia a DM. 4s cobre o atraso do relay.
 pub const SESSION_GAP_TIMEOUT: Duration = Duration::from_secs(4);
 
 async fn write_frame(w: &mut (dyn AsyncWrite + Unpin + Send), bytes: &[u8]) -> Result<()> {
@@ -105,14 +86,10 @@ async fn read_frame_with(
     Ok(buf)
 }
 
-/// Leitura de SESSÃO: 150s só como proteção contra hang — a liveness é
-/// governada pelo outer `timeout(ping_timeout)` (25s/120s), que dispara antes.
 async fn read_frame_session(r: &mut (dyn AsyncRead + Unpin + Send)) -> Result<Vec<u8>> {
     read_frame_with(r, Duration::from_secs(150)).await
 }
 
-/// Leitura com replay: devolve primeiro frames de sessão chegados ANTES do
-/// HelloOk (sem isso, descartá-los dessincronizava o nonce e matava a sessão).
 struct ReplayRead {
     buf: Vec<u8>,
     pos: usize,
@@ -153,8 +130,6 @@ impl AsyncRead for ReplayRead {
     }
 }
 
-/// Guarda UM frame de sessão chegado cedo (wire bytes len+body) no stash.
-/// Retorna Err se o cap anti-DoS estourar.
 fn stash_early(stashed: &mut Vec<u8>, body: &[u8]) -> Result<()> {
     if stashed.len() + 4 + body.len() > RELAY_EARLY_STASH_CAP {
         return Err(DistorrentError::Protocol(
@@ -170,9 +145,6 @@ fn is_relay_timeout(e: &DistorrentError) -> bool {
     e.to_string().contains("timeout")
 }
 
-/// Sessão estabelecida: halves de leitura/escrita + cifra.
-/// Funciona sobre TCP ou sobre o relay (stream virtual) — os halves são
-/// boxed para o mesmo código rodar nos dois transportes.
 pub struct Session {
     read: Box<dyn AsyncRead + Unpin + Send>,
     write: Box<dyn AsyncWrite + Unpin + Send>,
@@ -183,7 +155,6 @@ pub struct Session {
     recv_dir: u8,
 }
 
-/// Metade de escrita — movida para a writer task.
 pub struct SessionWriter {
     write: Box<dyn AsyncWrite + Unpin + Send>,
     cipher: ChaCha20Poly1305,
@@ -191,20 +162,16 @@ pub struct SessionWriter {
     dir: u8,
 }
 
-/// Metade de leitura — fica no reader loop (com timeout/heartbeat).
-/// Tolerante a reordenação/perda: buffers de frames fora de ordem + pulo de
-/// gap (ver `SESSION_REORDER_WINDOW`/`SESSION_GAP_TIMEOUT`).
 pub struct SessionReader {
     read: Box<dyn AsyncRead + Unpin + Send>,
     cipher: ChaCha20Poly1305,
     counter: u64,
     dir: u8,
-    /// Plaintexts decifrados fora de ordem, indexados pelo counter do nonce.
     pending: BTreeMap<u64, Vec<u8>>,
-    /// Início da espera pelo frame "cabeça" ausente (None = em ordem / sem gap).
     gap_since: Option<Instant>,
 }
 
+// Seção 1: Session
 impl Session {
     fn new(
         read: Box<dyn AsyncRead + Unpin + Send>,
@@ -267,11 +234,6 @@ impl SessionWriter {
         write_frame(&mut self.write, &ct).await
     }
 
-    /// Envia VÁRIOS frames numa única escrita TCP (batching): cada frame
-    /// mantém seu nonce sequencial e o wire format idêntico — só o número
-    /// de syscalls muda. O receptor não percebe diferença.
-    /// O CHAMADOR limita quantos frames por classe (bulky ≤ poucos por vez).
-    /// Retorna os tamanhos de wire por frame (para métricas), na mesma ordem.
     pub async fn send_batch<T: Serialize>(&mut self, frames: &[T]) -> Result<Vec<usize>> {
         let mut wire = Vec::with_capacity(frames.len().saturating_mul(1024));
         let mut sizes = Vec::with_capacity(frames.len());
@@ -305,14 +267,8 @@ impl SessionReader {
         Ok(v)
     }
 
-    /// `recv` + tamanho do plaintext (para métricas de bytes RX sem
-    /// re-serializar o frame).
     pub async fn recv_sized<T: DeserializeOwned>(&mut self) -> Result<(T, usize)> {
-        // Sessão usa timeout longo (150s): a liveness real é do outer
-        // ping_timeout (25s/120s). Ordenação: decifra com JANELA de counters e
-        // entrega em ordem; gap de perda é pulado após SESSION_GAP_TIMEOUT.
         loop {
-            // 1) cabeça já bufferizada? Entrega (fast-path em ordem também cai aqui).
             if let Some(pt) = self.pending.remove(&self.counter) {
                 self.counter += 1;
                 self.gap_since = None;
@@ -321,12 +277,10 @@ impl SessionReader {
                     .map_err(|e| DistorrentError::Protocol(format!("json inválido: {e}")))?;
                 return Ok((v, size));
             }
-            // 2) há frames à frente esperando a cabeça? Espera com teto de gap.
             let ct: Vec<u8> = if !self.pending.is_empty() {
                 let since = *self.gap_since.get_or_insert_with(Instant::now);
                 let elapsed = since.elapsed();
                 if elapsed >= SESSION_GAP_TIMEOUT {
-                    // frame cabeça perdido: pula para o próximo disponível
                     let next = *self.pending.keys().next().unwrap_or(&self.counter);
                     debug!(
                         "sessão: gap de nonce {}..{next} (perda) — pulando",
@@ -353,7 +307,6 @@ impl SessionReader {
             } else {
                 read_frame_session(&mut self.read).await?
             };
-            // 3) decifra em qualquer counter da janela (AEAD autentica o certo).
             let mut found: Option<(u64, Vec<u8>)> = None;
             for off in 0..SESSION_REORDER_WINDOW {
                 let c = self.counter + off;
@@ -372,23 +325,21 @@ impl SessionReader {
             match found {
                 Some((c, pt)) => {
                     if c == self.counter {
-                        // em ordem (caso comum): sem tocar no buffer
                         self.counter += 1;
                         self.gap_since = None;
                         let size = pt.len();
+                        // Seção 2: v
                         let v = serde_json::from_slice(&pt).map_err(|e| {
                             DistorrentError::Protocol(format!("json inválido: {e}"))
                         })?;
                         return Ok((v, size));
                     }
-                    // fora de ordem: guarda e volta ao passo 1 (entrega em ordem)
                     self.pending.insert(c, pt);
                     if self.gap_since.is_none() {
                         self.gap_since = Some(Instant::now());
                     }
                 }
                 None => {
-                    // Stray de handshake OU lixo: não consome nonce, não mata sessão.
                     if serde_json::from_slice::<HandshakeFrame>(&ct).is_ok() {
                         continue;
                     }
@@ -407,19 +358,13 @@ fn build_nonce(dir: u8, counter: u64) -> Nonce {
     Nonce::from(n)
 }
 
-/// Executa handshake sobre stream novo. `PROTO_V`: v2+ entende o túnel
-/// virtual; v4+ entende o visto azul (`SecureFrame::Read`). Variante
-/// desconhecida derruba sessão legada (gate no emissor).
 pub const PROTO_V: u32 = 4;
 
-/// Dial furador de NAT: conecta A PARTIR da porta do listener (reuseport) —
-/// furo coordenado via Punch; Err rápido se o NAT não colaborar (simétrico).
 pub async fn punch_dial(local_port: u16, remote: std::net::SocketAddr) -> Result<TcpStream> {
     let socket = match remote.ip() {
         std::net::IpAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
         std::net::IpAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
     };
-    // reuseport/reuseaddr: discar a partir da MESMA porta do listener.
     #[cfg(unix)]
     socket.set_reuseport(true)?;
     #[cfg(windows)]
@@ -437,8 +382,6 @@ pub async fn punch_dial(local_port: u16, remote: std::net::SocketAddr) -> Result
     Ok(stream)
 }
 
-/// Probe UDP best-effort do furo TCP (abre pinhole em NATs
-/// endpoint-independent); nunca falha o furo, timeout bounded ~0,6s.
 pub async fn udp_punch_probe(remote: std::net::SocketAddr) {
     use tokio::net::UdpSocket;
     let bind = match remote {
@@ -448,7 +391,6 @@ pub async fn udp_punch_probe(remote: std::net::SocketAddr) {
     let Ok(sock) = UdpSocket::bind(bind).await else {
         return;
     };
-    // magic só p/ identificar ruído de furo
     const PROBE: &[u8] = b"DisTorrent-PUNCH1";
     for i in 0..3u8 {
         let _ = sock.send_to(PROBE, remote).await;
@@ -456,7 +398,6 @@ pub async fn udp_punch_probe(remote: std::net::SocketAddr) {
             tokio::time::sleep(Duration::from_millis(120)).await;
         }
     }
-    // best-effort: não bloqueia.
     let mut buf = [0u8; 64];
     let _ = tokio::time::timeout(Duration::from_millis(200), sock.recv_from(&mut buf)).await;
     debug!(%remote, "hole punch: probe UDP enviado (best-effort)");
@@ -468,7 +409,6 @@ pub struct HandshakeResult {
     pub peer_pubkey_hex: String,
     pub peer_nickname: String,
     pub initiator: bool,
-    /// proto_v anunciado pelo peer (0 = legado: sem Punch).
     pub peer_proto_v: u32,
 }
 
@@ -502,9 +442,6 @@ pub async fn handshake_with_fp(
     .await
 }
 
-/// Handshake sobre QUALQUER stream bidirecional (TCP ou relay virtual).
-/// Nonces por direção de sessão: emissor usa dir própria + contador;
-/// receptor deriva o mesmo nonce com a dir OPOSTA + contador próprio.
 pub async fn handshake_stream<S>(
     stream: S,
     keypair: Arc<Keypair>,
@@ -559,6 +496,7 @@ where
                 }),
             )
             .await?;
+            // Seção 3: key
             let key = session_key(&eph, &ack.eph_pub, &nonce, &ack.nonce)?;
             Ok((ack, key))
         } else {
@@ -595,7 +533,6 @@ where
                     "assinatura do HelloOk inválida".into(),
                 ));
             }
-            // respondente deriva com nonces na ordem (iniciador, respondente)
             let key = session_key(&eph, &hello.eph_pub, &hello.nonce, &nonce)?;
             Ok((
                 HelloAck {
@@ -626,9 +563,6 @@ where
     })
 }
 
-/// Handshake SÓ-RELAY (4G adverso): mesmo protocolo do TCP, com leitura por
-/// perna de 30s, Hello retransmitido, Ack reenviado e HelloOk 3x (sobrevive
-/// a 20% de perda). Tópico/envelope inalterados (compat).
 pub async fn handshake_stream_relay<S>(
     stream: S,
     keypair: Arc<Keypair>,
@@ -663,8 +597,6 @@ where
             proto_v: PROTO_V,
         };
         send_json(&mut write, &HandshakeFrame::Hello(hello.clone())).await?;
-        // Stash de frames de sessão chegados cedo (flush imediato do peer +
-        // reordenação): replayados na sessão via ReplayRead (sem descarte).
         let mut stashed: Vec<u8> = Vec::new();
         let deadline = tokio::time::Instant::now() + RELAY_HANDSHAKE_TOTAL_TIMEOUT;
         loop {
@@ -680,8 +612,6 @@ where
                     "handshake relay timeout (dial)".into(),
                 ));
             }
-            // Lê o frame CRU: o que não for HandshakeFrame é ciphertext
-            // de sessão chegado cedo — vai ao stash (replay), não ao descarte.
             match read_frame_with(&mut read, wait).await {
                 Ok(body) => match serde_json::from_slice::<HandshakeFrame>(&body) {
                     Ok(HandshakeFrame::HelloAck(ack)) => {
@@ -700,8 +630,6 @@ where
                             ));
                         }
                         let sig = keypair.sign(&transcript);
-                        // HelloOk 3x: sobrevive a perda; extras pós-online são
-                        // descartadas pelo manager.
                         for _ in 0..3 {
                             send_json(
                                 &mut write,
@@ -726,18 +654,14 @@ where
                         });
                     }
                     Ok(HandshakeFrame::Hello(peer_hello)) => {
-                        // Dial cruzado: eleição determinística pelo fingerprint
-                        // (sem retry/jitter, que recolide em livelock). Menor fp
-                        // segue como iniciador; maior vira respondente do Hello
-                        // recebido (mesma stream). Converge em 1 rodada.
                         if peer_hello.fp == my_fp {
-                            continue; // auto-Hello (loopback): ignora
+                            continue;
                         }
                         if let Err(e) = verify_hello(&peer_hello.fp, &peer_hello.pubkey_hex) {
                             return Err(e);
                         }
                         if my_fp.as_str() > peer_hello.fp.as_str() {
-                            // Viro respondente: respondo o Hello dele e espero HelloOk.
+                            // Seção 4: transcript
                             let transcript = handshake_transcript(
                                 &peer_hello.fp,
                                 &peer_hello.eph_pub,
@@ -756,7 +680,6 @@ where
                                 proto_v: PROTO_V,
                             };
                             send_json(&mut write, &HandshakeFrame::HelloAck(ack.clone())).await?;
-                            // Espera o HelloOk com o tempo RESTANTE do dial.
                             loop {
                                 let now2 = tokio::time::Instant::now();
                                 if now2 >= deadline {
@@ -822,9 +745,6 @@ where
                                             }
                                             Ok(_) => continue,
                                             Err(_) => {
-                                                // Frame de SESSÃO (flush imediato do peer +
-                                                // reordenação) antes do HelloOk: guarda p/
-                                                // replay (ReplayRead) em vez de descartar.
                                                 stash_early(&mut stashed, &cbody)?;
                                                 continue;
                                             }
@@ -838,32 +758,24 @@ where
                                         .await;
                                         continue;
                                     }
-                                    // Erro de leitura não-timeout: ignora e espera
-                                    // (deadline limita).
                                     Err(_) => continue,
                                 }
                             }
                         } else {
-                            // Menor fp: ignora, reaquece meu Hello, sigo esperando Ack.
                             send_json(&mut write, &HandshakeFrame::Hello(hello.clone())).await?;
                             continue;
                         }
                     }
                     Ok(_) => {
-                        // HelloOk inesperado no dial: ignora e reaquece com Hello.
                         let _ = send_json(&mut write, &HandshakeFrame::Hello(hello.clone())).await;
                         continue;
                     }
                     Err(_) => {
-                        // Ciphertext de sessão chegado antes do Ack (sessão velha
-                        // do peer ainda viva): guarda p/ replay após o handshake
-                        // em vez de abortar o dial.
                         stash_early(&mut stashed, &body)?;
                         continue;
                     }
                 },
                 Err(e) if is_relay_timeout(&e) => {
-                    // Sem Ack: reenvia o MESMO Hello (mesmo transcript) e espera.
                     send_json(&mut write, &HandshakeFrame::Hello(hello.clone())).await?;
                     continue;
                 }
@@ -871,8 +783,6 @@ where
             }
         }
     } else {
-        // Respondente: espera o Hello (até 30s); frames de sessão precoces vão
-        // ao stash p/ replay, não ao descarte.
         let mut stashed: Vec<u8> = Vec::new();
         let hello: Hello = loop {
             let body = read_frame_with(&mut read, RELAY_HANDSHAKE_READ_TIMEOUT).await?;
@@ -903,6 +813,7 @@ where
         send_json(&mut write, &HandshakeFrame::HelloAck(ack.clone())).await?;
         let deadline = tokio::time::Instant::now() + RELAY_HANDSHAKE_TOTAL_TIMEOUT;
         loop {
+            // Seção 5: now
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 return Err(DistorrentError::Protocol(
@@ -940,31 +851,22 @@ where
                         });
                     }
                     Ok(HandshakeFrame::Hello(dup)) if dup.fp == hello.fp => {
-                        // Mesmo Hello: nosso Ack se perdeu — reenvia o MESMO Ack.
                         if dup.eph_pub == hello.eph_pub && dup.nonce == hello.nonce {
                             let _ =
                                 send_json(&mut write, &HandshakeFrame::HelloAck(ack.clone())).await;
                             continue;
                         }
-                        // Hello NOVO (outro dial, eph/nonce diferentes): falha
-                        // rápido para o manager eleger respondente novo — sem
-                        // isso o dial novo receberia o Ack velho e travaria 80s.
                         return Err(DistorrentError::Protocol(
                             "novo Hello durante handshake — reeleição".into(),
                         ));
                     }
-                    Ok(_) => continue, // Ack/Ok cruzado: ignora
+                    Ok(_) => continue,
                     Err(_) => {
-                        // Frame de SESSÃO (flush imediato do iniciador, que já
-                        // fechou o dial ao receber nosso Ack) antes do HelloOk:
-                        // guarda p/ replay (ReplayRead) em vez de descartar — o
-                        // descarte dessincronizava o nonce e matava a sessão.
                         stash_early(&mut stashed, &body)?;
                         continue;
                     }
                 },
                 Err(e) if is_relay_timeout(&e) => {
-                    // Sem HelloOk: reenvia o Ack como nudge e espera mais.
                     if tokio::time::Instant::now() >= deadline {
                         return Err(DistorrentError::Protocol(
                             "handshake relay timeout (responder)".into(),
@@ -973,8 +875,6 @@ where
                     let _ = send_json(&mut write, &HandshakeFrame::HelloAck(ack.clone())).await;
                     continue;
                 }
-                // Erro de leitura não-timeout: ignora e espera (deadline de
-                // 80s limita).
                 Err(_) => {
                     continue;
                 }
@@ -999,7 +899,6 @@ mod tests {
     use chacha20poly1305::aead::Aead;
     use tokio::io::AsyncWriteExt;
 
-    /// Cifra um frame JSON com o nonce (dir, counter) e devolve wire bytes len+body.
     fn wire(
         cipher: &ChaCha20Poly1305,
         dir: u8,
@@ -1022,16 +921,13 @@ mod tests {
         out
     }
 
-    /// O relay reordena; o receptor tem de entregar em ordem (nonce sequencial).
     #[tokio::test]
     async fn session_reader_reordena_e_entrega_em_ordem() {
         let (mut sender, receiver) = tokio::io::duplex(1 << 20);
         let key = [0x11u8; 32];
         let cipher = ChaCha20Poly1305::new((&key).into());
-        // initiator=false → recv_dir = 0; o "peer" cifra com dir 0.
         let (mut reader, _w) =
             Session::new(Box::new(receiver), Box::new(tokio::io::sink()), key, false).split();
-        // envia FORA DE ORDEM: 2,0,1,3 → receptor devolve 0,1,2,3
         for c in [2u64, 0, 1, 3] {
             let frame = serde_json::json!({ "n": c });
             sender
@@ -1045,7 +941,6 @@ mod tests {
         }
     }
 
-    /// Stray de handshake (JSON em claro) não consome nonce nem mata a sessão.
     #[tokio::test]
     async fn session_reader_ignora_stray_em_claro() {
         let (mut sender, receiver) = tokio::io::duplex(1 << 20);
@@ -1053,13 +948,11 @@ mod tests {
         let cipher = ChaCha20Poly1305::new((&key).into());
         let (mut reader, _w) =
             Session::new(Box::new(receiver), Box::new(tokio::io::sink()), key, false).split();
-        // stray: bytes length-prefixed que NÃO são ciphertext válido
         let stray =
             serde_json::to_vec(&serde_json::json!({ "type": "Hello", "proto_v": 1 })).unwrap();
         let mut framed = (stray.len() as u32).to_be_bytes().to_vec();
         framed.extend_from_slice(&stray);
         sender.write_all(&framed).await.unwrap();
-        // frame real logo depois (counter 0) — deve ser entregue
         let frame = serde_json::json!({ "n": 0 });
         sender
             .write_all(&wire(&cipher, 0, 0, &frame))

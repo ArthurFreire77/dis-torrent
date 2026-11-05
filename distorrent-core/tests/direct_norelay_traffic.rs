@@ -1,12 +1,3 @@
-//! PROVA DIRETA SEM RELAY — quando há TCP direta, NENHUM byte de DM passa pelo servidor.
-//!
-//! Dois nós com `MemRelay` compartilhado conectam DIRETO via `add_manual_peer`
-//! (127.0.0.1, como `e2e_two_users.rs`), viram amigos e trocam 5 DMs com ACK.
-//! Assert: `via_relay==false` E delta de `RelayStats` zerado durante a janela
-//! das 5 DMs (`posts==0` e `poll_hits==0`). O manager polla o tópico de relay
-//! a cada ~1s, mas poll vazio NÃO conta como hit; anúncio `distorrent_a_*`
-//! (descoberta) também NÃO conta — só o plano de dados `distorrent_r_*`.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,18 +74,15 @@ async fn direct_no_relay_traffic() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // DIRETA via 127.0.0.1 (como e2e_two_users.rs) — sem depender de anúncio.
     let addr_a: std::net::SocketAddr = format!("127.0.0.1:{}", a.listen_port()).parse().unwrap();
     let addr_b: std::net::SocketAddr = format!("127.0.0.1:{}", b.listen_port()).parse().unwrap();
     a.add_manual_peer(addr_b, Some(fp_b.clone()));
     b.add_manual_peer(addr_a, Some(fp_a.clone()));
 
-    // Espera a direta dos dois lados (via_relay==false).
     wait_direct(&a, &b, &fp_a, &fp_b, 20).await;
     assert!(!a.is_peer_via_relay(&fp_b), "A→B deve ser direta");
     assert!(!b.is_peer_via_relay(&fp_a), "B→A deve ser direta");
 
-    // Amizade pela DIRETA (já online: o maintain de relay vê online e não disca).
     a.friend_request(&fp_b).unwrap();
     let req = wait_event(
         &mut ev_b,
@@ -124,7 +112,6 @@ async fn direct_no_relay_traffic() {
         "sessão segue direta após amizade"
     );
 
-    // Janela de medida: delta durante as 5 DMs (manager idle polla vazio, sem hits).
     let (p0, h0) = a.relay_stats();
     let (p0b, h0b) = b.relay_stats();
     println!("[direct_norelay] baseline relay_stats A=({p0},{h0}) B=({p0b},{h0b})");
@@ -181,3 +168,4 @@ async fn direct_no_relay_traffic() {
     assert_eq!(dpb, 0, "nenhum post no relay (B) durante DMs diretas");
     assert_eq!(dhb, 0, "nenhum poll-hit no relay (B) durante DMs diretas");
 }
+// Seção 1: fim

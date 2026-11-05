@@ -1,24 +1,11 @@
-//! Testes de penetração básicos da camada de segurança Storm:
-//! MITM, replay, spoof de nome/autoria, flood, links, regras por servidor.
-//!
-//! Estratégia: MITM/replay/spoof exercem o handshake+envelope reais;
-//! flood/dup/links/regras exercem o gate (spam_gate/server_rules_gate) via
-//! dois engines reais em localhost quando há rede, e via Store+helpers
-//! quando o foco é a decisão pura.
-
 use distorrent_core::{antispam, identity::Keypair, moderation, names, protocol::MessageEnvelope};
 use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// MITM: atacante no meio não consegue forjar mensagem do autor
-// ---------------------------------------------------------------------------
 
 #[test]
 fn mitm_nao_forja_mensagem() {
     let alice = Keypair::generate();
     let mallory = Keypair::generate();
     let env = MessageEnvelope::new(&alice, "convX", "segredo");
-    // Mallory tenta re-assinar com a própria chave mas mantendo author_fp de Alice
     let mut forged = env.clone();
     forged.sig = mallory.sign(&distorrent_core::protocol::message_sign_bytes(
         &env.id,
@@ -27,20 +14,16 @@ fn mitm_nao_forja_mensagem() {
         &env.body,
         env.ts,
     ));
-    // verificação com a pubkey REAL de Alice falha (sig é de Mallory)
     assert!(!forged.verify_with_pubkey(&alice.public_hex()));
-    // e o vínculo fp↔pubkey impede Mallory de se passar por Alice
     assert!(!distorrent_core::identity::fingerprint_matches(
         &env.author_fp,
         &mallory.public_hex()
     ));
-    // original passa
     assert!(env.verify_with_pubkey(&alice.public_hex()));
 }
 
 #[test]
 fn handshake_transcript_amarrado_a_nonces_e_chaves() {
-    // nonces/chaves diferentes → transcript diferente → assinatura não reutilizável
     let t1 = distorrent_core::protocol::handshake_transcript(
         "aa", &[1u8; 32], &[1u8; 16], "bb", &[2u8; 32], &[2u8; 16],
     );
@@ -54,59 +37,35 @@ fn handshake_transcript_amarrado_a_nonces_e_chaves() {
     assert!(!Keypair::verify(&a.public_hex(), &t2, &sig).unwrap());
 }
 
-// ---------------------------------------------------------------------------
-// Replay: envelope reenviado é detectado como duplicado pelo gate
-// ---------------------------------------------------------------------------
-
 #[test]
 fn replay_e_duplicada_barrados() {
     let mut dup = antispam::DuplicateDetector::with_window_secs(60);
     assert!(!dup.check("fpA", "oi", 1000));
-    // replay exato do mesmo corpo/autor dentro da janela
     assert!(dup.check("fpA", "oi", 2000));
-    // autor diferente com mesmo texto NÃO é dup (grupos legítimos repetem)
     assert!(!dup.check("fpB", "oi", 3000));
 }
-
-// ---------------------------------------------------------------------------
-// Spoof de nome: homoglifos, cargos, parecidos
-// ---------------------------------------------------------------------------
 
 #[test]
 fn spoof_de_nome_barrado() {
     let p = names::NamePolicy::for_kind(names::NameKind::User);
-    // cirílico 'а' no lugar do 'a'
     assert!(!names::validate_name(names::NameKind::User, "аdmin", &[], &p).ok);
-    // imita cargo
     assert!(!names::validate_name(names::NameKind::User, "Moderador Storm", &[], &p).ok);
-    // zero-width ghost
     assert!(!names::validate_name(names::NameKind::User, "ana\u{200B}", &["ana".into()], &p).ok);
-    // parecido a 1 edição de existente
     let r = names::validate_name(names::NameKind::User, "marc0s", &["marcos".into()], &p);
     assert!(!r.ok);
-    // legítimo passa e normaliza NFC
     let ok = names::validate_name(names::NameKind::User, "  Ana Souza  ", &[], &p);
     assert!(ok.ok);
     assert_eq!(ok.normalized, "Ana Souza");
 }
 
-// ---------------------------------------------------------------------------
-// Flood: 11ª mensagem em 10s cai; janela nova libera
-// ---------------------------------------------------------------------------
-
 #[test]
 fn flood_gate_via_engine_state() {
-    // exercita a mesma política do spam_gate (10/10s) de forma determinística
     let mut r = antispam::RateLimiter::with_params(10, 10);
     for _ in 0..10 {
         assert!(r.check("peer").is_none());
     }
     assert!(r.check("peer").is_some());
 }
-
-// ---------------------------------------------------------------------------
-// Links: malicioso cai, encurtador avisa (medium) / cai (high)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn links_gate() {
@@ -136,10 +95,6 @@ fn links_gate() {
     ));
 }
 
-// ---------------------------------------------------------------------------
-// Regras por servidor: palavra própria, domínio, shadow-ban, permissão, audit
-// ---------------------------------------------------------------------------
-
 #[test]
 fn regras_do_servidor_e_auditoria() {
     let mut rules = moderation::ServerRules::fresh("srv1");
@@ -148,24 +103,18 @@ fn regras_do_servidor_e_auditoria() {
     rules.blocked_domains = vec!["evil.gg".into()];
     assert!(moderation::check_text_against_rules("isso vazou ontem", &rules).is_some());
     assert!(moderation::check_text_against_rules("https://evil.gg/a", &rules).is_some());
-    assert!(moderation::check_text_against_rules("https://bit.ly/a", &rules).is_some()); // high bloqueia shortener
+    assert!(moderation::check_text_against_rules("https://bit.ly/a", &rules).is_some());
     assert!(moderation::check_text_against_rules("bom dia", &rules).is_none());
 
-    // permissão: dono sim, membro não, cargo com bit sim
     assert!(moderation::can_ban(true, false, 0));
     assert!(!moderation::can_ban(false, false, 0));
     assert!(moderation::can_ban(false, false, moderation::PERM_BAN));
 
-    // auditoria: motivo sem HTML, id único
     let a = moderation::AuditEntry::new("srv1", "mod", "ban", "alvo", "<img src=x> flood");
     let b = moderation::AuditEntry::new("srv1", "mod", "ban", "alvo", "flood");
     assert!(!a.reason.contains('<'));
     assert_ne!(a.id, b.id);
 }
-
-// ---------------------------------------------------------------------------
-// Persistência v5: rules + audit + reputação + reports sobrevivem ao reopen
-// ---------------------------------------------------------------------------
 
 #[test]
 fn store_v5_roundtrip() {
@@ -202,10 +151,6 @@ fn store_v5_roundtrip() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fim-a-fim real: dois engines, mensagem válida passa, flood cai sem matar sessão
-// ---------------------------------------------------------------------------
-
 use distorrent_core::net::engine::{EngineEvent, NetworkEngine};
 use distorrent_core::storage::Store;
 use tempfile::TempDir;
@@ -225,6 +170,7 @@ fn spawn(nick: &str) -> (Arc<NetworkEngine>, Arc<Store>, TempDir) {
     (engine, store, dir)
 }
 
+// Seção 1: wait_event
 async fn wait_event(
     rx: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
     matches: impl Fn(&EngineEvent) -> bool,
@@ -268,7 +214,6 @@ async fn e2e_mensagem_valida_entrega_e_flood_nao_mata_sessao() {
     )
     .await;
 
-    // amizade pelo fluxo real (regra v4.3: DM só entre amigos)
     a.friend_request(&fpb).unwrap();
     wait_event(
         &mut ev_b,
@@ -284,7 +229,6 @@ async fn e2e_mensagem_valida_entrega_e_flood_nao_mata_sessao() {
     )
     .await;
 
-    // DM legítima entrega (cifrada + assinada)
     let conv = a.open_dm(&fpb, "bob").unwrap();
     let stored = a.send_dm(&conv.id, "olá, mensagem legítima").unwrap();
     assert_eq!(stored.status, "sent");
@@ -296,19 +240,16 @@ async fn e2e_mensagem_valida_entrega_e_flood_nao_mata_sessao() {
     .await;
     assert!(matches!(got, EngineEvent::MessageNew(_)));
 
-    // flood: 15 msgs distintas — o gate do receptor derruba o excedente (10/10s)
     for i in 0..15 {
         let _ = a
             .send_dm(&conv.id, &format!("flood-msg-{i}-conteudo-unico-{i}"))
             .ok();
     }
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    // reputação do flooder caiu no receptor (flood -5 por msg excedente)
     let (_trust, score, _) = sb.get_reputation(&fpa).unwrap();
     assert!(score < 0, "flood deve derrubar reputação, score={score}");
 
-    // sessão SOBREVIVEU ao flood: DM normal após a janela entrega de novo
-    tokio::time::sleep(std::time::Duration::from_millis(9500)).await; // janela 10s limpa
+    tokio::time::sleep(std::time::Duration::from_millis(9500)).await;
     let conv_b = b.open_dm(&fpa, "alice").unwrap();
     let _ = b.send_dm(&conv_b.id, "sessão viva após flood").unwrap();
     let got2 = wait_event(
@@ -319,9 +260,6 @@ async fn e2e_mensagem_valida_entrega_e_flood_nao_mata_sessao() {
     .await;
     assert!(matches!(got2, EngineEvent::MessageNew(_)));
 
-    // link malicioso vindo de peer autenticado é descartado (sem matar sessão).
-    // checagem negativa por ausência no store (esperar evento que nunca vem
-    // entraria em pânico por timeout — ausência é o resultado correto).
     let _ = a.send_dm(&conv.id, "clica https://grabify.link/xyz").ok();
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let inbox_b = b.messages(&conv_b.id);
@@ -329,7 +267,6 @@ async fn e2e_mensagem_valida_entrega_e_flood_nao_mata_sessao() {
         inbox_b.iter().all(|m| !m.body.contains("grabify")),
         "link malicioso não pode chegar ao receptor"
     );
-    // e a sessão segue viva depois de tudo: A recebe de volta
     let _ = b.send_dm(&conv_b.id, "ping final").unwrap();
     let got3 = wait_event(
         &mut ev_a,

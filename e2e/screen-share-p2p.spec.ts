@@ -1,19 +1,3 @@
-// Screen share P2P — teste REAL de ponta a ponta no Chromium.
-//
-// Não é teste de mock: este arquivo executa o caminho de produção do projeto.
-//   1. importa o módulo REAL (src/services/screenShare.ts) servido pelo Vite;
-//   2. captura a tela de verdade com `getDisplayMedia` (superfície de aba no
-//      CI, monitor quando a máquina tem display);
-//   3. monta DOIS RTCPeerConnection reais e liga o stream entre eles
-//      (loopback P2P: candidatos host, sem servidor, sem SFU);
-//   4. mede FPS capturado/enviado/recebido, bitrate, resolução, frames
-//      decodificados e latência a partir de getStats de verdade.
-//
-// Sem servidor de mídia em lugar nenhum: o stream sai do getDisplayMedia e
-// chega no RTCPeerConnection do outro lado pelo mesmo canal WebRTC que o app
-// usa em produção. As asserções exigem números > 0 — um caminho que não
-// transmite falha o teste em vez de "passar" com placebo.
-
 import { test, expect, chromium, type Page } from '@playwright/test'
 
 declare global {
@@ -61,13 +45,10 @@ async function bootWithScreenCapture(page: Page): Promise<void> {
 }
 
 test.describe('screen share P2P (captura real + WebRTC real)', () => {
-  // 3x o timeout: são ~8s de captura contínua + boot da página real.
   test.slow()
 
   test('captura a tela e transmite para um segundo peer sem perder frames', async () => {
     const browser = await chromium.launch({
-      // Permite usar Edge instalado quando o Chromium gerenciado não inicia
-      // por dependência do runtime Windows; sem variável, usa o Chromium padrão.
       channel: process.env.PLAYWRIGHT_BROWSER_CHANNEL || undefined,
       headless: false,
       args: [
@@ -83,7 +64,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
     page.on('pageerror', (e) => errors.push(String((e as Error)?.message ?? e)))
     await bootWithScreenCapture(page)
 
-    // O runner injeta a sonda: ela usa o módulo REAL do projeto.
     await page.addScriptTag({
       type: 'module',
       content: `
@@ -120,7 +100,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           try {
             stream = await md.getDisplayMedia(buildDisplayMediaConstraints(opts, env))
           } catch (e) {
-            // Superfície de monitor indisponível (CI/headless): tenta a aba.
             try {
               stream = await md.getDisplayMedia({
                 video: { displaySurface: 'browser' },
@@ -140,7 +119,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           setScreenContentHint(track, opts.source)
           await applyScreenConstraints(track, opts)
 
-          // ── P2P: dois RTCPeerConnection reais, sinalização local ──────────
           const sender = new RTCPeerConnection({ iceServers: [] })
           const receiver = new RTCPeerConnection({ iceServers: [] })
           const remoteStream = new MediaStream()
@@ -158,10 +136,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           document.body.appendChild(remoteVideo)
           remoteVideo.play().catch(() => {})
 
-          // A captura de tela é estática por natureza: sem movimento, o
-          // encoder não produz frames e "sentFps > 0" é sorte. Um quadrado
-          // animado (visível na tela capturada) garante fluxo contínuo de
-          // frames DURANTE a medição.
           const stim = document.createElement('div')
           stim.style.cssText = 'position:fixed;left:24px;bottom:24px;width:64px;height:64px;background:#f0f;border-radius:12px;z-index:2147483647;'
           document.body.appendChild(stim)
@@ -177,13 +151,9 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           await receiver.setLocalDescription(answer)
           await sender.setRemoteDescription(answer)
 
-          // Trickle ICE: sem trocar candidatos os dois PCs nunca conectam
-          // (ontrack dispara com o SDP, mas mídia nenhuma flui).
           sender.onicecandidate = (ev) => { if (ev.candidate) receiver.addIceCandidate(ev.candidate).catch(() => {}) }
           receiver.onicecandidate = (ev) => { if (ev.candidate) sender.addIceCandidate(ev.candidate).catch(() => {}) }
 
-          // Espera a conexão de verdade antes de medir: sem isso o loop de
-          // 8s conta tempo de handshake como "zero frames".
           const waitConnected = (pc) => new Promise((resolve) => {
             if (pc.connectionState === 'connected') return resolve(null)
             const check = () => { if (pc.connectionState === 'connected' || pc.connectionState === 'failed') { pc.removeEventListener('connectionstatechange', check); resolve(null) } }
@@ -193,18 +163,14 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
           await waitConnected(sender)
           await waitConnected(receiver)
 
-          // Tuning REAL do encoder (bitrate/escala/degradação).
           probe.sendParamsApplied = await applySenderTuning(senderVideo, opts)
 
-          // O segundo peer precisa reaproveitar o MESMO m-line ao trocar a fonte
-          // (é o que o callManager faz com replaceTrack): nada de renegociar.
           sender.onnegotiationneeded = () => { unexpectedRenegotiation = true }
           await senderVideo.replaceTrack(track)
           await new Promise(r => setTimeout(r, 100))
           probe.renegotiationStable = !unexpectedRenegotiation
           probe.peersReusedSender = true
 
-          // ── medição real por 8s ────────────────────────────────────────
           const monitor = new ScreenCaptureMonitor()
           monitor.attach(track)
           const collector = new ScreenStatsCollector()
@@ -217,10 +183,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
             const ss = await sender.getStats()
             const merged = new Map()
             for (const [k, v] of rs) merged.set(k, v)
-            // O '-s' evita colisão de ID: sender e receiver compartilham o
-            // espaço de IDs de stats. O valor TEM que ir junto — sem ele a
-            // stats do sender inteira virava undefined e nada de outbound
-            // (codec/framesEncoded/bitrate) era medido.
             for (const [k, v] of ss) merged.set(k.toString() + '-s', v)
             const capture = monitor.sample()
             const m = collector.read(merged, capture, null)
@@ -228,12 +190,8 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
             lastTime = remoteVideo.currentTime
             probe.remoteVideoSize = { w: remoteVideo.videoWidth, h: remoteVideo.videoHeight }
           }
-          // O vídeo remoto precisa ter avançado de verdade (frames decodificados).
           probe.remoteVideoTimeAdvanced = remoteVideo.currentTime > 0 && remoteVideo.currentTime !== lastTime - 1
 
-          // Amostra de pixels AO VIVO (depois de close()/stop() o elemento
-          // perde o frame e drawImage daria falso-negativo):
-          // 64x64 do frame decodificado não pode ser tudo preto.
           probe.notBlack = (() => {
             try {
               if (!remoteVideo.videoWidth) return false
@@ -289,6 +247,7 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
 
     await page.waitForFunction(() => window.__distorrentScreenProbe !== undefined, { timeout: 20000 })
     await page.waitForFunction(() => {
+      // Seção 1: p
       const p = window.__distorrentScreenProbe
       return !!p && (p.ok === true || !!p.why)
     }, { timeout: 45000 })
@@ -296,23 +255,18 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
     const probe = await page.evaluate(() => window.__distorrentScreenProbe)
     console.log('SCREEN PROBE', JSON.stringify(probe, null, 1))
 
-    // Se a máquina não tem display nenhum (sandbox), isso é um pulo honesto:
-    // nada foi medido, e o teste diz isso em vez de fingir que passou.
     test.skip(!probe?.ok, `captura de tela indisponível neste ambiente: ${probe?.why ?? 'desconhecido'}`)
 
-    // 1) a captura aconteceu de verdade
     expect(probe!.captureLabel, 'a track de tela precisa ter rótulo do sistema').toBeTruthy()
     expect(probe!.captureWidth!).toBeGreaterThan(0)
     expect(probe!.captureHeight!).toBeGreaterThan(0)
 
-    // 2) o encoder do remetente rodou de verdade
     expect(probe!.sendParamsApplied, 'applySenderTuning precisa ser aceito pelo engine').toBe(true)
     expect(probe!.framesEncoded!).toBeGreaterThan(0)
     expect(probe!.sendBitrateKbps!).toBeGreaterThan(0)
     expect(probe!.sentFps!).toBeGreaterThan(0)
     expect(probe!.codec, 'codec de vídeo deve ser reportado pelo getStats').toBeTruthy()
 
-    // 3) o receptor recebeu e decodificou frames de verdade
     expect(probe!.remoteTrackLive).toBe(true)
     expect(probe!.remoteVideoSize!.w).toBeGreaterThan(0)
     expect(probe!.remoteVideoTimeAdvanced, 'o vídeo remoto precisa avançar (não pode ficar congelado)').toBe(true)
@@ -320,20 +274,14 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
     expect(probe!.receivedFps!).toBeGreaterThan(0)
     expect(probe!.receiveBitrateKbps!).toBeGreaterThan(0)
 
-    // 4) latência medida de verdade (loopback = alguns ms; nunca null)
     expect(probe!.rttMs!).not.toBeNull()
     expect(probe!.rttMs!).toBeGreaterThanOrEqual(0)
 
-    // 5) nada de tela preta: o frame decodificado tem pixels (amostrado ao
-    //    vivo pela sonda, antes de fechar os peers)
     expect(probe!.notBlack, 'o frame recebido não pode ser uma tela preta').toBe(true)
 
-    // 6) a degradação adaptativa desce um degrau (e o piso é 480p)
     expect(probe!.degradedAfterPressure).toBe(true)
-    // Trocar a fonte no sender existente não pode exigir uma negociação extra.
     expect(probe!.renegotiationStable).toBe(true)
 
-    // 7) nenhum erro de página durante a captura/transmissão
     const joined = errors.join('\n')
     expect(joined).not.toContain('ReferenceError')
     expect(joined).not.toContain('TypeError')

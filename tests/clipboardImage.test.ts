@@ -1,8 +1,3 @@
-// Colar imagem no compositor (Ctrl+V).
-//
-// A regressão: o `<textarea>` só entende texto, então um print na área de
-// transferência não gerava NADA — nem mensagem, nem erro. `paste` precisa ler
-// `clipboardData` e transformar o binário em arquivo do swarm.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -31,7 +26,6 @@ test('imagem colada: aceita os MIME de imagem usuais e recusa o resto', () => {
 test('imagem colada: nome vem do SO quando existe, senão é gerado com data', () => {
   assert.equal(pastedImageName('image/png', WHEN), 'imagem-20261102-140509.png')
   assert.equal(pastedImageName('image/jpeg', WHEN), 'imagem-20261102-140509.jpg')
-  // Dois pastes no mesmo segundo não colidem por extensão diferente.
   assert.equal(pastedImageName('image/webp', WHEN), 'imagem-20261102-140509.webp')
 
   const comNome = pastedImages(data({
@@ -58,7 +52,6 @@ test('imagem colada: texto puro não vira arquivo', () => {
 })
 
 test('imagem colada: cai em `items` quando o WebView não popula `files`', () => {
-  // WebView2 às vezes só preenche `items`; sem este caminho o paste ficava vazio.
   const r = pastedImages(data({
     items: [
       { kind: 'string', type: 'text/plain' },

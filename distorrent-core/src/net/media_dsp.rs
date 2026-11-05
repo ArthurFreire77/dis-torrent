@@ -1,29 +1,16 @@
-//! AEC/supressão de ruído (speexdsp via `aec-rs`) para a voz nativa.
-//! Cuidado: `filter_length` é em AMOSTRAS (não existe `tail_length_ms`), e
-//! sem a referência correta do speaker o filtro apaga a voz real.
-
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-/// 48 kHz: mesma taxa do resto do pipeline de voz (Opus Voip).
 pub const SAMPLE_RATE: u32 = 48_000;
-/// 20 ms por quadro.
-pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * 20; // 960
+pub const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize / 1000) * 20;
 
-/// Comprimento do filtro adaptativo: 200 ms cobre a cauda acústica sem inflar CPU.
 pub const FILTER_LENGTH_MS: u32 = 200;
-/// `filter_length` em amostras — a API real pede amostras.
-pub const FILTER_LENGTH: i32 = ((SAMPLE_RATE / 1000) * FILTER_LENGTH_MS) as i32; // 9600
+pub const FILTER_LENGTH: i32 = ((SAMPLE_RATE / 1000) * FILTER_LENGTH_MS) as i32;
 
-/// Anel de ~1,3 s: absorve jitter entre relógios sem virar latência.
 const REF_CAPACITY: usize = SAMPLE_RATE as usize * 13 / 10;
 
-/// Quadros sem referência antes de descartar o filtro (evita apagar voz real
-/// por sobre-subtração quando o speaker volta).
 const STALE_LIMIT: u32 = 10;
 
-/// Anel de referência do speaker: recebe exatamente os samples do playout,
-/// descarta-o-mais-antigo para nunca crescer nem atrasar.
 #[derive(Debug)]
 pub struct RefRing {
     buf: Mutex<VecDeque<i16>>,
@@ -44,7 +31,6 @@ impl RefRing {
         }
     }
 
-    /// Empurra áudio tocando; lock curtíssimo na thread realtime de playout.
     pub fn push(&self, s: &[i16]) {
         let mut q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         q.extend(s.iter().copied());
@@ -53,7 +39,6 @@ impl RefRing {
         }
     }
 
-    /// Retira até `n` amostras; `false` = sem referência, chamador NÃO roda AEC.
     pub fn take(&self, n: usize, out: &mut [i16]) -> bool {
         let mut q = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         if q.len() < n {
@@ -75,16 +60,13 @@ impl RefRing {
     }
 }
 
-/// NS desligado por padrão: o risco de apagar a voz local supera o ganho.
 pub const DEFAULT_NS: bool = false;
 
-/// Estado do AEC de uma sessão; `Send` seguro pois vive em UM task só.
 struct Inner {
     aec: aec_rs::Aec,
 }
 unsafe impl Send for Inner {}
 
-/// Cancelador de eco + supressao de ruido, por sessao.
 pub struct EchoCanceller {
     inner: Option<Inner>,
     ns: bool,
@@ -92,18 +74,15 @@ pub struct EchoCanceller {
     playbuf: Vec<i16>,
     out: Vec<i16>,
     starved: u32,
-    /// ultimos numeros, so' para diagnostico.
     pub last_starved: bool,
     pub rebuilt: u32,
 }
 
 impl EchoCanceller {
-    /// `play_ref` = anel do playout; sem AEC (fone) o mic passa intacto.
     pub fn new(play_ref: std::sync::Arc<RefRing>, enabled: bool) -> Self {
         Self::new_opts(play_ref, enabled, DEFAULT_NS)
     }
 
-    /// NS do speexdsp apaga ~43 dB de fala estacionária (medido) — default é off.
     pub fn new_opts(play_ref: std::sync::Arc<RefRing>, enabled: bool, ns: bool) -> Self {
         Self {
             inner: enabled.then(|| Self::make(ns)),
@@ -132,21 +111,18 @@ impl EchoCanceller {
         }
     }
 
-    /// Processa um quadro do mic; sem AEC/referência devolve `mic` intacto.
     pub fn process<'a>(&'a mut self, mic: &'a [i16]) -> &'a [i16] {
         debug_assert_eq!(mic.len(), FRAME_SAMPLES);
         if self.inner.is_none() {
             return mic;
         }
 
-        // Sem referencia suficiente => nao roda o AEC (ver doc de `play_ref`).
         let have = self.play_ref.take(FRAME_SAMPLES, &mut self.playbuf);
         self.last_starved = !have;
 
         if !have {
             self.starved += 1;
             if self.starved >= STALE_LIMIT {
-                // Referência morta: descarta o filtro (estado divergido apagaria a voz).
                 self.inner = None;
                 self.starved = 0;
                 self.rebuilt = 1;
@@ -161,7 +137,6 @@ impl EchoCanceller {
         &self.out
     }
 
-    /// Rearma o AEC após referência morta, só quando ela voltar.
     pub fn maybe_rearm(&mut self, enable: bool) {
         if enable && self.inner.is_none() && self.play_ref.available() >= FRAME_SAMPLES {
             self.rebuilt += 1;
@@ -171,7 +146,6 @@ impl EchoCanceller {
     }
 }
 
-/// Energia em dBFS. dbfs(&[x]) = 0 para sinal full-scale, negativo para abaixo.
 pub fn dbfs(x: &[i16]) -> f64 {
     if x.is_empty() {
         return f64::NEG_INFINITY;
@@ -191,15 +165,11 @@ pub fn dbfs(x: &[i16]) -> f64 {
     }
 }
 
-// ---------------------------------------------------------------- testes
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// Voz sintética realista: sinal harmônico puro trava o filtro e mente
-    /// na medição (custou duas rodadas erradas).
     fn voz(n: usize, semente: u32, rms: f32) -> Vec<f32> {
         let mut x = semente | 1;
         let bruto: Vec<f32> = (0..n)
@@ -208,6 +178,7 @@ mod tests {
                 ((x >> 8) as f32 / 8_388_608.0) - 1.0
             })
             .collect();
+        // Seção 1: env
         let env: Vec<f32> = (0..n)
             .map(|i| {
                 let t = i as f64 / SAMPLE_RATE as f64;
@@ -265,9 +236,8 @@ mod tests {
         out.iter().map(|v| (v * g).clamp(-1.0, 1.0)).collect()
     }
 
-    /// Roda o pipeline AEC; devolve (dBFS antes, dBFS depois) pós-convergência.
     fn medir(usar_aec: bool, delay_ms: usize, eco_gain: f32, quadros: usize) -> (f64, f64) {
-        const PULAR: usize = 100; // 2 s para o filtro adaptativo convergir
+        const PULAR: usize = 100;
         let delay = (SAMPLE_RATE as usize / 1000) * delay_ms;
         let total = delay + 2 * FRAME_SAMPLES;
         let mut line = vec![0i16; total];
@@ -304,24 +274,21 @@ mod tests {
         (antes / n, depois / n)
     }
 
-    /// Compara energia antes/depois do AEC com eco atrasado injetado.
     #[test]
     fn aec_reduz_eco_antes_e_depois() {
-        const Q: usize = 200; // 4 s
+        const Q: usize = 200;
         let (antes, depois) = medir(true, 12, 0.35, Q);
         let reducao = antes - depois;
         println!(
             "\n  === AEC: ANTES {:.2} dBFS | DEPOIS {:.2} dBFS | reducao {:.2} dB ===\n",
             antes, depois, reducao
         );
-        // O eco tem de sumir: sem isto o AEC nao esta ligado a nada.
         assert!(
             reducao > 6.0,
             "AEC nao reduziu o eco: ANTES {antes:.2} dBFS, DEPOIS {depois:.2} dBFS"
         );
     }
 
-    /// Sem alto-falante não há eco: mic passa INTACTO (requisito de segurança).
     #[test]
     fn sem_referencia_o_microfone_passa_intacto() {
         let ring = Arc::new(RefRing::new());
@@ -329,7 +296,6 @@ mod tests {
         let mic: Vec<i16> = (0..FRAME_SAMPLES)
             .map(|i| ((i as f32 * 0.01).sin() * 12000.0) as i16)
             .collect();
-        // sem nenhum push no ring: referencia morta
         let out = ec.process(&mic).to_vec();
         assert_eq!(out, mic, "sem referencia o microfone nao pode ser alterado");
         assert!(
@@ -338,7 +304,6 @@ mod tests {
         );
     }
 
-    /// AEC desligado (fone de ouvido) = pass-through exato, sem custo de CPU.
     #[test]
     fn desligado_e_pass_through() {
         let ring = Arc::new(RefRing::new());
@@ -351,13 +316,11 @@ mod tests {
         assert_eq!(ec.process(&mic), &mic[..]);
     }
 
-    /// Ring: push/take, descarte-do-mais-antigo e ausencia de referencia.
     #[test]
     fn ring_de_referencia() {
         let r = RefRing::new();
         let mut buf = vec![0i16; FRAME_SAMPLES];
 
-        // ring vazio => take falha e devolve silencio (nada de lixo antigo)
         assert!(!r.take(FRAME_SAMPLES, &mut buf));
         assert!(buf.iter().all(|&v| v == 0));
 
@@ -366,20 +329,17 @@ mod tests {
         assert!(buf.iter().all(|&v| v == 7));
         assert_eq!(r.available(), 0);
 
-        // encher alem da capacidade nao cresce (latencia nao explode)
         for _ in 0..40 {
             r.push(&vec![1i16; FRAME_SAMPLES]);
         }
         assert!(r.available() <= REF_CAPACITY, "ring estourou a capacidade");
     }
 
-    /// Referência morta longa descarta o filtro (evita overdelete na volta).
     #[test]
     fn referencia_morta_descarta_o_filtro() {
         let ring = Arc::new(RefRing::new());
         let mut ec = EchoCanceller::new(ring.clone(), true);
         let mic = vec![100i16; FRAME_SAMPLES];
-        // so referencia no primeiro quadro, depois nada
         ring.push(&vec![0i16; FRAME_SAMPLES]);
         for _ in 0..(STALE_LIMIT + 2) {
             ec.process(&mic);
@@ -388,12 +348,11 @@ mod tests {
             ec.rebuilt > 0,
             "o filtro deveria ter sido descartado apos referencia morta"
         );
-        // e volta a passar o microfone intacto ate a referencia voltar
+        // Seção 2: out
         let out = ec.process(&mic).to_vec();
         assert_eq!(out, mic);
     }
 
-    /// dbfs: full-scale ~ 0 dB, silencio = -infinito.
     #[test]
     fn dbfs_basico() {
         assert!((dbfs(&[i16::MAX; 100]) - 0.0).abs() < 0.01);

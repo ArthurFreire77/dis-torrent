@@ -5,6 +5,7 @@ import { setCallVideoSending, applyOfferInStable as applyOfferToSession } from '
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
 import { shouldInitiatePair } from './callRepair'
+import { shouldFallbackToRelay, shouldDropRelayAfterIceRecovered } from './callRelayFallback'
 import { mergeRemoteStream, type RemoteStreamLike, type RemoteTrackLike } from './callRemoteTracks'
 import { type CallEvent, type CallPhase, nextCallPhase, isCallPhaseActive } from './callPhases'
 import type { VoiceMediaStats } from './models'
@@ -115,9 +116,6 @@ export {
   isValidTurnUrl,
   getTurnUrl,
   getFallbackStunServers,
-  getFallbackTurnCredential,
-  getFallbackTurnServer,
-  getClassicTurnServer,
   getIceServers,
   hasRelayConfigured,
 } from './callIce'
@@ -1260,6 +1258,19 @@ export class CallManager {
           )
           this.applyPhase('ice-failed')
           if (st.phase === 'reconnecting') this.startReconnectWatchdog()
+          // Sem rota WebRTC, a sinalização JÁ está aberta (o core entregou o
+          // ICE até aqui): usa ela para mandar o áudio. Sem isto o caminho de
+          // reserva existia mas nunca era ligado e a chamada ficava em
+          // "Conectando..." até estourar — era o "conectando infinito".
+          if (shouldFallbackToRelay({
+            relayActive: this.relayActive,
+            relaySupported: this.supportsRelay(),
+            phase: st.phase,
+            relayManual: this.relayManual,
+          })) {
+            this.onCallNotice?.('sem rota direta — usando o áudio pela sinalização')
+            void this.setRelayMode(true, 'ice-failed')
+          }
         }
       } catch {  }
     })
@@ -1271,7 +1282,9 @@ export class CallManager {
           const p = this.state.participants.find((x: any) => x.fp === info.fp)
           if (p) p.disconnected = false
           this.applyPhase('media-connected')
-          if (this.relayActive && !this.relayManual) void this.setRelayMode(false)
+          if (shouldDropRelayAfterIceRecovered({ relayActive: this.relayActive, relayManual: this.relayManual })) {
+            void this.setRelayMode(false)
+          }
         } catch {  }
       })
     } catch { this.iceRecoveredOff = null }
@@ -1487,6 +1500,18 @@ export class CallManager {
       }
       try { this.onCallNotice?.('sem rota de mídia direta — reiniciando ICE') } catch {  }
       this.setFailureCause('sem rota de mídia em 20s (ICE preso em checking/gathering sem par selecionado; NAT/CGNAT ou TURN inalcançável — ver painel)')
+      // Antes de reiniciar o ICE, tenta a rota que não depende de NAT: o áudio
+      // pela sinalização. Sem isto o botão ficava em "Conectando..." para
+      // sempre em CGNAT (celular no 4G), que é o caso mais comum.
+      if (shouldFallbackToRelay({
+        relayActive: this.relayActive,
+        relaySupported: this.supportsRelay(),
+        phase: st.phase,
+        relayManual: this.relayManual,
+      })) {
+        this.onCallNotice?.('sem rota direta — usando o áudio pela sinalização')
+        void this.setRelayMode(true, 'ice-failed')
+      }
       this.restartIceAll(st.callId)
       this.applyPhase('ice-failed')
     } catch {  }
@@ -1515,6 +1540,25 @@ export class CallManager {
           }
           if (anyAlive) {
             this.applyPhase('media-reconnected')
+            return
+          }
+          // Antes de desistir, tenta a rota de áudio pela sinalização: numa
+          // rede com CGNAT/bloqueio de UDP o ICE nunca fecha, mas o canal de
+          // mensagens está de pé. Desistir aqui era o "conectando para sempre".
+          if (shouldFallbackToRelay({
+            relayActive: this.relayActive,
+            relaySupported: this.supportsRelay(),
+            phase: st.phase,
+            relayManual: this.relayManual,
+          })) {
+            this.onCallNotice?.('sem rota de mídia — entrando pelo áudio da sinalização')
+            void this.setRelayMode(true, 'ice-failed').then((ok) => {
+              if (ok) return
+              this.setFailureCause('reconexão falhou — sem rota de mídia e sem áudio de reserva')
+              this.applyPhase('reconnect-timeout')
+              this.onCallNotice?.('reconexão falhou — sem rota de mídia após 30s')
+              void this.leave()
+            })
             return
           }
           this.setFailureCause('reconexão falhou — sem rota de mídia após 30s (ICE restarts esgotados; NAT/CGNAT sem TURN válido)')
@@ -2018,8 +2062,11 @@ export class CallManager {
     try {
       if (on) {
         if (!canUseRelayCalls()) return false
+        // Quem decide se a rota de reserva é a definitiva é `reason`: só a
+        // escolha do usuário é "manual". Marcar manual sempre prendia a chamada
+        // no relay mesmo depois de o ICE voltar (áudio duplicado e atrasado).
+        this.relayManual = reason === 'manual'
         await this.startRelay(reason ?? 'manual')
-        this.relayManual = true
         this.syncRelayToState()
         return true
       }
@@ -2228,7 +2275,6 @@ export class CallManager {
   private async startRelay(reason: string): Promise<void> {
     this.relayActive = true
     this.relayReason = reason
-    if (reason === 'manual' || reason === 'relay-only') this.relayManual = true
     this.ensureRelayTransport()
     this.syncRelayToState()
     try {

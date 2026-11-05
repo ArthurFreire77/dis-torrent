@@ -1,20 +1,3 @@
-// Endereço local como link de verdade.
-//
-// O problema que isto resolve: a app mostrava `http://localhost:5173/invite/...`
-// como texto puro. Três coisas erradas ao mesmo tempo:
-//
-//  1. Não era link. Sem `<a href>` nem botão de abrir, o celular não oferece
-//     "abrir no navegador" — o usuário tinha que copiar e digitar à mão.
-//  2. `localhost` no celular é O PRÓPRIO CELULAR. Copiar o link e mandar para o
-//     celular não abre o computador; abre o celular e dá erro. Fingir que
-//     localhost resolve para o computador é pior que não mostrar nada.
-//  3. Não havia como saber o endereço certo. O IP de LAN era desconhecido da UI.
-//
-// A correção mostra as DUAS coisas, rotuladas:
-//   - localhost — "só neste computador"
-//   - IP de LAN — "use este no celular, na mesma rede Wi-Fi"
-// E nunca inventa um domínio no lugar de localhost.
-
 import { useCallback, useEffect, useState } from 'react'
 import { services } from '../services'
 import { isDeepLinkUrl } from './externalLinks'
@@ -28,7 +11,6 @@ export interface LocalAddresses {
   port: number
 }
 
-/** Extrai a rota de `url` para montar os mesmos caminhos em outro host. */
 function pathOf(url: string, fallback = '/'): string {
   try {
     const u = new URL(url)
@@ -38,19 +20,13 @@ function pathOf(url: string, fallback = '/'): string {
   }
 }
 
-/**
- * Detecta se o navegador está vendo a página em loopback. Se estiver, o
- * endereço LAN é relevante; se a página já foi aberta pelo IP de LAN, não.
- */
 function isLoopbackHost(host: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '[::1]'
 }
 
 export function LocalLink({
-  /** URL completa que o usuário quer compartilhar (convite, app, etc.). */
   url,
   label = 'Link local',
-  /** Explica a situação específica (ex.: "convite para o servidor"). */
   context,
 }: {
   url: string
@@ -71,7 +47,6 @@ export function LocalLink({
     }
   }, [])
 
-  // "Copiado" some sozinho: um feedback que não expira vira mentira.
   useEffect(() => {
     if (copied === 'none') return
     const t = setTimeout(() => setCopied('none'), 2200)
@@ -84,8 +59,6 @@ export function LocalLink({
       await navigator.clipboard.writeText(value)
       setCopied('ok')
     } catch {
-      // Fallback legado — e o único caminho em WebView sem permissão de
-      // clipboard.
       try {
         const ta = document.createElement('textarea')
         ta.value = value
@@ -107,13 +80,7 @@ export function LocalLink({
   const onLoopback = typeof window !== 'undefined' && isLoopbackHost(window.location.host)
   const lan = addrs?.lan ?? null
 
-  // DEEP LINK (`distorrent://...`): não tem host/porta para trocar por IP de
-  // LAN — quem sabe abrir é o app registrado no sistema, não um navegador.
-  // Num WebView, um `<a target="_blank">` com esse esquema abria uma janela
-  // interna e morria em `ECONNREFUSED: Unable to connect`.
   const deepLink = isDeepLinkUrl(url)
-  // Quando a página JÁ está sendo aberta pelo IP de LAN, o localhost não
-  // interessa — o endereço certo é o que está na barra de endereços.
   const lanUrl = !deepLink && lan ? `http://${lan}${route}` : null
 
   if (deepLink) {
@@ -177,7 +144,7 @@ export function LocalLink({
         </div>
       )}
 
-      {/* localhost — válido só aqui */}
+      {}
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, color: ui.muted, marginBottom: 5 }}>
           NESTE COMPUTADOR
@@ -190,7 +157,7 @@ export function LocalLink({
         />
       </div>
 
-      {/* IP de LAN — o que funciona no celular */}
+      {}
       {lanUrl ? (
         <div>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, color: ui.link, marginBottom: 5 }}>
@@ -228,7 +195,7 @@ export function LocalLink({
   )
 }
 
-/** Linha: link clicável + abrir + copiar, com feedback de cópia. */
+// Seção 1: LinkRow
 function LinkRow({
   href,
   display,
@@ -240,12 +207,6 @@ function LinkRow({
   onCopy: () => void
   copied: boolean
 }) {
-  // DEEP LINK (`distorrent://`) não é endereço de navegador: `<a target="_blank">`
-  // dentro do WebView cria uma janela interna apontando para o esquema custom e
-  // ela morre com `ECONNREFUSED: Unable to connect` (era o que aparecia ao
-  // clicar no convite). Aqui o link continua selecionável/copiável e o botão
-  // "Abrir" entrega o endereço ao sistema operacional, que é quem sabe abrir
-  // o app registrado para o esquema.
   const isDeepLink = isDeepLinkUrl(href)
   const textStyle = {
     flex: '1 1 180px',
@@ -259,8 +220,7 @@ function LinkRow({
   } as const
   const abrir = () => {
     if (isDeepLink) {
-      // Sem `window.open`: o WebView trataria como URL e falharia.
-      void services.openExternal(href).catch(() => { /* sem app registrado: copiar ainda funciona */ })
+      void services.openExternal(href).catch(() => {  })
       return
     }
     window.open(href, '_blank', 'noopener')

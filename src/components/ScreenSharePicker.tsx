@@ -1,11 +1,3 @@
-// Seletor de compartilhamento de tela (fonte, áudio, qualidade, FPS).
-//
-// Tudo que o sistema realmente suporta aparece; o que não existe na
-// plataforma fica visivelmente desabilitado COM o motivo — nada de menu
-// offering opção que ia falhar. A escolha vira uma chamada a
-// `callManager.setScreenShareOptions`, que aplica na captura viva sem derrubar
-// a chamada (trocar fonte/áudio recaptura, resolução/FPS não).
-
 import { useEffect, useMemo, useState } from 'react'
 import { callManager, getScreenShareBackend, screenShareUnavailableReason } from '../services/callManager'
 import {
@@ -37,11 +29,8 @@ const QUALITY_CHOICES: { value: ScreenQualityKey; label: string }[] = [
   { value: '480p', label: '480p (mínimo)' },
   { value: '720p', label: '720p' },
   { value: '1080p', label: '1080p' },
-  // Texto nítido em monitor grande: acima de 1080p o detalhe vem da captura,
-  // não do encoder (ver SCREEN_QUALITY_STEPS).
   { value: '1440p', label: '1440p (nítido)' },
   { value: '4K', label: '4K (máximo)' },
-  // 8K só vale com tela 8K + GPU; sem isso o engine entrega a resolução nativa.
   { value: '8K', label: '8K (tela 8K)' },
 ]
 
@@ -51,7 +40,6 @@ const FPS_LABELS: Record<ScreenFpsKey, string> = {
   '60': '60 FPS',
   '120': '120 FPS (se o aparelho suportar)',
 }
-// A lista de opções vem de screenShare.ts (fonte única); aqui só o rótulo.
 const FPS_CHOICES: { value: ScreenFpsKey; label: string }[] = SCREEN_FPS_OPTIONS.map(v => ({
   value: v,
   label: FPS_LABELS[v],
@@ -128,9 +116,6 @@ export default function ScreenSharePicker({
   const [monitors, setMonitors] = useState<MonitorInfo[]>([])
   const unavailable = backend === 'none' ? screenShareUnavailableReason() : null
 
-  // Monitores reais da máquina. Só faz sentido quando a fonte é "monitor
-  // específico"; fora do app nativo (Android/browser) a lista fica vazia e a UI
-  // não promete o que a plataforma não tem.
   useEffect(() => {
     let alive = true
     if (!open || opts.source !== 'monitor') { setMonitors([]); return }
@@ -138,9 +123,6 @@ export default function ScreenSharePicker({
     return () => { alive = false }
   }, [open, opts.source])
 
-  // No caminho nativo só existe tela inteira e o áudio do sistema não é
-  // capturado: nunca deixe uma opção armazenada (ex.: `window`/`system`) chegar
-  // ao core fingindo que será honrada.
   useEffect(() => {
     if (!open || !native) return
     if (opts.source !== 'screen' || (opts.audio !== 'none' && opts.audio !== 'mic')) {
@@ -222,10 +204,8 @@ export default function ScreenSharePicker({
 
       <Row label="Áudio">
         {AUDIO_CHOICES.map((a) => {
-          // `window + áudio do sistema` é impossível no Chromium (loopback só
-          // existe com superfície de monitor). Desabilitar com motivo em vez de
-          // deixar o usuário escolher e receber uma trilha que nunca chega.
           const windowBlocksSystem = a.needsSystem && opts.source === 'window'
+          // Seção 1: disabled
           const disabled = (a.needsSystem && !env.systemAudio) || windowBlocksSystem
           const why = windowBlocksSystem
             ? 'áudio do sistema exige compartilhar um monitor inteiro, não uma janela'

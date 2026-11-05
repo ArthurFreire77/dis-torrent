@@ -1,14 +1,5 @@
-//! Anti-spam P2P — pipeline barato→caro: rate limit (token bucket), dedup
-//! (blake3 + janela), filtro de links, PoW para novatos e reputação com
-//! shadow-ban. Veredito `Allow | Warn | Drop | Ban`; assinatura é revalidada
-//! antes (anti-spoof).
-
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
-
-// ---------------------------------------------------------------------------
-// Níveis
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpamLevel {
@@ -25,7 +16,6 @@ impl SpamLevel {
             _ => Self::Medium,
         }
     }
-    /// (msgs_por_10s, burst, dup_janela_s, pow_bits)
     pub fn params(self) -> (u32, u32, i64, u8) {
         match self {
             Self::Low => (20, 8, 30, 0),
@@ -38,15 +28,10 @@ impl SpamLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Allow,
-    /// passa mas marca (dedup conta, reputação cai)
     Warn(&'static str),
     Drop(&'static str),
     Ban(&'static str),
 }
-
-// ---------------------------------------------------------------------------
-// 1. Rate limiter (token bucket por chave)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct Bucket {
@@ -85,7 +70,6 @@ impl RateLimiter {
         }
     }
 
-    /// Retorna `None` se permitido, `Some(espera)` se em timeout/flood.
     pub fn check(&mut self, key: &str) -> Option<Duration> {
         let now = Instant::now();
         if let Some(until) = self.timeouts.get(key) {
@@ -104,7 +88,6 @@ impl RateLimiter {
         b.last = now;
         if b.tokens >= 1.0 {
             b.tokens -= 1.0;
-            // decaimento de violações quando se comporta
             if let Some(v) = self.violations.get_mut(key) {
                 if *v > 0 && b.tokens > self.burst / 2.0 {
                     *v = v.saturating_sub(1);
@@ -114,7 +97,6 @@ impl RateLimiter {
         } else {
             let v = self.violations.entry(key.to_string()).or_insert(0);
             *v += 1;
-            // timeout progressivo: 2^v segundos, teto 5 min
             let secs = (1u64 << (*v).min(8)) * 2;
             let secs = secs.min(300);
             self.timeouts
@@ -127,10 +109,6 @@ impl RateLimiter {
         self.violations.get(key).copied().unwrap_or(0)
     }
 }
-
-// ---------------------------------------------------------------------------
-// 2. Duplicadas (hash + janela)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct DuplicateDetector {
@@ -163,8 +141,6 @@ impl DuplicateDetector {
         hex::encode(&h.finalize().as_bytes()[..16])
     }
 
-    /// `true` = duplicada dentro da janela (dropar).
-    /// Passe `at_ms = 0` para usar o relógio atual.
     pub fn check(&mut self, author_fp: &str, body: &str, at_ms: i64) -> bool {
         let now = if at_ms == 0 {
             crate::identity::now_ms()
@@ -191,10 +167,7 @@ impl DuplicateDetector {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 3. Links suspeitos
-// ---------------------------------------------------------------------------
-
+// Seção 1: malicious_domains
 pub fn malicious_domains() -> Vec<&'static str> {
     vec![
         "grabify.link",
@@ -229,7 +202,6 @@ pub fn shorteners() -> Vec<&'static str> {
     ]
 }
 
-/// Extrai domínios de um texto (http(s):// e bare `algo.tld/...` simples).
 pub fn extract_domains(text: &str) -> Vec<String> {
     let mut out = vec![];
     let lower = text.to_lowercase();
@@ -254,7 +226,6 @@ pub fn extract_domains(text: &str) -> Vec<String> {
                 .split(':')
                 .next()
                 .unwrap_or("");
-            // heurística: precisa ter ponto + tld de 2+ letras
             if h.contains('.')
                 && h.split('.')
                     .last()
@@ -305,10 +276,6 @@ pub fn check_links(body: &str, extra_blocked: &[String]) -> LinkVerdict {
     LinkVerdict::Clean
 }
 
-// ---------------------------------------------------------------------------
-// 4. Proof-of-work (captcha leve p/ novatos)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone)]
 pub struct PowChallenge {
     pub challenge_hex: String,
@@ -325,7 +292,6 @@ impl PowChallenge {
         }
     }
 
-    /// Solução válida se `blake3(challenge || nonce_be)` tem `bits` zeros à esquerda.
     pub fn verify(&self, nonce: u64) -> bool {
         if self.bits == 0 {
             return true;
@@ -342,7 +308,6 @@ impl PowChallenge {
         leading_zero_bits(d.as_bytes()) >= self.bits as u32
     }
 
-    /// Solver do cliente (limitado; bits<=12 resolve em ms).
     pub fn solve(&self, max_iters: u64) -> Option<u64> {
         for n in 0..max_iters {
             if self.verify(n) {
@@ -366,10 +331,7 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
     n
 }
 
-// ---------------------------------------------------------------------------
-// 5. Reputação
-// ---------------------------------------------------------------------------
-
+// Seção 2: derive
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
     New,
@@ -400,7 +362,7 @@ impl Trust {
 #[derive(Debug, Clone)]
 pub struct Reputation {
     pub trust: Trust,
-    pub score: i32, // -100..100
+    pub score: i32,
     pub reports: u32,
 }
 
@@ -435,16 +397,11 @@ impl Reputation {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline combinado (o engine chama por mensagem recebida)
-// ---------------------------------------------------------------------------
-
 pub struct InboundCtx<'a> {
     pub level: SpamLevel,
     pub trust: Trust,
     pub shadow_banned: bool,
     pub extra_blocked_domains: &'a [String],
-    /// novato sem PoW resolvido?
     pub pow_required: bool,
     pub pow_ok: bool,
 }
@@ -484,7 +441,7 @@ mod tests {
         assert!(r.check("a").is_none());
         assert!(r.check("a").is_none());
         let wait = r.check("a");
-        assert!(wait.is_some()); // 4ª estoura o burst de 3
+        assert!(wait.is_some());
         assert!(r.violations("a") >= 1);
     }
 
@@ -493,9 +450,7 @@ mod tests {
         let mut r = RateLimiter::with_params(1, 1);
         assert!(r.check("k").is_none());
         let w1 = r.check("k").unwrap();
-        // limpa timeout manualmente p/ simular reincidência após cumprir pena
         r.timeouts.remove("k");
-        // esgota de novo
         r.buckets.get_mut("k").unwrap().tokens = 0.0;
         r.buckets.get_mut("k").unwrap().last = Instant::now();
         let w2 = r.check("k").unwrap();
@@ -506,9 +461,9 @@ mod tests {
     fn duplicada_na_janela() {
         let mut d = DuplicateDetector::with_window_secs(60);
         assert!(!d.check("fp1", "Olá mundo", 1000));
-        assert!(d.check("fp1", "  olá MUNDO ", 2000)); // case/space-insensitive
+        assert!(d.check("fp1", "  olá MUNDO ", 2000));
         assert!(!d.check("fp1", "outra msg", 3000));
-        assert!(!d.check("fp1", "Olá mundo", 1000 + 61_000)); // fora da janela
+        assert!(!d.check("fp1", "Olá mundo", 1000 + 61_000));
     }
 
     #[test]
@@ -552,6 +507,7 @@ mod tests {
         .verify(0));
     }
 
+    // Seção 3: test
     #[test]
     fn reputacao_transicoes() {
         let mut r = Reputation::fresh();

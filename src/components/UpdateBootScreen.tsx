@@ -1,36 +1,12 @@
-// TELA DE INICIALIZAÇÃO COM ATUALIZAÇÃO SEMPRE VISÍVEL.
-//
-// POR QUE ELA EXISTE: o `UpdateOverlay` só aparecia quando HAVIA versão nova —
-// no boot normal o usuário via a barra de progresso do app sem nenhuma pista
-// de que o app estava conferindo o GitHub. Ele pediu "uma tela assim
-// atualizando" e "sempre procurar no GitHub".
-//
-// Esta tela é o que aparece entre abrir o app e entrar nele. Ela mostra, em
-// ordem e com a verdade do momento:
-//   1. "verificando atualizações…" enquanto consulta a release;
-//   2. "você está na versão X — é a mais nova" quando não há nada;
-//   3. "baixando 8,9 MB" → "instalando" quando há versão nova (Windows);
-//      no Android/Linux ela dá o botão, porque o sistema exige um toque;
-//   4. "sem conexão — segue para o app" quando a rede falha (nunca bloqueia).
-//
-// Ela NÃO mente nem atrasa o caminho bom: o boot da identidade roda em
-// paralelo; esta tela só fica na frente enquanto a checagem realmente estiver
-// acontecendo, com um teto de tempo para rede ruim.
-
 import React from 'react'
 import type { UpdateGateApi } from './UpdateGate'
 import { formatBytes, isNewer, shortNotes, updateModeFor } from '../services/updateRules'
 
-/** Tempo máximo na frente do app esperando a checagem (rede ruim não trava). */
 const MAX_ESPERA_MS = 12_000
 
 const MONO = "'JetBrains Mono', ui-monospace, monospace"
 
 export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallback?: React.ReactNode }) {
-  // O boot da identidade pode terminar antes; sem este teto, uma rede morta
-  // deixaria a tela parada em "verificando" para sempre. Depois do teto a
-  // tela sai e a checagem continua em segundo plano (o overlay assume se
-  // achar algo).
   const [expirou, setExpirou] = React.useState(false)
   React.useEffect(() => {
     const t = setTimeout(() => setExpirou(true), MAX_ESPERA_MS)
@@ -40,12 +16,8 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
   const info = api.info
   const temNova = !!info && isNewer(info.current, info.latest)
   const mode = info ? updateModeFor(info.platform, info.asset_name) : 'link'
-  // Instalador rotulado com outra versão: aplicar não resolve (o app volta na
-  // mesma versão). É melhor avisar no boot do que deixar o usuário instalar de
-  // novo e achar que o app está quebrado.
   const rotuloErrado = !!info?.label_mismatch
   const ocupada = api.phase === 'checking' || api.phase === 'downloading' || api.phase === 'installing'
-  // A tela segura o app só enquanto a checagem está em curso e não expirou.
   const prender = ocupada && !expirou
 
   const titulo =
@@ -77,9 +49,6 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
             ? `instalada: ${info.current || '?'}`
             : '')
 
-  // Sem nada para fazer (nenhum resultado ainda e sem versão nova): mostra o
-  // boot antigo, que já avisa "ainda iniciando o nó P2P" depois de 5 s. Assim
-  // a tela de atualização não some e deixa o usuário olhando para nada.
   if (api.phase === 'idle' && fallback) return <>{fallback}</>
 
   return (
@@ -90,7 +59,7 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
     >
       <div className="boot-logo">DisTorrent</div>
 
-      {/* Barra fina de progresso: gira enquanto trabalha, cheia quando termina. */}
+      {}
       <div className="boot-bar" aria-hidden="true">
         <i
           style={
@@ -137,9 +106,8 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
           </pre>
         )}
 
-        {/* Ações: só quando a automação não pode concluir sozinha. Com o rótulo
-            errado não oferecemos "Atualizar agora": instalar de novo devolveria
-            o mesmo app, e é exatamente o loop que queremos evitar. */}
+        {
+}
         {!prender && temNova && !rotuloErrado && (
           <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'center' }}>
             <button

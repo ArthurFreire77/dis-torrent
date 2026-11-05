@@ -1,22 +1,3 @@
-//! E2E REAL pela REDE TOR — nada local: o tráfego sai pelo daemon Tor,
-//! atravessa circuitos reais da rede onion e chega num SERVIÇO ONION.
-//!
-//! Setup:
-//!   1. Engine B escuta localmente; o daemon Tor publica um serviço onion
-//!      apontando para ele (assim B fica alcançável SEM IP público/NAT —
-//!      é o NAT traversal do Tor).
-//!   2. Engine A em privacidade "full" (Tor via SOCKS5 do daemon local —
-//!      o comprimento do circuito é do Tor, padrão 3 saltos) conecta a
-//!      `<onion>.onion:80` — o hostname NUNCA resolve localmente, vai ao
-//!      proxy e a rede resolve dentro dos circuitos.
-//!   3. Handshake autenticado + DM ida-e-volta com ACK entregue.
-//!
-//! Requer: binário `tor` + internet (bootstrap de consenso). Rodar com:
-//!   cargo test --test tor_e2e -- --ignored --nocapture
-//
-// LINUX ONLY: usa `std::os::unix::fs::PermissionsExt` (Tor recusa
-// HiddenServiceDir permissivo). Sem este gate, `cargo check --tests` no
-// Windows (job core-win do CI) falha em código que nem roda ali.
 #![cfg(target_os = "linux")]
 
 use std::sync::Arc;
@@ -70,7 +51,6 @@ impl Drop for TorDaemon {
 fn spawn_tor(target_port: u16, dir: &std::path::Path) -> TorDaemon {
     std::fs::create_dir_all(dir.join("hs")).unwrap();
     {
-        // Tor recusa HiddenServiceDir com permissões permissivas
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir.join("hs"), std::fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -106,12 +86,10 @@ fn spawn_tor(target_port: u16, dir: &std::path::Path) -> TorDaemon {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requer binário tor + internet — rode com: cargo test --test tor_e2e -- --ignored"]
 async fn e2e_dm_via_rede_tor_onion_service() {
-    // ── 1) Bruna (destino) — engine B normal ──
     let (bruna, _db) = spawn_engine("Bruna");
     let fp_b = bruna.identity().fingerprint.clone();
     let b_port = bruna.listen_port();
 
-    // ── 2) Tor publica o serviço onion de Bruna ──
     let tordir = tempfile::tempdir().unwrap();
     let mut tor = spawn_tor(b_port, tordir.path());
     let hostfile = tordir.path().join("hs/hostname");
@@ -132,7 +110,6 @@ async fn e2e_dm_via_rede_tor_onion_service() {
     );
     println!("[tor-e2e] serviço onion publicado: {onion}:80 → 127.0.0.1:{b_port}");
 
-    // ── 3) Arthur em privacidade "full" (Tor) conecta ao onion ──
     let (arthur, _da) = spawn_engine("Arthur");
     let fp_a = arthur.identity().fingerprint.clone();
     arthur.privacy_set_mode("full").unwrap();
@@ -161,7 +138,6 @@ async fn e2e_dm_via_rede_tor_onion_service() {
     .await;
     println!("[tor-e2e] handshake autenticado completo ATRAVÉS da rede Tor ✓");
 
-    // ── 4) DM real com ACK entregue ──
     let conv = arthur.open_dm(&fp_b, "Bruna").unwrap();
     let m = arthur
         .send_dm(&conv.id, "mensagem via rede Tor — sem IP exposto")
@@ -180,5 +156,5 @@ async fn e2e_dm_via_rede_tor_onion_service() {
     wait_event(&mut ev_a, "ACK entregue", |e| matches!(e, EngineEvent::MessageStatus { msg_id, status } if msg_id == &m.id && status == "delivered"), 30).await;
     println!("[tor-e2e] DM entregue com ACK criptográfico ✓ — teste Tor 100% real");
 
-    let _ = tor.child.kill(); // Drop também cobre
+    let _ = tor.child.kill();
 }

@@ -1,21 +1,3 @@
-//! E2E REAL — dois usuários completos ("Arthur" e "Bruna") em redes
-//! DIFERENTES, conectados exclusivamente através de um PROXY TCP (relay
-//! público simulado). Nada de localhost direto: todo tráfego passa pelo
-//! proxy — igual à internet, onde um lado alcança o outro via endereço
-//! público (UPnP/port-forward/relay).
-//!
-//! Jornada coberta:
-//!   1. Handshake autenticado ATRAVÉS do proxy (identidade não pode ser forjada)
-//!   2. Pedido de amizade → aceito → ambos veem "accepted"
-//!   3. DM ida e volta com ACK "delivered" criptográfico
-//!   4. Grupo DM sincronizado (GroupCreated) + mensagens dos dois lados
-//!   5. Comunidade: criar → convite assinado → entrar → canais sincronizam
-//!   6. Canal novo no host replica no membro; mensagem de canal via relay do host
-//!   7. Cargos: criar → atribuir → membro enxerga
-//!   8. Kick: membro expulso recebe CommunityKicked e perde o servidor
-//!   9. Queda de rede (proxy morto) → mensagem fica PENDING → volta → entrega
-//!  10. Reinício do app de Bruna: MESMA identidade (fp estável), histórico intacto
-
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -27,8 +9,6 @@ use tokio::time::sleep;
 use distorrent_core::net::engine::{EngineEvent, NetworkEngine, NetworkState};
 use distorrent_core::storage::Store;
 
-// ---------------- proxy TCP (relay simulado) ----------------
-
 struct Proxy {
     addr: SocketAddr,
     shutdown: watch::Sender<bool>,
@@ -38,7 +18,6 @@ struct Proxy {
 
 impl Proxy {
     fn start(bind: SocketAddr, target: SocketAddr) -> Self {
-        // bind com retry: a porta pode demorar alguns ms a ser liberada após stop()
         let listener = {
             let mut attempts = 0;
             loop {
@@ -67,8 +46,6 @@ impl Proxy {
                             let conns = conns_task.clone();
                             let t = tokio::spawn(async move {
                                 let mut down = down;
-                                // encaminha byte a byte nos dois sentidos — o proxy
-                                // NÃO entende o protocolo (só vê bytes cifrados)
                                 if let Ok(mut up) = tokio::net::TcpStream::connect(target).await {
                                     let _ = tokio::io::copy_bidirectional(&mut down, &mut up).await;
                                 }
@@ -102,8 +79,6 @@ impl Drop for Proxy {
         self.stop();
     }
 }
-
-// ---------------- helpers ----------------
 
 fn spawn_user(
     nick: &str,
@@ -160,7 +135,6 @@ async fn wait_offline_of(
     .await;
 }
 
-/// Espera por CONDIÇÃO DE ESTADO REAL (polling) — imune a eventos repetidos/stale.
 async fn wait_until<F: FnMut() -> bool>(desc: &str, mut cond: F, secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     loop {
@@ -175,7 +149,6 @@ async fn wait_until<F: FnMut() -> bool>(desc: &str, mut cond: F, secs: u64) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_two_users_via_proxy_full_journey() {
-    // ---------- 1) dois usuários, redes diferentes ----------
     let (arthur, _kp_a, _da) = spawn_user("Arthur");
     let (bruna, kp_b, db_b) = spawn_user("Bruna");
     let fp_a = arthur.identity().fingerprint.clone();
@@ -185,7 +158,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     let mut ev_a = arthur.subscribe();
     let mut ev_b = bruna.subscribe();
 
-    // ---------- 2) proxy TCP: Arthur só alcança Bruna via relay ----------
     let target_b: SocketAddr = format!("127.0.0.1:{}", bruna.listen_port())
         .parse()
         .unwrap();
@@ -210,8 +182,8 @@ async fn e2e_two_users_via_proxy_full_journey() {
     assert_eq!(arthur.peer_state(&fp_b), NetworkState::Connected);
     assert_eq!(bruna.peer_state(&fp_a), NetworkState::Connected);
 
-    // ---------- 3) amizade real A→B→aceite----------
     arthur.friend_request(&fp_b).unwrap();
+    // Seção 1: req
     let req = wait_event(
         &mut ev_b,
         "Bruna recebe pedido",
@@ -243,7 +215,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
         "Bruna tem Arthur como amiga"
     );
 
-    // ---------- 4) DM ida e volta (com ACK real) ----------
     let dm = arthur.open_dm(&fp_b, "Bruna").unwrap();
     let m1 = arthur.send_dm(&dm.id, "oi Bruna, tudo bem?").unwrap();
     assert_eq!(m1.status, "sent");
@@ -276,7 +247,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     assert_eq!(in_a.body, "tudo ótimo, Arthur!");
     assert_eq!(arthur.messages(&dm.id).len(), 2);
 
-    // ---------- 5) grupo DM sincronizado ----------
     let grupo = arthur.create_group("Dupla", vec![fp_b.clone()]).unwrap();
     let sync = wait_event(
         &mut ev_b,
@@ -319,7 +289,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     };
     assert_eq!(gmsg2.body, "obrigada pelo convite");
 
-    // ---------- 6) comunidade: criar → convite → entrar ----------
     let cid = arthur
         .create_community("Guilda Teste", &["geral".into(), "projetos".into()])
         .unwrap();
@@ -339,7 +308,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
         "canais iniciais sincronizados"
     );
 
-    // ---------- 7) canal novo no host replica no membro ----------
     let novo = arthur
         .channel_create(&cid, "Memes", "", "DIVERSÃO", "text")
         .unwrap();
@@ -357,7 +325,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     )
     .await;
 
-    // ---------- 8) mensagem de canal via relay do host ----------
     let geral_id = arthur
         .channel_list(&cid)
         .unwrap()
@@ -376,6 +343,7 @@ async fn e2e_two_users_via_proxy_full_journey() {
         10,
     )
     .await;
+    // Seção 2: EngineEvent
     let EngineEvent::MessageNew(cmsg) = cmrecv else {
         unreachable!()
     };
@@ -383,7 +351,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     assert_eq!(cmsg.author_fp, fp_b);
     wait_event(&mut ev_b, "Bruna vê delivered (ChannelAck)", |e| matches!(e, EngineEvent::MessageStatus { msg_id, status } if msg_id == &cm.id && status == "delivered"), 10).await;
 
-    // ---------- 9) cargos reais ----------
     let vip = arthur
         .role_create(&cid, "VIP", "#fee75c", 96, true, true)
         .unwrap();
@@ -403,7 +370,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     )
     .await;
 
-    // ---------- 10) kick real ----------
     arthur.member_kick(&cid, &fp_b).unwrap();
     wait_event(
         &mut ev_b,
@@ -414,7 +380,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     .await;
     assert!(
         !bruna.channel_list(&cid).is_ok() || bruna.channel_list(&cid).unwrap().is_empty() || {
-            // comunidade removida localmente: get_community não encontra
             bruna_channel_gone(&bruna, &cid)
         },
         "comunidade deve sumir do lado de Bruna"
@@ -427,7 +392,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
         "Bruna saiu do roster do host"
     );
 
-    // ---------- 11) queda de rede → PENDING → reconexão → entrega ----------
     proxy.stop();
     println!("[e2e] proxy derrubado — simulando queda de internet");
     wait_offline_of(&mut ev_a, &fp_b, 40).await;
@@ -435,7 +399,7 @@ async fn e2e_two_users_via_proxy_full_journey() {
     let pend = arthur.send_dm(&dm.id, "mensagem durante a queda").unwrap();
     assert_eq!(pend.status, "pending", "sem conexão → pendente real");
 
-    let proxy2 = Proxy::start(proxy.addr, target_b); // mesmo endereço público "volta"
+    let proxy2 = Proxy::start(proxy.addr, target_b);
     println!("[e2e] proxy restaurado em {}", proxy2.addr);
     wait_event(
         &mut ev_a,
@@ -453,14 +417,9 @@ async fn e2e_two_users_via_proxy_full_journey() {
     )
     .await;
 
-    // ---------- 12) reinício do app de Bruna: identidade estável ----------
-    // Solta listeners, conexões e tarefas do engine anterior antes de abrir a
-    // mesma identidade de novo. `Drop` do Arc não encerra o engine enquanto
-    // suas tarefas ainda o mantêm vivo.
     bruna.shutdown();
     drop(bruna);
     sleep(Duration::from_millis(300)).await;
-    // MESMA chave + MESMO banco = mesma identidade, fingerprint NUNCA muda
     let store_b2 = Arc::new(Store::open(&db_b.path().join("distorrent.db")).unwrap());
     let bruna2 = Arc::new(NetworkEngine::new(
         store_b2,
@@ -498,7 +457,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
         20,
     )
     .await;
-    // amizade sobrevive ao reinício (flush reenvia aceite)
     wait_event(
         &mut ev_a,
         "amizade re-sincronizada",
@@ -517,7 +475,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
             .any(|p| p.fp == fp_a),
         "amizade persistida no banco de Bruna"
     );
-    // histórico persistido no host
     let hist = arthur.messages(&dm.id);
     assert!(
         hist.iter().any(|m| m.body == "mensagem durante a queda"),

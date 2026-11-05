@@ -121,7 +121,10 @@ impl Bridge {
     pub fn status(&self) -> BridgeStatus {
         BridgeStatus {
             running: !self.shared.stop.load(Ordering::Relaxed),
-            url: Some(format!("http://127.0.0.1:{}{}", self.shared.port, self.shared.path)),
+            url: Some(format!(
+                "http://127.0.0.1:{}{}",
+                self.shared.port, self.shared.path
+            )),
             port: Some(self.shared.port),
             events_pending: self.shared.events.lock().map(|q| q.len()).unwrap_or(0),
             requests: self.shared.requests.load(Ordering::Relaxed) as u64,

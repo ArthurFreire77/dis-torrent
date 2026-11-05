@@ -3920,12 +3920,7 @@ impl NetworkEngine {
     /// - a config inteira é revalidada pelo parser do core;
     /// - `perms` **não** muda por aqui: um bot nunca se concede poder;
     /// - o bot precisa existir e estar online, como em qualquer ação.
-    pub fn bot_replace_config(
-        &self,
-        community_id: &str,
-        bot_id: &str,
-        raw: &str,
-    ) -> Result<usize> {
+    pub fn bot_replace_config(&self, community_id: &str, bot_id: &str, raw: &str) -> Result<usize> {
         self.require_owner(community_id)?;
         let Some(bot) = self
             .store

@@ -18,7 +18,7 @@ function applyAudio() {
     if (p.audioIn) (next as Record<string, unknown>).deviceId = { exact: p.audioIn }
     else delete (AUDIO_CONSTRAINTS as Record<string, unknown>).deviceId
     Object.assign(AUDIO_CONSTRAINTS, next)
-  } catch { /* noop */ }
+  } catch {  }
 }
 
 export function applySavedAudio() {
@@ -52,8 +52,6 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     try {
       const md = navigator.mediaDevices
       if (!md?.enumerateDevices) {
-        // Linux nativo (WebKitGTK sem enumerateDevices): mostra o mic real
-        // do motor em vez de lista vazia.
         if (services.kind === 'native') {
           const name = await services.voiceMicName().catch(() => '')
           setMics(name ? [{ id: '', label: name }] : [])
@@ -78,8 +76,6 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     try {
       const md = navigator.mediaDevices
       if (!md?.getUserMedia) {
-        // Linux nativo (WebKitGTK sem getUserMedia): mede o nível direto do
-        // cpal via comando nativo, em poll de ~120ms.
         if (services.kind === 'native') { await nativeTest(); return }
         setErr('Captura indisponível neste aparelho.')
         return
@@ -121,7 +117,6 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     }
   }
 
-  /** Teste via motor nativo (cpal): abre o mic, lê o pico em poll. */
   async function nativeTest() {
     const testId = await services.voiceMicTestStart()
     let alive = true
@@ -208,3 +203,4 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     </div>
   )
 }
+// Seção 1: fim

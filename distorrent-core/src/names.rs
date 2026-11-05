@@ -1,16 +1,3 @@
-//! Validação de nomes (usuário / servidor / canal) — Storm camada de segurança.
-//!
-//! Garantias:
-//! - Normalização Unicode NFC (via `unicode-normalization`) contra homoglifos e "nomes fantasmas".
-//! - Bloqueio de controles, zero-width, caracteres perigosos para injeção (`<>"'\\\``).
-//! - Tamanho configurável por tipo.
-//! - Blocklist PT-BR + EN (configurável) + bloqueio de cargos/imitação.
-//! - Detecção de confusáveis (skeleton ASCII) contra spoof de nome.
-//! - Sugestões de variação + gerador aleatório.
-//!
-//! Tudo é função pura: a UI chama para feedback em tempo real e o CORE
-//! re-valida antes de persistir (a UI nunca é fonte de autorização).
-
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +22,6 @@ impl NameKind {
 pub struct NamePolicy {
     pub min_len: usize,
     pub max_len: usize,
-    /// palavras extras do servidor (lowercase, já normalizadas)
     pub extra_banned: Vec<String>,
 }
 
@@ -64,16 +50,13 @@ impl NamePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameCheck {
     pub ok: bool,
-    /// nome normalizado (NFC + trim + colapso de espaços) — usar este para persistir/comparar
     pub normalized: String,
     pub errors: Vec<String>,
     pub suggestions: Vec<String>,
 }
 
-/// Blocklist base PT-BR + EN (amostra curada; servidor pode estender via `extra_banned`).
 pub fn base_blocklist() -> Vec<&'static str> {
     vec![
-        // PT-BR ofensivo
         "porra",
         "caralho",
         "merda",
@@ -96,7 +79,6 @@ pub fn base_blocklist() -> Vec<&'static str> {
         "buceta",
         "xota",
         "siririca",
-        // EN ofensivo / ódio
         "fuck",
         "shit",
         "bitch",
@@ -110,14 +92,12 @@ pub fn base_blocklist() -> Vec<&'static str> {
         "tranny",
         "pedo",
         "rapist",
-        // scam / phishing genérico
         "free-nitro",
         "steam-gift",
         "airdrop-claim",
     ]
 }
 
-/// Cargos/títulos que ninguém pode imitar.
 pub fn reserved_titles() -> Vec<&'static str> {
     vec![
         "admin",
@@ -138,8 +118,6 @@ pub fn reserved_titles() -> Vec<&'static str> {
     ]
 }
 
-/// Sanitiza input livre (mensagens, tópicos): remove controles, limita tamanho,
-/// neutraliza HTML. NÃO loga conteúdo — apenas transforma.
 pub fn sanitize_text(input: &str, max_chars: usize) -> String {
     let nfc: String = input.nfc().collect();
     let mut out = String::with_capacity(nfc.len().min(max_chars));
@@ -147,7 +125,6 @@ pub fn sanitize_text(input: &str, max_chars: usize) -> String {
         if c.is_control() && c != '\n' && c != '\t' {
             continue;
         }
-        // zero-width / bidi overrides / fantasmas
         if matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'
             | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{00AD}')
         {
@@ -158,7 +135,6 @@ pub fn sanitize_text(input: &str, max_chars: usize) -> String {
         }
         out.push(c);
     }
-    // colapsa espaços repetidos, preserva no máximo 2 quebras seguidas
     let mut collapsed = String::with_capacity(out.len());
     let mut spaces = 0usize;
     let mut newlines = 0usize;
@@ -184,7 +160,7 @@ pub fn sanitize_text(input: &str, max_chars: usize) -> String {
     collapsed.trim().to_string()
 }
 
-/// Escapa para exibição em HTML (previne injeção em nomes renderizados).
+// Seção 1: escape_html
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -201,14 +177,12 @@ pub fn escape_html(s: &str) -> String {
     out
 }
 
-/// Skeleton ASCII para detectar confusáveis: minúsculas, remove diacríticos
-/// comuns, mapeia leet/homoglifos cirílicos+gregos conhecidos.
 pub fn skeleton(name: &str) -> String {
     let nfc: String = name.nfc().collect::<String>().to_lowercase();
     let mut out = String::with_capacity(nfc.len());
     for c in nfc.chars() {
         let mapped: &str = match c {
-            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'а' => "a", // inclui 'а' cirílico
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'а' => "a",
             'è' | 'é' | 'ê' | 'ë' | 'ē' | 'е' => "e",
             'ì' | 'í' | 'î' | 'ï' | 'і' => "i",
             'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'о' => "o",
@@ -283,7 +257,6 @@ fn has_dangerous_chars(s: &str) -> Vec<char> {
     bad
 }
 
-/// Validação principal. `existing` = nomes já usados no escopo (servidor/canal/global).
 pub fn validate_name(
     kind: NameKind,
     raw: &str,
@@ -291,7 +264,6 @@ pub fn validate_name(
     policy: &NamePolicy,
 ) -> NameCheck {
     let mut errors: Vec<String> = vec![];
-    // NFC + trim + colapso de espaços
     let nfc: String = raw.nfc().collect();
     let collapsed = nfc.split_whitespace().collect::<Vec<_>>().join(" ");
     let normalized = collapsed.trim().to_string();
@@ -316,7 +288,6 @@ pub fn validate_name(
     if !bad.is_empty() {
         errors.push("contém caracteres proibidos (< > \" ' \\ `, controles ou invisíveis)".into());
     }
-    // Só permite letras, números, espaço, _ - . (canal: minúsculas + hífen por convenção)
     let allowed = |c: char| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-' | '.');
     if !normalized.chars().all(allowed) {
         errors.push("use apenas letras, números, espaço, _ - .".into());
@@ -343,18 +314,17 @@ pub fn validate_name(
         errors.push("nome imita cargo oficial (admin/moderador/storm)".into());
     }
 
-    // Unicidade no escopo (compara skeleton para pegar homoglifos)
     let existing_skel: Vec<String> = existing.iter().map(|e| skeleton(e)).collect();
     if existing_skel.iter().any(|e| e == &skel) {
         errors.push("nome já existe neste escopo".into());
     }
-    // Spoof de outro usuário: distância 1 (levenshtein simples) num escopo pequeno
     if existing_skel.iter().any(|e| levenshtein1(&skel, e))
         && !existing_skel.iter().any(|e| e == &skel)
     {
         errors.push("muito parecido com um nome existente (anti-spoof)".into());
     }
 
+    // Seção 2: ok
     let ok = errors.is_empty();
     let suggestions = if ok {
         vec![]
@@ -369,7 +339,6 @@ pub fn validate_name(
     }
 }
 
-/// distância de edição == 1 (inserção/remoção/troca) — barato e suficiente p/ anti-spoof.
 fn levenshtein1(a: &str, b: &str) -> bool {
     if a == b {
         return false;
@@ -401,7 +370,6 @@ fn levenshtein1(a: &str, b: &str) -> bool {
     edits + (a.len() - i + b.len() - j) as u32 == 1
 }
 
-/// Sugere até 3 variações livres no escopo.
 pub fn suggest_variants(base: &str, existing: &[String]) -> Vec<String> {
     let clean: String = skeleton(base)
         .chars()
@@ -426,7 +394,6 @@ pub fn suggest_variants(base: &str, existing: &[String]) -> Vec<String> {
             break;
         }
     }
-    // fallback numerado
     let mut n = 2u32;
     while out.len() < 3 && n < 100 {
         let cand = format!("{clean}_{n:02}");
@@ -438,7 +405,6 @@ pub fn suggest_variants(base: &str, existing: &[String]) -> Vec<String> {
     out
 }
 
-/// Nome aleatório consistente (`adjetivo_substantivo_nn`).
 pub fn random_name() -> String {
     const ADJ: &[&str] = &[
         "veloz", "bravo", "lunar", "solar", "feroz", "calmo", "vivo", "norte",
@@ -454,9 +420,6 @@ pub fn random_name() -> String {
     format!("{a}_{n}_{num}")
 }
 
-/// Safety Number estilo Signal: `blake3(fp_a|pub_a|fp_b|pub_b)` ordenado,
-/// formatado em 8 grupos de 5 dígitos. Ambas as partes calculam o mesmo número
-/// independente da ordem — verificação por QR/leitura em voz alta.
 pub fn safety_number(fp_a: &str, pub_a: &str, fp_b: &str, pub_b: &str) -> String {
     let (x, y) = if fp_a <= fp_b {
         ((fp_a, pub_a), (fp_b, pub_b))
@@ -493,7 +456,6 @@ mod tests {
 
     #[test]
     fn nfc_unifica_homoglifo() {
-        // 'é' pré-composto vs e + combining accent → mesmo normalizado
         let a = validate_name(
             NameKind::User,
             "café",
@@ -525,23 +487,21 @@ mod tests {
         assert_eq!(escape_html("<a>"), "&lt;a&gt;");
     }
 
+    // Seção 3: test
     #[test]
     fn blocklist_e_cargos() {
         let p = NamePolicy::for_kind(NameKind::User);
         assert!(!validate_name(NameKind::User, "Admin Supremo", &[], &p).ok);
         assert!(!validate_name(NameKind::User, "storm oficial", &[], &p).ok);
         assert!(!validate_name(NameKind::User, "caralho99", &[], &p).ok);
-        // leet-speak também pega
         assert!(!validate_name(NameKind::User, "4dm1n", &[], &p).ok);
     }
 
     #[test]
     fn spoof_homoglifo_cirilico() {
         let p = NamePolicy::for_kind(NameKind::User);
-        // 'а' cirílico no lugar do 'a' latino
         let r = validate_name(NameKind::User, "аdmin", &[], &p);
         assert!(!r.ok);
-        // nome parecido com existente
         let r2 = validate_name(NameKind::User, "marcos", &["marco".to_string()], &p);
         assert!(!r2.ok);
         assert!(r2.errors.iter().any(|e| e.contains("parecido")));

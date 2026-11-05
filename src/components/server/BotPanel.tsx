@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { BotBridgeInfo, BotBridgeStatus, BotLogView, BotPluginStatus, BotView, ChannelMeta } from '../../services/models'
+import type { BotBridgeInfo, BotBridgeStatus, BotLogView, BotPluginStatus, BotView, ChannelMeta, RoleView } from '../../services/models'
 import { services } from '../../services'
 import {
   BOT_ADMIN_ACTIONS,
@@ -16,7 +16,8 @@ import {
   type BotExec,
   type BotConfig,
 } from '../../services/botCommands'
-import { Button, Card, EmptyState, Notice, Select, TextArea, TextField, helpStyle, ui } from '../../shared/ui'
+import { copyBestEffort } from '../../shared/clipboard'
+import { Button, Card, EmptyState, Modal, Notice, Select, TextArea, TextField, helpStyle, ui } from '../../shared/ui'
 import { Ic, type IconName } from '../../shared/icons'
 
 const css = `
@@ -38,10 +39,18 @@ const css = `
 .botp-line[data-level="warn"]{ color:#ffe0a3 }
 .botp-mono{ font-family:'JetBrains Mono',ui-monospace,monospace }
 
-/* Painel: navegação lateral fixa + conteúdo com rolagem própria. Antes o
-   componente era despejado solto na página, por cima da interface. */
 .botp-overlay{ position:fixed; inset:0; z-index:95; background:rgba(0,0,0,.72); display:flex; align-items:center; justify-content:center; padding:16px }
 .botp-shell{ width:100%; max-width:1060px; height:min(92vh,900px); display:flex; flex-direction:column; background:${ui.bg}; border:1px solid ${ui.border}; border-radius:12px; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.55) }
+
+/* Embutido: o painel ocupa a área de conteúdo das configurações do servidor.
+   Sem overlay e sem segunda janela — era isso que deixava o painel "atrás"
+   das configurações, com dois fundos escuros empilhados. */
+.botp-embed{ display:flex; flex-direction:column; flex:1 1 auto; width:100%; min-width:0; height:100%; min-height:0 }
+.botp-embed .botp-shell{ max-width:none; height:100%; border:none; border-radius:0; box-shadow:none; background:${ui.bg} }
+.botp-embed .botp-body{ flex-direction:column }
+.botp-embed .botp-nav{ width:100%; flex-direction:row; overflow-x:auto; overflow-y:hidden; border-right:none; border-bottom:1px solid ${ui.border}; padding:8px; flex-shrink:0; background:${ui.bg} }
+.botp-embed .botp-navbtn{ white-space:nowrap; width:auto; flex-shrink:0 }
+.botp-embed .botp-navbtn .botp-navcount{ margin-left:6px }
 .botp-head{ display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid ${ui.border}; flex-shrink:0 }
 .botp-body{ flex:1; display:flex; min-height:0 }
 .botp-nav{ width:196px; flex-shrink:0; border-right:1px solid ${ui.border}; padding:10px 8px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; background:${ui.surface} }
@@ -60,7 +69,7 @@ const css = `
 }
 `
 
-type Tab = 'comandos' | 'permissoes' | 'eventos' | 'runtime' | 'console'
+type Tab = 'credenciais' | 'comandos' | 'permissoes' | 'eventos' | 'runtime' | 'console'
 
 export function BotPanel({
   communityId,
@@ -68,17 +77,28 @@ export function BotPanel({
   channels,
   onSaved,
   onClose,
+  embedded = false,
 }: {
   communityId: string
   bot: BotView
   channels: ChannelMeta[]
   onSaved: () => void
   onClose: () => void
+  /** Ocupa a área das configurações do servidor em vez de abrir outro modal. */
+  embedded?: boolean
 }) {
   const initial = useMemo(() => parseBotConfig(bot.config ?? null) ?? defaultBotConfig(), [bot.config])
-  const [tab, setTab] = useState<Tab>('comandos')
+  const [tab, setTab] = useState<Tab>('credenciais')
   const [cfg, setCfg] = useState<BotConfig>(initial)
   const [perms, setPerms] = useState<number>(bot.perms ?? 0)
+  const [roleId, setRoleId] = useState(bot.roleId ?? '')
+  const [online, setOnline] = useState(bot.online)
+  const [roles, setRoles] = useState<RoleView[]>([])
+  const [token, setToken] = useState(bot.token)
+  const [showToken, setShowToken] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [regenBusy, setRegenBusy] = useState(false)
+  const [confirmRegen, setConfirmRegen] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -95,6 +115,19 @@ export function BotPanel({
   const consoleRef = useRef<HTMLDivElement | null>(null)
 
   const hasNative = typeof services.botBridgeStart === 'function'
+
+  useEffect(() => {
+    let alive = true
+    services
+      .rolesList(communityId)
+      .then((r) => {
+        if (alive && Array.isArray(r)) setRoles(r)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [communityId])
 
   useEffect(() => {
     let alive = true
@@ -148,7 +181,12 @@ export function BotPanel({
   }
 
   function addCommand() {
-    const n = cfg.commands.length + 1
+    // Nome provisório único: `comando-1`, `comando-2`… sem repetir um nome que
+    // já existe. Antes o id aberto era `cmd-<nome>` e o render usava o índice,
+    // então o comando novo nascia fechado.
+    const usados = new Set(cfg.commands.map((c) => c.name))
+    let n = cfg.commands.length + 1
+    while (usados.has(`comando-${n}`)) n += 1
     setCfg((prev) => ({
       ...prev,
       commands: [
@@ -156,7 +194,7 @@ export function BotPanel({
         { name: `comando-${n}`, method: 'GET', url: '', exec: 'reply', reply: '', cooldownMs: 1500 },
       ],
     }))
-    setExpanded(`cmd-${n}`)
+    setExpanded(`cmd-${cfg.commands.length}`)
   }
 
   function removeCommand(index: number) {
@@ -178,7 +216,12 @@ export function BotPanel({
           if (p) throw new Error(`/${c.name}: ${p}`)
         }
       }
-      await services.botUpdate(communityId, bot.id, { config: json, perms })
+      await services.botUpdate(communityId, bot.id, {
+        config: json,
+        perms,
+        roleId: roleId || null,
+        online,
+      })
       setSavedAt(Date.now())
       onSaved()
     } catch (e: unknown) {
@@ -186,6 +229,29 @@ export function BotPanel({
     } finally {
       setBusy(false)
     }
+  }
+
+  async function regenToken() {
+    setConfirmRegen(false)
+    setRegenBusy(true)
+    setError(null)
+    try {
+      const next = await services.botRegenToken(communityId, bot.id)
+      setToken(next)
+      setShowToken(true)
+      setCopied(false)
+      onSaved()
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'não foi possível gerar um novo token')
+    } finally {
+      setRegenBusy(false)
+    }
+  }
+
+  function copyToken() {
+    copyBestEffort(token)
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1800)
   }
 
   async function startBridge() {
@@ -247,11 +313,16 @@ export function BotPanel({
   }
 
   const dirty = useMemo(
-    () => JSON.stringify(cfg) !== JSON.stringify(initial) || perms !== (bot.perms ?? 0),
-    [cfg, initial, perms, bot.perms],
+    () =>
+      JSON.stringify(cfg) !== JSON.stringify(initial) ||
+      perms !== (bot.perms ?? 0) ||
+      (roleId || '') !== (bot.roleId ?? '') ||
+      online !== bot.online,
+    [cfg, initial, perms, bot.perms, roleId, bot.roleId, online, bot.online],
   )
 
   const tabs: { id: Tab; label: string; icon: IconName; count?: number }[] = [
+    { id: 'credenciais', label: 'Credenciais', icon: 'key' },
     { id: 'comandos', label: 'Comandos', icon: 'terminal', count: cfg.commands.length },
     { id: 'permissoes', label: 'Permissões', icon: 'shield' as IconName },
     { id: 'eventos', label: 'Eventos', icon: 'plug', count: cfg.events.length },
@@ -259,59 +330,66 @@ export function BotPanel({
     { id: 'console', label: 'Console', icon: 'file' },
   ]
 
+  const roleOptions = [
+    { value: '', label: 'Sem cargo (só o básico)' },
+    ...roles.map((r) => ({ value: r.id, label: r.name })),
+  ]
+  if (roleId && !roles.some((r) => r.id === roleId)) {
+    roleOptions.push({ value: roleId, label: 'Cargo atual (fora da lista)' })
+  }
+  const maskedToken =
+    token.length > 12 ? `${token.slice(0, 10)}…${token.slice(-4)}` : token || '(sem token)'
+  const header = (
+    <div className="botp-head">
+      <span
+        aria-hidden="true"
+        style={{
+          width: 34,
+          height: 34,
+          borderRadius: '50%',
+          background: `${ui.accent}33`,
+          border: `2px solid ${ui.accent}`,
+          color: ui.accent,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontWeight: 800,
+          flexShrink: 0,
+        }}
+      >
+        {bot.avatar && bot.avatar.length <= 2 ? bot.avatar : bot.name.charAt(0).toUpperCase()}
+      </span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 15, fontWeight: 800, color: ui.heading }}>{bot.name}</span>
+          <span className="botp-chip">bot · #{bot.discriminator}</span>
+          <span className="botp-chip" data-tone={online ? 'ok' : 'mut'}>
+            {online ? 'online' : 'offline'}
+          </span>
+          {bridgeStatus?.running && (
+            <span className="botp-chip" data-tone="ok">ponte {bridgeStatus.port}</span>
+          )}
+          {plugin?.running && (
+            <span className="botp-chip" data-tone="ok">plugin {plugin.pid}</span>
+          )}
+          {dirty && <span className="botp-chip" data-tone="warn">não salvo</span>}
+        </div>
+      </div>
+      <Button variant="ghost" icon="x" onClick={onClose} ariaLabel={embedded ? 'Voltar aos bots' : 'Fechar painel do bot'} />
+    </div>
+  )
+
   return (
     <div
-      className="botp-overlay"
-      onClick={onClose}
+      className={embedded ? 'botp-embed' : 'botp-overlay'}
+      onClick={embedded ? undefined : onClose}
       onKeyDown={(e) => {
         if (e.key === 'Escape') onClose()
       }}
     >
       <style>{css}</style>
-      <div
-        className="botp-shell"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Configurar ${bot.name}`}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="botp-head">
-          <span
-            aria-hidden="true"
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: '50%',
-              background: `${ui.accent}33`,
-              border: `2px solid ${ui.accent}`,
-              color: ui.accent,
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontWeight: 800,
-              flexShrink: 0,
-            }}
-          >
-            {bot.avatar && bot.avatar.length <= 2 ? bot.avatar : bot.name.charAt(0).toUpperCase()}
-          </span>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 15, fontWeight: 800, color: ui.heading }}>{bot.name}</span>
-              <span className="botp-chip">bot · #{bot.discriminator}</span>
-              <span className="botp-chip" data-tone={bot.online ? 'ok' : 'mut'}>
-                {bot.online ? 'online' : 'offline'}
-              </span>
-              {bridgeStatus?.running && (
-                <span className="botp-chip" data-tone="ok">ponte {bridgeStatus.port}</span>
-              )}
-              {plugin?.running && (
-                <span className="botp-chip" data-tone="ok">plugin {plugin.pid}</span>
-              )}
-              {dirty && <span className="botp-chip" data-tone="warn">não salvo</span>}
-            </div>
-          </div>
-          <Button variant="ghost" icon="x" onClick={onClose} ariaLabel="Fechar painel do bot" />
-        </div>
+      <div className="botp-shell" role="region" aria-label={`Configurar ${bot.name}`}>
+        {header}
 
         <div className="botp-body">
           <nav className="botp-nav" role="tablist" aria-label="Seções do bot">
@@ -344,6 +422,106 @@ export function BotPanel({
                 <Notice tone="success">Configuração salva e validada pelo core.</Notice>
               </div>
             )}
+
+      {tab === 'credenciais' && (
+        <>
+          <Card title="Token de acesso" subtitle="Segredo do bot. Só o dono do servidor vê e gera outro." icon="key">
+            <div style={{ display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div
+                className="botp-mono"
+                style={{
+                  flex: '1 1 240px',
+                  minWidth: 0,
+                  wordBreak: 'break-all',
+                  background: ui.input,
+                  border: `1px solid ${ui.border}`,
+                  borderRadius: ui.radius,
+                  padding: '10px 12px',
+                  fontSize: 12.5,
+                  color: ui.text,
+                }}
+              >
+                {showToken ? token || '(sem token)' : maskedToken}
+              </div>
+              <Button
+                icon={showToken ? 'eyeOff' : 'eye'}
+                onClick={() => setShowToken((v) => !v)}
+                ariaLabel={showToken ? 'Ocultar token' : 'Mostrar token'}
+              >
+                {showToken ? 'Ocultar' : 'Mostrar'}
+              </Button>
+              <Button icon={copied ? 'checkDouble' : 'copy'} onClick={copyToken} ariaLabel="Copiar token">
+                {copied ? 'Copiado' : 'Copiar'}
+              </Button>
+            </div>
+            <div style={{ marginTop: ui.md, display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Button variant="danger" icon="refresh" busy={regenBusy} onClick={() => setConfirmRegen(true)}>
+                Gerar novo token
+              </Button>
+              <span style={{ ...helpStyle, marginTop: 0, flex: '1 1 200px' }}>
+                Quem tem o token fala como este bot. Gerar outro invalida o atual na hora.
+              </span>
+            </div>
+          </Card>
+
+          <Card title="Comportamento" subtitle="Cargo que o bot usa e como ele aparece na lista de membros." icon="gear">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: `0 ${ui.lg}` }}>
+              <Select
+                label="Cargo do bot"
+                value={roleId}
+                options={roleOptions}
+                ariaLabel="Cargo do bot"
+                hint="As permissões do bot vêm deste cargo. Menos é mais."
+                onChange={setRoleId}
+              />
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: ui.md,
+                paddingTop: ui.md,
+                borderTop: `1px solid ${ui.border}`,
+                flexWrap: 'wrap',
+              }}
+            >
+              <button
+                type="button"
+                role="switch"
+                aria-checked={online}
+                aria-label="Bot online"
+                onClick={() => setOnline((v) => !v)}
+                style={{
+                  width: 46,
+                  height: 26,
+                  flexShrink: 0,
+                  borderRadius: 99,
+                  border: `1px solid ${online ? ui.success : ui.borderStrong}`,
+                  background: online ? 'rgba(35,165,89,.28)' : ui.input,
+                  cursor: 'pointer',
+                  padding: 2,
+                  display: 'flex',
+                  justifyContent: online ? 'flex-end' : 'flex-start',
+                }}
+              >
+                <span
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: '50%',
+                    background: online ? ui.success : ui.muted,
+                    display: 'block',
+                  }}
+                />
+              </button>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: ui.heading }}>Bot marcado como online</div>
+                <div style={helpStyle}>Desligado, ele para de responder sem perder a config.</div>
+              </div>
+            </div>
+          </Card>
+        </>
+      )}
 
       {tab === 'comandos' && (
         <>
@@ -859,24 +1037,52 @@ export function BotPanel({
               </span>
             )}
             <span style={{ flex: 1 }} />
-            <Button onClick={onClose} disabled={busy}>Fechar</Button>
+            <Button onClick={onClose} disabled={busy}>{embedded ? 'Voltar' : 'Fechar'}</Button>
             <Button variant="success" icon="save" busy={busy} onClick={() => void save()}>
               Salvar
             </Button>
           </div>
         </div>
-      </div>
+
+      <Modal
+        open={confirmRegen}
+        onClose={() => setConfirmRegen(false)}
+        title="Gerar novo token?"
+        subtitle="O token atual para de funcionar na hora, sem volta."
+        width={480}
+        zIndex={embedded ? 120 : 110}
+        footer={
+          <>
+            <span style={{ flex: 1 }} />
+            <Button onClick={() => setConfirmRegen(false)}>Cancelar</Button>
+            <Button variant="danger" icon="refresh" busy={regenBusy} onClick={() => void regenToken()}>
+              Gerar e invalidar o antigo
+            </Button>
+          </>
+        }
+      >
+        <Notice tone="warning" icon="warn">
+          Qualquer integração, script ou webhook que use o token antigo vai começar a falhar até você
+          atualizar a credencial lá.
+        </Notice>
+      </Modal>
+    </div>
     )
 }
 
 /** Resumo de uma linha por bot (usado pela lista do gerenciador). */
 export function botSummary(bot: BotView): { commands: number; events: number; perms: number; broken: boolean } {
-  const cfg = parseBotConfig(bot.config ?? null)
-  if (!cfg) return { commands: 0, events: 0, perms: bot.perms ?? 0, broken: true }
+  const perms = bot.perms ?? 0
+  // Bot recém-criado tem config vazia (ou nenhuma): isso é "sem comandos",
+  // não "config quebrada". Só o JSON gravado e ilegível conta como inválido.
+  const raw = bot.config ?? ''
+  if (!raw.trim()) return { commands: 0, events: 0, perms, broken: false }
+  const cfg = parseBotConfig(raw)
+  if (!cfg) return { commands: 0, events: 0, perms, broken: true }
   return {
     commands: cfg.commands.length,
     events: cfg.events.length,
-    perms: bot.perms ?? 0,
+    perms,
     broken: false,
   }
 }

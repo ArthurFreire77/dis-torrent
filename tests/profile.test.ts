@@ -31,22 +31,12 @@ describe('avatar cache', () => {
     assert.ok(AVATAR_MAX_BYTES <= 100_000)
   })
   it('avatar + capa cabem no frame do P2P (senão a foto nunca chega)', () => {
-    // O core tem PROFILE_IMG_B64_MAX=80_000 e PROFILE_BANNER_B64_MAX=110_000.
-    // Estes limites falham ALTO se alguém aumentar a compressão sem revisar o
-    // transporte: avatares acima disso eram cortados/evictados no relay e o
-    // destinatário nunca via a foto.
     const b64 = (bytes: number) => Math.ceil(bytes / 3) * 4
     assert.ok(b64(AVATAR_MAX_BYTES) <= 80_000, 'avatar base64 acima do teto do core')
     assert.ok(b64(BANNER_MAX_BYTES) <= 110_000, 'capa base64 acima do teto do core')
-    // Soma dos dois (pior caso de um ProfileSet) com folga no frame de 1 MiB.
     assert.ok(b64(AVATAR_MAX_BYTES) + b64(BANNER_MAX_BYTES) < 200_000)
   })
 })
-
-// ============ REVISÃO E SINCRONIZAÇÃO DE PERFIL ============
-// Cobre a política de conflito usada pelo core (social.rs) e pelo mock do
-// navegador: revisão maior vence, versão antiga é descartada, conteúdo igual
-// não gera trabalho e edições concorrentes convergem sem depender do relógio.
 
 describe('perfil: hash de conteúdo', () => {
   it('é determinístico e estável para os mesmos campos', () => {
@@ -66,7 +56,6 @@ describe('perfil: hash de conteúdo', () => {
   })
 
   it('não colide com a concatenação ingênua dos campos', () => {
-    // "ab"+"c" e "a"+"bc" precisam ser perfis DIFERENTES.
     const a = profileContentHash({ display_name: 'ab', about: 'c', avatar_b64: '', banner_b64: '', accent: '' })
     const b = profileContentHash({ display_name: 'a', about: 'bc', avatar_b64: '', banner_b64: '', accent: '' })
     assert.notEqual(a, b)

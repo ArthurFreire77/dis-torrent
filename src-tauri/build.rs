@@ -1,16 +1,4 @@
 fn main() {
-    // PLUGINS ANDROID PRÓPRIOS: precisam ser declarados no build para o Tauri
-    // gerar o manifesto ACL deles.
-    //
-    // Sem isto, `invoke('plugin:callfg|start')` e companhia são REJEITADOS
-    // antes de chegar ao Kotlin ("Command plugin:callfg|start not allowed by
-    // ACL") — e como o JS engole o erro, o sintoma é mudo: sem foreground
-    // service o Android 14+ corta microfone/câmera em segundo plano, o WebView
-    // é pausado e a sinalização de chamada congela. Era o "áudio não pega".
-    //
-    // A checagem é em RUNTIME de propósito: `#[cfg(target_os)]` dentro de um
-    // build script é avaliado para o HOST (Windows), não para o alvo Android —
-    // os plugins nunca eram declarados e o build seguia com o ACL vazio.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     #[allow(unused_mut)]

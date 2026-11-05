@@ -1,16 +1,3 @@
-// Dados e regras PURAS do assistente de criação de servidor.
-//
-// POR QUE FORA DO COMPONENTE: o wizard tinha 1191 linhas e misturava catálogo,
-// validação, criação e sete blocos de JSX. Aqui ficam só as decisões (o que é um
-// nome válido, quais canais o modelo traz, qual categoria um tipo de canal usa),
-// sem React e sem `services` — assim dá para testar em `node --test` e a tela
-// não precisa ser montada para provar que a regra está certa.
-//
-// REGRA QUE MUDOU (bug real): o limite do nome era `60` hardcoded aqui e
-// `64` no core (`names.rs`), com a checagem local inventando as próprias
-// mensagens. O resultado era servidor recusado pelo core depois de o wizard
-// dizer que estava tudo certo. Agora a validação é UMA: a do core.
-
 import type { ChannelMeta } from '../../services/models.ts'
 import { validateNameLocal } from '../../core/security/names.ts'
 import { CATEGORIAS_PADRAO, validateChannelName } from './channelRules.ts'
@@ -33,7 +20,6 @@ export interface RolePreset {
   hoist: boolean
   mentionable: boolean
   enabled: boolean
-  /** Uma linha explicando o que o cargo FAZ. É o que o resumo mostra. */
   why: string
 }
 
@@ -43,7 +29,6 @@ export interface IconCategory {
   desc: string
 }
 
-/** Limite do nome do servidor — o MESMO do core (`names::POLICY[Server]`). */
 export const LIMITE_NOME = 64
 export const LIMITE_REGRAS = 2000
 
@@ -68,11 +53,6 @@ export const KIND_OPCOES = (Object.keys(KIND_LABEL) as ChannelKind[]).map((k) =>
   label: KIND_LABEL[k],
 }))
 
-/**
- * Categorias de ícone. Substituem os oito emoji: cada uma tem nome e diz o que
- * costuma ser um servidor daquele tipo, que é a informação que o emoji tentava
- * dar de jeito.
- */
 export const ICON_CATEGORIES: IconCategory[] = [
   { id: 'server', label: 'Servidor', desc: 'Sem tema definido. Serve para qualquer coisa.' },
   { id: 'users', label: 'Comunidade', desc: 'Grupos de pessoas, eventos e bate-papo.' },
@@ -86,17 +66,11 @@ export const ICON_CATEGORIES: IconCategory[] = [
   { id: 'mic', label: 'Áudio', desc: 'Gravação, música, podcast e locução.' },
 ]
 
-/**
- * Modelos que PRÉ-PREENCHEM descrição, ícone e canais. Não pulam passo: a pessoa
- * pode ignorar e escrever tudo à mão. O modelo só oferece um ponto de partida
- * coerente — e nunca sobrescreve o nome, que é a única coisa que ela escreveu.
- */
 export const MODELOS: {
   id: string
   label: string
   desc: string
   icon: IconName
-  /** Cor do "emoji" do molde (fundo do quadradinho, como no Discord). */
   tint: string
   description: string
   channels: { name: string; kind: ChannelKind }[]
@@ -166,10 +140,6 @@ export function initialChannels(): WizardChannel[] {
   return [{ name: 'geral', kind: 'text', category: categoryFor('text') }]
 }
 
-/**
- * Bot inicial do assistente — começa desligado (a pessoa escolhe em "Adicionar
- * bot" se quer um). Mantido fora do componente para o estado ser previsível.
- */
 export function novoBotWizardModel(): { name: string; roleId: string | null; template: 'vazio' | 'clima' } {
   return { name: 'Bot', roleId: null, template: 'vazio' }
 }
@@ -213,6 +183,7 @@ export function initialRoles(): RolePreset[] {
   ]
 }
 
+// Seção 1: slugChannel
 export function slugChannel(v: string): string {
   return v
     .trim()
@@ -223,7 +194,6 @@ export function slugChannel(v: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-/** Canais como `ChannelMeta` — o que `validateChannelName` espera. */
 export function channelsAsMeta(channels: WizardChannel[]): ChannelMeta[] {
   return channels.map((c, i) => ({
     id: String(i),
@@ -234,7 +204,6 @@ export function channelsAsMeta(channels: WizardChannel[]): ChannelMeta[] {
   }))
 }
 
-/** Erro por canal, no mesmo índice. `null` = válido. */
 export function channelErrorsOf(channels: WizardChannel[]): (string | null)[] {
   const meta = channelsAsMeta(channels)
   return channels.map((c, i) => validateChannelName(c.name, meta, String(i)))
@@ -243,22 +212,9 @@ export function channelErrorsOf(channels: WizardChannel[]): (string | null)[] {
 export interface NameCheck {
   error: string | null
   warning: string | null
-  /** Nome já normalizado pelo core (o que será gravado). */
   normalized: string
 }
 
-/**
- * Validação do nome do servidor em tempo real.
- *
- * Delega para `validateNameLocal` — o MESMO espelho do core que o resto do app
- * usa (`user`/`server`/`channel`, skeletons anti-homoglifo, reservados e nomes
- * bloqueados). Antes o wizard tinha um `checkName` próprio com limite 60 e sem
- * nenhuma dessas regras: o core recusava depois e o erro aparecia como falha
- * genérica.
- *
- * O aviso "isso parece nome de pessoa" continua aqui porque é conselho de
- * produto, não regra de validação — o core não tem como saber.
- */
 export function checkServerName(raw: string, existing: string[] = []): NameCheck {
   const trimmed = raw.trim()
   if (!trimmed) return { error: null, warning: null, normalized: '' }
@@ -279,12 +235,6 @@ export function checkServerName(raw: string, existing: string[] = []): NameCheck
 export const AVISO_NOME_PESSOA =
   'Isso parece o nome de uma pessoa. Se for, considere um tema: é mais fácil achar o servidor depois e o nome não fica ambíguo no rail.'
 
-/**
- * Heurística de "nome de pessoa": UMA palavra, sem dígito, capitalizada,
- * comprimento de nome de gente. Deliberadamente rasa — o custo de um falso
- * positivo é um aviso que a pessoa ignora; o custo de um falso negativo é o
- * servidor chamado "Arthur" para sempre.
- */
 export function pareceNomeDePessoa(nome: string): boolean {
   if (/\s/.test(nome)) return false
   if (/\d/.test(nome)) return false

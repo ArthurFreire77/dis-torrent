@@ -1,19 +1,14 @@
-//! Rate limit específico para reações recebidas de peers autenticados.
-//!
-//! O limitador de frames protege o transporte; este módulo protege o estado
-//! social de rajadas de mudanças e do crescimento de mapas por IDs variados.
-
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-const PEER_RATE_PER_SEC: f64 = 1.0; // 10 ações/10s, com burst inicial de 5.
+const PEER_RATE_PER_SEC: f64 = 1.0;
 const PEER_BURST: f64 = 5.0;
-const CONVERSATION_RATE_PER_SEC: f64 = 3.0; // teto adicional por peer+conversa.
+const CONVERSATION_RATE_PER_SEC: f64 = 3.0;
 const CONVERSATION_BURST: f64 = 10.0;
-const MESSAGE_RATE_PER_SEC: f64 = 2.0; // no máximo 2 mudanças/s por peer+mensagem.
+const MESSAGE_RATE_PER_SEC: f64 = 2.0;
 const MESSAGE_BURST: f64 = 2.0;
-const GLOBAL_RATE_PER_SEC: f64 = 50.0; // 500 ações/10s somando todos os peers.
+const GLOBAL_RATE_PER_SEC: f64 = 50.0;
 const GLOBAL_BURST: f64 = 100.0;
 
 const PRUNE_INTERVAL: Duration = Duration::from_secs(10);
@@ -59,8 +54,6 @@ where
     K: Eq + Hash + Clone,
 {
     if !map.contains_key(&key) && map.len() >= cap {
-        // Evicta só a entrada mais antiga. Limpar o mapa inteiro faria um
-        // peer renovar o burst de todos os demais ao variar IDs de conversa.
         if let Some(oldest) = map
             .iter()
             .min_by_key(|(_, bucket)| bucket.last_seen)
@@ -72,9 +65,6 @@ where
     map.entry(key).or_insert_with(|| Bucket::full(burst, now))
 }
 
-/// Buckets separados por peer, conversa e mensagem. A identidade passada é
-/// sempre a do canal autenticado; o `reactor_fp` declarado pelo frame não é
-/// usado como chave de segurança.
 #[derive(Debug)]
 pub(crate) struct ReactionLimiter {
     global: Bucket,
@@ -99,8 +89,6 @@ impl ReactionLimiter {
         }
     }
 
-    /// `Err` significa descartar apenas esta reação. O chamador mantém a
-    /// sessão viva e não persiste, emite nem retransmite o frame rejeitado.
     pub(crate) fn allow_at(
         &mut self,
         peer_fp: &str,
@@ -114,9 +102,6 @@ impl ReactionLimiter {
         let conversation_key = (peer_fp.to_string(), conv_id.to_string());
         let message_key = (peer_fp.to_string(), conv_id.to_string(), msg_id.to_string());
 
-        // Primeiro atualiza todas as janelas. Tokens só são consumidos depois
-        // de todas passarem, para uma rejeição por conversa não gastar o bucket
-        // independente do peer.
         let peer_ok = {
             let bucket = bucket_for(
                 &mut self.peers,
@@ -178,6 +163,7 @@ impl ReactionLimiter {
         Ok(())
     }
 
+    // Seção 1: prune
     fn prune(&mut self, now: Instant) {
         if now.saturating_duration_since(self.last_prune) < PRUNE_INTERVAL {
             return;

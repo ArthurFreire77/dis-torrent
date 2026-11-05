@@ -14,41 +14,9 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 
-/**
- * Notificação de CHAMADA RECEBIDA estilo WhatsApp: aparece em cima de tudo
- * (full-screen intent) com os botões **Atender** e **Recusar**.
- *
- * ## Por que este plugin existe
- *
- * O `tauri-plugin-notification` cobre mensagem, mas é genérico: não cria
- * `setFullScreenIntent`, não tem botões de ação e não marca a categoria
- * `CALL`. O resultado era o que o usuário descrevia como "a notificação do
- * Android é uma merda": o aviso ficava na gaveta, sem botão e sem aparecer na
- * tela quando o aparelho estava bloqueado.
- *
- * ## O que é possível (sem mentir)
- *
- * - `setFullScreenIntent` abre a activity por cima da tela de bloqueio **se** o
- *   usuário deu a permissão de "exibir sobre outros apps"/notificações de
- *   chamada. Em ROMs recentes o Android pode mostrar só um banner — o botão
- *   **Atender** da notificação continua funcionando nesse caso.
- * - Atender/Recusar aqui só DISPARAM a intenção para o Activity (`ACTION`
- *   `distorrent.call.accept` / `.reject`), que repassa à WebView. Quem faz a
- *   sinalização é o `callManager` — nada de aceitar chamada pelas costas do JS
- *   (o SDP/ICE precisa da página viva).
- * - É um `BroadcastReceiver` registrado no manifesto: funciona com o app em
- *   segundo plano (que é justamente quando a notificação importa).
- */
 @TauriPlugin
 class CallNotificationPlugin(private val activity: android.app.Activity) : Plugin(activity) {
 
-  /**
-   * Intenção tocada com o app em SEGUNDO PLANO (activity viva).
-   *
-   * O `PluginManager.onNewIntent` chama isto em todo plugin; aqui a ação vira o
-   * evento `action`, que o frontend escuta com
-   * `addPluginListener('callnotif', 'action')`.
-   */
   override fun onNewIntent(intent: Intent) {
     val callId = intent.getStringExtra(EXTRA_CALL_ID) ?: return
     if (callId.isBlank()) return
@@ -98,13 +66,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
     }
   }
 
-  /**
-   * Drena a ação que chegou com o app FECHADO (boot a frio).
-   *
-   * Devolve `{ action, call_id }` uma única vez e limpa. O frontend chama ao
-   * montar o shell: sem isso, tocar em "Atender" com o processo morto só abria
-   * o app e a chamada seguia tocando sem ninguém aceitar.
-   */
   @Command
   fun pendingAction(invoke: Invoke) {
     try {
@@ -125,11 +86,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
     }
   }
 
-  /**
-   * Cria (idempotente) os canais. `distorrent_calls` tem importância MÁXIMA e
-   * som de toque: sem importância alta o Android não promove a notificação e
-   * o full-screen intent é ignorado.
-   */
   private fun createChannels() {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val mgr = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -142,8 +98,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
         description = "Chamadas de voz e vídeo — aparece sobre a tela de bloqueio"
         setShowBadge(true)
         enableVibration(true)
-        // Sem silenciar por padrão: chamada precisa tocar. O usuário muda isso
-        // nas configurações do sistema, como em qualquer discador.
         setBypassDnd(false)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
       }
@@ -165,7 +119,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
     val contentPi = PendingIntent.getActivity(
       activity, notificationIdFor("call:$callId"), open, piFlags,
     )
-    // TELA CHEIA: abre o app por cima do bloqueio quando o sistema permitir.
     val fullPi = PendingIntent.getActivity(
       activity,
       notificationIdFor("callfull:$callId"),
@@ -193,7 +146,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
       .addAction(action(android.R.drawable.ic_menu_call, "Atender", callId, ACTION_ACCEPT))
       .addAction(action(android.R.drawable.ic_menu_close_clear_cancel, "Recusar", callId, ACTION_REJECT))
 
-    // `setFullScreenIntent` só no Android 5+ (M já respeita bem; pre-M é raro).
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
       builder.setFullScreenIntent(fullPi, true)
     }
@@ -218,30 +170,18 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
     ).build()
   }
 
+  // Seção 1: applicationInfoCompatIcon
   private fun applicationInfoCompatIcon(): Int = activity.applicationInfo.icon
 
   companion object {
     const val CHANNEL_CALLS = "distorrent_calls"
     const val EXTRA_CALL_ID = "distorrent_call_id"
-    /** Ação do broadcast de "Atender" (recebida por [CallActionReceiver]). */
     const val ACTION_ACCEPT = "com.distorrent.app.CALL_ACCEPT"
-    /** Ação do broadcast de "Recusar". */
     const val ACTION_REJECT = "com.distorrent.app.CALL_REJECT"
 
-    /**
-     * Ação tocada ANTES de a WebView existir (boot a frio).
-     *
-     * Formato `"<call_id>|<accept|reject|open>"`. O frontend drena com
-     * `plugin:callnotif|pendingAction` ao montar; sem isso, atender pela
-     * notificação com o app morto abria o app e não fazia nada.
-     */
     @Volatile
     var pendingAction: String? = null
 
-    /**
-     * Mesmo id estável do Rust/JS (`notificationIdFor`): repetir a conta é o que
-     * faz a chamada repetida SUBSTITUIR o aviso em vez de empilhar dois.
-     */
     fun notificationIdFor(key: String): Int {
       var h = 5381
       for (b in key.toByteArray(Charsets.UTF_8)) {
@@ -253,13 +193,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
   }
 }
 
-/**
- * Recebe Atender/Recusar com o app em segundo plano e entrega a intenção ao
- * `MainActivity` (que a repassa à WebView).
- *
- * Não existe caminho "atender sem abrir o app": o WebRTC/`callManager` vive na
- * página. O receiver só traz o app à frente já com a ação escolhida.
- */
 class CallActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     val callId = intent.getStringExtra(CallNotificationPlugin.EXTRA_CALL_ID) ?: return

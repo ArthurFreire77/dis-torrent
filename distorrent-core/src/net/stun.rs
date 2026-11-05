@@ -1,7 +1,3 @@
-//! Cliente STUN mínimo (RFC 5389, só Binding) sobre UDP — descobre o IP
-//! público sob CGNAT. Best-effort (erro vira `None`); `DISTORRENT_STUN=0`
-//! desliga. Engine usa só o IP (a porta UDP não serve para furo TCP).
-
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
@@ -9,31 +5,21 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tracing::debug;
 
-/// Magic cookie do RFC 5389 (também usado no XOR dos endereços).
 const MAGIC_COOKIE: u32 = 0x2112_A442;
-/// Binding Request (0x0001).
 const MSG_BINDING_REQUEST: u16 = 0x0001;
-/// Binding Success Response (0x0101).
 const MSG_BINDING_SUCCESS: u16 = 0x0101;
-/// Atributo MAPPED-ADDRESS (RFC 3489, texto claro).
 const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
-/// Atributo XOR-MAPPED-ADDRESS (RFC 5389, ofuscado).
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
-/// Tamanho fixo do header STUN.
 const HEADER_LEN: usize = 20;
-/// Timeout por servidor (curto: não atrasa boot/anúncio).
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-/// TTL do cache — bom cidadão: não spammar os STUN públicos.
 const CACHE_TTL_MS: i64 = 60_000;
 
-/// Servidores públicos (raça em paralelo; vence o 1º que responder).
 const STUN_SERVERS: &[&str] = &[
     "stun.l.google.com:19302",
     "stun.cloudflare.com:3478",
     "stun1.l.google.com:19302",
 ];
 
-/// Kill-flag `DISTORRENT_STUN=0` (ou false/no/off) desliga. Default: ligado.
 fn stun_flag_value(v: Option<&str>) -> bool {
     match v {
         None => true,
@@ -55,23 +41,18 @@ fn random_txid() -> [u8; 12] {
     txid
 }
 
-/// Monta um Binding Request de 20 bytes (sem atributos).
 fn build_binding_request(txid: &[u8; 12]) -> [u8; HEADER_LEN] {
     let mut buf = [0u8; HEADER_LEN];
     buf[0..2].copy_from_slice(&MSG_BINDING_REQUEST.to_be_bytes());
-    // length = 0 (sem atributos)
     buf[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
     buf[8..20].copy_from_slice(txid);
     buf
 }
 
-/// Valida o header de uma Binding Success e devolve o corpo (atributos).
-/// Rejeita: curta, tipo errado, cookie errado, txid divergente ou length fora.
 fn parse_binding_success<'a>(buf: &'a [u8], expect_txid: &[u8; 12]) -> Option<&'a [u8]> {
     if buf.len() < HEADER_LEN {
         return None;
     }
-    // Os 2 bits altos do tipo são SEMPRE 0 (RFC 5389 §6).
     if buf[0] & 0xC0 != 0 {
         return None;
     }
@@ -80,7 +61,6 @@ fn parse_binding_success<'a>(buf: &'a [u8], expect_txid: &[u8; 12]) -> Option<&'
         return None;
     }
     let msg_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
-    // length é múltiplo de 4 e o buffer tem que conter o corpo inteiro.
     if msg_len % 4 != 0 {
         return None;
     }
@@ -97,7 +77,6 @@ fn parse_binding_success<'a>(buf: &'a [u8], expect_txid: &[u8; 12]) -> Option<&'
     Some(&buf[HEADER_LEN..end])
 }
 
-/// Formato MAPPED-ADDRESS: reservado(1), família(1), porta(2), endereço.
 fn parse_mapped_addr(value: &[u8]) -> Option<SocketAddr> {
     if value.len() < 4 {
         return None;
@@ -123,8 +102,6 @@ fn parse_mapped_addr(value: &[u8]) -> Option<SocketAddr> {
     }
 }
 
-/// Formato XOR-MAPPED-ADDRESS (RFC 5389 §15.2): porta ^ (cookie>>16) e
-/// endereço ^ máscara (cookie para IPv4; cookie||txid para IPv6).
 fn parse_xor_addr(value: &[u8], txid: &[u8; 12]) -> Option<SocketAddr> {
     if value.len() < 4 {
         return None;
@@ -143,7 +120,6 @@ fn parse_xor_addr(value: &[u8], txid: &[u8; 12]) -> Option<SocketAddr> {
             if value.len() < 20 {
                 return None;
             }
-            // máscara = magic cookie (4) || transaction id (12)
             let mut mask = [0u8; 16];
             mask[0..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
             mask[4..16].copy_from_slice(txid);
@@ -157,8 +133,6 @@ fn parse_xor_addr(value: &[u8], txid: &[u8; 12]) -> Option<SocketAddr> {
     }
 }
 
-/// Percorre os atributos e devolve o primeiro endereço. XOR-MAPPED-ADDRESS
-/// tem prioridade; MAPPED-ADDRESS fica como fallback. Nunca panica.
 fn parse_address_attrs(body: &[u8], txid: &[u8; 12]) -> Option<SocketAddr> {
     let mut mapped: Option<SocketAddr> = None;
     let mut i = 0usize;
@@ -184,12 +158,12 @@ fn parse_address_attrs(body: &[u8], txid: &[u8; 12]) -> Option<SocketAddr> {
             }
             _ => {}
         }
-        // atributos são alinhados a 4 bytes (padding).
         i = value_end + ((4 - (attr_len % 4)) % 4);
     }
     mapped
 }
 
+// Seção 1: Cache
 type Cache = StdMutex<Option<(Option<SocketAddr>, i64)>>;
 static STUN_CACHE: OnceLock<Cache> = OnceLock::new();
 
@@ -197,8 +171,6 @@ fn cache_cell() -> &'static Cache {
     STUN_CACHE.get_or_init(|| StdMutex::new(None))
 }
 
-/// Cache válido? `Some(inner)` = resposta cacheada (inner pode ser None numa
-/// falha recente — evita bombardear os servidores). `None` = expirado/ausente.
 fn cache_get() -> Option<Option<SocketAddr>> {
     let cell = cache_cell().lock().unwrap_or_else(|e| e.into_inner());
     match &*cell {
@@ -212,10 +184,8 @@ fn cache_put(addr: Option<SocketAddr>) {
         Some((addr, crate::identity::now_ms()));
 }
 
-/// Consulta UM servidor e devolve o endereço mapeado.
 async fn query_one(server: &str) -> Option<SocketAddr> {
     let addrs = tokio::net::lookup_host(server).await.ok()?;
-    // Prefere IPv4 (rota mais previsível); aceita IPv6 se for só o que houver.
     let mut target: Option<SocketAddr> = None;
     for a in addrs {
         if a.is_ipv4() {
@@ -247,7 +217,6 @@ async fn query_one(server: &str) -> Option<SocketAddr> {
     Some(addr)
 }
 
-/// Raça todos os servidores; devolve o 1º que responder e aborta o resto.
 async fn race_servers() -> Option<SocketAddr> {
     let mut set = tokio::task::JoinSet::new();
     for server in STUN_SERVERS {
@@ -263,9 +232,6 @@ async fn race_servers() -> Option<SocketAddr> {
     None
 }
 
-/// Endpoint público (ip:porta) do nosso NAT, com cache de ~60s. Raça alguns
-/// servidores públicos e devolve o primeiro que responder. `None` se estiver
-/// desligado (`DISTORRENT_STUN=0`), todos falharem ou tudo expirar.
 pub async fn stun_external_addr() -> Option<SocketAddr> {
     if !stun_enabled() {
         return None;
@@ -282,7 +248,6 @@ pub async fn stun_external_addr() -> Option<SocketAddr> {
 mod tests {
     use super::*;
 
-    /// Monta uma Binding Success sintética com UM atributo (sem rede).
     fn build_response(txid: &[u8; 12], attr_type: u16, attr_value: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(&MSG_BINDING_SUCCESS.to_be_bytes());
@@ -312,7 +277,7 @@ mod tests {
         let req = build_binding_request(&txid);
         assert_eq!(req.len(), 20);
         assert_eq!(u16::from_be_bytes([req[0], req[1]]), MSG_BINDING_REQUEST);
-        assert_eq!(u16::from_be_bytes([req[2], req[3]]), 0); // sem atributos
+        assert_eq!(u16::from_be_bytes([req[2], req[3]]), 0);
         assert_eq!(&req[4..8], &MAGIC_COOKIE.to_be_bytes());
         assert_eq!(&req[8..20], &txid);
     }
@@ -363,25 +328,21 @@ mod tests {
     }
 
     #[test]
+    // Seção 2: parse_rejeita_resposta_invalida
     fn parse_rejeita_resposta_invalida() {
         let txid = [0x01u8; 12];
         let value = xor_value_v4(Ipv4Addr::new(1, 2, 3, 4), 100);
         let resp = build_response(&txid, ATTR_XOR_MAPPED_ADDRESS, &value);
 
-        // txid diferente → rejeita
         assert!(parse_binding_success(&resp, &[0xFFu8; 12]).is_none());
-        // curta → rejeita (não panica)
         assert!(parse_binding_success(&[], &txid).is_none());
         assert!(parse_binding_success(&resp[..10], &txid).is_none());
-        // tipo errado (request) → rejeita
         let mut wrong = resp.clone();
         wrong[0..2].copy_from_slice(&MSG_BINDING_REQUEST.to_be_bytes());
         assert!(parse_binding_success(&wrong, &txid).is_none());
-        // cookie errado → rejeita
         let mut bad_cookie = resp.clone();
         bad_cookie[4..8].copy_from_slice(&0u32.to_be_bytes());
         assert!(parse_binding_success(&bad_cookie, &txid).is_none());
-        // length que estoura o buffer → rejeita
         let mut bad_len = resp.clone();
         bad_len[2..4].copy_from_slice(&500u16.to_be_bytes());
         assert!(parse_binding_success(&bad_len, &txid).is_none());
@@ -389,7 +350,6 @@ mod tests {
 
     #[test]
     fn parse_atributo_truncado_nao_panica() {
-        // Atributo declara 8 bytes mas só há 2 → devolve None, sem panic.
         let txid = [0x09u8; 12];
         let mut body = Vec::new();
         body.extend_from_slice(&ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());

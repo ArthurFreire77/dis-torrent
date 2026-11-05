@@ -1,6 +1,3 @@
-// Online HONESTO: link vivo na memória não pode virar bolinha verde se o
-// outro lado parou de responder. `peer_state` cai para Reconnecting quando o
-// último frame recebido passou da janela de heartbeat.
 use super::*;
 use crate::storage::Store;
 use std::sync::Arc;
@@ -15,8 +12,6 @@ fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
 
 #[test]
 fn sem_frame_recebido_o_peer_conta_como_vivo() {
-    // Sessão recém-criada: o primeiro frame pode estar a caminho. Não pode
-    // piscar "reconectando" na UI antes de dar chance ao handshake.
     let (e, _d) = mk_engine("vida-novo");
     assert!(e.peer_alive("peer-sem-diag"));
 }
@@ -39,10 +34,6 @@ fn peer_sem_link_nao_e_conectado() {
     assert_eq!(e.peer_state("ninguem"), NetworkState::Disconnected);
 }
 
-/// LINK MEIO-VIVO: Ping/Pong mantém a sessão `Online`, mas nenhum `Ack` volta e
-/// há mensagem nossa presa. O reaper precisa derrubar a sessão — sem isto o
-/// outbox reenvia para o mesmo caminho morto até estourar o orçamento (o
-/// relato "aparece online mas a mensagem fica no relógio").
 #[test]
 fn link_online_sem_ack_com_outbox_preso_e_derrubado() {
     let (e, _d) = mk_engine("vida-meio-aberto");
@@ -58,7 +49,6 @@ fn link_online_sem_ack_com_outbox_preso_e_derrubado() {
     });
     e.links.lock().unwrap().insert(peer.to_string(), link);
 
-    // Ping recente (a bolinha verde continua) e Ack velho (dado não volta).
     let velho = agora - 600_000;
     e.diag_update(peer, |d| {
         d.last_rx_ms = agora;
@@ -76,19 +66,15 @@ fn link_online_sem_ack_com_outbox_preso_e_derrubado() {
 
     e.reap_half_open_links();
 
-    // Saiu do mapa (ou virou Reconnecting): o maintain rediala.
     let estado = e.links.lock().unwrap().get(peer).map(|l| l.get_state());
     assert_ne!(
         estado,
         Some(PeerLinkState::Online),
         "link sem confirmação de dados não pode continuar Online"
     );
-    // A mensagem continua na fila: será reenviada na sessão nova.
     assert_eq!(e.store.outbox_len_for_peer(peer), 1);
 }
 
-/// Sem mensagem presa o link ocioso (sem Ack nunca) NÃO pode ser derrubado —
-/// senão todo contato logado entraria em churn de reconexão.
 #[test]
 fn link_ocioso_sem_ack_nao_e_derrubado() {
     let (e, _d) = mk_engine("vida-ocioso");
@@ -102,7 +88,7 @@ fn link_ocioso_sem_ack_nao_e_derrubado() {
     });
     e.links.lock().unwrap().insert(peer.to_string(), link);
     e.diag_update(peer, |d| {
-        d.last_rx_ms = 1; // vida vinda de ping, muito antiga
+        d.last_rx_ms = 1;
         d.last_ack_ms = 0;
     });
 
@@ -112,9 +98,6 @@ fn link_ocioso_sem_ack_nao_e_derrubado() {
     assert_eq!(estado, Some(PeerLinkState::Online));
 }
 
-/// Sessão recém-criada com outbox presa: `last_ack`/`last_rx` zerados não
-/// podem ser lidos como "2 minutos sem Ack" (subtração de zero). Já houve um
-/// descarte imediato do link por causa disso.
 #[test]
 fn sessao_nova_com_outbox_nao_e_derrubada_na_hora() {
     let (e, _d) = mk_engine("vida-nova-outbox");

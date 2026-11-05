@@ -976,6 +976,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "if-addrs",
  "igd",
  "image",
  "jpeg-encoder",

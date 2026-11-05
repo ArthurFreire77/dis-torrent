@@ -1,11 +1,3 @@
-// Tema, presença e formatação de tempo da camada social.
-//
-// Extraído de `Social.tsx` (que tinha 1508 linhas e 27 exports) por
-// `scripts/split-social.mjs`. O conteúdo é o MESMO — a divisão é só de
-// responsabilidade: um arquivo por assunto, para achar e revisar sem rolar
-// 1,5 mil linhas. `Social.tsx` continua reexportando tudo, então nenhum
-// importador precisou mudar.
-
 import type { PresenceStatus, ProfileView } from '../../services/models'
 
 export const T = {
@@ -63,12 +55,3 @@ export function displayNameOf(
   if (nickname) return nickname
   return profiles[fp]?.display_name || nickname || fp
 }
-
-// ======================= TEXTO RICO (markdown Discord) =======================
-
-/**
- * Renderiza markdown no estilo Discord: negrito, itálico, tachado, spoiler
- * (||...||), código inline, bloco de código com highlighting de linguagem,
- * citação, títulos, links, menções e shortcodes :emoji:.
- * Destaca `highlight` (usado pela busca).
- */

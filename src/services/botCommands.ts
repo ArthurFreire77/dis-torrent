@@ -332,13 +332,15 @@ export function defaultBotConfig(): BotConfig {
 
 /**
  * Lê a config de `bots.config`. Devolve `null` só quando o texto não é JSON
- * objeto; campos desconhecidos são descartados (como no core).
+ * objeto; campos desconhecidos são descartados (como no core). Texto vazio é
+ * config padrão: é o que o bot recém-criado tem, e o core aceita igual.
  */
 export function parseBotConfig(raw: unknown): BotConfig | null {
-  if (!raw) return null
+  if (raw === null || raw === undefined) return null
   let obj: any
   if (typeof raw === 'string') {
-    if (!raw.trim() || raw.length > BOT_CONFIG_MAX_JSON) return null
+    if (!raw.trim()) return defaultBotConfig()
+    if (raw.length > BOT_CONFIG_MAX_JSON) return null
     try {
       obj = JSON.parse(raw)
     } catch {

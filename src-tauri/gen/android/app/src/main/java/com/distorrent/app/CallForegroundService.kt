@@ -11,48 +11,15 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 
-/**
- * Serviço em primeiro plano de CHAMADA (Android 14+).
- *
- * ## Por que existe
- *
- * O frontend já chamava `plugin:callfg|start` em `callManager.startCallForeground`
- * (início da chamada, aceite, entrada em canal de voz), mas o plugin Kotlin
- * tinha sido removido porque a versão anterior não compilava — ou seja, o
- * WebView pedia um serviço que não existia e o `invoke` falhava em silêncio.
- *
- * Sem um foreground service, o Android 14+ **corta microfone e câmera** assim
- * que o app sai da tela ("while-in-use permissions") e pode matar o processo
- * da chamada. Com ele, a chamada continua com o app em segundo plano, e o
- * usuário vê uma notificação permanente (é o preço honesto de manter o mic
- * aberto — nada de esconder isso).
- *
- * ## O que NÃO faz
- *
- * - Não é serviço de mensagens: o motor P2P vive no processo do app; um FGS
- *   `dataSync` permanente para "ficar online" seria justamente o tipo de uso
- *   que o Android restringe (e que a Play policy proíbe sem necessidade).
- * - Não pede permissão de runtime: mic/câmera são pedidos pelo WebView no
- *   momento da chamada; aqui só declaramos o TIPO do serviço em uso.
- */
 class CallForegroundService : Service() {
 
   override fun onBind(intent: Intent?): IBinder? = null
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     try {
-      // `createChannel()` e `buildNotification()` ficavam FORA do try. Uma
-      // exceção em qualquer um dos dois (ROMs que recusam ícone adaptativo no
-      // `setSmallIcon`, por exemplo) estourava dentro de
-      // `Service.onStartCommand` e derrubava o APP no instante em que a
-      // chamada começava — sem log útil e sem relação aparente com voz.
       createChannel()
       val notification = buildNotification()
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        // MICROFONE sempre; CÂMERA só com a permissão concedida. O manifesto
-        // declara `microphone|camera`, e pedir o tipo `camera` sem `CAMERA`
-        // concedida lança SecurityException (o serviço pararia e a chamada de
-        // vídeo perderia a câmera ao minimizar, sem aviso).
         var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         if (hasCameraPermission()) {
           types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
@@ -62,27 +29,18 @@ class CallForegroundService : Service() {
         startForeground(NOTIFICATION_ID, notification)
       }
       isRunning = true
-      // Só depois de o serviço subir: o roteamento de chamada exige o FGS ativo.
       applyAudioRouting()
     } catch (e: Throwable) {
-      // Sem permissão de mic declarada/concedida o Android recusa o tipo —
-      // melhor parar do que ficar num estado que promete algo que não existe.
       android.util.Log.w("distorrentCallFg", "startForeground recusado: ${e.message}")
       isRunning = false
       stopSelf()
       return START_NOT_STICKY
     }
-    // START_NOT_STICKY: se o processo morrer, NÃO ressuscita um serviço de
-    // chamada fantasma (não existe chamada para manter). Quem chamar de novo
-    // inicia de novo.
     return START_NOT_STICKY
   }
 
   override fun onDestroy() {
     isRunning = false
-    // Devolve o roteamento de áudio ao normal. Sem isto, o aparelho ficava em
-    // modo de comunicação depois da chamada (som de mídia saindo pelo fone do
-    // ouvido e volume preso).
     try { restoreAudioRouting() } catch (_: Throwable) { }
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -100,28 +58,15 @@ class CallForegroundService : Service() {
       android.content.pm.PackageManager.PERMISSION_GRANTED
   }
 
-  /**
-   * Roteia o áudio para CHAMADA enquanto o serviço está vivo.
-   *
-   * POR QUE ISTO EXISTE: sem `MODE_IN_COMMUNICATION` o Android não aplica o
-   * volume de chamada nem o cancelador de eco, e em vários aparelhos o som não
-   * sai (o "conectou e ficou mudo"). O WebView não faz esse ajuste por nós.
-   *
-   * NÃO forçamos viva-voz: com fone com fio ou Bluetooth conectado isso jogava
-   * o som no alto-falante ("não sai no fone"). O Android escolhe a rota
-   * sozinho entre os dispositivos disponíveis.
-   */
   private fun applyAudioRouting() {
     try {
       val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
       am.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
       audioApplied = true
-    } catch (_: Throwable) { /* ROM sem AudioManager: o WebView segue no padrão */ }
+    } catch (_: Throwable) {  }
   }
 
   private fun restoreAudioRouting() {
-    // Só restaura o que alteramos: clobber do modo em ROM que nunca aplicou
-    // deixava o aparelho preso em modo de chamada depois de um crash.
     if (!audioApplied) return
     audioApplied = false
     try {
@@ -136,7 +81,7 @@ class CallForegroundService : Service() {
     val channel = NotificationChannel(
       CHANNEL_ID,
       "Chamada em andamento",
-      NotificationManager.IMPORTANCE_LOW, // sem som: é estado, não aviso
+      NotificationManager.IMPORTANCE_LOW,
     ).apply {
       description = "Mostra que o microfone está em uso por uma chamada do DisTorrent"
       setShowBadge(false)
@@ -174,11 +119,9 @@ class CallForegroundService : Service() {
   companion object {
     const val CHANNEL_ID = "distorrent_call"
     const val NOTIFICATION_ID = 4711
-    /** Visível para `MainActivity`: há chamada ativa (ver `onPause`). */
     @Volatile
     var isRunning: Boolean = false
       private set
-    /** O modo de áudio foi realmente alterado? (não restaurar o que não mexemos) */
     @Volatile
     private var audioApplied: Boolean = false
   }

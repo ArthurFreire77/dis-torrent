@@ -1,8 +1,3 @@
-// Validação de nomes (usuário/servidor/canal) — espelho TS do CORE.
-// Feedback em tempo real na UI; o Rust re-valida antes de persistir.
-
-// Extensão `.ts` explícita: `node --experimental-strip-types` (a suíte de unit)
-// não resolve especificador sem extensão. Era o que impedia testar `names.ts`.
 import { sanitizeText } from './sanitize.ts'
 
 export type NameKind = 'user' | 'server' | 'channel'
@@ -40,7 +35,6 @@ const LEET: Record<string, string> = {
   '5': 's', '$': 's', '7': 't', '8': 'b', '9': 'g', '€': 'e', '£': 'l',
 }
 
-/** Skeleton anti-homoglifo: minúsculas, sem diacríticos, leet resolvido. */
 export function skeleton(name: string): string {
   let s: string
   try {
@@ -55,7 +49,6 @@ export function skeleton(name: string): string {
       out += LEET[c]
       continue
     }
-    // cirílico/grego visualmente idênticos ao latim
     const hom: Record<string, string> = {
       а: 'a', е: 'e', і: 'i', о: 'o', с: 'c', м: 'm', т: 't', х: 'x',
       ѕ: 's', ρ: 'p', κ: 'k', η: 'n', ο: 'o',
@@ -69,7 +62,6 @@ export function skeleton(name: string): string {
     if (c === 'œ') { out += 'oe'; continue }
     if (/[\s_\-.]/.test(c)) continue
     if (/[a-z0-9]/.test(c)) { out += c; continue }
-    // resto (emoji, CJK, símbolos) cai fora do skeleton
   }
   return out
 }

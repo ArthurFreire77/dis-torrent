@@ -1,24 +1,14 @@
-// Seção recolhível + "ver mais" — anti-poluição de tela (pedido do dono):
-// listas longas não despejam tudo de uma vez; cada bloco tem cabeçalho
-// clicável (recolhe/expande) e, quando passa do limite, um botão "ver mais".
-
 import { Children, ReactNode, useState } from 'react'
 import { Icon, Icons } from './icons'
 
 export interface SectionProps {
   title: ReactNode
-  /** aberta por padrão? (default: true) */
   defaultOpen?: boolean
-  /** quantos itens mostrar antes do "ver mais" (0 = sempre tudo) */
   maxVisible?: number
-  /** recolhida ocupa menos espaço? (oculta o corpo inteiro) */
   collapsible?: boolean
-  /** escondido atrás de "ver mais" (contagem opcional) */
   hiddenCount?: number
   children: ReactNode
-  /** estilos do shell (desktop usa paleta própria, mobile a `T`) */
   variant: 'desktop' | 'mobile'
-  /** conteúdo extra à direita do título (badge, botão "+") */
   actions?: ReactNode
 }
 

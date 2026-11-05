@@ -2,7 +2,7 @@ import type { UserIdentity } from '../identity/identity'
 import type { StorageDriver } from './driver'
 
 const KEY_ID = 'identity'
-const KEY_PRIV = 'identity:priv' // separado, nunca exposto para UI diretamente
+const KEY_PRIV = 'identity:priv'
 
 export class IdentityStore {
   constructor(private driver: StorageDriver) {}

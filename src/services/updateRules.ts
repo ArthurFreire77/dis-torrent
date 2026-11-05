@@ -1,49 +1,31 @@
-// REGRAS PURAS DA ATUALIZAÇÃO (sem imports de runtime/Tauri/rede/disco).
-// Separado de `updater.ts` para ser importável (e testável) pelo unit em Node;
-// o Rust só busca/baixa — a decisão de versão mora aqui.
-
-// Formatação de bytes: uma implementação só (`shared/bytes.ts`).
 export { formatBytes } from '../shared/bytes.ts'
 
-/** Metadados devolvidos por `update_check` (Rust). */
 export interface UpdateInfo {
   current: string
   latest: string
   asset_name: string
   asset_size: number
   download_url: string
-  /** `sha256:<hex>` quando o GitHub informar; vazio quando não informar. */
   digest: string
   notes: string
   html_url: string
   platform: string
-  /** Asset cita versão diferente da tag (binário velho reaproveitado) — o cartão avisa. */
   label_mismatch?: boolean
-  /** Versão citada no nome do asset, quando ele cita alguma. */
   asset_version?: string
 }
 
 export interface ParsedVersion {
   nums: number[]
-  /** Sufixo de pré-release (`pre-alpha`, `alpha.2`); vazio em versão final. */
   pre: string
-  /** Tokens do sufixo (`['pre','alpha']`, `['alpha','2']`). */
   preTokens: string[]
 }
 
-/**
- * Lê uma versão no formato do projeto (`1.1.10-pre-alpha`, `v1.1.9`, `2.0`,
- * `1.2.1-alpha`, `1.2.1-pre-alpha`).
- * Cada componente numérico é comparado como NÚMERO — como string, "10" < "9".
- */
 export function parseVersion(raw: string): ParsedVersion {
   const s = String(raw ?? '').trim().replace(/^v/i, '')
-  /** Separa o núcleo numérico do sufixo: `1.1.10-pre-alpha` -> `1.1.10` + `pre-alpha`. */
   const [core, ...rest] = s.split('-')
   const nums = (core ?? '')
     .split('.')
     .map((p) => {
-      // `10a` -> 10: build do Tauri às vezes anexa letra no patch.
       const m = /^\d+/.exec(p.trim())
       return m ? Number(m[0]) : 0
     })
@@ -52,10 +34,6 @@ export function parseVersion(raw: string): ParsedVersion {
   return { nums, pre, preTokens: pre ? pre.split(/[-.]/).filter(Boolean) : [] }
 }
 
-/**
- * Peso do rótulo de pré-release. `pre-alpha` vem ANTES de `alpha`, que vem
- * antes de `beta`/`rc`; desconhecido fica no meio para não inventar ordem.
- */
 const PRE_RANK: Record<string, number> = {
   pre: 0,
   alpha: 1,
@@ -74,19 +52,6 @@ function rankOf(tokens: string[]): number {
   return 2
 }
 
-/**
- * Compara duas versões (`> 0` = `a` mais nova).
- *
- * 1) Núcleo numérico sempre; `1.1.10 > 1.1.9`.
- * 2) Sufixo SÓ quando OS DOIS têm sufixo. Nunca comparar sufixo contra ausência:
- *    a tag é limpa (`v1.1.23`) e o app reporta `1.1.23-pre-alpha`; tratar
- *    ausência como "final" fazia o app baixar o mesmo instalador para sempre
- *    (bug real: `stalled` a cada boot).
- * 3) Com os dois sufixados, a ordem é `pre-alpha < alpha < beta < rc` e, dentro
- *    do mesmo rótulo, o número decide (`alpha.2 > alpha.10` como número).
- *
- * As duas pontas (este arquivo e `updater.rs`) PRECISAM concordar.
- */
 export function compareVersions(a: string, b: string): number {
   const pa = parseVersion(a)
   const pb = parseVersion(b)
@@ -96,13 +61,11 @@ export function compareVersions(a: string, b: string): number {
     const nb = pb.nums[i] ?? 0
     if (na !== nb) return na > nb ? 1 : -1
   }
-  // Mesmo núcleo: só compara sufixos quando ambos existem (ver item 2 acima).
   if (!pa.pre || !pb.pre) return 0
   if (pa.pre === pb.pre) return 0
   const ra = rankOf(pa.preTokens)
   const rb = rankOf(pb.preTokens)
   if (ra !== rb) return ra > rb ? 1 : -1
-  // Mesmo rótulo: compara os números (alpha.2 vs alpha.10).
   const na = pa.preTokens.filter((t) => /^\d+$/.test(t)).map(Number)
   const nb = pb.preTokens.filter((t) => /^\d+$/.test(t)).map(Number)
   const n = Math.max(na.length, nb.length)
@@ -114,12 +77,10 @@ export function compareVersions(a: string, b: string): number {
   return 0
 }
 
-/** Existe versão mais nova publicada? */
 export function isNewer(current: string, latest: string): boolean {
   return compareVersions(latest, current) > 0
 }
 
-/** Só as N primeiras linhas das notas: o overlay não vira parede de texto. */
 export function shortNotes(notes: string, maxLines = 6): string {
   const lines = String(notes ?? '')
     .split('\n')
@@ -128,36 +89,17 @@ export function shortNotes(notes: string, maxLines = 6): string {
   return lines.slice(0, maxLines).join('\n')
 }
 
-/**
- * Como o update é aplicado: `auto` (Windows, executa o instalador), `manual`
- * (Linux/Android exigem confirmação do usuário) ou `link` (sem instalador).
- */
 export type UpdateMode = 'auto' | 'manual' | 'link'
 
-/**
- * Como o update é aplicado: `auto` (a versão nova entra e o app reabre sozinho),
- * `manual` (o instalador do sistema abre e o usuário confirma) ou `link`.
- *
- * O que dá para automatizar de verdade:
- * - Windows: Inno ` /SILENT` + reinício — automático de fato.
- * - Linux: depende do formato. AppImage é um arquivo só, então o Rust copia por
- *   cima e reexecuta (`auto`). `.deb` exige root (`dpkg -i`) ou um prompt de
- *   senha (pkexec), que não é automático — segue `manual`.
- * - Android: o sistema exige o toque de confirmação para instalar APK fora da
- *   loja. Não há como contornar sem root; prometer `auto` seria mentira.
- */
 export function updateModeFor(platform: string, assetName = ''): UpdateMode {
   if (platform === 'windows') return 'auto'
-  // Linux: só o AppImage se substitui sozinho; o .deb abre no instalador.
   if (platform === 'linux') {
     return /\.appimage$/i.test(assetName) ? 'auto' : 'manual'
   }
-  // Android: o Rust baixa o APK e o plugin nativo abre o instalador.
   if (platform === 'android') return 'manual'
   return 'link'
 }
 
-/** Resultado do fluxo, para a UI decidir o que fazer depois. */
 export type UpdateOutcome =
   | { kind: 'none' }
   | { kind: 'later'; info: UpdateInfo }
@@ -166,34 +108,19 @@ export type UpdateOutcome =
   | { kind: 'error'; message: string }
 
 export interface UpdateDeps {
-  /** `null` = build de navegador (não há instalador para baixar). */
   check: () => Promise<UpdateInfo>
   download: (info: UpdateInfo) => Promise<string>
   apply: (path: string) => Promise<void>
   quit: () => Promise<void>
-  /** Guarda "pulei esta versão" / "essa falhou" / "essa eu já instalei". */
   getFlag: (key: string) => Promise<string | null>
   setFlag: (key: string, value: string) => Promise<void>
 }
 
 export const FLAG_SKIP = 'update.skip'
 export const FLAG_FAILED = 'update.failed'
-/**
- * Versão que este app JÁ instalou e continuou rodando a antiga — freio do loop
- * "atualiza → fecha → abre → atualiza de novo" com instalador rotulado errado.
- */
 export const FLAG_APPLIED = 'update.applied'
-/**
- * Validade de uma falha de update. Passado isso, a versão é tentada de novo:
- * a causa costuma ser temporária (rede, disco, UAC negado sem querer) e o app
- * não pode ficar preso numa versão antiga para sempre.
- */
 export const FAILED_TTL_MS = 6 * 60 * 60 * 1000
 
-/**
- * `true` quando a marca de falha expirou (ou nem tem instante — marca antiga,
- * gravada antes do formato `versao|instante`).
- */
 export function falhaExpirada(marca: string | null, nowMs = Date.now()): boolean {
   if (!marca) return true
   const i = marca.lastIndexOf('|')
@@ -202,18 +129,8 @@ export function falhaExpirada(marca: string | null, nowMs = Date.now()): boolean
   if (!Number.isFinite(ts) || ts <= 0) return true
   return nowMs - ts >= FAILED_TTL_MS
 }
-/**
- * Sinal do Rust de que o AppImage já foi substituído e reaberto: não é erro,
- * é o gatilho para encerrar esta cópia antiga.
- */
 export const REINICIAR_SINAL = 'ATUALIZADO_E_REINICIADO'
 
-/**
- * Fluxo completo, sem UI: verifica, decide, baixa, confere e aplica.
- * Garante: falha de rede não bloqueia; versão pulada não volta; versão que
- * falhou vira `later` (não loop); instalada sem efeito vira `stalled`; hash
- * sempre conferido antes de aplicar.
- */
 export async function runUpdateFlow(
   deps: UpdateDeps,
   opts: { autoApply: boolean },
@@ -229,82 +146,48 @@ export async function runUpdateFlow(
   if ((await deps.getFlag(FLAG_SKIP)) === info.latest) return { kind: 'none' }
 
   const mode = updateModeFor(info.platform, info.asset_name)
-  // `link` só quando a plataforma não sabe instalar sozinha (macOS).
   if (mode === 'link') return { kind: 'later', info }
 
-  // FREIO DO LOOP: versão já instalada sem efeito — instalar de novo repete o resultado.
-  //
-  // BUG REAL (o app parou de se atualizar sozinho): a marca era gravada ANTES
-  // de rodar o instalador e NUNCA era limpa quando a versão nova finalmente
-  // entrava. Quem estava na 1.1.43, instalou a 1.1.44 e subiu para ela ficava
-  // com `update.applied = 1.1.44` para sempre — e aí TODA checagem seguinte
-  // (inclusive a da 1.1.45) caía aqui e virava `stalled`. O app ficou congelado
-  // na versão instalada, sem nunca mais oferecer nada.
-  //
-  // A regra certa é comparar com a versão que está RODANDO: se o app já está
-  // na versão marcada (ou acima), o update funcionou — a marca é lixo e sai.
-  // Só é "stalled" quando a marca é de uma versão À FRENTE da que roda (o
-  // instalador rodou e a cópia antiga continuou viva).
   const appliedFlag = await deps.getFlag(FLAG_APPLIED)
   const alreadyApplied = !!appliedFlag && appliedFlag === info.latest
   if (alreadyApplied) {
     if (compareVersions(info.current, appliedFlag) >= 0) {
-      // Entrou de verdade: limpa o freio e segue (pode haver versão mais nova).
       await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
     } else {
       return { kind: 'stalled', info }
     }
   }
-  // Marca antiga de OUTRA versão (nem a atual nem a oferecida): também é lixo.
   if (appliedFlag && appliedFlag !== info.latest && compareVersions(info.current, appliedFlag) >= 0) {
     await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
   }
 
   const failedFlag = (await deps.getFlag(FLAG_FAILED)) ?? ''
-  // FALHA TEM VALIDADE, NÃO É PARA SEMPRE.
-  //
-  // BUG REAL: uma falha (rede caindo no meio, disco cheio, instalador recusado)
-  // marcava a versão como falhada e o app NUNCA mais tentava aquela versão —
-  // ficava parado até sair outra. Agora a marca guarda a versão + o instante e
-  // expira em 6 h: a próxima abertura depois disso tenta de novo.
   const failedBefore = !!failedFlag && (failedFlag === info.latest || failedFlag.startsWith(`${info.latest}|`))
   if (failedBefore && !falhaExpirada(failedFlag)) return { kind: 'later', info }
   if (!opts.autoApply) return { kind: 'later', info }
-
-  // ANDROID: baixa e abre o instalador do sistema como no Linux. Antes o return
-  // antecipado impedia o Android de atualizar sozinho; o toque de confirmação
-  // continua obrigatório (é do sistema), e `autoApply` segue a preferência.
 
   let path: string
   try {
     path = await deps.download(info)
   } catch (e) {
-    // Download quebrado não marca falha permanente: pode ser rede; tenta de novo.
     return { kind: 'error', message: String((e as Error)?.message ?? e) }
   }
 
-  // Marca ANTES de executar: o instalador fecha este processo (sem garantia
-  // de que o código abaixo rode — marca depois faria o loop voltar).
   await deps.setFlag(FLAG_APPLIED, info.latest).catch(() => {})
 
   try {
     await deps.apply(path)
   } catch (e) {
+    // Seção 1: msg
     const msg = String((e as Error)?.message ?? e)
-    // AppImage no Linux: o Rust já trocou o arquivo e REABRIU a versão nova.
-    // Aqui só encerramos esta cópia antiga pelo caminho normal do app.
     if (msg.includes(REINICIAR_SINAL)) {
       await deps.quit().catch(() => {})
       return { kind: 'applied', info, path }
     }
-    // Falha do INSTALADOR: desfaz a marca e registra a falha para não reiniciar em loop.
     await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
     await deps.setFlag(FLAG_FAILED, `${info.latest}|${Date.now()}`).catch(() => {})
     return { kind: 'error', message: msg }
   }
 
-  // Windows: o Inno fecha este processo e reabre o app. NÃO existe timer de
-  // saída de propósito: um `setTimeout(quit)` da cópia antiga derrubava a
-  // cópia nova (loop de janela). Quem encerra e reinicia é o instalador.
   return { kind: 'applied', info, path }
 }

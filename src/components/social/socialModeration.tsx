@@ -1,18 +1,8 @@
-// Moderação (bans/timeouts) e eventos do servidor.
-//
-// Extraído de `Social.tsx` (que tinha 1508 linhas e 27 exports) por
-// `scripts/split-social.mjs`. O conteúdo é o MESMO — a divisão é só de
-// responsabilidade: um arquivo por assunto, para achar e revisar sem rolar
-// 1,5 mil linhas. `Social.tsx` continua reexportando tudo, então nenhum
-// importador precisou mudar.
-
 import React, { useEffect, useState } from 'react'
 import type { BanView, ChannelMeta, EventView } from '../../services/models'
 import { T, fmtClock, fmtDay } from './socialTheme'
 import { Avatar, Modal, btnDanger, btnGhost, btnPrimary, inputStyle } from './socialPrimitives'
 import { services } from '../../services'
-
-// ============================== MODERAÇÃO ==============================
 
 export function ModerationPanel({ communityId, members, isOwner, onClose, onToast }: {
   communityId: string
@@ -125,8 +115,6 @@ export function ModerationPanel({ communityId, members, isOwner, onClose, onToas
   )
 }
 
-// ============================== EVENTOS ==============================
-
 export function EventPanel({ communityId, channels, onClose, onToast }: {
   communityId: string
   channels: ChannelMeta[]
@@ -198,4 +186,4 @@ export function EventPanel({ communityId, channels, onClose, onToast }: {
     </Modal>
   )
 }
-
+// Seção 1: fim

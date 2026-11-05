@@ -1,5 +1,3 @@
-// Tokens centrais — valores congelados, só centraliza os hex em produção.
-
 export const dark = {
   rail: '#1e1f22',
   sidebar: '#2b2d31',
@@ -58,23 +56,19 @@ export function resolveTheme(name: ThemeName): Tokens {
   if (name === 'system' && typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
     try {
       if (window.matchMedia('(prefers-color-scheme: light)').matches) return { ...light }
-    } catch { /* ignora: cai para dark */ }
+    } catch {  }
   }
   return { ...dark }
 }
 
-/** Espaçamento em múltiplos de 4 — mesma escala do DESIGN_SYSTEM.md. */
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const
 
-/** Raio de canto padrão. */
 export const radius = { sm: 6, md: 8, lg: 12, pill: 999 } as const
 
-/** Durações de transição (respeita prefers-reduced-motion no CSS global). */
 export const motion = { fast: 150, normal: 200 } as const
 
 export const AVATAR_SIZES = { full: 40, compact: 32, large: 80 } as const
 
-/** Cor determinística de fallback do avatar a partir do fingerprint. */
 export function avatarColor(fp: string): string {
   const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
   let h = 0

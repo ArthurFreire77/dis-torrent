@@ -74,7 +74,7 @@ export function saveParticipantPlaybackSettings(
   const trimmed = Object.fromEntries(Object.entries(all).slice(-MAX_SAVED_PARTICIPANTS))
   try {
     storage.setItem(CALL_PLAYBACK_STORAGE_KEY, JSON.stringify(trimmed))
-  } catch { /* preferência local não pode interromper uma chamada */ }
+  } catch {  }
   return next
 }
 
@@ -100,5 +100,5 @@ export function applyMountedParticipantPlayback(
         applyParticipantPlayback(element, fp, callDeafened, settings)
       }
     })
-  } catch { /* controles de volume locais nunca derrubam a chamada */ }
+  } catch {  }
 }

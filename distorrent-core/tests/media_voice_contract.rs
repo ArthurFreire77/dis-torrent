@@ -1,14 +1,3 @@
-//! Trava o contrato público da camada de voz nativa.
-//!
-//! Se uma assinatura mudar, este arquivo não compila — e' o aviso de que o
-//! wiring do app (src-tauri + engine.rs) vai quebrar. O teste de ponta a ponta
-//! (mic -> Opus -> webrtc -> jitter -> decode -> alto-falante, com medição de
-//! latência) roda no binário de validação do módulo, não aqui: este arquivo só
-//! precisa garantir a FORMA da API e que um ciclo offer/answer real acontece.
-//!
-//! `media_voice` só existe em `cfg(target_os = "linux")` (ver `net/mod.rs`).
-//! Sem este gate o alvo inteiro falhava no Windows com `unresolved import`, o
-//! que derrubava `cargo test` e o `cargo clippy --all-targets` do CI.
 #![cfg(target_os = "linux")]
 
 use std::sync::Arc;
@@ -17,7 +6,6 @@ use distorrent_core::net::media_voice::{OutboundSignal, VoiceMedia, VoiceStats};
 
 #[test]
 fn contrato_da_api() {
-    // Construtores e metodos, com os tipos de retorno exatos.
     let new: fn() -> Result<Arc<VoiceMedia>, String> = VoiceMedia::new;
     let m: Arc<VoiceMedia> = new().expect("VoiceMedia::new");
 
@@ -37,7 +25,6 @@ fn contrato_da_api() {
     let hangup: fn(&VoiceMedia, &str) = VoiceMedia::hangup;
     let stats: fn(&VoiceMedia, &str) -> Option<VoiceStats> = VoiceMedia::stats;
 
-    // VoiceStats: um campo por requisito, com o tipo pedido.
     let s = VoiceStats {
         state: String::from("idle"),
         route: String::from("n/d"),
@@ -62,7 +49,6 @@ fn contrato_da_api() {
     };
     assert_eq!(s.jitter_depth_ms, VoiceMedia::jitter_depth_ms());
 
-    // As tres variantes do sinal de saida, com os campos exatos.
     let _ = OutboundSignal::Offer { sdp: String::new() };
     let _ = OutboundSignal::Answer { sdp: String::new() };
     let _ = OutboundSignal::Ice {
@@ -70,7 +56,6 @@ fn contrato_da_api() {
         mid: String::new(),
     };
 
-    // Uma sessao real ponta a ponta pela API publica.
     let offer = create_offer(&m, "call", "peer").expect("create_offer");
     assert!(offer.starts_with("v=0"), "offer nao parece SDP: {offer}");
     let answer = handle_offer(&m, "call", "peer2", &offer).expect("handle_offer");

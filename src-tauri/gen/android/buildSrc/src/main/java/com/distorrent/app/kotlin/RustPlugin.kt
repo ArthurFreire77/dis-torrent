@@ -65,14 +65,6 @@ open class RustPlugin : Plugin<Project> {
                     val targetName = targetPair.value
                     val targetArch = archList[targetPair.index]
                     val targetArchCapitalized = targetArch.replaceFirstChar { it.uppercase() }
-                    // `register` (lazy) + `projectDir` explícito: o BuildTask do
-                    // template atual declara `projectDir` como @Input obrigatório.
-                    // Quando `tauri android init` roda num projeto já existente ele
-                    // atualiza o BuildTask.kt (que passa a EXIGIR projectDir) mas
-                    // NÃO atualiza este RustPlugin.kt — o Gradle então falha com
-                    // "property 'projectDir' doesn't have a configured value" e o
-                    // APK nunca é gerado. Por isso os dois arquivos são versionados
-                    // juntos e ficam consistentes; não rode `android init` no CI.
                     val targetBuildTask = project.tasks.register(
                         "rustBuild$targetArchCapitalized$profileCapitalized",
                         BuildTask::class.java

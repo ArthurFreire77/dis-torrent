@@ -1,8 +1,3 @@
-// Quem assume a negociação de um par (ver callRepair.ts).
-//
-// Os casos travam o bug real de campo: "entro na chamada e fica em
-// Conectando". O lado de fp menor esperava a offer do outro para sempre; com a
-// offer perdida no caminho, ninguém oferecia e a sala nunca conectava.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -20,7 +15,6 @@ test('lado maior oferece na hora', () => {
 
 test('lado menor espera o orçamento antes de oferecer', () => {
   const base = { myFp: BAIXO, peerFp: ALTO, hasPair: false }
-  // Primeiro tique: só começa a contar (não oferece).
   assert.equal(shouldInitiatePair({ ...base, nowMs: 1_000 }), false)
   assert.equal(
     shouldInitiatePair({ ...base, waitingSinceMs: 1_000, nowMs: 1_000 + PAIR_WAIT_BUDGET_MS - 1 }),

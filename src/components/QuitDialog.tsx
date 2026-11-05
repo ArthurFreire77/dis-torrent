@@ -1,35 +1,18 @@
-// Fechar o DisTorrent.
-//
-// O botão inferior esquerdo fazia LOGOUT (`setPhase('lock')`), derrubando a
-// sessão por engano. O dono pediu que ele SAIA do app de verdade — inclusive
-// quando o app está em segundo plano (bandeja/serviço), que continuaria vivo
-// sem isso. "Sair da conta" fica no perfil, onde é o lugar certo.
-//
-// TRAVA DE 15 MINUTOS (pedido do dono): encerrar o processo logo depois de
-// abrir derruba a conexão P2P antes de ela estabilizar e o usuário "desaparece"
-// sem aviso. Enquanto o app tem menos de 15 minutos de vida, "Sair do app" fica
-// desabilitado com o tempo restante visível. "Minimizar (continuar recebendo)"
-// continua liberado — ali o app segue vivo e recebendo.
 import { useEffect, useState } from 'react'
 import { Button } from '../shared/ui'
 import { QUIT_LOCK_MS, canQuitNow, formatQuitLock, quitLockRemaining } from '../services/appUptime'
 
 export interface QuitDialogProps {
-  /** Encerra o processo (bandeja, foreground service, motor). */
   onQuit: () => Promise<void>
-  /** Minimiza sem encerrar (opcional). */
   onMinimize: () => Promise<void>
   onClose: () => void
-  /** No navegador não há processo para encerrar. */
   canQuit: boolean
-  /** Instante em que este processo abriu (ver `resolveSessionStart`). */
   startedAtMs?: number
 }
 
 export function QuitDialog({ onQuit, onMinimize, onClose, canQuit, startedAtMs }: QuitDialogProps) {
   const inicio = startedAtMs ?? Date.now()
   const [now, setNow] = useState(() => Date.now())
-  // Só conta o tempo enquanto o bloqueio está de pé; depois do prazo o timer morre.
   useEffect(() => {
     if (canQuitNow(Date.now(), inicio)) return
     const t = window.setInterval(() => setNow(Date.now()), 1000)

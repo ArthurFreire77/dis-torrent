@@ -20,13 +20,26 @@ const version = pkg.version // 1.1.56-pre-alpha
 const tag = `v${version.replace(/-pre-alpha$/, '')}` // v1.1.56
 const name = `DisTorrent ${version}`
 
-const cred = execSync(
-  'powershell -NoProfile -Command "$c = \'protocol=https`nhost=github.com`n`n\' | git credential fill; $c"',
-  { encoding: 'utf8' },
-)
-const password = /password=(.+)/.exec(cred)?.[1]?.trim()
+async function githubToken() {
+  if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN
+  if (process.env.GH_TOKEN) return process.env.GH_TOKEN
+  // Credencial do Credential Manager, via git (o formato do `fill` é
+  // `key=value` por linha; lemos só a linha do password).
+  try {
+    const out = execSync('git credential fill', {
+      input: 'protocol=https\nhost=github.com\n\n',
+      encoding: 'utf8',
+    })
+    const m = /^password=(.+)$/m.exec(out)
+    return m?.[1]?.trim() || null
+  } catch {
+    return null
+  }
+}
+
+const password = await githubToken()
 if (!password) {
-  console.error('sem credencial do git para github.com')
+  console.error('sem credencial do git para github.com (defina GITHUB_TOKEN)')
   process.exit(1)
 }
 
@@ -55,22 +68,23 @@ async function api(method, url, body) {
 
 function findAsset(dir, pattern) {
   if (!fs.existsSync(dir)) return null
-  for (const f of fs.readdirSync(dir)) {
-    if (pattern.test(f)) return path.join(dir, f)
-  }
-  return null
+  // Só a versão desta release: o diretório de bundle acumula todas as antigas,
+  // e pegar o primeiro .exe/.deb subiria binário de versão errada.
+  const hits = fs
+    .readdirSync(dir)
+    .filter((f) => pattern.test(f) && f.includes(version))
+    .sort()
+  return hits.length ? path.join(dir, hits[hits.length - 1]) : null
 }
 
 const candidates = [
   {
     label: '.exe (instalador Inno)',
-    file: findAsset('src-tauri/target/release/bundle/inno', /setup\.exe$/i),
+    file: findAsset('src-tauri/target/release/bundle/inno', /_x64_setup\.exe$/i),
   },
   {
     label: '.deb',
-    file:
-      findAsset('src-tauri/target/release/bundle/deb', /\.deb$/i) ??
-      findAsset('src-tauri/target/release/bundle/deb', /\.deb$/i),
+    file: findAsset('src-tauri/target/release/bundle/deb', /_amd64\.deb$/i),
   },
   {
     label: '.AppImage',
@@ -79,8 +93,8 @@ const candidates = [
   {
     label: '.apk',
     file:
-      findAsset('src-tauri/target/release/bundle/apk', /\.apk$/i) ??
-      findAsset('src-tauri/gen/android/app/build/outputs/apk/release', /^app-release\.apk$/i),
+      findAsset('src-tauri/target/release/bundle/apk', /_arm64.*\.apk$/i) ??
+      findAsset('src-tauri/gen/android/app/build/outputs/apk/arm64/release', /\.apk$/i),
   },
 ]
 

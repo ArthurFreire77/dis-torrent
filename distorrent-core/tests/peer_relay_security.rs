@@ -1,11 +1,3 @@
-//! Testes de segurança do "peer relay" (correções da auditoria F1..F7).
-//!
-//! Fica fora do módulo p/ exercitar a API PÚBLICA do broker/engine:
-//! - (c) o broker não serve um tópico sem o token/dono correto (F1);
-//! - (d) o peer-relay é OPT-IN: off por padrão sem DISTORRENT_RELAY/DISTORRENT_PEER_RELAY (F7);
-//! - (F3) o envelope do peer-relay é opaco (sem from/to/msg_id);
-//! - (F6) o `PeerRelayData` serializado cabe sob o teto seguro.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,30 +16,23 @@ fn spawn_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     (engine, dir)
 }
 
-/// (F1)/(c) O broker só serve um tópico ao seu DONO (token/capability =
-/// fingerprint autenticada). Um peer que não é dono não drena e o conteúdo
-/// permanece intacto.
 #[test]
 fn broker_nao_serve_topico_de_outro_par() {
     let b = PeerRelayBroker::new();
-    // A publica no tópico de B.
     assert!(b.put("A", "distorrent_r_B", "ciphertext-de-A-para-B"));
 
-    // C (qualquer peer, mesmo conhecendo o fp de B) NÃO drena.
     assert!(
         b.get("C", "distorrent_r_B", 1).is_empty(),
         "não-dono não pode drenar tópico alheio"
     );
     assert_eq!(b.topic_count(), 1, "tópico intacto após a tentativa");
 
-    // B (dono) drena normalmente.
     assert_eq!(
         b.get("B", "distorrent_r_B", 2),
         vec!["ciphertext-de-A-para-B".to_string()]
     );
 }
 
-/// (F7)/(d) Peer-relay é OPT-IN: sem DISTORRENT_RELAY/DISTORRENT_PEER_RELAY fica OFF.
 #[tokio::test]
 async fn peer_relay_off_por_padrao() {
     std::env::remove_var("DISTORRENT_RELAY");
@@ -55,7 +40,6 @@ async fn peer_relay_off_por_padrao() {
     std::env::remove_var("DISTORRENT_NO_RELAY");
     let (engine, _dir) = spawn_engine("RelayDefaultOn");
 
-    // AUTO: o intermediário por PEER nasce LIGADO (não é o relay público).
     assert!(
         engine.peer_relay_optin_enabled(),
         "intermediário por peer é automático (on)"
@@ -66,7 +50,6 @@ async fn peer_relay_off_por_padrao() {
         "serve como intermediário por padrão"
     );
 
-    // Kill-switch desliga.
     engine.set_relay_disabled(true);
     assert!(
         !engine.peer_relay_enabled(),
@@ -85,7 +68,6 @@ async fn peer_relay_off_por_padrao() {
     engine.shutdown();
 }
 
-/// (F3) O envelope do peer-relay não carrega identidade ao intermediário.
 #[test]
 fn envelope_peer_relay_opaco() {
     let payload = b"frame-opaco-do-peer-relay".to_vec();
@@ -100,12 +82,10 @@ fn envelope_peer_relay_opaco() {
     }
 }
 
-/// (F6) Um tópico cheio gera `PeerRelayData` que cabe sob o teto seguro.
 #[test]
 fn relay_data_respeita_teto() {
     let b = PeerRelayBroker::new();
     let t = "distorrent_r_dono";
-    // Bytes de controle inflam o JSON (~6x ao escapar).
     let chunk = "\u{0007}".repeat(48 * 1024);
     for _ in 0..64 {
         let _ = b.put("A", t, &chunk);

@@ -37,13 +37,10 @@ function statusColor(status: DownloadStatus): string {
   return t.red
 }
 
-/** Botões do manager nunca quebram a UI: try/catch silencioso. */
 function safeCall(fn: () => void): void {
   try {
     fn()
-  } catch {
-    /* ignora: painel é só leitura+comando */
-  }
+  } catch {}
 }
 
 function ActionButton({ title, onClick }: { title: string; onClick: () => void }) {
@@ -88,34 +85,24 @@ export default function DownloadsPanel({ open, onClose, onDoneToast }: {
     const cleanups: Array<() => void> = []
     try {
       setItems(downloadManager.list())
-    } catch {
-      /* lista indisponível */
-    }
+    } catch {}
     try {
       cleanups.push(downloadManager.subscribe((next) => setItems(next)))
-    } catch {
-      /* sem assinatura */
-    }
+    } catch {}
     try {
       cleanups.push(downloadManager.onDone((item) => {
         if (item.status !== 'completed') return
         const msg = item.savedPath ? `${item.name} salvo em ${item.savedPath}` : `${item.name} salvo`
         try {
           toastRef.current?.(msg)
-        } catch {
-          /* toast é best-effort */
-        }
+        } catch {}
       }))
-    } catch {
-      /* sem assinatura */
-    }
+    } catch {}
     return () => {
       for (const fn of cleanups) {
         try {
           fn()
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       }
     }
   }, [])
@@ -301,3 +288,4 @@ export default function DownloadsPanel({ open, onClose, onDoneToast }: {
     </div>
   )
 }
+// Seção 1: fim

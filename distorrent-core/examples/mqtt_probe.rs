@@ -1,7 +1,3 @@
-//! Sonda educada de brokers MQTT públicos: UMA conexão por broker, sem storm.
-//! Uso: cargo run --example mqtt_probe
-//! Mostra CONNACK / recusa / timeout por broker — base para depurar "4G não conecta".
-
 use std::time::Duration;
 
 #[tokio::main]
@@ -32,7 +28,6 @@ async fn main() {
                     Ok(_) => {}
                     Err(e) => {
                         verdict = format!("ERRO em {:?}: {e}", t0.elapsed());
-                        // recusa explícita (NotAuthorized etc.) não vai melhorar: para já
                         let s = format!("{e:?}");
                         if s.contains("NotAuthorized")
                             || s.contains("ServiceUnavailable")
@@ -45,7 +40,6 @@ async fn main() {
             }
         }
         println!("{host}: {verdict}");
-        // intervalo educado entre brokers (não martelar)
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }

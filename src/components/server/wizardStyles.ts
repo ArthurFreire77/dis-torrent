@@ -1,31 +1,7 @@
-// Estilo do assistente de criação de servidor.
-//
-// ## Duas camadas, de propósito
-//
-// `layout` (inline) contém TODA a estrutura: grid, espaçamentos, cards, cores.
-// Style inline sempre se aplica — não depende de `<style>` ser injetado, de CSP,
-// nem de a folha global continuar carregada.
-//
-// `css` (folha) contém SÓ o que é impossível escrever inline: `:hover`,
-// `:focus-visible` e `@media`. Se esse bloco não for aplicado (WebView que
-// descarta `<style>`, CSP restritiva, preview de terceiros), a tela fica com
-// aparência simples — **mas continua legível e utilizável**.
-//
-// POR QUE ISSO IMPORTA: um build anterior renderizava o wizard sem a folha e o
-// resultado era o pior possível — rótulo e descrição grudados sem espaço
-// ("ServidorSem tema definido…"), cards virando uma linha corrida de texto,
-// etapas colando ("1Identidade 2Canais"). O usuário ficou sem saber o que era
-// cada campo. O layout não pode depender do estilo "extra".
-
 import type { CSSProperties } from 'react'
 import { ui } from '../../shared/ui'
 
-// ---------------------------------------------------------------------------
-// Camada 1: layout inline (sempre aplicado)
-// ---------------------------------------------------------------------------
-
 export const layout = {
-  /** Duas colunas no desktop; a folha troca para uma só abaixo de 860px. */
   cols: {
     display: 'grid',
     gridTemplateColumns: 'minmax(0, 1fr) 268px',
@@ -33,7 +9,6 @@ export const layout = {
     alignItems: 'start',
   } satisfies CSSProperties,
 
-  /** Coluna de conteúdo. `minWidth: 0` impede o filho de estourar o grid. */
   main: {
     minWidth: 0,
     display: 'flex',
@@ -83,14 +58,12 @@ export const layout = {
     marginTop: 3,
   } satisfies CSSProperties,
 
-  /** Moldes em lista vertical (estilo Discord): uma linha por molde. */
   models: {
     display: 'grid',
     gridTemplateColumns: 'minmax(0, 1fr)',
     gap: 8,
   } satisfies CSSProperties,
 
-  /** Linha clicável de molde: ícone | texto | seta. `aria-pressed` realça. */
   card: (selected: boolean): CSSProperties => ({
     appearance: 'none',
     textAlign: 'left',
@@ -108,7 +81,6 @@ export const layout = {
     font: 'inherit',
   }),
 
-  /** Caixa do ícone do molde, mesma linguagem dos cards de categoria. */
   modelIcon: (selected: boolean): CSSProperties => ({
     width: 30,
     height: 30,
@@ -121,7 +93,6 @@ export const layout = {
     flexShrink: 0,
   }),
 
-  /** Seta ">" à direita, empurrada para o fim da linha. */
   cardChevron: {
     marginLeft: 'auto',
     color: ui.muted,
@@ -129,7 +100,6 @@ export const layout = {
     display: 'flex',
   } satisfies CSSProperties,
 
-  /** Grade de ícones: colunas de 200px, quantas couberem. */
   cats: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
@@ -166,7 +136,6 @@ export const layout = {
     flexShrink: 0,
   }),
 
-  /** Linha de canal: ícone | nome | tipo | categoria | remover. */
   chanRow: (bad: boolean): CSSProperties => ({
     display: 'grid',
     gridTemplateColumns: '24px minmax(0, 1fr) 96px 160px 32px',
@@ -208,7 +177,6 @@ export const layout = {
     boxShadow: '0 0 0 3px rgba(255,255,255,.05)',
   }),
 
-  /** Descrição do cargo alinhada ao NOME (checkbox 18 + gaps 10+10). */
   roleWhy: {
     fontSize: 11,
     color: ui.muted,
@@ -237,7 +205,6 @@ export const layout = {
     borderRadius: 6,
   } satisfies CSSProperties,
 
-  /** Barra de etapas (4 segmentos). */
   segWrap: {
     display: 'flex',
     gap: 6,
@@ -299,13 +266,13 @@ export const layout = {
   cap: {
     fontSize: 11,
     fontWeight: 800,
+    // Seção 1: letterSpacing
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     color: ui.muted,
     margin: `0 0 ${ui.sm}px`,
   } satisfies CSSProperties,
 
-  /** Aviso "Falta: …" / erro de criação. */
   notice: {
     fontSize: 12,
     color: '#ffe0a3',
@@ -315,7 +282,6 @@ export const layout = {
     alignItems: 'flex-start',
   } satisfies CSSProperties,
 
-  /** Prévia do servidor no topo do resumo. */
   prev: {
     display: 'flex',
     alignItems: 'center',
@@ -423,7 +389,6 @@ export const layout = {
 
   empty: { fontSize: 12, color: ui.muted, lineHeight: 1.5 } satisfies CSSProperties,
 
-  /** Caixa vazia explicando o passo (bot opcional, por exemplo). */
   emptyBox: {
     fontSize: 12,
     color: ui.muted,
@@ -434,7 +399,6 @@ export const layout = {
     padding: '12px 13px',
   } satisfies CSSProperties,
 
-  /** Cartão de UM bot no passo de criação. */
   botCard: {
     display: 'flex',
     flexDirection: 'column',
@@ -485,7 +449,6 @@ export const layout = {
     color: selected ? '#fff' : ui.text,
   }),
 
-  /** Bloco de documentação expansível (mesmo padrão do resto do wizard). */
   docCard: (open: boolean): CSSProperties => ({
     borderRadius: ui.radiusSm,
     background: ui.surface,
@@ -525,14 +488,7 @@ export const layout = {
   } satisfies CSSProperties,
 } as const
 
-// ---------------------------------------------------------------------------
-// Camada 2: folha — SÓ o que não existe inline
-// ---------------------------------------------------------------------------
-
 export const css = `
-/* Realce/estado que não se expressa em style inline. Tudo o mais (estrutura,
-   espacos, cores, grades) esta em \`layout\`, aplicado inline. Se esta folha nao
-   carregar, a tela continua legivel e utilizavel. */
 
 .csw-card:hover:not(:disabled){ background:${ui.surfaceHover} !important; border-color:${ui.borderStrong} !important }
 .csw-card:active:not(:disabled){ transform:translateY(1px) }
@@ -553,14 +509,11 @@ export const css = `
 .csw-role-top input[type="checkbox"]:checked::after{ content:""; position:absolute; left:5px; top:2px; width:5px; height:9px; border:solid #fff; border-width:0 2px 2px 0; transform:rotate(45deg) }
 .csw-role-top input[type="checkbox"]:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
 
-/* Abaixo de 860px a coluna de 268px rouba a largura do conteúdo. O resumo desce
-   (order:2) em vez de sumir: é ele que mostra a contagem de canais e cargos. */
 @media (max-width: 860px){
   .csw-cols{ grid-template-columns:minmax(0,1fr) !important }
   .csw-side{ position:static !important; order:2 }
   .csw-models{ grid-template-columns:minmax(0,1fr) !important }
 }
-/* 560px: 4 colunas de canal não cabem. Tipo e categoria descem. */
 @media (max-width: 560px){
   .csw-chan{ grid-template-columns:24px minmax(0,1fr) 32px !important }
   .csw-chan-name{ grid-column:2 / 4 }
@@ -572,3 +525,4 @@ export const css = `
   .csw-seg-t{ display:none }
 }
 `
+// Seção 2: fim

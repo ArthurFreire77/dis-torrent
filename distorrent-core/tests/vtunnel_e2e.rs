@@ -1,10 +1,3 @@
-//! E2E TÚNEL VIRTUAL (Fase 1) — dois usuários que só se alcançam pelo relay
-//! estabelecem sessão X25519 (oferta/resposta via relay) e trocam ping/pong
-//! cifrado pelo túnel. Prova: handshake sem IP/porta + datagrama AEAD + RTT.
-//!
-//! Cobre: TunnelOffer → TunnelAnswer → TunnelUp nos dois lados → ping/pong
-//! com `TunnelPong` (rtt_ms >= 0) → IP virtual determinístico `fd9d::/8`.
-
 use std::time::Duration;
 
 use distorrent_core::net::engine::{EngineEvent, NetworkEngine};
@@ -54,7 +47,6 @@ async fn tunel_handshake_ping_via_relay() {
     let fp_b = b.identity().fingerprint.clone();
     assert_ne!(fp_a, fp_b);
 
-    // IP virtual determinístico: calculável sem rede, único por fp.
     let vip_a = virtual_ipv6(&fp_a);
     let vip_b = virtual_ipv6(&fp_b);
     assert_ne!(vip_a, vip_b);
@@ -68,7 +60,6 @@ async fn tunel_handshake_ping_via_relay() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // amizade pelo relay (sessão online nos dois lados)
     let outcome = a.friend_request(&fp_b).unwrap();
     assert_eq!(format!("{outcome:?}"), "QueuedOffline");
     let req = wait_event(
@@ -94,11 +85,9 @@ async fn tunel_handshake_ping_via_relay() {
         distorrent_core::net::engine::NetworkState::Connected
     );
 
-    // A pede o túnel: oferta viaja pela sessão relay existente.
     assert!(!a.tunnel_established(&fp_b));
     a.tunnel_request(&fp_b);
 
-    // TunnelUp nos DOIS lados (B estabelece ao aceitar a oferta).
     let up_b = wait_event(
         &mut ev_b,
         "B estabelece o túnel",
@@ -120,7 +109,6 @@ async fn tunel_handshake_ping_via_relay() {
     assert!(a.tunnel_established(&fp_b));
     assert!(b.tunnel_established(&fp_a));
 
-    // Ping cifrado ponta a ponta pelo túnel → pong com RTT.
     let id = a.tunnel_ping(&fp_b).unwrap();
     let pong = wait_event(
         &mut ev_a,
@@ -138,8 +126,6 @@ async fn tunel_handshake_ping_via_relay() {
     assert_eq!(got, id);
     assert!(rtt_ms >= 0, "RTT honesto e não-negativo");
 }
-
-// ─────────── Fase 2: DM e sinalização viajando PELO túnel ───────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tunel_dm_e_chamada_via_tunnel() {
@@ -173,7 +159,6 @@ async fn tunel_dm_e_chamada_via_tunnel() {
     )
     .await;
 
-    // túnel sobe (handshake via relay)
     a.tunnel_request(&fp_b);
     wait_event(
         &mut ev_b,
@@ -191,15 +176,14 @@ async fn tunel_dm_e_chamada_via_tunnel() {
     .await;
     assert!(a.tunnel_established(&fp_b));
 
-    // Baseline: antes, sessão é via relay e ninguém usou o túnel ainda.
     assert!(
         a.is_peer_via_relay(&fp_b),
         "sessão A→B é relay (carrier do túnel)"
     );
+    // Seção 1: before_rx
     let before_rx = b.peer_diag(&fp_a).tunnel_rx_frames;
     let before_tx = a.peer_diag(&fp_b).tunnel_tx_frames;
 
-    // DM: send_dm → SendToPeer → com peer só-via-relay, DEVE tunelizar.
     let dm = a.open_dm(&fp_b, "TunelB").unwrap();
     let m1 = a.send_dm(&dm.id, "oi via TÚNEL!").unwrap();
     let rec = wait_event(
@@ -215,8 +199,6 @@ async fn tunel_dm_e_chamada_via_tunnel() {
     assert_eq!(in_b.body, "oi via TÚNEL!");
     wait_event(&mut ev_a, "ACK volta via túnel", |e| matches!(e, EngineEvent::MessageStatus { msg_id, status } if msg_id == &m1.id && status == "delivered"), 60).await;
 
-    // Prova Material: o tráfego do DM passou PELA sessão do túnel (cifrado
-    // + replay-window + AAD), não pelo corpo livre do relay.
     let d_b = b.peer_diag(&fp_a);
     let d_a = a.peer_diag(&fp_b);
     assert!(
@@ -228,7 +210,6 @@ async fn tunel_dm_e_chamada_via_tunnel() {
         "A deve ter ENVIADO frame via túnel"
     );
 
-    // Sinalização de CHAMADA pelo mesmo caminho: CallInvite via túnel.
     let call_id = a.call_invite(&fp_b, "voice").unwrap();
     let inc = wait_event(
         &mut ev_b,
@@ -250,7 +231,6 @@ async fn tunel_dm_e_chamada_via_tunnel() {
     )
     .await;
 
-    // PONG de um ping pelo túnel mostra RTT real do caminho completo.
     let _ = a.tunnel_ping(&fp_b).unwrap();
     wait_event(
         &mut ev_a,
@@ -261,8 +241,6 @@ async fn tunel_dm_e_chamada_via_tunnel() {
     .await;
 }
 
-/// Frame GRANDE de sinalização (SDP real tem ~2KB) fragmenta e remonta pelo
-/// túnel — valida a remontagem no e2e real (não só unitário).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tunel_fragmenta_frame_grande() {
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
@@ -311,13 +289,6 @@ async fn tunel_fragmenta_frame_grande() {
     )
     .await;
 
-    // SDP grande (200KB > frag 48KB): fragmenta e remonta.
-    //
-    // `voice-` de propósito: num `call-*` 1:1 com voz NATIVA disponível (Linux
-    // com ALSA/GStreamer) a offer é RETIDA pelo core (`hold_call_offer`) e o
-    // `CallOfferEv` não sai para o JS — comportamento correto do produto, que
-    // fazia este teste falhar. Canal de voz não passa pelo gate de retenção,
-    // então o frame chega ao evento e a fragmentação é medida de verdade.
     let sdp = "v=0 ".to_string() + &"a=".repeat(200_000);
     a.call_signal(
         &fp_b,

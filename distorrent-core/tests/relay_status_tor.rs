@@ -1,18 +1,3 @@
-//! TESTE REAL do diagnóstico de relay em modo anônimo (proxy/Tor).
-//!
-//! Ignorado por padrão porque exige um Tor (ou SOCKS5) rodando localmente.
-//! Rode com:
-//!   cargo test --test relay_status_tor -- --ignored --nocapture
-//!
-//! Prova DUAS coisas de verdade, sem mock:
-//! 1. O caminho SOCKS5 muda o IP de saída: um GET em http://api.ipify.org
-//!    feito por `socks5_connect` retorna um IP DIFERENTE do GET direto.
-//!    (Se igual, o tráfego NÃO passou pelo proxy — exatamente o vazamento
-//!    que o modo proxy/Tor evita.)
-//! 2. `check_relay_legs_via(Some(tor))` roda ponta a ponta e marca a perna
-//!    ntfy (HTTPS) como alcançável pelo SOCKS — ou seja, o diagnóstico
-//!    `relay_status` deixa de vazar o IP nesses modos.
-
 use std::time::Duration;
 
 use distorrent_core::net::socks5::{socks5_connect, SocksTarget};
@@ -21,7 +6,6 @@ use tokio::net::TcpStream;
 
 const ECHO_HOST: &str = "api.ipify.org";
 
-/// GET HTTP/1.0 cru e devolve o corpo (o IP público visto pela origem).
 async fn http_get_ip<S>(mut stream: S) -> Option<String>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -32,13 +16,11 @@ where
     stream.write_all(req.as_bytes()).await.ok()?;
     stream.flush().await.ok()?;
     let mut buf = Vec::new();
-    // timeout total do corpo: Tor pode ser lento ao abrir circuito
     let read = tokio::time::timeout(Duration::from_secs(40), stream.read_to_end(&mut buf)).await;
     if read.is_err() {
         return None;
     }
     let text = String::from_utf8_lossy(&buf);
-    // separa headers do corpo e valida que é um IP plausível
     let body = text
         .split("\r\n\r\n")
         .nth(1)
@@ -69,13 +51,11 @@ async fn relay_diagnostics_via_tor_nao_vaza_ip() {
     let proxy =
         std::env::var("DISTORRENT_TOR_ADDR").unwrap_or_else(|_| "127.0.0.1:9050".to_string());
 
-    // 0) O proxy está no ar?
     if TcpStream::connect(proxy.as_str()).await.is_err() {
         eprintln!("SKIP: SOCKS5/Tor não está rodando em {proxy}");
         return;
     }
 
-    // 1) Prova REAL de rota: o IP de saída via SOCKS tem de diferir do direto.
     let direto = ip_direto().await;
     let via = ip_via_socks(&proxy).await;
     eprintln!("IP direto = {direto:?}  |  IP via SOCKS({proxy}) = {via:?}");
@@ -95,7 +75,6 @@ async fn relay_diagnostics_via_tor_nao_vaza_ip() {
         }
     }
 
-    // 2) O diagnóstico oficial roda pelo SOCKS e reporta as pernas.
     let legs = distorrent_core::net::relay::check_relay_legs_via(Some(&proxy)).await;
     assert!(!legs.is_empty(), "diagnóstico não retornou pernas");
     for l in &legs {

@@ -97,6 +97,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+; Sem regra de firewall o Windows descarta o TCP/UDP de ENTRADA e dois PCs na
+; mesma rede não se acham (só funciona quando o outro lado está sem firewall).
+; A regra criada pelo prompt do Windows cobre UM perfil só; aqui liberamos
+; Domínio/Privado/Público para o app instalado.
+Name: "firewall"; Description: "Liberar o DisTorrent no firewall do Windows (redes locais)"; GroupDescription: "Rede"
 
 [Files]
 ; O Tauri 2 embute frontend e recursos dentro do próprio .exe, então o pacote
@@ -131,6 +136,21 @@ const
   // DESLIGADA em src-tauri/Cargo.toml; se um dia for ligada, o nome ganha a
   // versão e este literal precisa acompanhar).
   AppInstanceMutex = 'com.distorrent.app-sim';
+
+// Regras de firewall do app. Criadas em `netsh` porque o Inno não tem API de
+// firewall e instalar por usuário (sem UAC) NÃO deixa o Windows perguntar:
+// sem isso o áudio/mensagem de ENTRADA é descartado e dois PCs na mesma rede
+// ficam invisíveis um para o outro. `netsh` sem admin falha em silêncio e a
+// instalação continua — nunca bloqueia o instalador por causa disto.
+procedure CriarRegrasFirewall();
+var
+  ResultCode: Integer;
+  Exe: String;
+begin
+  Exe := ExpandConstant('{app}\{#AppExeName}');
+  Exec('netsh', 'advfirewall firewall add rule name="DisTorrent TCP" dir=in action=allow program="' + Exe + '" protocol=TCP enable=yes profile=any', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('netsh', 'advfirewall firewall add rule name="DisTorrent UDP" dir=in action=allow program="' + Exe + '" protocol=UDP enable=yes profile=any', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
 
 function WebView2Instalado(): Boolean;
 begin
@@ -177,6 +197,9 @@ var
 begin
   if CurStep <> ssPostInstall then
     Exit;
+
+  if WizardIsTaskSelected('firewall') then
+    CriarRegrasFirewall();
 
   // Erro honesto > estado falso: não fingimos instalar o WebView2. Avisamos e
   // abrimos a página oficial (o Windows 11 e o Windows 10 atualizado já têm).

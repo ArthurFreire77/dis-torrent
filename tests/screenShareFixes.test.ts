@@ -1,14 +1,3 @@
-// Regressões do compartilhamento de tela corrigidas na auditoria.
-//
-// Cada teste aqui trava um bug REAL que existia antes:
-//  - modo padrão "tela inteira" mandava `monitorTypeSurfaces:'exclude'`, o que
-//    escondia os monitores e matava o áudio do sistema no Chromium;
-//  - a mesma resolução era reduzida duas vezes (captura + encoder), então
-//    "720p" saía em 640×360 e "480p" em ~214×120;
-//  - "FPS automático" era um teto fixo de 60 escondido;
-//  - o caminho nativo (Linux/WebKitGTK) aparecia sem fonte disponível e com
-//    áudio do sistema "disponível" mesmo sem existir captura de loopback.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -46,9 +35,6 @@ test('regressão: "tela inteira" NÃO esconde os monitores no seletor do sistema
 
 test('regressão: áudio do sistema pede restrictOwnAudio (evita eco de retorno)', () => {
   const withSystem = buildDisplayMediaConstraints(opts({ audio: 'system' }), ENV)
-  // `restrictOwnAudio` é BOOLEANO na spec do getDisplayMedia. Passar string
-  // fazia o engine ignorar a proteção — o loopback devolvia a voz dos
-  // participantes e virava eco.
   assert.equal(withSystem.restrictOwnAudio, true)
   const none = buildDisplayMediaConstraints(opts({ audio: 'none' }), ENV)
   assert.equal(none.restrictOwnAudio, false)
@@ -57,16 +43,12 @@ test('regressão: áudio do sistema pede restrictOwnAudio (evita eco de retorno)
 test('regressão: sem escala dupla — 720p sai 720p, não 640×360', () => {
   const o = opts({ quality: '720p', fps: '60' })
   const c = screenConstraints(o) as Record<string, any>
-  // `ideal` (não `max`): o teto sozinho fazia o Chromium ESTRICAR a imagem em
-  // telas que não são 16:9 (1440×900 virava 1280×720 = texto borrado e barra
-  // preta). Com `ideal` o engine escolhe o mais próximo preservando a proporção.
   assert.equal(c.width.ideal, 1280)
   assert.equal(c.height.ideal, 720)
   assert.equal(c.width.max, undefined, 'max sem ideal estica/corta a imagem')
   assert.equal(c.resizeMode, 'none', 'o engine não pode reescalar por conta própria')
   const tuning = buildSenderTuning(o)
   assert.equal(tuning.scaleResolutionDownBy, 1, 'a captura já entrega 720p; dividir de novo vira 360p')
-  // 480p também não pode ser dividido por 4 em cima da captura de 854×480.
   assert.equal(buildSenderTuning(opts({ quality: '480p' })).scaleResolutionDownBy, 1)
 })
 
@@ -75,7 +57,6 @@ test('regressão: "FPS automático" não inventa teto de 60', () => {
   assert.equal(fpsOf(resolveStep(o), o), null)
   const c = screenConstraints(o) as Record<string, any>
   assert.equal(c.frameRate, undefined, 'auto não deve impor frameRate')
-  // FPS explícito continua valendo.
   assert.equal(fpsOf(resolveStep(o), opts({ fps: '30' })), 30)
 })
 

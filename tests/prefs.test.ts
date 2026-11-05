@@ -69,8 +69,6 @@ describe('política de notificação espelhada no motor', () => {
     const p = JSON.parse(notificationPolicyJson())
     assert.equal(p.default, 'all')
     assert.equal(p.channels.c1, 'mentions')
-    // Canal silenciado entra como 'none', sem precisar de entrada em
-    // `channelLevel` — é a mesma decisão de `levelFor`.
     assert.equal(p.channels.c2, 'none')
     assert.deepEqual(p.servers, ['s1'])
   })

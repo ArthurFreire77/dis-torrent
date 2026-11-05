@@ -1,6 +1,3 @@
-// Seletor de emoji reutilizável (composer + barra de reações) — sem
-// dependências. Categorias fixas, busca, emojis do servidor e recentes.
-
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { EMOJI_GROUPS, ALL_EMOJI, type EmojiGroup } from '../shared/emojiSet'
 import type { EmojiView } from '../services/models'
@@ -18,7 +15,6 @@ export function EmojiPicker({
   onClose: () => void
   onPick: (emoji: string) => void
   serverEmojis?: EmojiView[]
-  /** posição do popover ('up'|'down') — mobile vs desktop */
   anchor?: 'up' | 'down'
   title?: string
 }) {
@@ -45,7 +41,6 @@ export function EmojiPicker({
       if (boxRef.current && !boxRef.current.contains(e.target as Node)) onClose()
     }
     window.addEventListener('keydown', onKey, true)
-    // pointerdown com capture: não fecha quando o clique é dentro do popover
     setTimeout(() => window.addEventListener('mousedown', onDown, true), 0)
     return () => {
       window.removeEventListener('keydown', onKey, true)
@@ -76,7 +71,7 @@ export function EmojiPicker({
     onPick(e2)
     const next = [e2, ...recent.filter((x) => x !== e2)].slice(0, 24)
     setRecent(next)
-    try { localStorage.setItem('distorrent:emoji:recent', JSON.stringify(next)) } catch { /* quota */ }
+    try { localStorage.setItem('distorrent:emoji:recent', JSON.stringify(next)) } catch {  }
   }
 
   const shown = results ? [{ id: 'busca', label: 'Resultados', icon: '', emojis: results }] : groups

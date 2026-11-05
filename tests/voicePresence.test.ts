@@ -1,11 +1,3 @@
-// Presença REAL na chamada e espera sem "falhar".
-//
-// Dois relatos do dono com print:
-// - um usuário "segura" aparecia na chamada sem estar lá (linha velha do
-//   `voice_states`, que é persistente);
-// - "eu posso ficar lá na call esperando alguém conectar, o tempo que eu
-//   quiser" — o app não podia desistir nem prometer conexão que não existe.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -25,10 +17,6 @@ const row = (fp: string, muted = false): VoiceRow => ({ fp, muted, deafened: fal
 const online = (...fps: string[]) => new Set(fps)
 
 test('a tela só mostra quem o manager registrou na chamada', () => {
-  // Regra do dono: "não aparecer ninguém até o cara entrar e ficar na call".
-  // `voice_states` é ANÚNCIO de presença — quem anunciou e nunca negociou mídia
-  // (ou fechou o app) não pode virar card. `activeCall.participants` só ganha a
-  // pessoa quando ela oferece/responde/ICE, que é a prova de que entrou.
   const bloco = shell.slice(shell.indexOf('const channelCallPeers'))
   const trecho = bloco.slice(0, 2600)
   assert.match(trecho, /activeCall\?\.participants/, 'a fonte dos cards é o roster do manager')
@@ -53,8 +41,6 @@ test('eu nunca sou removido (posso entrar num canal vazio)', () => {
 })
 
 test('sem lista de sessões NÃO se filtra (senão a chamada parece vazia)', () => {
-  // No boot/reconexão geral o motor ainda não reportou ninguém: filtrar aqui
-  // esconderia todo mundo e o remédio viraria a doença.
   const rows = [row('eu'), row('amigo')]
   const vis = filterLiveVoiceRows(rows, { myFp: 'eu', onlineFps: online(), filtrar: false })
   assert.equal(vis.length, 2)
@@ -73,13 +59,14 @@ test('o hook de canais aplica o filtro (não basta o comentário)', () => {
 })
 
 test('canal vazio espera para sempre (sem teto de postergações)', () => {
-  // O teto de 3 janelas (~60 s) parava de vigiar o canal vazio. O dono quer
-  // poder ficar na call o tempo que quiser.
   const bloco = manager.slice(manager.indexOf('private onConnectWatchdogFire'))
   const trecho = bloco.slice(0, 3000)
-  assert.match(trecho, /CANAL VAZIO NÃO É FALHA/, 'o caso está documentado')
   assert.match(trecho, /this\.connectWatchdogGrants = 0/, 'zera o contador em vez de esgotar')
-  // E não pode existir o aviso de "ninguém conectou" como desistência.
+  assert.match(
+    trecho,
+    /this\.pcs\.size === 0 && st\.callId\.startsWith\('voice-'\)/,
+    'canal vazio reagenda sem falhar',
+  )
   assert.doesNotMatch(trecho, /ninguém conectou a mídia ainda/, 'não declara desistência')
 })
 
@@ -87,6 +74,5 @@ test('sozinho na chamada a tela diz "Esperando alguém entrar", não "Conectando
   assert.match(stage, /waitingAlone/, 'a tela recebe o estado de espera')
   assert.match(stage, /Esperando alguém entrar/, 'texto honesto')
   assert.match(stage, /pode ficar o tempo que quiser/, 'diz que pode esperar')
-  // O badge de fase NÃO aparece quando está sozinho (não há o que conectar).
   assert.match(stage, /waitingAlone \? \(/, 'o badge cede lugar ao texto de espera')
 })

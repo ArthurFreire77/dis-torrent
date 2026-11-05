@@ -30,7 +30,6 @@ abstract class BuildTask : DefaultTask() {
             runTauriCli(executable)
         } catch (e: Exception) {
             if (Os.isFamily(Os.FAMILY_WINDOWS)) {
-                // Try different Windows-specific extensions
                 val fallbacks = listOf(
                     "$executable.exe",
                     "$executable.cmd",

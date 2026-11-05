@@ -34,12 +34,10 @@ test('texto do bloqueio é legível e honesto', () => {
   assert.equal(formatQuitLock(45_000), '45s')
   assert.equal(formatQuitLock(12 * 60_000 + 34_000), '12m 34s')
   assert.equal(formatQuitLock(QUIT_LOCK_MS), '15m 00s')
-  // Arredonda para CIMA: nunca mostra "0s" com bloqueio pendente.
   assert.equal(formatQuitLock(1), '1s')
   assert.equal(formatQuitLock(-500), '0s')
 })
 
-/** Storage falso mínimo (sem DOM). */
 function fakeStorage(initial: Record<string, string> = {}): Storage & { dump: () => Record<string, string> } {
   const map = new Map(Object.entries(initial))
   return {

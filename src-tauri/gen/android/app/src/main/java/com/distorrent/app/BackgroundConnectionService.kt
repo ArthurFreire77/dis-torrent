@@ -15,36 +15,6 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.Plugin
 
-/**
- * Serviço em primeiro plano que mantém o app VIVO com a tela apagada.
- *
- * ## O problema real
- *
- * O motor P2P roda dentro do processo do app. Quando o usuário sai da tela, o
- * Android congela o WebView e, sem nada em primeiro plano, **mata o processo**
- * em poucos minutos (Doze/App Standby). Consequência: nenhuma mensagem nem
- * chamada chegava com o app fechado — "a notificação do Android não aparece,
- * só funciona com o aplicativo aberto".
- *
- * ## O que este serviço faz (e o que NÃO faz)
- *
- * - Mantém o processo vivo com tipo **`remoteMessaging`** (o tipo de FGS que o
- *   Android define para mensageria; não é `dataSync`, que tem teto de horas por
- *   dia no Android 15).
- * - Mostra uma notificação **permanente e silenciosa** dizendo que o app está
- *   conectado. É o preço honesto de continuar recebendo — igual a qualquer
- *   mensageiro. Nada de processo escondido.
- * - NÃO abre microfone nem câmera (esses têm serviço próprio,
- *   [CallForegroundService], criado só durante a chamada).
- *
- * ## Quando liga/desliga
- *
- * Ligado pelo frontend (`plugin:bgservice|start`) quando as notificações do
- * sistema estão ativas E o app é nativo (`appState.initAppState`), desligado
- * em `plugin:bgservice|stop` ao desativar. Também sobe no boot do app se a
- * preferência persistida (`bg.service.wanted`) estiver marcada — o Android só
- * respeita `START_STICKY` depois que o serviço existiu uma vez.
- */
 class BackgroundConnectionService : Service() {
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -54,23 +24,17 @@ class BackgroundConnectionService : Service() {
       createChannel()
       val notif = buildNotification()
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        // Android 14+: o TIPO declarado no `startForeground` precisa existir no
-        // manifesto, senão SecurityException.
         startForeground(NOTIFICATION_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
       } else {
         startForeground(NOTIFICATION_ID, notif)
       }
       isRunning = true
     } catch (e: Throwable) {
-      // Honesto: sem permissão/tipo o serviço não sobe. O app continua
-      // funcionando em primeiro plano; só perde o recebimento com ele fechado.
       android.util.Log.w("distorrentBgService", "startForeground recusado: ${e.message}")
       isRunning = false
       stopSelf()
       return START_NOT_STICKY
     }
-    // START_STICKY: se o sistema matar por memória, ele recria o serviço — é o
-    // que mantém o recebimento vivo num aparelho apertado.
     return START_STICKY
   }
 
@@ -94,7 +58,7 @@ class BackgroundConnectionService : Service() {
     val ch = NotificationChannel(
       CHANNEL_ID,
       "Conectado em segundo plano",
-      NotificationManager.IMPORTANCE_MIN, // silencioso: é estado, não aviso
+      NotificationManager.IMPORTANCE_MIN,
     ).apply {
       description = "Mantém o DisTorrent recebendo mensagens e chamadas com o app fechado"
       setShowBadge(false)
@@ -138,13 +102,6 @@ class BackgroundConnectionService : Service() {
   }
 }
 
-/**
- * Ponte `plugin:bgservice|start` / `|stop` → [BackgroundConnectionService].
- *
- * Devolve o estado REAL (`{ rodando: true/false }`) em vez de fingir sucesso:
- * em ROM que recusa o tipo `remoteMessaging`, a UI precisa saber que o
- * recebimento com o app fechado não está garantido.
- */
 @TauriPlugin
 class BgServicePlugin(private val activity: android.app.Activity) : Plugin(activity) {
 
@@ -157,8 +114,6 @@ class BgServicePlugin(private val activity: android.app.Activity) : Plugin(activ
       } else {
         activity.startService(intent)
       }
-      // Persiste a escolha: no boot seguinte o serviço sobe sozinho (o Android
-      // só respeita `START_STICKY` depois que o serviço existiu uma vez).
       activity.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
         .edit().putBoolean(KEY_WANTED, true).apply()
       invoke.resolve(stateObject())

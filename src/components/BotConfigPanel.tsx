@@ -1,8 +1,3 @@
-// Painel de configuração de bot — 3 abas, validação por campo: token mascarado
-// (olho/copiar/regen com confirmação destrutiva), comandos REST com teste por
-// comando e erro no campo, escopos agrupados + webhook, rodapé fixo.
-// `<style>` próprio porque hover/focus-visible/active não se expressam inline.
-
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { services } from '../services'
 import type { BotView, ChannelMeta, RoleView } from '../services/models'
@@ -13,8 +8,6 @@ import {
   type BotCommandDef,
 } from '../services/botCommands'
 import { groupByCategory } from '../app/channels'
-// `copyBestEffort` de `shared/clipboard` (fonte única — antes havia cópia local
-// que dizia "copiado" sem ter copiado).
 import { copyBestEffort as copyToClipboard } from '../shared/clipboard'
 import {
   Button,
@@ -36,20 +29,16 @@ import { Tooltip } from '../shared/Tooltip'
 const FALLBACK_PREFIX = '!'
 const MAX_COMMANDS = 16
 
-// ---------- helpers ----------
-
 let seq = 0
 function nextUid(): string {
   seq += 1
   return `cmd-${seq}`
 }
 
-/** Linha de comando com id estável: remover a linha 1 não bagunça a linha 2. */
 interface CmdRow extends BotCommandDef {
   uid: string
 }
 
-/** Avatar = inicial colorida derivada do id. Zero emoji, zero `BOT_AVATARS`. */
 function avatarHue(seed: string): number {
   let h = 2166136261
   for (let i = 0; i < seed.length; i += 1) {
@@ -68,7 +57,6 @@ function avatarInitial(name: string): string {
   return first ? first.toUpperCase() : '?'
 }
 
-/** Mesma regra do backend (`parseBotConfig`): 1 caractere, sem espaço. */
 function prefixError(prefix: string): string | null {
   if (!prefix) return 'escolha um caractere'
   if (!/^[!/.$@#%-]$/.test(prefix)) return 'use exatamente 1 caractere: ! / . $ @ # % -'
@@ -87,7 +75,6 @@ function nameError(name: string): string | null {
   return null
 }
 
-/** Assinatura do estado editável — só para avisar "alterações não salvas". */
 function signature(
   prefix: string,
   rows: CmdRow[],
@@ -105,8 +92,6 @@ function signature(
     online,
   ])
 }
-
-// ---------- css local (hover / focus-visible / active / disabled) ----------
 
 const css = `
 .bcp-tab{ appearance:none; background:transparent; border:1px solid transparent; border-radius:8px; color:${ui.muted}; font-size:13px; font-weight:700; padding:9px 12px; cursor:pointer; display:inline-flex; align-items:center; gap:7px; transition:background .15s, color .15s, border-color .15s }
@@ -149,8 +134,6 @@ const css = `
 
 .bcp-token{ font-family:'JetBrains Mono', monospace; font-size:13px; color:${ui.text}; word-break:break-all; background:${ui.input}; border:1px solid ${ui.border}; border-radius:${ui.radius}; padding:11px 12px; min-width:0 }
 
-/* Hover/active sobre o Button/IconButton de ui.tsx (background inline).
-   Seletor descendente: o Tooltip insere um span entre wrapper e botão. */
 .bcp-h-sec:hover button:not(:disabled){ background:${ui.surfaceHover} !important; border-color:${ui.borderStrong} !important }
 .bcp-h-succ:hover button:not(:disabled){ background:${ui.successHover} !important }
 .bcp-h-dan:hover button:not(:disabled){ background:${ui.dangerHover} !important }
@@ -158,11 +141,8 @@ const css = `
 .bcp-h-ghost:hover button:not(:disabled){ background:${ui.surfaceHover} !important; color:${ui.heading} !important }
 .bcp-h:active button:not(:disabled){ filter:brightness(.92) }
 
-/* Abaixo de ~560px o título do Card e o botão disputam a linha: envolver e
-   descer a ação (flex-basis 100% com !important por causa do inline). */
 @media (max-width: 560px) {
   .bcp-panel section > div:first-child{ flex-wrap:wrap }
-  /* Card fixa flex:1/min-width:0 inline — precisa de !important. */
   .bcp-panel section > div:first-child > div{ flex-basis:100% !important }
 }
 
@@ -180,10 +160,6 @@ const TABS: { id: TabId; label: string; icon: IconName }[] = [
 
 type TestState = { status: 'busy' | 'ok' | 'err'; text: string }
 
-/**
- * Confirmação de ação destrutiva (regen de token, remover comando, descartar
- * edições); `uid: '__close__'`... na prática `kind: 'discard'` cobre o fechar.
- */
 type Confirm =
   | { kind: 'regen'; title: string; body: string; confirmLabel: string }
   | { kind: 'remove'; uid: string; title: string; body: string; confirmLabel: string }
@@ -197,6 +173,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
   onSaved: () => void
   onClose: () => void
 }) {
+  // Seção 1: initial
   const initial = useMemo(() => parseBotConfig(bot.config ?? null), [bot.config])
 
   const [tab, setTab] = useState<TabId>('credenciais')
@@ -225,10 +202,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const tablistRef = useRef<HTMLDivElement | null>(null)
 
-  /**
-   * Troca de aba e leva o foco junto (sem isso a seta recalculava do botão
-   * antigo e saltava para a aba errada).
-   */
   function goToTab(next: TabId) {
     setTab(next)
     const btn = tablistRef.current?.querySelector<HTMLButtonElement>(`#bcp-tab-${next}`)
@@ -243,7 +216,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
         if (alive && Array.isArray(r)) setRoles(r)
       })
       .catch(() => {
-        /* lista de cargos é opcional: o select mostra só o cargo atual */
       })
     return () => {
       alive = false
@@ -251,9 +223,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     }
   }, [communityId])
 
-  // ---- Derivados: validação recalculada a cada tecla, nunca só no salvar ----
-
-  /** Uma linha só conta como preenchida se o usuário começou a preenchê-la. */
   function rowUsed(r: CmdRow): boolean {
     return Boolean(r.name.trim() || r.url.trim() || r.body || r.template || r.responsePath)
   }
@@ -265,7 +234,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     return { name: n ?? (dup ? 'já existe um comando com esse nome' : null), url: urlError(r.url) }
   }
 
-  /** O erro de uma linha só aparece depois que ela foi tocada (ou após salvar). */
   function rowShowError(uid: string): boolean {
     return saveAttempted || Boolean(touched[`${uid}:name`] || touched[`${uid}:url`])
   }
@@ -282,12 +250,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
   }).length
 
   const groupedChannels = useMemo(() => groupByCategory(channels), [channels])
-
-  // TODO(canal-duplicado): o merge manual de `channels` em ThemeShell.tsx
-  // devolve o mesmo canal duas vezes — trocar por `mergeChannels` no chamador.
-  // Aqui consumimos como chega: mascarar aqui esconderia o bug.
-
-  // ---- Comandos ----
 
   function touch(key: string) {
     setTouched((prev) => (prev[key] ? prev : { ...prev, [key]: true }))
@@ -319,8 +281,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     setScope((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]))
   }
 
-  // ---- Token ----
-
   function copyToken() {
     copyToClipboard(token)
     setCopied(true)
@@ -343,8 +303,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
       setRegenBusy(false)
     }
   }
-
-  // ---- Teste POR comando (antes só testava o primeiro da lista) ----
 
   async function testRow(r: CmdRow) {
     const e = rowErrors(r)
@@ -374,9 +332,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     }
   }
 
-  // ---- Salvar ----
-
-  /** Primeiro campo inválido, na ordem das abas — manda o usuário para lá. */
   function firstProblem(): { tab: TabId; msg: string } | null {
     if (prefixErr) return { tab: 'credenciais', msg: 'o prefixo precisa ser 1 caractere' }
     for (const r of rows) {
@@ -390,6 +345,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     return null
   }
 
+  // Seção 2: save
   async function save() {
     setSaveAttempted(true)
     setFormError(null)
@@ -448,7 +404,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
       bot.online,
     )
 
-  /** Só avisa antes de fechar/descartar se o usuário mudou alguma coisa. */
   function requestClose() {
     if (isDirty) {
       setConfirm({
@@ -461,8 +416,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     }
     onClose()
   }
-
-  // ---------- render ----------
 
   const maskedToken = token.length > 8 ? `${token.slice(0, 8)}…${token.slice(-4)}` : token || '(sem token)'
   const roleOptions = [{ value: '', label: 'Sem cargo' }, ...roles.map((r) => ({ value: r.id, label: r.name }))]
@@ -481,7 +434,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
     >
       <style>{css}</style>
 
-      {/* abas — fixas no topo enquanto o conteúdo rola */}
+      {}
       <div
         ref={tablistRef}
         role="tablist"
@@ -550,7 +503,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
         </div>
       )}
 
-      {/* ---------------- ABA CREDENCIAIS ---------------- */}
+      {}
       {tab === 'credenciais' && (
         <div className="bcp-panel" role="tabpanel" id="bcp-panel-credenciais" aria-labelledby="bcp-tab-credenciais">
           <Card title="Identidade" subtitle="Avatar, id e status do bot no servidor." icon="bot">
@@ -658,6 +611,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: `0 ${ui.lg}` }}>
               <TextField
                 label="Prefixo"
+                // Seção 3: value
                 value={prefix}
                 maxLength={4}
                 placeholder="!"
@@ -707,7 +661,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
         </div>
       )}
 
-      {/* ---------------- ABA COMANDOS ---------------- */}
+      {}
       {tab === 'comandos' && (
         <div className="bcp-panel" role="tabpanel" id="bcp-panel-comandos" aria-labelledby="bcp-tab-comandos">
           <Card
@@ -825,6 +779,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: `0 ${ui.lg}` }}>
                             <TextField
                               label="Nome"
+                              // Seção 4: value
                               value={r.name}
                               placeholder="clima"
                               mono
@@ -958,7 +913,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
         </div>
       )}
 
-      {/* ---------------- ABA ESCOPOS E WEBHOOK ---------------- */}
+      {}
       {tab === 'escopos' && (
         <div className="bcp-panel" role="tabpanel" id="bcp-panel-escopos" aria-labelledby="bcp-tab-escopos">
           <Card
@@ -1002,6 +957,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 2 }}>
                       {g.channels.map((ch) => {
+                        // Seção 5: on
                         const on = scope.includes(ch.id)
                         return (
                           <label key={ch.id} className="bcp-check" data-off={!on}>
@@ -1058,7 +1014,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
         </div>
       )}
 
-      {/* ---------------- RODAPÉ FIXO ---------------- */}
+      {}
       <div
         style={{
           position: 'sticky',
@@ -1102,7 +1058,7 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
         </span>
       </div>
 
-      {/* ---------------- CONFIRMAÇÕES DESTRUTIVAS ---------------- */}
+      {}
       <Modal
         open={confirm !== null}
         onClose={() => setConfirm(null)}
@@ -1120,8 +1076,6 @@ export default function BotConfigPanel({ communityId, bot, channels, onSaved, on
                 busy={regenBusy}
                 onClick={() => {
                   if (!confirm) return
-                  // Diálogo fecha em TODOS os caminhos (confirmar apagar deixava
-                  // o modal aberto por cima do painel).
                   if (confirm.kind === 'regen') {
                     setConfirm(null)
                     void regenToken()

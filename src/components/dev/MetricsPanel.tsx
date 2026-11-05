@@ -1,6 +1,3 @@
-// Painel dev: métricas de runtime do motor (contadores + RTT por peer).
-// Só expõe contagens/latências — nunca conteúdo de mensagens.
-
 import { useCallback, useEffect, useState } from 'react'
 import { services } from '../../services'
 

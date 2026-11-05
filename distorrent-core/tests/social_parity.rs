@@ -1,10 +1,3 @@
-//! Teste E2E da camada social (paridade Discord) — 2 nós reais em localhost.
-//!
-//! Cobre: reações (toggle/idempotência), respostas, edição (só autor),
-//! exclusão lógica, fixar, encaminhamento, busca com filtros, cursor de
-//! leitura/não-lidas, presença estendida, perfil, threads, ban/timeout,
-//! slowmode, enquetes (voto), eventos e emojis.
-
 use std::time::Duration;
 
 use distorrent_core::identity::Keypair;
@@ -30,7 +23,6 @@ fn reacoes_toggle_e_agregacao() {
     let env = env_for(&a, "dm1", "olá");
     s.insert_message(&env, "out", "delivered").unwrap();
 
-    // toggle: 1ª vez adiciona, 2ª remove
     assert!(s
         .reaction_toggle(&env.id, "dm1", "🔥", &a.fingerprint())
         .unwrap());
@@ -46,7 +38,6 @@ fn reacoes_toggle_e_agregacao() {
     assert_eq!(sum[0].count, 1);
     assert_eq!(sum[0].emoji, "🔥");
 
-    // "mine" reflete a identidade de quem pergunta
     let mine = s.mark_reactions_mine(sum, &a.fingerprint());
     assert!(mine[0].mine);
     let not_mine = s.mark_reactions_mine(s.reactions_for_msg(&env.id).unwrap(), "outro");
@@ -62,12 +53,10 @@ fn resposta_edicao_exclusao_e_pin() {
     s.insert_message(&p1, "out", "delivered").unwrap();
     s.insert_message(&p2, "out", "delivered").unwrap();
 
-    // resposta
     s.msg_set_reply(&p2.id, "c1", &p1.id).unwrap();
     let meta = s.msg_meta(&p2.id).unwrap().unwrap();
     assert_eq!(meta.reply_to, p1.id);
 
-    // edição
     s.msg_edit(&p2.id, "c1", "segunda (editada)").unwrap();
     assert_eq!(
         s.effective_body(&p2.id, "segunda").unwrap(),
@@ -75,13 +64,11 @@ fn resposta_edicao_exclusao_e_pin() {
     );
     assert!(s.msg_meta(&p2.id).unwrap().unwrap().edited_at > 0);
 
-    // pin
     s.msg_pin(&p1.id, "c1", true, &a.fingerprint()).unwrap();
     let pins = s.pins_list("c1").unwrap();
     assert_eq!(pins.len(), 1);
     assert_eq!(pins[0].msg_id, p1.id);
 
-    // exclusão lógica: some da busca mas o registro continua
     s.msg_delete(&p2.id, "c1").unwrap();
     assert!(s.msg_meta(&p2.id).unwrap().unwrap().deleted);
     let hits = s
@@ -173,17 +160,16 @@ fn cursor_de_leitura_gera_nao_lidas() {
         let e = env_for(&a, "c1", &format!("msg {i}"));
         s.insert_message(&e, "in", "ok").unwrap();
     }
-    // cursor capturado DEPOIS das mensagens = tudo lido
     let now = distorrent_core::identity::now_ms();
     assert_eq!(s.unread_count("c1").unwrap(), 5);
     s.read_set("c1", now).unwrap();
     assert_eq!(s.unread_count("c1").unwrap(), 0);
-    // cursor nunca retrocede
     s.read_set("c1", now - 10_000).unwrap();
     assert_eq!(s.read_cursor("c1").unwrap(), now);
     assert_eq!(s.read_all().unwrap().len(), 1);
 }
 
+// Seção 1: test
 #[test]
 fn presenca_extendida_e_perfil() {
     let s = Store::open_in_memory().unwrap();
@@ -203,7 +189,6 @@ fn presenca_extendida_e_perfil() {
     let prof = s.profile_get(&a.fingerprint()).unwrap();
     assert_eq!(prof.display_name, "Alice B");
     assert_eq!(prof.accent, "#ff0000");
-    // avatar vazio NÃO apaga o anterior
     s.profile_set(&a.fingerprint(), "Alice", "", "AVATAR_B64", "", "")
         .unwrap();
     s.profile_set(&a.fingerprint(), "Alice2", "", "", "", "")
@@ -248,18 +233,15 @@ fn threads_criacao_e_mensagem() {
 fn ban_temporario_expira_e_timeout_limpa() {
     let s = Store::open_in_memory().unwrap();
     let now = distorrent_core::identity::now_ms();
-    // ban temporário já expirado →Some(none)
     s.ban_set("com1", "spam", "spam", "dono", now - 1000)
         .unwrap();
     assert!(s.ban_get("com1", "spam").unwrap().is_none());
-    // ban permanente
     s.ban_set("com1", "mal", "malware", "dono", 0).unwrap();
     assert!(s.ban_get("com1", "mal").unwrap().is_some());
     assert_eq!(s.ban_list("com1").unwrap().len(), 1);
     s.ban_remove("com1", "mal").unwrap();
     assert!(s.ban_get("com1", "mal").unwrap().is_none());
 
-    // timeout ativo e depois expirado
     s.timeout_set("com1", "ruim", now + 60_000, "fala demais", "mod")
         .unwrap();
     assert!(s.timeout_active("com1", "ruim").unwrap() > 0);
@@ -274,15 +256,12 @@ fn slowmode_bloqueia_segunda_mensagem() {
     let a = fx("alice");
     s.channel_cfg_set("ch1", 30, false, false).unwrap();
     assert_eq!(s.channel_cfg_slowmode("ch1").unwrap(), 30);
-    // 1ª liberada
     assert_eq!(s.slowmode_gate("ch1", &a.fingerprint(), 30).unwrap(), 0);
-    // 2ª bloqueada com espera real
     let wait = s.slowmode_gate("ch1", &a.fingerprint(), 30).unwrap();
     assert!(
         wait > 0 && wait <= 30_000,
         "slowmode deve devolver espera: {wait}"
     );
-    // outro fingerprint não é afetado
     assert_eq!(s.slowmode_gate("ch1", "outro-fp", 30).unwrap(), 0);
 }
 
@@ -311,7 +290,6 @@ fn enquete_votos_e_apuracao() {
     assert_eq!(counts, vec![2, 1]);
     assert_eq!(total, 3);
     assert_eq!(s.poll_my_votes("pl1", &a.fingerprint()).unwrap(), vec![0]);
-    // voto simples substitui o anterior
     s.poll_vote("pl1", "bob", 1).unwrap();
     let (counts, total) = s.poll_tally("pl1").unwrap();
     assert_eq!(counts, vec![1, 2]);
@@ -340,7 +318,6 @@ fn eventos_agendados_e_interesse() {
     s.event_interest("com1", "ev1", "bob").unwrap();
     e = s.event_list("com1").unwrap().pop().unwrap();
     assert_eq!(e.interested, vec!["bob".to_string()]);
-    // toggla
     s.event_interest("com1", "ev1", "bob").unwrap();
     e = s.event_list("com1").unwrap().pop().unwrap();
     assert!(e.interested.is_empty());
@@ -364,6 +341,7 @@ fn emojis_do_servidor() {
     assert!(s.emoji_list("com1").unwrap().is_empty());
 }
 
+// Seção 2: test
 #[test]
 fn marcadores_e_purga_de_conversa() {
     let s = Store::open_in_memory().unwrap();
@@ -386,7 +364,6 @@ fn marcadores_e_purga_de_conversa() {
 
 #[test]
 fn frames_sociais_resserializam() {
-    // round-trip do enum: variantes novas precisam sobreviver ao serde
     let cases = vec![
         SecureFrame::React {
             conv_id: "c".into(),
@@ -495,7 +472,6 @@ async fn rede_social_reacoes_entre_dois_nos() {
     wait_online(&mut ev_a, "A").await;
     wait_online(&mut ev_b, "B").await;
 
-    // amizade aceita nos DOIS lados (DM só de amigo)
     let fp_a = a.identity().fingerprint.clone();
     let fp_b = b.identity().fingerprint.clone();
     a.friend_request(&fp_b).unwrap();
@@ -532,6 +508,7 @@ async fn rede_social_reacoes_entre_dois_nos() {
     .await
     .expect("aceite de amizade não sincronizou nos dois peers");
 
+    // Seção 3: conv
     let conv = Store::dm_conversation_id(&fp_a, &fp_b);
     a.store.ensure_dm_conversation(&fp_a, &fp_b, "Bob").unwrap();
     let m = a.send_dm(&conv, "oi bob").unwrap();

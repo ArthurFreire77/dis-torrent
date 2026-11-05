@@ -1,15 +1,3 @@
-//! E2E SINALIZACAO DE CHAMADA VIA RELAY (v4.3) — dois nos que NUNCA se
-//! alcancam por TCP (sem add_manual_peer, sem discovery) trocam sinalizacao
-//! WebRTC 100% pelo relay.
-//!
-//! Cobre: friend_request -> accept pelo relay (base de relay_e2e.rs) ->
-//! call_invite (só CallIncoming) -> call_accept
-//! (CallAcceptedEv) -> call_signal offer -> answer -> ice nos dois sentidos,
-//! com integridade de call_id/from_fp/sdp/candidate/mid ponta a ponta.
-//!
-//! Backend: MemRelay compartilhado dentro de MultiRelay::of + set_relay_backend
-//! (padrao de relay_e2e.rs, com multicamada explicita).
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +11,6 @@ fn spawn_user(nick: &str, hub: MemRelay) -> (Arc<NetworkEngine>, tempfile::TempD
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = distorrent_core::identity::Keypair::generate();
     let engine = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
-    // MultiRelay::of com perna unica MemRelay compartilhada (in-memory, sem rede).
     let leg: Arc<dyn RelayBackend> = Arc::new(hub);
     engine.set_relay_backend(Arc::new(MultiRelay::of(vec![leg])));
     engine.start_with_discovery(false).unwrap();
@@ -53,7 +40,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn call_signaling_offer_answer_ice_via_relay() {
-    // Relay-only determinístico (ver tests/relay_adverse.rs).
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     let hub = MemRelay::new();
     let (a, _da) = spawn_user("CallA", hub.clone());
@@ -65,7 +51,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // 1) Amizade pelo relay (base): NENHUM add_manual_peer, NENHUM endereco.
     let outcome = a.friend_request(&fp_b).unwrap();
     assert_eq!(format!("{outcome:?}"), "QueuedOffline");
 
@@ -90,7 +75,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
     )
     .await;
 
-    // Ambos ONLINE via relay.
     assert_eq!(
         a.peer_state(&fp_b),
         distorrent_core::net::engine::NetworkState::Connected
@@ -102,7 +86,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
     assert!(a.is_peer_via_relay(&fp_b), "sessao A->B deve ser relay");
     assert!(b.is_peer_via_relay(&fp_a), "sessao B->A deve ser relay");
 
-    // 2) call_invite de A -> B (voz). Envia só CallIncoming.
     let call_id = a.call_invite(&fp_b, "voice").unwrap();
     assert!(!call_id.is_empty(), "call_id nao pode ser vazio");
     assert!(
@@ -110,7 +93,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         "call_id tem prefixo call-: {call_id}"
     );
 
-    // B recebe CallIncoming integro.
     let incoming = wait_event(
         &mut ev_b,
         "B recebe CallIncoming via relay",
@@ -134,8 +116,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // Sem CallOffer dummy: invite envia só CallIncoming; a offer real chega via call_signal abaixo.
-    // 3) call_accept de B -> A.
     b.call_accept(&call_id, &fp_a).unwrap();
     let accepted = wait_event(
         &mut ev_a,
@@ -158,7 +138,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // 4) call_signal offer A -> B (explicito, sdp unico).
     let sdp_offer_ab = "v=0\r\noffer-a-to-b-111";
     a.call_signal(
         &fp_b,
@@ -191,7 +170,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // 5) call_signal answer B -> A.
     let sdp_answer_ba = "v=0\r\nanswer-b-to-a-222";
     b.call_signal(
         &fp_a,
@@ -201,6 +179,7 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         },
     )
     .unwrap();
+    // Seção 1: answer_ba
     let answer_ba = wait_event(
         &mut ev_a,
         "A recebe CallAnswerEv B->A via relay",
@@ -224,7 +203,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // 6) call_signal ICE A -> B.
     let cand_ab = "candidate:a-to-b-1";
     a.call_signal(
         &fp_b,
@@ -260,7 +238,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // 7) call_signal ICE B -> A (outro sentido).
     let cand_ba = "candidate:b-to-a-1";
     b.call_signal(
         &fp_a,
@@ -296,7 +273,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // 8) Sentido reverso completo: offer B -> A + answer A -> B.
     let sdp_offer_ba = "v=0\r\noffer-b-to-a-333";
     b.call_signal(
         &fp_a,
@@ -361,7 +337,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         unreachable!();
     }
 
-    // ICE reverso extra com mid distinto (audio/video) — integridade de mid.
     let cand_ab2 = "candidate:a-to-b-2-audio";
     a.call_signal(
         &fp_b,
@@ -372,6 +347,7 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         },
     )
     .unwrap();
+    // Seção 2: ice_ab2
     let ice_ab2 = wait_event(
         &mut ev_b,
         "B recebe 2o CallIceEv A->B (mid audio)",

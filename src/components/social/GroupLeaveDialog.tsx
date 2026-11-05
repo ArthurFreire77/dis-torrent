@@ -1,12 +1,8 @@
-// Diálogo de sair/apagar grupo — o DONO escolhe "para todos" ou "só para mim".
-// Componente puro de apresentação (overlay próprio): usado pelo desktop e pelo
-// celular, que têm layouts diferentes mas a MESMA decisão.
 import { useState } from 'react'
 import { Button } from '../../shared/ui'
 
 export interface GroupLeaveDialogProps {
   title: string
-  /** Sou o criador do grupo? Muda as opções (sair ≠ apagar para todos). */
   isOwner: boolean
   onClose: () => void
   onLeave: () => Promise<void>

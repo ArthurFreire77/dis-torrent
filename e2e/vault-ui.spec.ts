@@ -1,16 +1,10 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// Cofre & Backup (5.4) no modo browser (rota mobile /m):
-// - painel mostra aviso "app nativo" (export/import exigem o nativo)
-// - modo pânico limpa chaves distorrent:* do localStorage
-// - 2 mensagens numa DM aparecem (cobre a janela de mensagens da UI)
-
 async function createAccount(page: Page, name: string) {
   await page.goto('/m');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  // bottom-nav "Você" (header também tem aria-label Você — nav é o último)
   await expect(page.getByRole('button', { name: 'Você' }).last()).toBeVisible({ timeout: 15000 });
 }
 
@@ -42,7 +36,6 @@ test('cofre mostra aviso de app nativo no modo browser', async ({ page }) => {
   await expect(page.getByText('funciona apenas no')).toBeVisible();
 });
 
-// Gate aberto (contrato stormvault + vaultWipe no browserServices): reativado.
 test('modo pânico do browser limpa chaves distorrent: e mantém as demais', async ({ page }) => {
   await createAccount(page, 'Panico');
   await page.evaluate(() => {
@@ -67,7 +60,6 @@ test('duas mensagens numa DM aparecem nas duas pontas', async ({ browser }) => {
   await createAccount(b, 'BobV');
   await befriendMobile(a, b);
 
-  // A abre a DM e envia 2 mensagens
   await a.getByRole('button', { name: 'Amigos' }).click();
   await a.getByRole('button', { name: 'Todos' }).click();
   const fpB = await fpOf(b);
@@ -78,13 +70,11 @@ test('duas mensagens numa DM aparecem nas duas pontas', async ({ browser }) => {
   await a.getByPlaceholder(/Conversar com/).fill(`cofre-msg-1 ${stamp}`);
   await a.getByPlaceholder(/Conversar com/).press('Enter');
   await expect(a.getByText(`cofre-msg-1 ${stamp}`)).toBeVisible({ timeout: 15000 });
-  // anti-duplo-envio da UI (300ms) — espera antes da 2ª mensagem
   await a.waitForTimeout(500);
   await a.getByPlaceholder(/Conversar com/).fill(`cofre-msg-2 ${stamp}`);
   await a.getByPlaceholder(/Conversar com/).press('Enter');
   await expect(a.getByText(`cofre-msg-2 ${stamp}`)).toBeVisible({ timeout: 15000 });
 
-  // B abre a DM e recebe ao vivo
   await b.getByRole('button', { name: 'Amigos' }).click();
   await b.getByRole('button', { name: 'Todos' }).click();
   const fpA = await fpOf(a);

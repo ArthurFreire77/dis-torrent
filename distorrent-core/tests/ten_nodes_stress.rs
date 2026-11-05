@@ -1,6 +1,3 @@
-//! STRESS REAL — 10 NÓS NetworkEngine com TempDir distintos, discovery desligado,
-//! malha completa via add_manual_peer, friend_request/accept em cadeia,
-//! DM com ACK delivered, latência e taxa de entrega.
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,7 +45,6 @@ async fn ten_nodes_mesh_stress() {
     let mut fps: Vec<String> = Vec::new();
     let mut ports: Vec<u16> = Vec::new();
 
-    // ---------- spawn 10 nós reais ----------
     for i in 0..N {
         let nick = format!("node{i}");
         let dir = tempfile::tempdir().unwrap();
@@ -56,7 +52,6 @@ async fn ten_nodes_mesh_stress() {
         let kp = distorrent_core::identity::Keypair::generate();
         let eng = NetworkEngine::new(store, kp, nick, dir.path().to_path_buf());
         eng.start_with_discovery(false).unwrap();
-        // espera listener subir
         let mut p = 0u16;
         for _ in 0..50 {
             p = eng.listen_port();
@@ -72,7 +67,6 @@ async fn ten_nodes_mesh_stress() {
         dirs.push(dir);
         tokio::time::sleep(Duration::from_millis(80)).await;
     }
-    // fps únicos?
     {
         let mut s = fps.clone();
         s.sort();
@@ -82,11 +76,9 @@ async fn ten_nodes_mesh_stress() {
     println!("[10nos] spawn ok. fps={fps:?}");
     println!("[10nos] ports={ports:?}");
 
-    // subscribe ANTES de discar
     let mut rxs: Vec<tokio::sync::broadcast::Receiver<EngineEvent>> =
         engines.iter().map(|e| e.subscribe()).collect();
 
-    // ---------- malha completa: i disca j (i<j) ----------
     let addrs: Vec<SocketAddr> = ports
         .iter()
         .map(|p| format!("127.0.0.1:{p}").parse().unwrap())
@@ -100,14 +92,12 @@ async fn ten_nodes_mesh_stress() {
     }
     println!("[10nos] dials iniciados: {dials} (malha i->j)");
 
-    // ---------- espera handshake total (cada nó vê 9 online) ----------
     wait_until(
         "malha completa 10x9",
         || engines.iter().all(|e| e.online_peer_fps().len() == N - 1),
         40,
     )
     .await;
-    // checagem extra de estado
     for i in 0..N {
         for j in 0..N {
             if i == j {
@@ -123,7 +113,6 @@ async fn ten_nodes_mesh_stress() {
     let directed: usize = engines.iter().map(|e| e.online_peer_fps().len()).sum();
     println!("[10nos] HANDSHAKE OK: directed_links={directed} (esperado 90), por_no=9");
 
-    // ---------- friend_request/accept em cadeia 0->1->...->9 ----------
     let t_friends = Instant::now();
     let mut friends_ok = 0u32;
     for i in 0..(N - 1) {
@@ -171,7 +160,7 @@ async fn ten_nodes_mesh_stress() {
         );
     }
 
-    // ---------- DM em cadeia com ACK delivered + latência ----------
+    // Seção 1: mut
     let mut latencias: Vec<u128> = Vec::new();
     let mut entregues = 0u32;
     let mut falhas = 0u32;
@@ -183,7 +172,6 @@ async fn ten_nodes_mesh_stress() {
         let t0 = Instant::now();
         let m = engines[a].send_dm(&dm.id, &body).unwrap();
         assert_eq!(m.status, "sent", "DM {a}->{b} deve ir sent (online)");
-        // receptor recebe
         let rec = wait_event(
             &mut rxs[b],
             &format!("DM {a}->{b}"),
@@ -195,7 +183,6 @@ async fn ten_nodes_mesh_stress() {
             assert_eq!(mm.author_fp, fps[a]);
             assert_eq!(mm.conv_id, dm.id, "DM id determinístico");
         }
-        // sender vê delivered
         match tokio::time::timeout(Duration::from_secs(15), async {
             wait_event(&mut rxs[a], &format!("ACK {a}->{b}"), |e| matches!(e, EngineEvent::MessageStatus { msg_id, status } if msg_id == &m.id && status == "delivered"), 15).await
         }).await {
@@ -220,7 +207,6 @@ async fn ten_nodes_mesh_stress() {
     let max = latencias.iter().max().copied().unwrap_or(0);
     println!("[10nos] DM cadeia: entregues={entregues}/9 falhas={falhas} lat_avg={avg:.1}ms min={min}ms max={max}ms latencias={latencias:?}");
 
-    // ---------- fingerprint estável ----------
     let mut fp_estavel = true;
     for i in 0..N {
         if engines[i].identity().fingerprint != fps[i] {
@@ -229,7 +215,6 @@ async fn ten_nodes_mesh_stress() {
     }
     println!("[10nos] fingerprint estável: {fp_estavel}");
 
-    // ---------- resumo final ----------
     let total_directed: usize = engines.iter().map(|e| e.online_peer_fps().len()).sum();
     println!("[10nos] RESUMO nós=10 conectados_por_no=9 directed={total_directed}/90 dials={dials} friends_cadeia={friends_ok}/9 dms_entregues={entregues}/9 falhas={falhas} lat_media_ms={avg:.1} fp_estavel={fp_estavel}");
 
@@ -242,6 +227,5 @@ async fn ten_nodes_mesh_stress() {
     assert_eq!(falhas, 0);
     assert!(fp_estavel);
 
-    // mantém TempDirs vivos até aqui
     drop(dirs);
 }

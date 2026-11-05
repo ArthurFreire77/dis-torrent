@@ -1,11 +1,3 @@
-// Modal de perfil (apelido, avatar, capa, status).
-//
-// Extraído de `Social.tsx` (que tinha 1508 linhas e 27 exports) por
-// `scripts/split-social.mjs`. O conteúdo é o MESMO — a divisão é só de
-// responsabilidade: um arquivo por assunto, para achar e revisar sem rolar
-// 1,5 mil linhas. `Social.tsx` continua reexportando tudo, então nenhum
-// importador precisou mudar.
-
 import React, { useEffect, useState } from 'react'
 import type { PresenceStatus, PresenceView, ProfileView } from '../../services/models'
 import { Ic, type IconName } from '../../shared/icons'
@@ -17,8 +9,6 @@ import {
 } from './socialPrimitives'
 import { services } from '../../services'
 
-// ============================== PERFIL ==============================
-
 export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, communityId, communityName, onRenamed, onSaved }: {
   fp: string
   nickname: string
@@ -28,12 +18,6 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   communityId?: string
   communityName?: string
   onRenamed?: () => void
-  /**
-   * Chamado com o perfil EFETIVAMENTE PERSISTIDO assim que o salvamento dá
-   * certo. Sem isto o modal era uma ilha de estado: gravava no SQLite, mas o
-   * avatar do canto inferior esquerdo (e o nome em toda a UI) só mudavam no
-   * próximo poll de 15 s — e nunca, se esse poll falhasse.
-   */
   onSaved?: (p: ProfileView) => void
 }) {
   const [profile, setProfile] = useState<ProfileView | null>(null)
@@ -96,14 +80,10 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
     setBusy(true); setErr(null)
     try {
       const p = await services.profileSet({ display_name: displayName, about, avatar_b64: avatar, banner_b64: banner, accent })
-      // Estado local = o que o core PERSISTIU (com rev/content_hash), não o
-      // patch digitado. É o mesmo objeto que os outros componentes recebem.
       setProfile(p)
       setAvatar(p.avatar_b64)
       setBanner(p.banner_b64)
       onSaved?.(p)
-      // Presença é independente: se falhar, o perfil JÁ foi salvo — o erro
-      // precisa dizer isso em vez de parecer que nada foi gravado.
       try {
         await services.presenceSet(status, custom, customEmoji)
         setPresence({ fp, status, custom, custom_emoji: customEmoji, updated_at: Date.now() })
@@ -117,7 +97,7 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   }
 
   async function copyFp() {
-    try { await navigator.clipboard?.writeText(fp) } catch { /* clipboard indisponível */ }
+    try { await navigator.clipboard?.writeText(fp) } catch {  }
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
   }
@@ -278,12 +258,7 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   )
 }
 
-
-// ---------------------------------------------------------------------------
-// Helpers que o recorte por faixa deixou fora (linhas 13-26 e 431 do original:
-// `STATUS_ICONS`/`statusIconName` e `secHead`). Ficam aqui porque só o modal de
-// perfil os usa.
-
+// Seção 1: STATUS_ICONS
 const STATUS_ICONS: { id: string; icon: IconName; label: string }[] = [
   { id: 'game', icon: 'grid', label: 'Jogando' },
   { id: 'code', icon: 'terminal', label: 'Codando' },

@@ -1,8 +1,3 @@
-//! Identidade criptográfica local (ed25519).
-//! Fingerprint = primeiros 6 bytes de blake3(pubkey), hex (12 chars).
-//! A chave privada nunca abandona este módulo serializada para a UI —
-//! persistência é responsabilidade do chamador (keyring no app, arquivo no Host).
-
 use blake3::Hasher;
 use ed25519_dalek::{Signer, Verifier};
 use rand::rngs::OsRng;
@@ -10,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{DistorrentError, Result};
 
-pub const FINGERPRINT_LEN: usize = 12; // hex chars
+pub const FINGERPRINT_LEN: usize = 12;
 
 #[derive(Clone)]
 pub struct Keypair {
@@ -21,7 +16,7 @@ pub struct Identity {
     pub fingerprint: String,
     pub pubkey_hex: String,
     pub nickname: String,
-    pub created_at: i64, // unix ms
+    pub created_at: i64,
 }
 
 impl Keypair {
@@ -86,14 +81,12 @@ impl Keypair {
     }
 }
 
-/// blake3(pubkey_bytes) → primeiros 12 hex chars. Corrige divergência TS/Rust.
 pub fn fingerprint_of_pubkey_hex(pubkey_hex: &str) -> String {
     match hex::decode(pubkey_hex.trim()) {
         Ok(pub_bytes) if pub_bytes.len() == 32 => {
             hex::encode(blake3::hash(&pub_bytes).as_bytes())[..FINGERPRINT_LEN].to_string()
         }
         _ => {
-            // fallback legado: hash do hex string puro (compat com identidades antigas)
             let mut h = Hasher::new();
             h.update(pubkey_hex.as_bytes());
             hex::encode(h.finalize().as_bytes())[..FINGERPRINT_LEN].to_string()
@@ -101,20 +94,16 @@ pub fn fingerprint_of_pubkey_hex(pubkey_hex: &str) -> String {
     }
 }
 
-/// Verifica que pubkey pertence ao fingerprint (anti-spoof). Aceita tanto o novo
-/// `blake3(pub_bytes)` quanto o legado `blake3(hex_str)` para compat com identidades antigas.
 pub fn fingerprint_matches(fingerprint: &str, pubkey_hex: &str) -> bool {
     if fingerprint_of_pubkey_hex(pubkey_hex) == fingerprint {
         return true;
     }
-    // compat legado: blake3(hex.as_bytes())
     let mut h = Hasher::new();
     h.update(pubkey_hex.as_bytes());
     let legacy = hex::encode(h.finalize().as_bytes())[..FINGERPRINT_LEN].to_string();
     legacy == fingerprint
 }
 
-/// legado para diagnóstico / testes
 pub fn fingerprint_of_pubkey_hex_legacy(pubkey_hex: &str) -> String {
     let mut h = Hasher::new();
     h.update(pubkey_hex.as_bytes());
@@ -151,7 +140,6 @@ mod tests {
         let sig = a.sign(msg);
         assert!(Keypair::verify(&a.public_hex(), msg, &sig).unwrap());
 
-        // garante mutação: flip último char (se '0' vira '1', senão '0')
         let last = sig.chars().last().unwrap();
         let flipped = if last == '0' { '1' } else { '0' };
         let tampered = format!("{}{}", &sig[..sig.len() - 1], flipped);

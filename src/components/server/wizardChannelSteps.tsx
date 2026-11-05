@@ -1,8 +1,3 @@
-// Passos 2, 3 e 4 do assistente: canais, cargos e regras.
-//
-// Mesmo contrato do passo de identidade: só apresentação + callbacks, e o
-// layout estrutural vem de `layout` (inline) para nunca depender da folha.
-
 import { Ic } from '../../shared/icons'
 import { Button, IconButton, Notice, Select, TextArea, TextField, ui } from '../../shared/ui'
 import { Tooltip } from '../../shared/Tooltip'
@@ -170,6 +165,7 @@ export function StepRoles({
               {aberto && (
                 <div className="csw-perms" style={layout.perms}>
                   {(Object.keys(PERMS) as (keyof typeof PERMS)[]).map((key) => {
+                    // Seção 1: bit
                     const bit = PERMS[key]
                     const pl = (PERM_LABELS as Record<number, string>)[bit] ?? key
                     return (

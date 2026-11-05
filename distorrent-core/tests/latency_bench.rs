@@ -1,29 +1,9 @@
-//! LATENCY BENCH (DisTorrent) — mede RTT send→delivered nos 3 caminhos.
-//!
-//! Padrão seguido de `relay_e2e.rs`: `start_with_discovery(false)`, befriend
-//! via API (`friend_request` → `FriendRequestIn` → `friend_respond` →
-//! `FriendAccepted`), depois `send_dm` + espera `MessageStatus{delivered}`
-//! cronometrando `Instant::now()` → evento.
-//!
-//! - `direct_localhost_rtt`: 2 nós via `add_manual_peer(127.0.0.1)` (TCP
-//!   direto, sem relay — hubs `MemRelay` ISOLADOS por nó p/ impossibilitar
-//!   rendezvous). 10 DMs ida. Reporta médio/p50/p99.
-//! - `relay_mem_rtt`: 2 nós via `MemRelay` COMPARTILHADO, SEM contato TCP
-//!   (padrão `relay_e2e.rs`). 5 DMs. Reporta médio/p50/p99 (inclui polls/push).
-//! - `relay_mqtt_real_rtt`: 2 nós via brokers públicos reais (padrão
-//!   `relay_mqtt_e2e.rs`, `MultiRelay` MQTT). 3 DMs. Reporta médio/p50/p99.
-//!
-//! Rode com: `cargo test --test latency_bench -- --nocapture --test-threads=1`
-//! (serializado p/ não contaminar a latência entre os 3 caminhos).
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use distorrent_core::net::engine::{EngineEvent, NetworkEngine, NetworkState};
 use distorrent_core::net::relay::{MemRelay, MqttRelay, MultiRelay};
 use distorrent_core::storage::Store;
-
-// ---------------- helpers ----------------
 
 async fn wait_event<F: Fn(&EngineEvent) -> bool>(
     rx: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
@@ -45,7 +25,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
     }
 }
 
-/// (mean_ms, p50_ms, p99_ms, sorted_ms)
 fn stats_ms(samples: &[Duration]) -> (f64, f64, f64, Vec<f64>) {
     assert!(!samples.is_empty(), "sem amostras");
     let mut v: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
@@ -80,8 +59,6 @@ fn spawn_direct(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = distorrent_core::identity::Keypair::generate();
     let e = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
-    // Hub ISOLADO por nó => rendezvous via relay impossível; garante TCP direto.
-    // Também sobrescreve as rotas MQTT públicas padrão (sem internet neste teste).
     e.set_relay_backend(Arc::new(MemRelay::new()));
     e.start_with_discovery(false).unwrap();
     std::thread::sleep(Duration::from_millis(150));
@@ -113,7 +90,6 @@ fn spawn_mqtt(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     (e, dir)
 }
 
-/// Befriend via API (padrão relay_e2e.rs). `timeout_s` = espera por etapa.
 async fn befriend_via_api(
     a: &Arc<NetworkEngine>,
     b: &Arc<NetworkEngine>,
@@ -144,7 +120,6 @@ async fn befriend_via_api(
     .await;
 }
 
-/// Uma ida send→delivered cronometrada.
 async fn dm_rtt(
     sender: &Arc<NetworkEngine>,
     ev_sender: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
@@ -165,8 +140,6 @@ async fn dm_rtt(
     t0.elapsed()
 }
 
-// ---------------- 1) direta localhost ----------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_localhost_rtt() {
     let (a, _da) = spawn_direct("BenchDirectA");
@@ -178,7 +151,6 @@ async fn direct_localhost_rtt() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // TCP direto: A disca no listener real de B via 127.0.0.1 (sem relay).
     let addr_b: std::net::SocketAddr = format!("127.0.0.1:{}", b.listen_port()).parse().unwrap();
     a.add_manual_peer(addr_b, Some(fp_b.clone()));
 
@@ -201,7 +173,6 @@ async fn direct_localhost_rtt() {
 
     befriend_via_api(&a, &b, &mut ev_a, &mut ev_b, 15).await;
 
-    // Prova de caminho direto (não relay).
     assert!(
         !a.is_peer_via_relay(&fp_b),
         "sessão A→B deveria ser DIRETA (via_relay=false)"
@@ -212,6 +183,7 @@ async fn direct_localhost_rtt() {
     );
 
     let dm = a.open_dm(&fp_b, "BenchDirectB").unwrap();
+    // Seção 1: N
     const N: usize = 10;
     let mut samples = Vec::with_capacity(N);
     for i in 0..N {
@@ -225,11 +197,8 @@ async fn direct_localhost_rtt() {
     report("direct_localhost", &samples);
 }
 
-// ---------------- 2) relay em memória ----------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_mem_rtt() {
-    // Relay-only determinístico (ver tests/relay_adverse.rs).
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     let hub = MemRelay::new();
     let (a, _da) = spawn_mem("BenchMemA", hub.clone());
@@ -241,7 +210,6 @@ async fn relay_mem_rtt() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // SEM add_manual_peer, SEM discovery: só relay (padrão relay_e2e.rs).
     befriend_via_api(&a, &b, &mut ev_a, &mut ev_b, 60).await;
 
     assert_eq!(a.peer_state(&fp_b), NetworkState::Connected);
@@ -263,8 +231,6 @@ async fn relay_mem_rtt() {
     report("relay_mem", &samples);
 }
 
-// ---------------- 3) relay MQTT real (brokers públicos) ----------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_mqtt_real_rtt() {
     let (a, _da) = spawn_mqtt("BenchMqttA");
@@ -275,10 +241,8 @@ async fn relay_mqtt_real_rtt() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // SEM TCP direto (padrão relay_mqtt_e2e.rs): tudo via brokers públicos.
     befriend_via_api(&a, &b, &mut ev_a, &mut ev_b, 120).await;
 
-    // Estado online via relay (evento já consumido acima — checa estado c/ poll).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         if a.peer_state(&fp_b) == NetworkState::Connected

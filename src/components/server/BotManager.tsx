@@ -46,7 +46,8 @@ export function BotManager({
   onCreate: (data: { name: string; roleId: string | null }) => Promise<void>
   onUpdate: (id: string, patch: { name?: string; roleId?: string | null; online?: boolean; perms?: number }) => Promise<void>
   onDelete: (id: string) => Promise<void>
-  onConfigure: (botId: string) => void
+  /** Abre o editor do bot (`null` fecha). */
+  onConfigure: (botId: string | null) => void
   /** Importa uma pasta de bot (`bot.json`): cria o bot com a config e permissões. */
   onImportFolder?: (dir: string) => Promise<string>
 }) {

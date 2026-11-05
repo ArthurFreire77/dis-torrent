@@ -1,5 +1,3 @@
-// Roda `check_relay_legs` real contra os brokers públicos e mostra o resultado
-// (o mesmo que o relatório de diagnóstico do app exibe).
 #[tokio::test]
 #[ignore = "rede real: consulta brokers MQTT públicos"]
 async fn probe_real_dos_brokers_publicos() {

@@ -1,5 +1,3 @@
-// Preferências de mídia da chamada (engrenagem): microfone/câmera, resolução,
-// FPS e processamento de voz. Lógica pura — testada sem DOM.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -26,7 +24,6 @@ test('padrão: 720p, fps automático, processamento de voz ligado', () => {
 })
 
 test('fps "auto" não fixa teto; número vira teto real', () => {
-  // Sem teto = o aparelho escolhe (era o bug do "automático" virar 60).
   assert.equal(fpsToMax('auto'), undefined)
   assert.equal(fpsToMax('30'), 30)
   assert.equal(fpsToMax('60'), 60)
@@ -46,7 +43,6 @@ test('fps automático NÃO manda frameRate (sem teto artificial)', () => {
 })
 
 test('min de resolução fica folgado (câmera fraca não dá OverconstrainedError)', () => {
-  // Pedir min igual ao ideal fazia a câmera frontal de celular nem abrir.
   const c = videoConstraintsFromPrefs(prefs({ quality: '4K' }))
   assert.equal((c.width as any).min, 320)
   assert.equal((c.height as any).min, 240)
@@ -73,7 +69,6 @@ test('sem device escolhido não manda deviceId (usa o padrão do sistema)', () =
 test('preferência corrompida ou de versão antiga cai no padrão sem lançar', () => {
   assert.equal(parseCallMediaPrefs('{{{ nao é json').quality, '720p')
   assert.equal(parseCallMediaPrefs(42).quality, '720p')
-  // Valor fora das opções é descartado, o resto é preservado.
   const p = parseCallMediaPrefs({ quality: '8K', fps: '999', audioInputId: 'mic-1' })
   assert.equal(p.quality, '720p')
   assert.equal(p.fps, 'auto')

@@ -1,7 +1,3 @@
-//! E2E DIRETA VIA ANÚNCIO (v4.3.6) — B descobre o endpoint de A pelo tópico
-//! de anúncio (`distorrent_a_<fp>`) e disca DIRETO (via_relay=false).
-//! Prova: descoberta multi-estrada → dial direta → eleição prefere direta.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,14 +22,10 @@ async fn direct_via_mqtt_announce() {
     let fp_a = a.identity().fingerprint.clone();
     let _fp_b = b.identity().fingerprint.clone();
 
-    // A é "alcançável direto": publica o endpoint real no tópico de anúncio
-    // (é o que o tick de announce faz a cada 5s quando há IP público).
     let addr_a = format!("127.0.0.1:{}", a.listen_port());
     let ann = serde_json::json!({ "fp": fp_a, "addr": addr_a, "nickname": "DirA" }).to_string();
     hub.post(&announce_topic(&fp_a), &ann).await.unwrap();
 
-    // B quer A como amigo: lookup imediato + tick acham o anúncio e
-    // discam DIRETO (a direta vence o relay na eleição, pode levar 1 ciclo).
     b.friend_request(&fp_a).unwrap();
     let mut ev_b = b.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);

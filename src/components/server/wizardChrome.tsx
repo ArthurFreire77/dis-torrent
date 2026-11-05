@@ -1,23 +1,8 @@
-// Rodapé e barra de etapas do assistente.
-//
-// Puramente visuais: recebem a decisão já tomada (`busy`, `error`, `pendencias`,
-// `step`) e não conhecem `services`, estado nem criação. Layout inline para não
-// depender da folha (os 4 segmentos colavam como "1Identidade 2Canais" quando o
-// `<style>` não era aplicado).
-
 import { Ic } from '../../shared/icons'
 import { Button, ui } from '../../shared/ui'
 import { layout } from './wizardStyles'
 import { PASSO_CONCLUIDO, PASSO_REGRAS, STEP_LABELS } from './wizardModel'
 
-/**
- * Rodapé do modal: erro real, o que falta e a ação do passo.
- *
- * O aviso de "Falta:" é `role=status` (não `alert`): é orientação de
- * preenchimento, e um alert dispararia leitura imediata a cada tecla digitada.
- * Já a falha de criação é `role=alert` — ali aconteceu algo que a pessoa
- * precisa saber na hora.
- */
 export function WizardFooter({
   step,
   busy,
@@ -93,11 +78,6 @@ export function WizardFooter({
   )
 }
 
-/**
- * Barra de etapas: 4 segmentos. Clicar só volta para passo já alcançado —
- * pular direto para cargos deixaria canais vazios (o servidor não existe sem
- * canal de texto).
- */
 export function WizardStepper({
   step,
   visited,

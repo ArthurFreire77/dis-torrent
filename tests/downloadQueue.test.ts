@@ -110,12 +110,12 @@ test('verifyFileIntegrity: blake3 ok/nok/vazio (hash anunciado em slice 32)', ()
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
   assert.equal(full.length, 64)
-  assert.equal(blake3Hex(bytes), full) // módulo usa o mesmo algoritmo
-  assert.equal(verifyFileIntegrity(bytes, full), true) // 64 chars
-  assert.equal(verifyFileIntegrity(bytes, full.slice(0, 32)), true) // 32 chars (anúncio legado)
+  assert.equal(blake3Hex(bytes), full)
+  assert.equal(verifyFileIntegrity(bytes, full), true)
+  assert.equal(verifyFileIntegrity(bytes, full.slice(0, 32)), true)
   const flipped = full.slice(0, 31) + (full[31] === '0' ? '1' : '0')
-  assert.equal(verifyFileIntegrity(bytes, flipped), false) // 1 char diferente
-  assert.equal(verifyFileIntegrity(new Uint8Array([1, 2, 4]), full.slice(0, 32)), false) // outro conteúdo
+  assert.equal(verifyFileIntegrity(bytes, flipped), false)
+  assert.equal(verifyFileIntegrity(new Uint8Array([1, 2, 4]), full.slice(0, 32)), false)
   assert.equal(verifyFileIntegrity(bytes, ''), false)
 })
 

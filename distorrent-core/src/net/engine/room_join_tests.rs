@@ -1,10 +1,3 @@
-// ENTRAR numa sala anunciada: o fluxo inteiro, não só o anúncio.
-//
-// O relato "cliquei Entrar e não foi" pode ser:
-//   a) o `room_join` não acha ninguém para avisar;
-//   b) acha, mas os PCs ficam travados (quem entra faz offer, o host não responde);
-//   c) a sala some antes do invite chegar.
-// Este teste cobre (a) e (c), que dá para provar sem rede real.
 use super::*;
 use crate::storage::Store;
 use std::sync::Arc;
@@ -49,7 +42,6 @@ fn entrar_na_sala_devolve_o_call_id_e_quem_avisar() {
     let conv = grupo_com(&host, &quem_entra);
     espelhar(&host, &quem_entra, &conv);
 
-    // Host abre a chamada e anuncia a sala (participante: só ele).
     host.publish_room(
         "call-sala-1",
         &conv,
@@ -57,7 +49,6 @@ fn entrar_na_sala_devolve_o_call_id_e_quem_avisar() {
         vec![host.identity.fingerprint.clone()],
     );
 
-    // O outro lado recebe o anúncio (mesmo caminho do handle_frame).
     quem_entra.room_receive(
         &host.identity.fingerprint,
         "call-sala-1",
@@ -71,7 +62,6 @@ fn entrar_na_sala_devolve_o_call_id_e_quem_avisar() {
         "quem entra precisa VER a sala antes de clicar"
     );
 
-    // Clicou Entrar.
     let (call_id, alvos) = quem_entra
         .room_join(&conv, "voice")
         .expect("join deveria funcionar");
@@ -96,8 +86,6 @@ fn entrar_sem_sala_da_erro_honesto() {
 
 #[test]
 fn entrar_em_sala_so_comigo_nao_avisa_ninguem() {
-    // Sala publicada por mim mesmo, com meu fp como único participante: não há
-    // ninguém para receber o invite — tem de falhar em vez de "conectar" sozinho.
     let (e, _d) = mk_engine("join-solo");
     e.publish_room(
         "call-solo",
@@ -115,11 +103,6 @@ fn entrar_em_sala_so_comigo_nao_avisa_ninguem() {
 #[test]
 #[cfg(target_os = "linux")]
 fn entrar_na_sala_registra_o_par_nativo() {
-    // Chamada NATIVA (Linux): entrar numa sala em andamento não passa por
-    // aceite, então o `hold_call_offer` não tem quem o drene. Sem REGISTRAR o
-    // par no `room_join`, a offer do host era retida para sempre e a sala
-    // ficava em "Conectando…" — o relato de campo. O teste trava o registro
-    // (a mídia em si exige device, que não existe aqui).
     let (host, _d1) = mk_engine("join-native-host");
     let (guest, _d2) = mk_engine("join-native-guest");
     let conv = grupo_com(&host, &guest);
@@ -138,9 +121,6 @@ fn entrar_na_sala_registra_o_par_nativo() {
         "open",
         vec![host.identity.fingerprint.clone()],
     );
-    // Sem Codec/device a voz nativa não sobe neste ambiente: se subir, o par
-    // tem de estar registrado; se não subir, nada é registrado e o caminho é
-    // o navegador (honesto). O teste só exige a coerência.
     let (call_id, alvos) = guest.room_join(&conv, "voice").expect("join ok");
     assert_eq!(call_id, "call-nativa-1");
     assert_eq!(alvos, vec![host.identity.fingerprint.clone()]);
@@ -173,7 +153,6 @@ fn sala_fechada_impede_entrar() {
         "open",
         vec![host.identity.fingerprint.clone()],
     );
-    // Host encerra: o anúncio de fechamento chega ao outro lado.
     guest.room_receive(
         &host.identity.fingerprint,
         "",
@@ -189,3 +168,4 @@ fn sala_fechada_impede_entrar() {
         "sala fechada não pode aceitar entrada"
     );
 }
+// Seção 1: fim

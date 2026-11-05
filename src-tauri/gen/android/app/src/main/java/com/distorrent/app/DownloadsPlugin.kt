@@ -13,29 +13,6 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
 
-/**
- * Salvamento no Downloads REAL do Android (MediaStore).
- *
- * ## Por que este plugin existe
- *
- * O `save_file` (Rust) grava no diretório privado do app
- * (`app_data_dir()/Download`), porque o Android 10+ (scoped storage) **nega**
- * escrita direta em `/storage/emulated/0/Download`. O usuário apertava
- * "Baixar" e o arquivo sumia numa pasta estranha — sem aparecer em Downloads,
- * nem no gerenciador de arquivos. Parecia que o download não tinha acontecido.
- *
- * A forma suportada de gravar no Downloads compartilhado é o **MediaStore**,
- * que é o caminho que o próprio app de Arquivos do Android usa. Não exige
- * permissão de armazenamento no Android 10+, e o arquivo aparece na hora em
- * "Downloads" e em qualquer app que leia mídia.
- *
- * ## Contrato com o frontend (`fileSwarm.ts`)
- *
- * `plugin:downloads|save(path, name) -> { path }`
- *  - `path`: caminho do arquivo já gravado pelo Rust na área privada;
- *  - `name`: nome final sugerido (sanitizado aqui — nunca confiar no peer);
- *  - devolve o caminho legível para a UI mostrar ao usuário.
- */
 @TauriPlugin
 class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activity) {
 
@@ -47,9 +24,6 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
         invoke.reject("nome de arquivo inválido")
         return
       }
-      // Defesa em profundidade: o Rust já bloqueia extensão de executável no
-      // `save_file_stream`, mas este plugin é a última porta antes do Downloads
-      // público (e o WebView chama `plugin:downloads|save` direto).
       val ext = safe.substringAfterLast('.', "").lowercase()
       if (ext in BLOCKED_EXT) {
         invoke.reject("extensão de executável/script bloqueada: .$ext")
@@ -60,15 +34,10 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
         invoke.reject("arquivo de origem não encontrado: ${src.name}")
         return
       }
-      // O `path` vem do WebView: sem esta checagem, um renderer comprometido
-      // copiava (e APAGAVA) qualquer arquivo legível pelo app — inclusive o
-      // SQLite e o cofre — para a pasta pública. Só aceita arquivo dentro das
-      // áreas do próprio app.
       if (!isInsideApp(src)) {
         invoke.reject("caminho de origem fora da área do app")
         return
       }
-      // Teto: o swarm limita a ~200MB. Acima disso é bug/ataque — não alocar.
       if (src.length() > 220_000_000L) {
         invoke.reject("arquivo grande demais para mover para Downloads (máx ~200MB)")
         return
@@ -79,8 +48,6 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
         } else {
           saveLegacy(safe, src, invoke)
         }
-      // A origem privada já foi copiada: pode ir. Se a cópia falhar, `save*`
-      // lançou antes e a origem continua (o Rust ainda tem o arquivo).
       try { if (!src.delete()) src.deleteOnExit() } catch (_: Throwable) { }
       invoke.resolve(JSObject().apply { put("path", dest) })
     } catch (e: Throwable) {
@@ -88,15 +55,12 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
     }
   }
 
-  /** Android 10+ (API 29+): MediaStore — caminho suportado, sem permissão. */
   private fun saveViaMediaStore(name: String, src: File, invoke: Invoke): String {
     val resolver = activity.contentResolver
     val values = ContentValues().apply {
       put(MediaStore.Downloads.DISPLAY_NAME, name)
       put(MediaStore.Downloads.MIME_TYPE, guessMime(name))
       put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-      // IS_PENDING esconde o arquivo enquanto escreve: se o app morrer no
-      // meio, o usuário não fica com um arquivo truncado com nome definitivo.
       put(MediaStore.Downloads.IS_PENDING, 1)
     }
     val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -111,13 +75,11 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
       resolver.update(uri, values, null, null)
       return "${Environment.DIRECTORY_DOWNLOADS}/$name"
     } catch (e: Throwable) {
-      // Não deixa lixo: se a escrita falhou, apaga a entrada pendente.
       try { resolver.delete(uri, null, null) } catch (_: Throwable) { }
       throw e
     }
   }
 
-  /** Android 9 e anteriores: escrita direta na pasta pública (sem permissão). */
   private fun saveLegacy(name: String, src: File, invoke: Invoke): String {
     val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
     if (!dir.exists()) dir.mkdirs()
@@ -126,7 +88,6 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
     return dest.absolutePath
   }
 
-  /** Nome seguro: basename, sem separadores, sem ".." (defesa contra traversal). */
   private fun sanitize(raw: String): String {
     val base = raw.substringAfterLast('/').substringAfterLast('\\')
     val cleaned = base.replace(Regex("[\\x00-\\x1f]"), "").trim()
@@ -134,11 +95,6 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
     return if (cleaned.length > 180) cleaned.take(180) else cleaned
   }
 
-  /**
-   * `true` só para arquivo dentro de `filesDir`/`cacheDir`/`noBackupFilesDir`/
-   * `getExternalFilesDir` (o diretório privado onde o Rust grava o download).
-   * Compara caminhos CANÔNICOS, então `..` e symlink não escapam.
-   */
   private fun isInsideApp(f: File): Boolean {
     return try {
       val p = f.canonicalPath
@@ -158,7 +114,6 @@ class DownloadsPlugin(private val activity: android.app.Activity) : Plugin(activ
   }
 
   private companion object {
-    /** Extensões que o Android/Windows abrem como programa. */
     val BLOCKED_EXT = setOf(
       "exe", "msi", "msp", "bat", "cmd", "com", "scr", "pif", "cpl",
       "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta",

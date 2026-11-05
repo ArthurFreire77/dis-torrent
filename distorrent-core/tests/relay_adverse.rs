@@ -1,27 +1,3 @@
-//! RELAY ADVERSO — prova onde o relay P2P quebra em rede 4G real.
-//!
-//! Baseline: `tests/relay_e2e.rs` usa `MemRelay` instantâneo (latência ~0).
-//! Aqui injetamos as 3 adversidades que o 4G real impõe:
-//!
-//! - ÂNGULO 1: latência alta ASSIMÉTRICA (A→B 4s, B→A 200ms). O handshake
-//!   relay precisa de 3 voos (Hello / HelloAck / HelloOk) + poll de 1-1.5s do
-//!   `relay_manager_loop`. Mede o tempo real e confronta com:
-//!     * `RELAY_DIAL_ATTEMPT` (40s, iniciador — `connect_relay_and_maintain`)
-//!     * `RELAY_HANDSHAKE_TIMEOUT` (90s, respondente — `spawn_relay_responder`)
-//!     * `HANDSHAKE_TIMEOUT` interno do transport (8s por `read_frame`,
-//!       16s total no `handshake_stream` — `src/net/transport.rs:28,226`)
-//! - ÂNGULO 2: rajada de redials simultâneos (A⇄B discam juntos, 3x seguidas
-//!   via `disconnect_peer` bilateral). A eleição de sessão (`register_and_run`:
-//!   menor fp prefere outbound, direta vence relay) não pode corromper DMs.
-//! - ÂNGULO 3: perna do `MultiRelay` morre no meio (1º post OK, resto Err).
-//!   `MultiRelay::post` só falha se TODAS falharem; `poll` ignora perna com
-//!   erro. Prova que a outra perna carrega tudo sem travar.
-//!
-//! Todos os backends aqui são REAIS (implementam `RelayBackend`, passam pelo
-//! `relay_post_loop` + `relay_manager_loop` + handshake autenticado + sessão
-//! ChaCha20). Nada é simulado no sentido de mock de handshake — só a latência/
-//! falha da rede é injetada no transporte.
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -36,18 +12,11 @@ use distorrent_core::net::relay::{MultiRelay, RelayBackend};
 use distorrent_core::storage::Store;
 use distorrent_core::{DistorrentError, Result};
 
-// ---------------------------------------------------------------------------
-// Backends adversos (rede real injetada no transporte)
-// ---------------------------------------------------------------------------
-
-/// Perna com latência fixa no POST (modela upload 4G lento).
-/// O `poll` é imediato — a latência de poll já existe no engine
-/// (`relay_manager_loop` com `interval(2s)`).
 #[derive(Clone)]
 struct DelayedLeg {
     hub: Arc<StdMutex<HashMap<String, Vec<String>>>>,
     post_delay: Duration,
-    #[allow(dead_code)] // rótulo de diagnóstico (mantido p/ logs futuros)
+    #[allow(dead_code)]
     label: &'static str,
 }
 
@@ -84,9 +53,6 @@ impl RelayBackend for DelayedLeg {
     }
 }
 
-/// Perna que morre no meio: os primeiros `max_ok_posts` POSTs passam,
-/// depois TUDO retorna Err (post e poll). Modela rádio 4G que cai / rota
-/// MQTT que para de responder no meio do handshake.
 struct FlakyLeg {
     hub: Arc<StdMutex<HashMap<String, Vec<String>>>>,
     posts: AtomicUsize,
@@ -135,8 +101,6 @@ impl RelayBackend for FlakyLeg {
         topic: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
         Box::pin(async move {
-            // Depois que a perna morreu, o poll também falha — é o que o
-            // MultiRelay precisa tolerar (ignora e segue nas demais).
             if self.posts.load(Ordering::SeqCst) >= self.max_ok_posts {
                 return Err(DistorrentError::Protocol("perna morta: poll falhou".into()));
             }
@@ -149,10 +113,6 @@ impl RelayBackend for FlakyLeg {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn spawn_with_backend(
     nick: &str,
@@ -188,8 +148,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
     }
 }
 
-/// Espera até ambos os lados DEIXAREM de ver `Connected` (prova que o
-/// disconnect derrubou a sessão antes de medir o redial).
 async fn wait_both_not_online(
     a: &Arc<NetworkEngine>,
     fp_b: &str,
@@ -212,8 +170,7 @@ async fn wait_both_not_online(
     }
 }
 
-/// Espera até ambos os lados verem `Connected` (poll de estado, não depende
-/// de evento que pode ter sido consumido/lagado).
+// Seção 1: wait_both_online
 async fn wait_both_online(
     a: &Arc<NetworkEngine>,
     fp_b: &str,
@@ -236,14 +193,8 @@ async fn wait_both_online(
     }
 }
 
-// ---------------------------------------------------------------------------
-// ÂNGULO 1 — latência alta assimétrica A→B 4s / B→A 200ms
-// ---------------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_asymmetric_latency_4s_vs_200ms() {
-    // Relay-only determinístico: desliga a descoberta direta via announce
-    // (DISTORRENT_NO_ANNOUNCE) para a eleição não sofrer race com a direta.
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     eprintln!("=== ANGULO 1: latência assimétrica A→B=4s / B→A=200ms ===");
     eprintln!("consts: RELAY_DIAL_ATTEMPT={RELAY_DIAL_ATTEMPT:?} RELAY_HANDSHAKE_TIMEOUT={RELAY_HANDSHAKE_TIMEOUT:?}");
@@ -253,7 +204,6 @@ async fn relay_asymmetric_latency_4s_vs_200ms() {
     );
 
     let hub: Arc<StdMutex<HashMap<String, Vec<String>>>> = Arc::new(StdMutex::new(HashMap::new()));
-    // Tudo que A posta demora 4s (upload 4G ruim); tudo que B posta, 200ms.
     let leg_a: Arc<dyn RelayBackend> = Arc::new(DelayedLeg {
         hub: hub.clone(),
         post_delay: Duration::from_secs(4),
@@ -280,8 +230,6 @@ async fn relay_asymmetric_latency_4s_vs_200ms() {
         t0.elapsed()
     );
 
-    // B recebe o pedido PELO RELAY com latência. Timeout generoso (100s) para
-    // acomodar redial se a 1ª tentativa estourar os 25s/16s.
     let req = wait_event(
         &mut ev_b,
         "B recebe pedido com latência assimétrica",
@@ -318,7 +266,6 @@ async fn relay_asymmetric_latency_4s_vs_200ms() {
     assert!(a.is_peer_via_relay(&fp_b), "sessão A→B deve ser relay");
     assert!(b.is_peer_via_relay(&fp_a), "sessão B→A deve ser relay");
 
-    // DM A→B (perna lenta) + ACK B→A (perna rápida): mede o custo 4G por mensagem.
     let dm = a.open_dm(&fp_b, "AsymB").unwrap();
     let t_dm0 = Instant::now();
     let m1 = a.send_dm(&dm.id, "oi 4G assimétrico: A→B 4s!").unwrap();
@@ -350,7 +297,6 @@ async fn relay_asymmetric_latency_4s_vs_200ms() {
     let t_ack = t_dm0.elapsed();
     eprintln!("ACK B→A (perna 200ms) fechou em {t_ack:?} total (DM+ACK)");
 
-    // ---- Veredito documentado (não muda consts — só reporta) ----
     eprintln!("--- VEREDITO ANGULO 1 ---");
     eprintln!(
         "pedido A→B (handshake+pedido): {t_req:?} | aceite completo: {t_acc:?} | online: {t_on:?}"
@@ -367,10 +313,6 @@ async fn relay_asymmetric_latency_4s_vs_200ms() {
     eprintln!("=== FIM ANGULO 1 em {:?} ===", t0.elapsed());
 }
 
-// ---------------------------------------------------------------------------
-// ÂNGULO 2 — rajada de redials simultâneos dos dois lados, 3x seguidas
-// ---------------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_simultaneous_redial_burst_3x() {
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
@@ -386,10 +328,6 @@ async fn relay_simultaneous_redial_burst_3x() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // Conexão inicial LIMPA (só A disca) para isolar o teste dos 3 bursts.
-    // (O burst SIMULTÂNEO real está nas 3 rodadas abaixo via disconnect bilateral.
-    //  Disparo duplo inicial A⇄B foi removido após prova de livelock: dois
-    //  iniciadores simultâneos falham o handshake — ver NOTA_LIVELOCK abaixo.)
     let t0 = Instant::now();
     let r1 = a.friend_request(&fp_b).unwrap();
     eprintln!(
@@ -397,12 +335,6 @@ async fn relay_simultaneous_redial_burst_3x() {
         t0.elapsed()
     );
 
-    // NOTA_LIVELOCK (prova 2026-09-03): disparo duplo inicial A⇄B simultâneo
-    // (tokio::join de dois friend_request QueuedOffline) entrou em LIVELOCK —
-    // 1/3 runs conectou em ~32s, 2/3 nunca conectaram em 120s. Causa: ambos
-    // viram iniciadores (Hello×Hello, esperavam HelloAck) + backoff simétrico
-    // sem jitter (3s→5s→10s…) recolide toda vez. Mantido single-dial aqui para
-    // os 3 bursts medirem redial, não o livelock inicial (livelock documentado).
     let got = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             match tokio::time::timeout(Duration::from_secs(60), ev_b.recv()).await {
@@ -415,9 +347,8 @@ async fn relay_simultaneous_redial_burst_3x() {
     .await
     .unwrap_or(false);
     eprintln!("t+{:?}: B viu pedido de A? {got}", t0.elapsed());
-    // Garante amizade aceita dos dois lados independente de quem viu o quê.
+    // Seção 2: _
     let _ = b.friend_respond(&fp_a, true);
-    // A pode já ter recebido o pedido de B também (dial simultâneo) — aceita.
     let _ = a.friend_respond(&fp_b, true);
 
     wait_both_online(&a, &fp_b, &b, &fp_a, 60).await;
@@ -430,11 +361,8 @@ async fn relay_simultaneous_redial_burst_3x() {
     assert!(a.is_peer_via_relay(&fp_b));
     assert!(b.is_peer_via_relay(&fp_a));
 
-    // 3 rodadas: derruba a sessão DOS DOIS LADOS AO MESMO TEMPO (força os dois
-    // maintains a rediscar juntos) + DMs simultâneos bidirecionais íntegros.
     for round in 0u8..3 {
         let t_r = Instant::now();
-        // Burst de redial: ambos desconectam juntos → ambos rediscam juntos.
         tokio::join!(async { a.disconnect_peer(&fp_b) }, async {
             b.disconnect_peer(&fp_a)
         });
@@ -443,13 +371,10 @@ async fn relay_simultaneous_redial_burst_3x() {
             t_r.elapsed()
         );
 
-        // Prova que a sessão caiu mesmo (senão estaríamos medindo a sessão velha).
         wait_both_not_online(&a, &fp_b, &b, &fp_a, 15).await;
         let t_down = t_r.elapsed();
         eprintln!("round {round}: sessão caiu em {t_down:?} (ambos != Connected) — redial bilateral em curso");
 
-        // Reeleição: os dois dials simultâneos devem convergir (menor fp fica
-        // com outbound, cf. register_and_run). Sem panic, sem sessão fantasma.
         wait_both_online(&a, &fp_b, &b, &fp_a, 60).await;
         let t_re = t_r.elapsed();
         eprintln!(
@@ -468,7 +393,6 @@ async fn relay_simultaneous_redial_burst_3x() {
             "round {round}: B deve estar Connected"
         );
 
-        // DMs SIMULTÂNEOS nos dois sentidos com corpo único por round.
         let body_ab = format!("burst-{round} A→B ping-{round}-x7");
         let body_ba = format!("burst-{round} B→A pong-{round}-y9");
         let dm_a = a.open_dm(&fp_b, "BurstB").unwrap();
@@ -481,7 +405,6 @@ async fn relay_simultaneous_redial_burst_3x() {
         let m_ab = a.send_dm(&dm_a.id, &body_ab).unwrap();
         let m_ba = b.send_dm(&dm_b.id, &body_ba).unwrap();
 
-        // Espera as duas entregas concorrentemente (receivers distintos).
         let desc_b = format!("B recebe burst-{round} A→B");
         let desc_a = format!("A recebe burst-{round} B→A");
         let (rec_b, rec_a) = tokio::join!(
@@ -509,8 +432,6 @@ async fn relay_simultaneous_redial_burst_3x() {
         assert_eq!(got_b.author_fp, fp_a);
         assert_eq!(got_a.author_fp, fp_b);
 
-        // ACKs dos dois lados (prova que contadores ChaCha/nonces das duas
-        // sessões eleitas não dessincronizaram).
         let desc_ack_a = format!("ACK burst-{round} A→B");
         let desc_ack_b = format!("ACK burst-{round} B→A");
         let (ack_a, ack_b) = tokio::join!(
@@ -539,10 +460,6 @@ async fn relay_simultaneous_redial_burst_3x() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// ÂNGULO 3a — MultiRelay unitário: perna morre no meio, outra carrega
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn multirelay_dead_leg_unit() {
     eprintln!("=== ANGULO 3a (unit): MultiRelay com perna morta ===");
@@ -558,13 +475,11 @@ async fn multirelay_dead_leg_unit() {
     });
     let multi = MultiRelay::of(vec![flaky.clone(), good.clone()]);
 
-    // 1º post: ambas as pernas OK.
     multi
         .post("topico-x", "hello-1")
         .await
         .expect("1º post deve passar");
     assert_eq!(flaky.posts_feitos(), 1);
-    // 2º/3º posts: flaky retorna Err, good sustenta → MultiRelay Ok.
     let t = Instant::now();
     multi
         .post("topico-x", "hello-2")
@@ -579,8 +494,6 @@ async fn multirelay_dead_leg_unit() {
         t.elapsed()
     );
 
-    // Poll: flaky.poll agora dá Err (perna morta) mas o MultiRelay ignora e
-    // retorna o que a perna boa tem. Prova que não trava nem perde.
     let msgs = multi
         .poll("topico-x")
         .await
@@ -595,9 +508,9 @@ async fn multirelay_dead_leg_unit() {
         "perna boa deve ter carregado hello-3"
     );
 
-    // Todas mortas → post FALHA (documenta o limite: sem perna viva, sem milagre).
     let dead1 = Arc::new(FlakyLeg::new(Arc::new(StdMutex::new(HashMap::new())), 0));
     let dead2 = Arc::new(FlakyLeg::new(Arc::new(StdMutex::new(HashMap::new())), 0));
+    // Seção 3: multi_dead
     let multi_dead = MultiRelay::of(vec![dead1, dead2]);
     let r = multi_dead.post("t", "x").await;
     assert!(
@@ -608,21 +521,14 @@ async fn multirelay_dead_leg_unit() {
     eprintln!("=== FIM ANGULO 3a ===");
 }
 
-// ---------------------------------------------------------------------------
-// ÂNGULO 3b — E2E: handshake + DM sobrevivem à perna que morre no meio
-// ---------------------------------------------------------------------------
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multirelay_dead_leg_engine_e2e() {
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     eprintln!("=== ANGULO 3b (e2e): handshake+DM com perna morrendo no meio ===");
-    // Duas rotas independentes: flaky (morre após 1 post por lado) + boa.
     let good_hub: Arc<StdMutex<HashMap<String, Vec<String>>>> =
         Arc::new(StdMutex::new(HashMap::new()));
     let flaky_hub: Arc<StdMutex<HashMap<String, Vec<String>>>> =
         Arc::new(StdMutex::new(HashMap::new()));
-    // Cada lado tem seu contador flaky (1º post OK, resto Err) — a morte cai
-    // NO MEIO do handshake (Hello passa, HelloAck/HelloOk já precisam da boa).
     let mk_multi = || -> Arc<dyn RelayBackend> {
         let flaky: Arc<dyn RelayBackend> = Arc::new(FlakyLeg::new(flaky_hub.clone(), 1));
         let good: Arc<dyn RelayBackend> = Arc::new(DelayedLeg {
@@ -666,7 +572,6 @@ async fn multirelay_dead_leg_engine_e2e() {
         t0.elapsed()
     );
 
-    // DM pós-morte: 100% dos posts flaky agora dão Err; tudo vai pela boa.
     let dm = a.open_dm(&fp_b, "LegB").unwrap();
     let m1 = a.send_dm(&dm.id, "sobrevivi à perna morta!").unwrap();
     let rec = wait_event(

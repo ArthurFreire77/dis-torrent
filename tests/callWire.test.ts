@@ -1,8 +1,3 @@
-// Testes do formato de sinalização no fio: o caminho do navegador usa
-// {type,sdp} em JSON e a camada nativa (Rust) usa SDP/candidato crus. Os dois
-// têm que ser aceitos — chamada mista (Linux nativo ↔ Windows navegador)
-// dependia disto para negociar.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseWireSdp, parseWireCandidate } from '../src/services/callWire.ts'
@@ -27,10 +22,8 @@ test('parseWireSdp: lixo/nada/typo confuso não passa', () => {
   assert.equal(parseWireSdp('', 'offer'), null)
   assert.equal(parseWireSdp('isto-nao-e-um-sdp', 'offer'), null)
   assert.equal(parseWireSdp('{quebrado', 'offer'), null)
-  // tipo trocado não vale
   assert.equal(parseWireSdp(JSON_OFFER, 'answer'), null)
   assert.equal(parseWireSdp(JSON_ANSWER, 'offer'), null)
-  // JSON sem sdp
   assert.equal(parseWireSdp(JSON.stringify({ type: 'offer' }), 'offer'), null)
 })
 

@@ -1,9 +1,3 @@
-//! E2E RELAY PURO (v4.3) — dois usuários que NUNCA se alcançam por TCP
-//! (sem add_manual_peer, sem discovery) conversam 100% pelo relay.
-//!
-//! Cobre: dial via relay → handshake autenticado sobre stream virtual →
-//! FriendRequest/Accept pelo relay → DM com ACK delivered → flag via_relay.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,7 +39,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_only_friend_and_dm() {
-    // Relay-only determinístico (ver tests/relay_adverse.rs).
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     let hub = MemRelay::new();
     let (a, _da) = spawn_user("RelayA", hub.clone());
@@ -57,12 +50,9 @@ async fn relay_only_friend_and_dm() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // NENHUM add_manual_peer, NENHUM endereço trocado: só relay.
-    // O pedido sai QueuedOffline e o loop de announce disca via relay.
     let outcome = a.friend_request(&fp_b).unwrap();
     assert_eq!(format!("{outcome:?}"), "QueuedOffline");
 
-    // B recebe o pedido PELO RELAY e aceita
     let req = wait_event(
         &mut ev_b,
         "B recebe pedido via relay",
@@ -76,7 +66,6 @@ async fn relay_only_friend_and_dm() {
     assert_eq!(nickname, "RelayA");
     b.friend_respond(&fp, true).unwrap();
 
-    // A vê o aceite PELO RELAY
     wait_event(
         &mut ev_a,
         "A vê aceite via relay",
@@ -85,9 +74,6 @@ async fn relay_only_friend_and_dm() {
     )
     .await;
 
-    // ambos ONLINE — e via relay (sem porta aberta em nenhum lado).
-    // (PeerOnline dispara no registro, ANTES do aceite — já foi consumido
-    // pelos waits acima; aqui vale o ESTADO, não um segundo evento.)
     assert_eq!(
         a.peer_state(&fp_b),
         distorrent_core::net::engine::NetworkState::Connected
@@ -99,7 +85,6 @@ async fn relay_only_friend_and_dm() {
     assert!(a.is_peer_via_relay(&fp_b), "sessão A→B deve ser relay");
     assert!(b.is_peer_via_relay(&fp_a), "sessão B→A deve ser relay");
 
-    // DM com ACK delivered — tudo pelo relay
     let dm = a.open_dm(&fp_b, "RelayB").unwrap();
     let m1 = a
         .send_dm(&dm.id, "oi pelo relay, sem porta aberta!")
@@ -117,7 +102,6 @@ async fn relay_only_friend_and_dm() {
     assert_eq!(in_b.body, "oi pelo relay, sem porta aberta!");
     wait_event(&mut ev_a, "ACK delivered via relay", |e| matches!(e, EngineEvent::MessageStatus { msg_id, status } if msg_id == &m1.id && status == "delivered"), 60).await;
 
-    // resposta volta pelo mesmo túnel
     let dm_b = b.open_dm(&fp_a, "RelayA").unwrap();
     assert_eq!(dm_b.id, dm.id);
     b.send_dm(&dm_b.id, "chegou limpo pelo relay!").unwrap();

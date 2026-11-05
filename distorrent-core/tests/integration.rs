@@ -1,7 +1,3 @@
-//! Testes de integração P2P REAIS: dois nós, sockets TCP localhost reais,
-//! handshake autenticado, mensagens assinadas, ACK, persistência e
-//! sincronização de outbox após reconexão.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,8 +53,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
     }
 }
 
-/// Estabelece amizade pelo fluxo real do produto (pedido → aceite).
-/// Regra v4.3: DM só entre amigos aceitos — todo teste de DM befriend antes.
 async fn befriend(
     a: &Arc<NetworkEngine>,
     b: &Arc<NetworkEngine>,
@@ -94,7 +88,6 @@ async fn two_nodes_handshake_and_dm_roundtrip() {
     let addr_b: std::net::SocketAddr = format!("127.0.0.1:{}", b.listen_port()).parse().unwrap();
     a.add_manual_peer(addr_b, Some(b.identity().fingerprint.clone()));
 
-    // handshake: ambos veem o peer ONLINE
     wait_event(
         &mut ev_a,
         |e| matches!(e, EngineEvent::PeerOnline { .. }),
@@ -109,17 +102,14 @@ async fn two_nodes_handshake_and_dm_roundtrip() {
     .await;
     assert_eq!(a.aggregated_state(), NetworkState::Connected);
 
-    // amizade antes de conversar (regra v4.3)
     befriend(&a, &b, &mut ev_a, &mut ev_b).await;
 
-    // A abre DM e envia mensagem REAL
     let conv = a.open_dm(&b.identity().fingerprint, "NodeB").unwrap();
     let stored = a
         .send_dm(&conv.id, "olá Node B — mensagem real via TCP")
         .unwrap();
-    assert_eq!(stored.status, "sent"); // transportado → SENT
+    assert_eq!(stored.status, "sent");
 
-    // B recebe, valida assinatura e persiste
     let received = wait_event(
         &mut ev_b,
         |e| matches!(e, EngineEvent::MessageNew(_)),
@@ -132,7 +122,6 @@ async fn two_nodes_handshake_and_dm_roundtrip() {
     assert_eq!(msg_in_b.body, "olá Node B — mensagem real via TCP");
     assert_eq!(msg_in_b.author_fp, a.identity().fingerprint);
     assert_eq!(msg_in_b.direction, "in");
-    // assinatura re-verificada do lado B
     assert!(distorrent_core::protocol::MessageEnvelope {
         id: msg_in_b.id.clone(),
         conv_id: msg_in_b.conv_id.clone(),
@@ -143,7 +132,6 @@ async fn two_nodes_handshake_and_dm_roundtrip() {
     }
     .verify_with_pubkey(&a.identity().pubkey_hex));
 
-    // ACK real: A vê DELIVERED
     let ack = wait_event(
         &mut ev_a,
         |e| matches!(e, EngineEvent::MessageStatus { status, .. } if status == "delivered"),
@@ -156,7 +144,6 @@ async fn two_nodes_handshake_and_dm_roundtrip() {
     assert_eq!(msg_id, stored.id);
     assert_eq!(status, "delivered");
 
-    // persistência nos DOIS lados
     let msgs_a = a.messages(&conv.id);
     let msgs_b = b.messages(&msg_in_b.conv_id);
     assert_eq!(msgs_a.len(), 1);
@@ -197,11 +184,11 @@ async fn reply_roundtrip_both_directions() {
     )
     .await;
 
-    // B responde pela SUA conversa (id determinístico — mesmo dos dois lados)
     let conv_b = b.open_dm(&a.identity().fingerprint, "Alice").unwrap();
     assert_eq!(conv_b.id, conv_a.id, "id de DM determinístico por par");
     b.send_dm(&conv_b.id, "resposta").unwrap();
 
+    // Seção 1: reply
     let reply = wait_event(
         &mut ev_a,
         |e| matches!(e, EngineEvent::MessageNew(_)),
@@ -219,13 +206,11 @@ async fn reply_roundtrip_both_directions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn offline_message_is_queued_and_delivered_on_reconnect() {
     let (a, kp_a, _da) = spawn_engine("Sender", false);
-    // B ainda NÃO existe — apenas conhecemos o fingerprint dele
     let kp_b = distorrent_core::identity::Keypair::generate();
     let fp_b = kp_b.identity("Receiver").fingerprint;
 
     let mut ev_a = a.subscribe();
 
-    // enviar com peer offline → PENDING real (outbox)
     let conv = a.open_dm(&fp_b, "Receiver").unwrap();
     let m1 = a.send_dm(&conv.id, "mensagem enquanto offline 1").unwrap();
     let m2 = a.send_dm(&conv.id, "mensagem enquanto offline 2").unwrap();
@@ -233,9 +218,6 @@ async fn offline_message_is_queued_and_delivered_on_reconnect() {
     assert_eq!(m2.status, "pending");
     assert_eq!(a.messages(&conv.id).len(), 2);
 
-    // B entra no ar JÁ tendo A como amigo (amizade pré-existente, ex.:
-    // backup restaurado) — sem isso o gate v4.3 (DM só de amigo) rejeita
-    // o flush, corretamente.
     let (store_b, _dirb) = tmp_store();
     store_b
         .set_friend(&a.identity().fingerprint, "Sender", "accepted")
@@ -263,7 +245,6 @@ async fn offline_message_is_queued_and_delivered_on_reconnect() {
     )
     .await;
 
-    // outbox flush: B recebe TODAS as pendências
     let r1 = wait_event(
         &mut ev_b,
         |e| matches!(e, EngineEvent::MessageNew(_)),
@@ -286,7 +267,6 @@ async fn offline_message_is_queued_and_delivered_on_reconnect() {
     assert!(bodies.contains(&"mensagem enquanto offline 1".to_string()));
     assert!(bodies.contains(&"mensagem enquanto offline 2".to_string()));
 
-    // A recebe ACKs de entrega real
     for _ in 0..2 {
         let _ = wait_event(
             &mut ev_a,
@@ -309,29 +289,18 @@ async fn wrong_expected_fingerprint_is_rejected() {
     let (b, _kb, _db) = spawn_engine("B", false);
     let (c, _kc, _dc) = spawn_engine("C", false);
 
-    // A pede B mas o endereço é do C → verificação de identidade falha e
-    // NENHUM evento PeerOnline pode ocorrer (conexão é derrubada pós-handshake).
     let addr_c: std::net::SocketAddr = format!("127.0.0.1:{}", c.listen_port()).parse().unwrap();
     a.add_manual_peer(addr_c, Some(b.identity().fingerprint.clone()));
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // o fingerprint esperado (B) NÃO pode constar como conectado
     assert_ne!(
         a.peer_state(&b.identity().fingerprint),
         NetworkState::Connected
     );
-    // e o peer autenticado (C) também não foi registrado como online para B's fp
     assert!(!a.online_peer_fps().contains(&b.identity().fingerprint));
 }
 
-/// Ciclo COMPLETO de chamada, repetido: chamar → o outro recebe → aceitar →
-/// encerrar → chamar de novo. É a regressão do "tem que reiniciar o app para
-/// chamar alguém": cada rodada precisa deixar o core limpo (sem participante
-/// pendurado, sem sessão de mídia viva) para a próxima servir.
-///
-/// Roda sem depender de dispositivo de mídia: o que se prova aqui é o CICLO DE
-/// VIDA (convite/aceite/fim e o estado que sobra), não o áudio.
 #[tokio::test(flavor = "multi_thread")]
 async fn call_cycle_repeats_cleanly_round_after_round() {
     let (a, _kp_a, _da) = spawn_engine("NodeA", false);
@@ -362,11 +331,8 @@ async fn call_cycle_repeats_cleanly_round_after_round() {
     let fp_b = b.identity().fingerprint.clone();
 
     for rodada in 0..3 {
-        // 1) A chama B. (No Linux o invite abre a mídia nativa; sem device o
-        // caminho segue no navegador — os dois contam como ciclo válido.)
         let want = a.call_invite(&fp_b, "dm").expect("invite");
 
-        // 2) B recebe o toque.
         let incoming = wait_event(
             &mut ev_b,
             |e| matches!(e, EngineEvent::CallIncoming { call_id: cid, .. } if cid == &want),
@@ -375,7 +341,6 @@ async fn call_cycle_repeats_cleanly_round_after_round() {
         .await;
         assert!(matches!(incoming, EngineEvent::CallIncoming { .. }));
 
-        // 3) B aceita.
         b.call_accept(&want, &fp_a).expect("accept");
 
         let aceite = wait_event(
@@ -386,7 +351,6 @@ async fn call_cycle_repeats_cleanly_round_after_round() {
         .await;
         assert!(matches!(aceite, EngineEvent::CallAcceptedEv { .. }));
 
-        // 4) A encerra. Os DOIS lados precisam ouvir o fim.
         a.call_end(&want).expect("end");
         wait_event(
             &mut ev_a,
@@ -401,8 +365,6 @@ async fn call_cycle_repeats_cleanly_round_after_round() {
         )
         .await;
 
-        // 5) O ESTADO TEM DE SAIR LIMPO. Se sobrar participante, a rodada
-        // seguinte herra "já existe uma chamada em andamento" no frontend.
         assert!(
             a.store
                 .call_participants(&want)
@@ -420,9 +382,8 @@ async fn call_cycle_repeats_cleanly_round_after_round() {
     }
 }
 
-/// Recusar também tem de limpar dos dois lados — antes a oferta recusada
-/// ficava retida no `held_calls` e era "aceita" por engano mais tarde.
 #[tokio::test(flavor = "multi_thread")]
+// Seção 2: rejected_call_leaves_nothing_held_behind
 async fn rejected_call_leaves_nothing_held_behind() {
     let (a, _kp_a, _da) = spawn_engine("NodeA", false);
     let (b, _kp_b, _db) = spawn_engine("NodeB", false);
@@ -467,8 +428,6 @@ async fn rejected_call_leaves_nothing_held_behind() {
     )
     .await;
 
-    // Chamada nova imediatamente depois: se a recusa tivesse deixado estado
-    // retido, o segundo convite não chegaria como toque novo.
     let want2 = a
         .call_invite(&fp_b, "dm")
         .expect("segundo invite após recusa");

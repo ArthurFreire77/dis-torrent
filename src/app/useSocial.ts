@@ -1,11 +1,3 @@
-// Hook da camada social (paridade Discord) — liga a UI aos serviços REAIS.
-//
-// Uma única chamada em LOTE por janela de mensagens (`reactionsBulk` +
-// `metaBulk`) em vez de N chamadas por mensagem: é o que permite uma conversa
-// longa abrir sem "flash" de estado. Tudo que o usuário age (reagir, editar,
-// apagar, fixar, responder) vai pelo motor, que valida permissão e difunde
-// pelo túnel — a UI nunca decide nada.
-
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { services } from '../services'
 import type {
@@ -18,23 +10,15 @@ import type {
 } from '../services/models'
 
 export interface SocialWindow {
-  /** msg_id → reações agregadas (contagem + se é minha) */
   reactions: Map<string, ReactionSummary[]>
-  /** msg_id → metadados (editado/apagado/fixado/respondendo/encaminhada) */
   meta: Map<string, MsgMetaView>
-  /** corpo efetivo por msg_id (edição aplicada) */
   bodies: Map<string, string>
   loading: boolean
   error: string | null
   reload: () => void
-  /** recarrega só as reactions/meta de uma janela (após uma ação) */
   refreshIds: (ids: string[]) => void
 }
 
-/**
- * Carrega reações + metadados + corpos efetivos da janela atual.
- * Só re-consulta quando o CONJUNTO de ids muda (não a cada tecla do composer).
- */
 export function useSocialWindow(messages: StoredMessage[], convId: string | null): SocialWindow {
   const [reactions, setReactions] = useState<Map<string, ReactionSummary[]>>(new Map())
   const [meta, setMeta] = useState<Map<string, MsgMetaView>>(new Map())
@@ -88,8 +72,6 @@ export function useSocialWindow(messages: StoredMessage[], convId: string | null
           services.metaBulk(unique),
           services.effectiveBodies(unique),
         ])
-        // Substitui a lista INTEIRA de cada id pedido — mesclar só acrescentaria
-        // e uma reação removida nunca sairia da tela (bug: toggle-off invisível).
         const fresh = new Set<string>()
         setReactions((prev) => {
           const next = new Map(prev)
@@ -99,7 +81,6 @@ export function useSocialWindow(messages: StoredMessage[], convId: string | null
             arr.push(r)
             next.set(r.msg_id, arr)
           }
-          // ids pedidos que NÃO voltaram = ficaram sem nenhuma reação
           for (const id of unique) if (!fresh.has(id)) next.set(id, [])
           return next
         })
@@ -113,15 +94,12 @@ export function useSocialWindow(messages: StoredMessage[], convId: string | null
           for (const [k, v] of bd) next.set(k, v)
           return next
         })
-      } catch { /* mantém o que há — o próximo refresh corrige */ }
+      } catch {  }
     })()
   }, [])
 
   const reload = useCallback(() => setNonce((n) => n + 1), [])
 
-  // Reação do OUTRO lado chegando (mobile usa este hook em vez do
-  // MessageList): sem esta escuta a reação remota só aparecia ao reabrir a
-  // conversa. Re-lê só a mensagem afetada via refreshIds.
   useEffect(() => {
     if (!convId) return
     const un = services.subscribe((ev: any) => {
@@ -130,15 +108,14 @@ export function useSocialWindow(messages: StoredMessage[], convId: string | null
         const mid = String(ev?.msg_id ?? '')
         if (!mid) return
         refreshIds([mid])
-      } catch { /* evento nunca derruba o hook */ }
+      } catch {  }
     })
-    return () => { try { (un as unknown as () => void)() } catch { /* ignore */ } }
+    return () => { try { (un as unknown as () => void)() } catch {  } }
   }, [convId, refreshIds])
 
   return { reactions, meta, bodies, loading, error, reload, refreshIds }
 }
 
-/** Ações de mensagem delegadas ao motor (todas autenticadas e auditáveis). */
 export function useMessageActions(onChanged?: (ids: string[]) => void) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -170,7 +147,6 @@ export function useMessageActions(onChanged?: (ids: string[]) => void) {
   }), [run, busy, error])
 }
 
-/** Presença de todos os peers conhecidos (online/idle/dnd/invisible/offline). */
 export function usePresence() {
   const [map, setMap] = useState<Map<string, PresenceView>>(new Map())
   const [nonce, setNonce] = useState(0)
@@ -182,13 +158,11 @@ export function usePresence() {
         .catch(() => { if (alive) setMap(new Map()) })
     }
     load()
-    // A presença é uma verificação periódica, não um fluxo instantâneo.
-    // A UI consulta a cada 30s para convergir no mesmo prazo usado pelo
-    // reaper nativo, evitando amigos presos como online por muito tempo.
     const t = setInterval(load, 30000)
     const un = services.subscribe((ev) => {
       if (ev.type === 'presence_changed') {
         setMap((prev) => {
+          // Seção 1: next
           const next = new Map(prev)
           next.set(ev.fp, { fp: ev.fp, status: ev.status as PresenceStatus, custom: ev.custom, custom_emoji: ev.custom_emoji, updated_at: Date.now() })
           return next
@@ -215,7 +189,6 @@ export const PRESENCE_LABEL: Record<PresenceStatus, string> = {
   online: 'Online', idle: 'Ausente', dnd: 'Não perturbe', invisible: 'Invisível', offline: 'Offline',
 }
 
-/** Emojis customizados de um servidor (`:name:` no chat). */
 export function useServerEmojis(communityId: string | null) {
   const [emojis, setEmojis] = useState<EmojiView[]>([])
   const [nonce, setNonce] = useState(0)
@@ -230,10 +203,6 @@ export function useServerEmojis(communityId: string | null) {
   return { emojis, reload: () => setNonce((n) => n + 1) }
 }
 
-/**
- * Cursor de leitura: marca a conversa como lida até `ts` e expõe o total de
- * não-lidas (badge no rail) + a marca de "novas mensagens" no chat.
- */
 export function useReadState(convId: string | null, myFp: string | null) {
   const [unread, setUnread] = useState(0)
   const [mentions, setMentions] = useState(0)

@@ -1,7 +1,3 @@
-//! E2E HOLE PUNCH (estilo torrent/Radmin) — dois nós que só se falam via
-//! relay coordenam furo TCP simultâneo e UPGRADEIAM para direta, sem servidor
-//! no caminho de dados. Inclui compat: Hello legado (sem proto_v) = 0.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +6,6 @@ use distorrent_core::net::relay::{MemRelay, MultiRelay};
 
 #[test]
 fn hello_legado_sem_proto_v_parseia_como_zero() {
-    // peers 5.2.x mandam Hello sem proto_v — tem que continuar valendo.
     let old = r#"{"fp":"abc","pubkey_hex":"00","nickname":"x","nonce":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"eph_pub":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"tcp_port":1234}"#;
     let h: distorrent_core::protocol::Hello = serde_json::from_str(old).unwrap();
     assert_eq!(h.proto_v, 0);
@@ -30,9 +25,7 @@ async fn punch_upgrade_relay_para_direta() {
         let kp = distorrent_core::identity::Keypair::generate();
         let e = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
         e.set_relay_backend(Arc::new(MultiRelay::of(vec![Arc::new(hub.clone())])));
-        // endpoint "público" = loopback (fura local; prova a mecânica fim a fim)
         e.start_with_discovery(false).unwrap();
-        // listener liga assíncrono — espera a porta real
         let port = {
             let t0 = std::time::Instant::now();
             loop {
@@ -56,7 +49,6 @@ async fn punch_upgrade_relay_para_direta() {
     let mut ev_a = a.subscribe();
     let mut ev_b = b.subscribe();
 
-    // amizade 100% via relay (sem TCP direto prévio)
     a.friend_request(&fp_b).unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     let mut accepted_a = false;
@@ -79,10 +71,6 @@ async fn punch_upgrade_relay_para_direta() {
             }
         }
     }
-    // A primeira sessão PODE ser relay (caso clássico, sem endpoint público)
-    // OU já direta (se o announce de endpoint público do bootstrap chegou
-    // antes e o NAT/loopback deixou furar — direta é preferida por design).
-    // O que o teste prova é o resultado final: direta em ambos os lados.
     let first_state = b.peer_state(&fp_a);
     assert!(
         first_state == NetworkState::Connected,
@@ -93,11 +81,6 @@ async fn punch_upgrade_relay_para_direta() {
         eprintln!("nota: 1ª sessão já foi DIRETA (announce venceu o relay) — válido");
     }
 
-    // Punch automático no register → furo loopback → UPGRADE para direta
-    // NOS DOIS LADOS antes de conversar (enviar com um lado ainda no relay
-    // velho cai no receiver morto do peer = buraco negro; o sweeper cobre
-    // em produção, mas o teste prova o caminho limpo).
-    // (at_ms = +2500ms + dial + handshake; tolerância folgada.)
     let deadline2 = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let b_direct =
@@ -114,11 +97,9 @@ async fn punch_upgrade_relay_para_direta() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // conversa segue na direta (sem relay no caminho)
     let (before_a, _) = a.relay_stats();
     let dm = a.open_dm(&fp_b, "PunchB").unwrap();
     let _m1 = a.send_dm(&dm.id, "oi pela direta furada!").unwrap();
-    // direção oposta também (isola lado)
     let dm_b = b.open_dm(&fp_a, "PunchA").unwrap();
     let _m2 = b.send_dm(&dm_b.id, "resposta pela direta!").unwrap();
     let deadline3 = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -127,11 +108,9 @@ async fn punch_upgrade_relay_para_direta() {
         if tokio::time::Instant::now() >= deadline3 {
             panic!("DM pós-punch não chegou (ab={got_ab} ba={got_ba})");
         }
-        // timeout nos branches: select sem evento nunca pode travar o teste
         tokio::select! {
             res = tokio::time::timeout(Duration::from_secs(2), ev_b.recv()) => {
                 if let Ok(Ok(ev)) = res {
-                    // receptor gera id próprio — casa pelo corpo
                     if matches!(&ev, EngineEvent::MessageNew(m) if m.body == "oi pela direta furada!") {
                         got_ab = true;
                     }

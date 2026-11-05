@@ -1,12 +1,3 @@
-// Auto-update: o freio do loop NÃO pode virar trava permanente.
-//
-// BUG REAL (relato do dono: "ele não tá atualizando sozinho"): quem estava na
-// 1.1.43 instalou a 1.1.44 e subiu para ela, mas a marca `update.applied`
-// ficou gravada com "1.1.44" para sempre. Toda checagem seguinte — inclusive da
-// 1.1.45 — caía no freio e virava `stalled`: o app nunca mais ofereceu nada.
-// O screenshot do dono mostrava exatamente "versão 1.1.44-pre-alpha" com a
-// 1.1.45 publicada.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -38,7 +29,6 @@ function info(over: Partial<UpdateInfo> = {}): UpdateInfo {
   }
 }
 
-/** Deps em memória: registra o que foi baixado/aplicado e o estado das flags. */
 function depsCom(flags: Record<string, string>, opts: { falhaApply?: boolean } = {}) {
   const estado = { ...flags }
   const usadas: string[] = []
@@ -54,8 +44,6 @@ function depsCom(flags: Record<string, string>, opts: { falhaApply?: boolean } =
 }
 
 test('marca de versão JÁ instalada é lixo: não pode travar o update novo', () => {
-  // Exatamente o estado que o banco do dono tinha: applied=1.1.44 e o app na
-  // 1.1.44, com a 1.1.45 disponível.
   const { deps, estado } = depsCom({ [FLAG_APPLIED]: '1.1.44-pre-alpha' }, { falhaApply: false })
   return runUpdateFlow(deps, { autoApply: true }).then((r) => {
     assert.notEqual(r.kind, 'stalled', 'não pode dizer "já instalei" com versão MAIS NOVA publicada')
@@ -65,8 +53,6 @@ test('marca de versão JÁ instalada é lixo: não pode travar o update novo', (
 })
 
 test('stalled continua valendo quando a marca está À FRENTE do que roda', () => {
-  // Marca 1.1.45 mas o app ainda roda 1.1.44: o instalador rodou e a cópia
-  // antiga continuou viva. Aí sim é loop — parar é o honesto.
   const { deps } = depsCom({ [FLAG_APPLIED]: '1.1.45-pre-alpha' })
   return runUpdateFlow(deps, { autoApply: true }).then((r) => {
     assert.equal(r.kind, 'stalled')
@@ -114,26 +100,17 @@ test('versão pulada pelo usuário continua respeitada', () => {
 })
 
 test('o código limpa a marca quando a versão rodando já é a marcada', () => {
-  // A regra tem de comparar com `info.current`, não só com `info.latest`.
   assert.match(rules, /compareVersions\(info\.current, appliedFlag\) >= 0/)
   assert.match(rules, /setFlag\(FLAG_APPLIED, ''\)/)
 })
 
-// ---------- "todos conseguem atualizar sozinhos" ----------
-
 test('qualquer versão antiga recebe a nova (varredura das releases reais)', async () => {
-  // Simula a POPULAÇÃO: gente parada em cada versão já publicada. Todas têm de
-  // sair do lugar — era o pedido do dono ("garanta que todas as pessoas
-  // consigam atualizar automaticamente").
   const antigas = [
     '1.1.30-pre-alpha', '1.1.31-pre-alpha', '1.1.34-pre-alpha', '1.1.35-pre-alpha',
     '1.1.36-pre-alpha', '1.1.38-pre-alpha', '1.1.39-pre-alpha', '1.1.40-pre-alpha',
     '1.1.42-pre-alpha', '1.1.43-pre-alpha', '1.1.44-pre-alpha',
   ]
   for (const current of antigas) {
-    // Cada um com a marca de "aplicado" da PRÓPRIA versão que está rodando —
-    // é exatamente o estado que travava (o app marca applied=latest antes de
-    // instalar, e aí ficava com applied == current para sempre).
     const { deps, estado } = depsCom({ [FLAG_APPLIED]: current })
     const r = await runUpdateFlow(deps, { autoApply: true })
     assert.equal(
@@ -165,8 +142,6 @@ test('quem pulou de propósito continua respeitado (não força)', async () => {
 })
 
 test('o instalador do Windows NÃO pode receber /NORESTART', () => {
-  // `/NORESTART` anula o `/RESTARTAPPLICATIONS`: o app fechava e ficava
-  // fechado, então quem não abrisse à mão continuava na versão velha.
   const rust = readFileSync('src-tauri/src/updater.rs', 'utf8')
   const ini = rust.indexOf('"/SILENT"')
   assert.ok(ini > 0, 'achou a lista de argumentos do instalador')

@@ -1,13 +1,3 @@
-// Gestão de membros do servidor.
-//
-// Antes: cada membro era uma linha com dois `<select>` de rótulo "+ Cargo" e
-// "- Cargo" (a mesma coisa em dois controles), os cargos apareciam como chips
-// com um "✕" de texto dentro, e a expulsão usava `window.confirm`.
-//
-// Agora: busca, filtro por cargo, atribuição por um único controle com
-// descriptive, chips com botão de remover de verdade, e confirmação própria
-// para expulsar.
-
 import { useMemo, useState } from 'react'
 import type { RoleView } from '../../services/models'
 import { Ic } from '../../shared/icons'
@@ -304,6 +294,7 @@ export function MemberManager({
                         <select
                           value=""
                           onChange={(e) => {
+                            // Seção 1: rid
                             const rid = e.target.value
                             if (rid) onAssign(fp, rid)
                           }}
@@ -389,7 +380,6 @@ export function MemberManager({
   )
 }
 
-/** Cor estável derivada do fingerprint — mesma pessoa, mesma cor, sempre. */
 function corDe(fp: string): string {
   const paleta = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
   let h = 0

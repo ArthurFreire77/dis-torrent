@@ -1,11 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// WebRTC real em Chromium com dispositivos falsos.
-// playwright.config.ts é mínimo (sem projects, chromium default + reuseExistingServer),
-// portanto launchOptions por-arquivo via test.use() É permitido e respeitado pelo
-// fixture `browser`. Se este bloco fosse ignorado pelo config, o teste cai no
-// branch honesto (botão desabilitado + msg pt-BR) em vez de falhar com crash.
-// Flags: fake device evita pedir mic/câmera real; fake-ui auto-autoriza permissão.
 test.use({
   browserName: 'chromium',
   launchOptions: {
@@ -19,7 +13,6 @@ test.use({
   },
 });
 
-// Padrão idêntico a live.spec.ts / calls.spec.ts: amizade ao vivo via BroadcastChannel, sem restart.
 async function createAccount(page: Page, name: string) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
@@ -62,8 +55,6 @@ async function useLocalHostIce(pages: Page[]) {
     const Native = window.RTCPeerConnection;
     window.RTCPeerConnection = new Proxy(Native, {
       construct(target, args) {
-        // As duas abas deste E2E estão no mesmo PC; STUN público pode testar
-        // hairpin NAT em vez do fluxo do app. ICE host valida o mesh local real.
         const config = args[0] && typeof args[0] === 'object'
           ? { ...args[0], iceServers: [] }
           : { iceServers: [] };
@@ -83,10 +74,6 @@ function assertNoWebRTCrash(allErrors: string[]) {
 test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app', async ({
   browser,
 }) => {
-  // O fluxo cobre duas contas, amizade ao vivo, chamada, volume/mute por peer e
-  // TRÊS ciclos de compartilhamento de tela (incluindo a negociação do áudio da
-  // tela). Os 30 s padrão do Playwright não cobrem isso — o teste morria no
-  // meio da segunda conta, não por bug do app.
   test.setTimeout(180_000);
   const ctx = await browser.newContext();
   const a = await ctx.newPage();
@@ -118,10 +105,6 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
         draw();
         const timer = window.setInterval(draw, 100);
         const stream = canvas.captureStream(15);
-        // Áudio "do sistema" de mentira: o seletor real do SO entrega a track de
-        // loopback junto com o vídeo. Sem esta track o E2E nunca exercitava o
-        // envio de áudio da tela (o bug em que ele era anexado DEPOIS da oferta
-        // e, por isso, nunca saía do app).
         const audioCtx = new AudioContext();
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
@@ -159,7 +142,6 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
   await createAccount(b, 'Bob');
   await befriendLive(a, b);
 
-  // Abre a DM para exibir a toolbar de chamada.
   await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
 
   const hasRTC = await a.evaluate(() => typeof RTCPeerConnection !== 'undefined');
@@ -168,7 +150,6 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
   );
 
   if (!hasRTC || !hasMedia) {
-    // Sem WebRTC: relay-only mantém botões ATIVOS (via relay); só 'none' desabilita.
     const support = await a.evaluate(() => {
       try {
         const hasGum = typeof navigator !== 'undefined' && !!(navigator as unknown as { mediaDevices?: { getUserMedia?: unknown } }).mediaDevices?.getUserMedia;
@@ -204,32 +185,21 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
     return;
   }
 
-  // A inicia chamada de voz.
   const voiceBtn = a.getByTitle('Iniciar chamada de voz');
   await expect(voiceBtn).toBeVisible({ timeout: 15000 });
   await expect(voiceBtn).toBeEnabled();
   await voiceBtn.click();
 
-  // Overlay ativo em A: desktop mostra a contagem de participantes,
-  // mobile mostra "Em chamada". Aceita qualquer um dos dois.
   await expect(a.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
 
-  // B vê o modal entrante AO VIVO ("está ligando…").
   await expect(b.getByText(/está ligando/)).toBeVisible({ timeout: 15000 });
 
-  // B aceita no modal (Recusar/Aceitar). Escopo: após amizade resolvida não há
-  // outro "Aceitar" pendente, mas usa first() por segurança.
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
 
-  // Overlay aparece em B após aceitar (mesma regra desktop/mobile).
   await expect(b.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
-  // Overlay continua em A.
   await expect(a.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
-  // Modal entrante sumiu em B.
   await expect(b.getByText(/está ligando/)).toBeHidden({ timeout: 15000 });
 
-  // O ganho e o mute por participante alteram o elemento de áudio remoto real
-  // e ficam restritos ao fingerprint daquele peer.
   const remoteAudio = a.locator(`audio[data-call-audio-fp="${await fpOf(b)}"]`);
   await expect(remoteAudio).toHaveCount(1, { timeout: 15000 });
   const remoteTile = a.locator(`[data-call-participant="${await fpOf(b)}"]`);
@@ -237,6 +207,7 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
   const remoteVolume = remoteTile.getByRole('slider');
   await expect(remoteVolume).toBeVisible();
   await remoteVolume.evaluate((element) => {
+    // Seção 1: input
     const input = element as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '37');
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -250,12 +221,8 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
     return store[key];
   }, await fpOf(b))).toEqual({ volume: 37, muted: true });
 
-  // Usa o fluxo real do app (botão → CallManager → sender → SDP/sinalização →
-  // tile remoto), com uma fonte canvas animada para não depender do seletor do SO.
   const callerFp = await fpOf(a);
   const callerTileOnB = b.locator(`[data-call-participant="${callerFp}"]`);
-  // Cancelar o seletor antes da captura não deve parar áudio nem alterar a
-  // transmissão remota (se houver uma captura anterior, ela continua viva).
   await a.getByTestId('call-screen-share').click();
   await a.getByRole('menu').getByRole('button', { name: /Configurações avançadas/ }).click();
   await expect(a.getByRole('button', { name: 'Cancelar compartilhamento' })).toBeVisible();
@@ -276,15 +243,8 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
       && video.videoHeight === 180
       && video.currentTime > 0;
   })).toBe(true);
-  // Áudio do compartilhamento: além da voz, o elemento remoto precisa receber a
-  // track de áudio da tela. Antes ela era anexada com o PC em `have-local-offer`
-  // e nunca virava oferta — a tela chegava muda e o teste só olhava o vídeo.
   const callerAudioOnB = b.locator(`audio[data-call-audio-fp="${callerFp}"]`);
   await expect(callerAudioOnB).toHaveCount(1, { timeout: 15000 });
-  // Conta as trilhas AUDÍVEIS (live e não mudas). Não serve olhar só
-  // `readyState`: ao encerrar o share o sender faz `replaceTrack(null)` e a
-  // m-line continua aberta — a trilha remota fica `live` porém `muted`, nunca
-  // `ended`. O que o usuário percebe é o som parar.
   const audibleAudioTracks = () => callerAudioOnB.evaluate((element) => {
     const stream = (element as HTMLAudioElement).srcObject as MediaStream | null;
     if (!stream) return 0;
@@ -295,12 +255,6 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
   await expect(a.getByTestId('call-screen-share')).toBeVisible({ timeout: 15000 });
   await expect(callerTileOnB.getByText('TELA')).toBeHidden({ timeout: 15000 });
   await expect(receivedScreen).toBeHidden({ timeout: 15000 });
-  // Sem a tela, o áudio do sistema também para. Aqui NÃO dá para olhar o
-  // `muted` da track remota: ao encerrar, o sender faz `replaceTrack(null)` e a
-  // m-line continua aberta, então o Chromium deixa a track remota `live` e sem
-  // `muted` confiável. O contrato determinístico é do lado que envia: a track
-  // de áudio capturada com a tela precisa ser encerrada no stop (era isso que
-  // faltava quando a tela ficava muda ou o som continuava vazando).
   await expect.poll(() => a.evaluate(() => {
     const fake = (window as unknown as { __fakeScreen?: MediaStream }).__fakeScreen;
     return fake?.getAudioTracks()[0]?.readyState ?? 'missing';
@@ -315,7 +269,6 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
     void win.__fakeScreenAudio?.ctx.close();
   });
 
-  // A mesma chamada precisa poder reutilizar o sender após parar a tela.
   await a.getByTestId('call-screen-share').click();
   await a.getByRole('menu').getByRole('button', { name: 'Tela inteira' }).click();
   await expect(a.getByTestId('call-screen-stop')).toBeVisible({ timeout: 15000 });
@@ -341,7 +294,6 @@ test('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app',
     void win.__fakeScreenAudio?.ctx.close();
   });
 
-  // NENHUM pageerror / "Can't find variable" em nenhuma aba.
   assertNoWebRTCrash([...errsA, ...errsB]);
 
   await ctx.close();
@@ -359,9 +311,6 @@ test('fallback modo compatibilidade: toggle ausente na UI é documentado; sem cr
   await befriendLive(a, b);
   await a.locator('.nav-row', { hasText: 'Bob' }).first().click();
 
-  // Procura exaustiva por toggle "modo compatibilidade" (grep em src confirma
-  // que não existe: só há "compatibilidade legada" em services/browser.ts e
-  // "via relay" em ConnectionDiagnostics). Cobre switch/checkbox/título/label/texto.
   const switchCount = await a.getByRole('switch', { name: /compat/i }).count().catch(() => 0);
   const checkboxCount = await a.getByRole('checkbox', { name: /compat/i }).count().catch(() => 0);
   const titleCount = await a.getByTitle(/compat/i).count().catch(() => 0);
@@ -370,7 +319,6 @@ test('fallback modo compatibilidade: toggle ausente na UI é documentado; sem cr
   const total = switchCount + checkboxCount + titleCount + labelCount + textCount;
 
   if (total > 0) {
-    // Se um dia o toggle existir: liga e exige indicador "via relay".
     const toggle =
       a.getByRole('switch', { name: /compat/i }).first();
     await toggle.click().catch(() => {});

@@ -1,15 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { createServerViaWizard } from './helpers/server';
 
-// Paridade Discord — camada social.
-//
-// A UI social (reação, edição, pin, citação, busca, enquete, perfil) foi a
-// maior lacuna do projeto. Este arquivo não testa "a tela existe": exercita o
-// ciclo completo de cada funcionalidade e afirma o RESULTADO visível, que é o
-// que quebra quando motor, IPC e UI discordam entre si — e foi exatamente o
-// que aconteceu (o núcleo tinha os 18 frames e 15 tabelas, mas zero comando
-// IPC; as funcionalidades existiam e nenhuma era alcançável pela UI).
-
 async function createAccount(page: Page, name: string) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
@@ -20,24 +11,14 @@ async function createAccount(page: Page, name: string) {
 
 async function createServer(page: Page, name: string): Promise<void> {
   await createServerViaWizard(page, name);
-  // O helper fecha o wizard mas NÃO abre o servidor: é preciso clicar no
-  // ícone da rail, senão a sidebar continua em "Amigos" e não há composer.
   await page.locator(`.rail-btn[title="${name}"]`).click();
   await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 });
 }
 
 function composer(page: Page) {
-  // O composer real é <textarea aria-label="Mensagem">; o placeholder muda
-  // ("Conversar em #geral" / "Conversar com fulano"), então não dá para casar
-  // por texto dele — o seletor antigo por placeholder nunca casou.
   return page.getByLabel('Mensagem');
 }
 
-/**
- * O composer só existe com uma conversa ABERTA (é assim no app: sem selConv
- * não há lista nem caixa de texto). Os testes abaixo mandavam mensagem sem
- * selecionar nada, então esperavam um campo que nunca aparecia.
- */
 async function openAnyConversation(page: Page, server = 'ServidorSocial'): Promise<void> {
   if (await composer(page).isVisible().catch(() => false)) return;
   await createServer(page, server);
@@ -50,9 +31,6 @@ async function send(page: Page, text: string): Promise<void> {
   await box.click();
   await box.fill(text);
   await box.press('Enter');
-  // Confere que a mensagem ENTROU pela contagem de linhas: o texto cru não
-  // serve aqui, porque markdown como "**negrito**" é renderizado já formatado
-  // e some da DOM com os asteriscos.
   await expect(page.locator('[data-mid]')).toHaveCount(
     await page.locator('[data-mid]').count(),
     { timeout: 1000 },
@@ -73,7 +51,6 @@ test.describe('camada social', () => {
     await send(page, '> uma citação');
     await expect(page.getByText('uma citação').first()).toBeVisible({ timeout: 5000 });
 
-    // o corpo vem de peer não confiável: precisa aparecer como TEXTO
     await send(page, '<img src=x onerror=alert(1)>');
     await expect(page.locator('img[src="x"]')).toHaveCount(0);
   });
@@ -86,7 +63,6 @@ test.describe('camada social', () => {
     await expect(quick).toBeVisible({ timeout: 5000 });
     await quick.click();
 
-    // a pastilha da reação aparece
     await expect(page.locator('button[title^="Reagir "]').first()).toBeVisible({ timeout: 5000 });
   });
 
@@ -97,7 +73,6 @@ test.describe('camada social', () => {
     await page.getByText('abrir o menu').first().hover();
     await page.getByTitle('Mais').first().click();
 
-    // o menu precisa conter as ações de paridade Discord
     await expect(page.getByText('Responder', { exact: false }).first()).toBeVisible({ timeout: 5000 });
   });
 

@@ -1,19 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { createServerViaWizard } from './helpers/server'
 
-/**
- * Regressão: canais duplicados nas configurações do servidor.
- *
- * A causa era DUAS fontes de verdade. `communities_list` devolvia os canais do
- * servidor em `channels`, e `channel_list` devolvia os mesmos canais de novo com
- * tipo/categoria/tópico. Cada merge manual da UI filtrava duplicatas de um
- * jeito — e o do painel de bot não filtrava nada, então o mesmo canal aparecia
- * duas vezes lá.
- *
- * Estes testes contam canais por nome em cada seção. Contagem por nome e não por
- * id porque era o nome que o usuário via repetido.
- */
-
 async function criarConta(page: Page, nome: string) {
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 })
@@ -56,12 +43,10 @@ test('contador da navegação bate com a lista real de canais', async ({ page })
   const dialog = await abrirConfiguracoes(page)
   const texto = await dialog.innerText()
 
-  // O contador da nav é o número ao lado do rótulo "Canais".
   const m = texto.match(/Canais\s*\n?\s*(\d+)/)
   expect(m, `não achei o contador de canais em:\n${texto.slice(0, 400)}`).not.toBeNull()
   const contadorNav = Number(m![1])
 
-  // Conta as linhas de canal de verdade no corpo.
   const linhas = await dialog.evaluate(
     (root: HTMLElement) => root.querySelectorAll('button[aria-label^="Editar canal"]').length,
   )
@@ -93,7 +78,6 @@ test('criar canal não duplica os existentes', async ({ page }) => {
   const dupsAntes = antes.filter((n, i) => antes.indexOf(n) !== i)
   expect(dupsAntes, `já havia duplicata: ${dupsAntes}`).toEqual([])
 
-  // cria um canal novo
   await dialog.getByRole('button', { name: /Criar canal|Criar o primeiro canal/ }).first().click()
   const modal = page.getByRole('dialog', { name: /Criar canal/ })
   await expect(modal).toBeVisible()
@@ -113,7 +97,6 @@ test('painel de bot não duplica canais ao abrir e salvar', async ({ page }) => 
 
   const dialog = await abrirConfiguracoes(page)
 
-  // cria um bot para ter painel
   await dialog.getByRole('button', { name: 'Bots' }).click()
   await dialog.getByRole('button', { name: /Criar bot/ }).first().click()
   const modal = page.getByRole('dialog', { name: 'Criar bot' })
@@ -121,15 +104,10 @@ test('painel de bot não duplica canais ao abrir e salvar', async ({ page }) => 
   await modal.getByRole('button', { name: 'Criar bot' }).click()
   await expect(modal).toBeHidden({ timeout: 15000 })
 
-  // abre a configuração do bot — é aqui que os canais duplicavam
   await dialog.getByRole('button', { name: /^Configurar BotDup$/ }).click()
   const painel = page.getByRole('dialog', { name: /Configurar BotDup/ })
   await expect(painel).toBeVisible({ timeout: 10000 })
 
-  // Aba de escopos: a lista de canais é a única parte do painel que recebe a
-  // prop `channels`. Cada canal é um `<label>` com um checkbox dentro, então
-  // contamos labels que CONTÊM checkbox — o título do card também é um label
-  // textual e contaminaria a contagem.
   await painel.getByRole('tab', { name: /Escopos/ }).click()
   const nomes = await painel.evaluate((root: HTMLElement) => {
     const out: string[] = []

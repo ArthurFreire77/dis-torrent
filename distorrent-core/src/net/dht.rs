@@ -1,9 +1,3 @@
-//! DHT lite + PEX (Peer Exchange) — Internet P2P sem IP manual.
-//! Quando o usuário não tem tracker e não está na mesma LAN, peers conectados
-//! trocam listas de peers conhecidos (gossip). Assim, se A conhece B e B conhece C,
-//! A aprende sobre C via B — rede se auto-descobre sem central obrigatório.
-//! Complementa UPnP + bootstrap tracker quando disponíveis.
-
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -11,9 +5,6 @@ use tracing::debug;
 
 use crate::net::engine::NetworkEngine;
 
-/// Inicia gossip PEX: a cada 20s, cada peer online recebe lista de até 10 peers
-/// conhecidos do local (exceto ele mesmo). Receptor valida e tenta conectar nos
-/// FPS que ainda não tem sessão.
 pub async fn spawn_pex(engine: Arc<NetworkEngine>) {
     let mut tick = interval(Duration::from_secs(20));
     let cancel = engine.cancel_subscribe();
@@ -22,7 +13,6 @@ pub async fn spawn_pex(engine: Arc<NetworkEngine>) {
             return;
         }
         tick.tick().await;
-        // privacidade: em proxy/full não gossipamos IPs
         let mode = engine.privacy_mode();
         if matches!(mode.as_str(), "proxy" | "full") {
             continue;
@@ -31,8 +21,6 @@ pub async fn spawn_pex(engine: Arc<NetworkEngine>) {
         if known.is_empty() {
             continue;
         }
-        // SEGURANÇA/PRIVACIDADE: só gossipa endereços para AMIGOS ACEITOS —
-        // nunca para um peer conectado aleatório (evita vazar a peerlist).
         let online = engine.online_friend_fps();
         if online.is_empty() {
             continue;
@@ -46,28 +34,12 @@ pub async fn spawn_pex(engine: Arc<NetworkEngine>) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DHT MAINLINE BITTORRENT (BEP-5) — descoberta 100% descentralizada
-// ─────────────────────────────────────────────────────────────────────────────
-/// Cada identidade vira um "infohash" na rede BitTorrent REAL:
-/// `Id = blake3("distorrent-dht-v1:" + fingerprint)[..20]`.
-/// O app ANUNCIA o próprio endpoint nesse infohash e faz `get_peers` no
-/// infohash dos amigos — os nós da mainline DHT (milhões, sem dono, sem
-/// servidor nosso) fazem o rendezvous. É o mecanismo de descoberta do
-/// protocolo BitTorrent: nada de relay obrigatório, nada de API externa.
-/// O handshake valida o fingerprint de qualquer jeito — endereço errado
-/// nunca vira sessão trocada.
 pub fn identity_infohash(fp: &str) -> mainline::Id {
     let h = blake3::hash(format!("distorrent-dht-v1:{fp}").as_bytes());
     let bytes: [u8; 20] = h.as_bytes()[..20].try_into().expect("blake3 gera 32B");
     mainline::Id::from_bytes(bytes).expect("Id aceita 20B")
 }
 
-/// Opt-in de produção: os BINÁRIOS (app Tauri / distorrent-host) setam `DISTORRENT_DHT=1`
-/// no boot. Testes não setam → engines de teste nunca tocam na rede BitTorrent
-/// (senão os e2e descobririam uns aos outros via DHT real e quebrariam a
-/// eleição relay/direta determinística dos asserts).
-/// `DISTORRENT_NO_DHT=1` força OFF mesmo com DISTORRENT_DHT (kill-switch de emergência).
 pub fn bit_dht_enabled() -> bool {
     if matches!(
         std::env::var("DISTORRENT_NO_DHT")
@@ -89,14 +61,6 @@ pub fn bit_dht_enabled() -> bool {
     )
 }
 
-/// Loop principal da DHT BitTorrent (1 tarefa por engine):
-/// - mantém um nó mainline vivo (UDP + bootstrap público);
-/// - ANUNCIA o próprio endpoint a cada 60s (e no boot);
-/// - `get_peers` nos infohashes dos amigos SEM sessão (fila urgente + rodízio,
-///   rate-limit 20s/peer) e disca DIRETO nos endereços descobertos
-///   (outbound-first, igual torrent);
-/// - privacidade: em proxy/Tor a DHT fica OFF (UDP vazaria o IP) e o motivo
-///   aparece no diagnóstico da UI.
 pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
     if !bit_dht_enabled() {
         debug!("DHT BitTorrent: desligada via DISTORRENT_NO_DHT");
@@ -109,7 +73,6 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
         if engine.is_cancelled(&cancel) {
             return;
         }
-        // Modo anônimo: UDP/DHT vazaria o IP real — desliga e diz por quê.
         let mode = engine.privacy_mode();
         if matches!(mode.as_str(), "proxy" | "full") {
             engine.shutdown_bit_dht();
@@ -119,7 +82,6 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
             });
             continue;
         }
-        // Nó vivo (bind UDP + bootstrap). Erro = tenta de novo no próximo tick.
         if engine.ensure_bit_dht().is_err() {
             engine.diag_record_net(|d| {
                 d.dht_ok = Some(false);
@@ -127,13 +89,6 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
             });
             continue;
         }
-        // Nó ATIVO: a DHT funciona (bind UDP + bootstrap). Isto é o sinal que o
-        // diagnóstico precisa — antes `dht_ok` só virava `true` quando o
-        // `announce_peer` dava certo, o que exige porta externa confirmada.
-        // Sob CGNAT nunca há porta externa, então o relatório ficava em
-        // "não informado (estado ainda desconhecido)" para sempre, mesmo com a
-        // DHT viva e os lookups funcionando. O anúncio tem estado próprio
-        // (`announce_addr`).
         engine.diag_record_net(|d| {
             if d.dht_ok.is_none() {
                 d.dht_ok = Some(true);
@@ -142,9 +97,6 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
         });
 
         let now = crate::identity::now_ms();
-        // ANÚNCIO próprio: no boot e a cada 60s (announce_peer no infohash).
-        // Só com porta EXTERNA confirmada (STUN/UPnP via `dht_announce_port`):
-        // anunciar a TCP interna gera dials mortos — pior que não anunciar.
         if now >= next_announce {
             next_announce = now + 60_000;
             if let Some(port) = engine.dht_announce_port() {
@@ -162,7 +114,6 @@ pub async fn spawn_bit_dht(engine: Arc<NetworkEngine>) {
             }
         }
 
-        // LOOKUP: fila urgente primeiro; senão rodízio dos amigos sem sessão.
         let mut targets = engine.dht_queue_pop(16);
         if targets.is_empty() {
             targets = engine.friends_without_session(8);

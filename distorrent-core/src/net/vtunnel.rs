@@ -1,7 +1,3 @@
-//! Túnel virtual UDP (LAN estilo Radmin): handshake X25519 autenticado por
-//! ed25519 via relay + datagramas ChaCha20Poly1305 (nonces crescentes,
-//! anti-replay, AAD de direção). IP virtual determinístico `fd9d::/8` por fp.
-
 use std::net::Ipv6Addr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
@@ -12,20 +8,12 @@ use crate::{DistorrentError, Result};
 
 pub const VTUN_DOMAIN: &[u8] = b"distorrent-vtun-v1";
 pub const VTUN_HKDF_INFO: &[u8] = b"distorrent/vtun/v1";
-/// Porta TCP que o app escuta DENTRO do túnel (igual à fixa de produção).
 pub const VTUN_TCP_PORT: u16 = 51413;
-/// Chunk máximo por datagrama do túnel (plaintext): cabe folgado num frame
-/// relay (que fragmenta em ~3KB) sem estourar limites do writer direto.
 pub const TUN_FRAG_MAX: usize = 48 * 1024;
-/// Frame interno (SecureFrame JSON) máximo aceito pelo túnel: acima disso o
-/// emissor manda pelo caminho normal (relay). Arquivo vai pelo swarm, nunca aqui.
 pub const TUN_FRAME_MAX: usize = 512 * 1024;
-/// Tags do envelope dentro do plaintext (1º byte).
 pub const TAG_FULL: u8 = 0x01;
 pub const TAG_FRAG: u8 = 0x02;
 
-/// IP virtual estável: `fd9d:` + 64 bits do `blake3("distorrent-vtun-v1:<fp>")`.
-/// Determinístico — dois lados calculam o mesmo sem trocar nada.
 pub fn virtual_ipv6(fp: &str) -> Ipv6Addr {
     let h = blake3::hash(format!("distorrent-vtun-v1:{fp}").as_bytes());
     let b = h.as_bytes();
@@ -39,8 +27,6 @@ pub fn virtual_ipv6(fp: &str) -> Ipv6Addr {
     )
 }
 
-/// Transcript do handshake do túnel (assinado por AMBOS com ed25519).
-/// `a` = quem oferece, `b` = quem responde — ordem fixa, sem ambiguidade.
 pub fn tunnel_transcript(
     a_fp: &str,
     a_eph: &[u8; 32],
@@ -61,8 +47,6 @@ pub fn tunnel_transcript(
     h.finalize().as_bytes().to_vec()
 }
 
-/// Chave do túnel: X25519 (efêmera própria × efêmera do peer) → HKDF-SHA256
-/// com salt = nonces. Rejeita shared all-zero ( MESMO padrão de `session_key`).
 pub fn tunnel_key(
     own_secret: &x25519_dalek::StaticSecret,
     peer_eph: &[u8; 32],
@@ -97,7 +81,6 @@ fn tun_aad(sender_fp: &str, receiver_fp: &str) -> Vec<u8> {
     aad
 }
 
-/// Janela anti-replay: aceita nonce > highest, ou dentro de 64 abaixo e inédito.
 struct RecvWindow {
     highest: u64,
     mask: u64,
@@ -121,26 +104,18 @@ impl RecvWindow {
         }
         let bit = 1u64 << diff;
         if self.mask & bit != 0 {
-            return false; // replay
+            return false;
         }
         self.mask |= bit;
         true
     }
 }
 
-/// Sessão estabelecida do túnel com um peer. Uma direção de contador por
-/// lado (cada lado só ENVIA com o próprio contador — sem disputa).
 pub struct TunnelSession {
     pub peer_fp: String,
-    /// Criação (epoch ms) — base do rekey por idade (Fase 4).
     pub created_ms: i64,
-    /// Bytes cifrados enviados — base do rekey por volume (Fase 4).
     pub tx_bytes: AtomicU64,
-    /// Último datagrama aberto com sucesso (prova real de vida) — o túnel era
-    /// dado "pronto" só por chave derivada; half-open ficava em silêncio.
     last_rx_ms: AtomicI64,
-    /// Último envio (contrapeso do last_rx_ms): sem ele, túnel OCIOSO seria
-    /// derrubado a cada varredura (churn eterno de handshake).
     last_tx_ms: AtomicI64,
     key: [u8; 32],
     send_ctr: AtomicU64,
@@ -153,7 +128,6 @@ impl TunnelSession {
             peer_fp,
             created_ms: crate::identity::now_ms(),
             tx_bytes: AtomicU64::new(0),
-            // 0 = nunca abrimos/enixamos nada por aqui.
             last_rx_ms: AtomicI64::new(0),
             last_tx_ms: AtomicI64::new(0),
             key,
@@ -165,57 +139,41 @@ impl TunnelSession {
         }
     }
 
-    /// O túnel pode transportar tráfego? A pergunta é "provei que funciona?":
-    /// prova recente, carência do handshake, ocioso (sem evidência de falha)
-    /// ou envio dentro da janela de resposta. "Mandei e nada voltou" = não.
     pub fn is_proven(&self, now_ms: i64, grace_ms: i64, ttl_ms: i64, probe_ms: i64) -> bool {
         let rx = self.last_rx_ms.load(Ordering::SeqCst);
         let tx = self.last_tx_ms.load(Ordering::SeqCst);
-        // 1. prova recente
         if rx > 0 && now_ms.saturating_sub(rx) <= ttl_ms {
             return true;
         }
-        // 2. carência do handshake
         if now_ms.saturating_sub(self.created_ms) <= grace_ms {
             return true;
         }
-        // 3. nada depois da última prova = ocioso, não quebrado
         if tx <= rx {
             return true;
         }
-        // 4. saiu algo depois da prova e nada voltou: dá a janela de resposta
         now_ms.saturating_sub(tx) <= probe_ms
     }
 
-    /// Túnel comprovadamente MORTO (≠ `is_proven`: envio sem resposta pode
-    /// estar em voo). Sem esta separação, a varredura causava renegociação
-    /// eterna em quem só está logado.
     pub fn is_dead(&self, now_ms: i64, grace_ms: i64, dead_ms: i64) -> bool {
-        // Nunca enviou nada depois da criação: ocioso, não morto.
         let tx = self.last_tx_ms.load(Ordering::SeqCst);
         if tx == 0 {
             return false;
         }
         let rx = self.last_rx_ms.load(Ordering::SeqCst);
         if tx <= rx {
-            // O último envio tem prova correspondente: nada a declarar.
             return false;
         }
-        // Enviou e nunca voltou (ou voltou antes deste envio): espera o prazo
-        // longo antes de concluir morte, para não confundir atraso com queda.
         if now_ms.saturating_sub(self.created_ms) <= grace_ms {
             return false;
         }
         now_ms.saturating_sub(tx) > dead_ms
     }
 
-    /// Marca que este lado ABRIU um datagrama do peer (prova real de vida).
+    // Seção 1: mark_rx
     fn mark_rx(&self, now_ms: i64) {
         self.last_rx_ms.store(now_ms, Ordering::SeqCst);
     }
 
-    /// Cifra um datagrama; devolve (nonce, ciphertext). Nonce 12B = 4 zeros +
-    /// contador BE de 64 bits. Estoura (u64::MAX) = erro → rekey (Fase 4).
     pub fn seal(
         &self,
         sender_fp: &str,
@@ -241,13 +199,11 @@ impl TunnelSession {
             )
             .map_err(|_| DistorrentError::Crypto("tunel: falha ao cifrar".into()))?;
         self.tx_bytes.fetch_add(ct.len() as u64, Ordering::SeqCst);
-        // Registra o ENVIO: é o que distingue "ocioso" de "mandei e não voltou".
         self.last_tx_ms
             .store(crate::identity::now_ms(), Ordering::SeqCst);
         Ok((ctr, ct))
     }
 
-    /// Abre e valida (AEAD + AAD de direção + anti-replay). Erro = descarta.
     pub fn open(
         &self,
         sender_fp: &str,
@@ -275,20 +231,17 @@ impl TunnelSession {
                 },
             )
             .map_err(|_| DistorrentError::Crypto("tunel: autenticação falhou".into()))?;
-        // Abriu de verdade = a chave serve nos dois sentidos (ver `is_proven`).
         self.mark_rx(crate::identity::now_ms());
         Ok(pt)
     }
 }
 
-/// Oferta pendente que EU fiz (segredo efêmero guardado até a resposta).
 pub struct TunnelPending {
     pub secret: x25519_dalek::StaticSecret,
     pub nonce: [u8; 16],
     pub created_ms: i64,
 }
 
-/// Envelope do plaintext do túnel: frame inteiro, fragmento ou inválido.
 pub enum TunMsg {
     Full(Vec<u8>),
     Frag {
@@ -348,8 +301,6 @@ pub fn decode_envelope(pt: &[u8]) -> TunMsg {
     }
 }
 
-/// Remontagem de frames fragmentados por peer. Limites anti-DoS: 64 frags/msg,
-/// 16 msgs/peer, 4MB total, 30s de vida — estouro descarta o mais antigo.
 pub struct TunnelReassembler {
     entries: std::collections::HashMap<(String, u32), ReasmEntry>,
     buffered_bytes: usize,
@@ -371,7 +322,6 @@ impl TunnelReassembler {
         }
     }
 
-    /// Insere um fragmento; devolve o frame completo quando fecha.
     pub fn insert(
         &mut self,
         fp: &str,
@@ -382,6 +332,7 @@ impl TunnelReassembler {
         now_ms: i64,
     ) -> Option<Vec<u8>> {
         self.gc(now_ms);
+        // Seção 2: key
         let key = (fp.to_string(), id);
         if !self.entries.contains_key(&key) {
             if self.entries.len() >= 16 {
@@ -400,7 +351,7 @@ impl TunnelReassembler {
         }
         let entry = match self.entries.get_mut(&key) {
             Some(e) if e.total == total => e,
-            _ => return None, // total conflitante = descarta
+            _ => return None,
         };
         if entry.got[idx as usize].is_none() {
             entry.bytes += chunk.len();
@@ -475,12 +426,9 @@ mod tests {
         assert_eq!(n1, 1);
         let pt = s.open("eu", "peer", n1, &ct1).unwrap();
         assert_eq!(pt, b"ping:1");
-        // replay do mesmo nonce morre
         assert!(s.open("eu", "peer", n1, &ct1).is_err());
-        // direção trocada morre (AAD)
         let (n2, ct2) = s.seal("eu", "peer", b"x").unwrap();
         assert!(s.open("peer", "eu", n2, &ct2).is_err());
-        // nonce 0 morre
         assert!(s.open("eu", "peer", 0, &ct1).is_err());
     }
 
@@ -492,7 +440,6 @@ mod tests {
         for _ in 0..5 {
             cts.push(s.seal("eu", "peer", b"d").unwrap());
         }
-        // entrega reversa: todos entram
         for (n, ct) in cts.iter().rev() {
             assert!(s.open("eu", "peer", *n, ct).is_ok());
         }
@@ -503,25 +450,17 @@ mod tests {
         const GRACE: i64 = 8_000;
         const TTL: i64 = 45_000;
         const PROBE: i64 = 10_000;
-        // Relógio REAL como base: `seal`/`mark_rx` estampam `now_ms()`, então
-        // deslocamentos sintéticos sobre `created_ms` não valem depois de um
-        // envio. Aqui a base é agora e os casos avançam no tempo.
         let s = TunnelSession::new("peer".into(), [3u8; 32]);
         let t0 = crate::identity::now_ms();
 
-        // Recém-criado: dentro da carência, pode carregar (é quando costuma dar certo).
         assert!(s.is_proven(t0, GRACE, TTL, PROBE), "carência precisa valer");
         assert!(s.is_proven(t0 + 7_000, GRACE, TTL, PROBE));
 
-        // OCIOSO (nunca enviei nada): continua valendo. Derrubar aqui puniria
-        // quem só está logado e viraria renegociação a cada varredura.
         assert!(
             s.is_proven(t0 + 120_000, GRACE, TTL, PROBE),
             "túnel ocioso não é túnel quebrado"
         );
 
-        // Mandei e nada voltou: depois da janela de resposta, NÃO carrega mais.
-        // Era o "uma mensagem funciona, depois emudece até reiniciar".
         s.seal("eu", "peer", b"msg").unwrap();
         assert!(
             s.is_proven(t0, GRACE, TTL, PROBE),
@@ -532,27 +471,19 @@ mod tests {
             "enviou e não voltou nada: rota morta, usa o caminho normal"
         );
 
-        // Voltou algo: prova real dos dois sentidos → vale de novo.
         s.mark_rx(crate::identity::now_ms());
         assert!(s.is_proven(crate::identity::now_ms(), GRACE, TTL, PROBE));
     }
 
-    /// `is_dead` só dispara em "mandei, nada voltou, prazo folgado" — nunca em
-    /// ocioso nem em envio ainda em voo.
-    ///
-    /// É a diferença que impede renegociação eterna: derrubar por "sem prova
-    /// agora" fazia o túnel nascer e morrer a cada varredura.
     #[test]
     fn tunel_so_e_morto_quando_envio_nao_volta_no_prazo() {
         const GRACE: i64 = 8_000;
         const DEAD: i64 = 120_000;
 
-        // Ocioso desde sempre: nunca é morto (nada para provar).
         let ocioso = TunnelSession::new("peer".into(), [7u8; 32]);
         let t0 = crate::identity::now_ms();
         assert!(!ocioso.is_dead(t0 + 3_600_000, GRACE, DEAD));
 
-        // Enviou algo: dentro do prazo ainda não é morte (pode estar em voo).
         let mudo = TunnelSession::new("peer".into(), [8u8; 32]);
         mudo.seal("eu", "peer", b"msg").unwrap();
         let agora = crate::identity::now_ms();
@@ -560,21 +491,18 @@ mod tests {
             !mudo.is_dead(agora + 30_000, GRACE, DEAD),
             "30s de atraso não é morte — relay/4G é lento"
         );
-        // Passado o prazo folgado sem nada voltar: morto, vale renegociar.
         assert!(
             mudo.is_dead(agora + DEAD + 1_000, GRACE, DEAD),
             "mandei e nada voltou no prazo: renegocia"
         );
 
-        // Voltou algo DEPOIS do envio: não é morto (o envio foi provado).
         let vivo = TunnelSession::new("peer".into(), [9u8; 32]);
         vivo.seal("eu", "peer", b"msg").unwrap();
         vivo.mark_rx(crate::identity::now_ms());
         assert!(!vivo.is_dead(crate::identity::now_ms() + DEAD * 5, GRACE, DEAD));
     }
 
-    /// A prova vence: envio depois da última prova, sem resposta, derruba —
-    /// e o ocioso NÃO pode cair nesta regra.
+    // Seção 3: test
     #[test]
     fn tunel_ocioso_nao_e_derrubado_mas_mudo_e() {
         const GRACE: i64 = 8_000;
@@ -583,18 +511,14 @@ mod tests {
         let s = TunnelSession::new("peer".into(), [5u8; 32]);
         let t0 = crate::identity::now_ms();
 
-        // Ocioso desde o começo, muito depois da carência: segue válido.
         assert!(s.is_proven(t0 + 600_000, GRACE, TTL, PROBE));
 
-        // Envio sem resposta depois disso: janela esgotada = morto.
         s.seal("eu", "peer", b"x").unwrap();
         let agora = crate::identity::now_ms();
         assert!(!s.is_proven(agora + PROBE + 5_000, GRACE, TTL, PROBE));
 
-        // A prova real devolve a confiança.
         s.mark_rx(agora);
         assert!(s.is_proven(agora, GRACE, TTL, PROBE));
-        // E continua valendo dentro do ttl.
         assert!(s.is_proven(agora + 30_000, GRACE, TTL, PROBE));
     }
 

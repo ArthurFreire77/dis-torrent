@@ -15,6 +15,7 @@ import {
 import { ChannelEditor, ChannelList, CategoryManager, CATEGORIAS_PADRAO } from './ChannelManager'
 import { RoleEditor, RoleList } from './RoleEditor'
 import { BotManager } from './BotManager'
+import BotPanel from './BotPanel'
 import { MemberManager } from './MemberManager'
 import { OverviewSection } from './OverviewSection'
 
@@ -67,7 +68,9 @@ export interface ServerSettingsProps {
   onBotCreate: (data: { name: string; roleId: string | null }) => Promise<void>
   onBotUpdate: (id: string, patch: { name?: string; roleId?: string | null; online?: boolean; perms?: number }) => Promise<void>
   onBotDelete: (id: string) => Promise<void>
-  onConfigBot: (botId: string) => void
+  /** Bot aberto no editor. `null` volta para a lista. */
+  configBotId?: string | null
+  onConfigBot: (botId: string | null) => void
   /** Importa a pasta de um bot existente (bot.json) e devolve o nome criado. */
   onImportBotFolder?: (dir: string) => Promise<string>
   onMakeInvite: () => Promise<string>
@@ -89,6 +92,9 @@ export default function ServerSettings(props: ServerSettingsProps) {
   const [roleModal, setRoleModal] = useState(false)
 
   const ehDono = props.ownerFp === props.myFp
+  const botEmEdicao = props.configBotId
+    ? (props.bots.find((b) => b.id === props.configBotId) ?? null)
+    : null
 
   const channels = useMemo(
     () => mergeChannels(props.channelsSummary, props.channelsFull),
@@ -129,6 +135,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
   function irPara(s: ServerSection) {
     setSection(s)
     setNavAberta(false)
+    if (s !== 'bots' && props.configBotId) props.onConfigBot(null)
   }
 
   return (
@@ -282,7 +289,13 @@ export default function ServerSettings(props: ServerSettingsProps) {
             </span>
           </div>
 
-          <div style={{ flex: 1, overflowY: 'auto', padding: ui.xxl }}>
+          <div
+            style={
+              botEmEdicao
+                ? { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }
+                : { flex: 1, overflowY: 'auto', padding: ui.xxl }
+            }
+          >
             {}
             {navAberta && (
               <div
@@ -296,13 +309,15 @@ export default function ServerSettings(props: ServerSettingsProps) {
               />
             )}
 
-            <SectionHead
-              icon={SECTIONS.find((s) => s.key === section)!.icon}
-              title={SECTIONS.find((s) => s.key === section)!.label}
-              desc={SECTIONS.find((s) => s.key === section)!.desc}
-            />
+            {!botEmEdicao && (
+              <SectionHead
+                icon={SECTIONS.find((s) => s.key === section)!.icon}
+                title={SECTIONS.find((s) => s.key === section)!.label}
+                desc={SECTIONS.find((s) => s.key === section)!.desc}
+              />
+            )}
 
-            {!ehDono && section !== 'convites' && (
+            {!ehDono && section !== 'convites' && !botEmEdicao && (
               <div style={{ marginBottom: ui.xl }}>
                 <Notice tone="info" icon="info">
                   Só o dono do servidor pode mudar estas configurações. Você pode
@@ -461,7 +476,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
               />
             )}
 
-            {section === 'bots' && (
+            {section === 'bots' && !botEmEdicao && (
               <BotManager
                 bots={props.bots}
                 roles={props.roles}
@@ -471,6 +486,17 @@ export default function ServerSettings(props: ServerSettingsProps) {
                 onDelete={props.onBotDelete}
                 onConfigure={props.onConfigBot}
                 onImportFolder={props.onImportBotFolder}
+              />
+            )}
+
+            {section === 'bots' && botEmEdicao && (
+              <BotPanel
+                embedded
+                communityId={props.serverId}
+                bot={botEmEdicao}
+                channels={channels}
+                onSaved={props.onRefresh}
+                onClose={() => props.onConfigBot(null)}
               />
             )}
 

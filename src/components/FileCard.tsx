@@ -1,20 +1,3 @@
-// CARTÃO DE ARQUIVO — um componente para os DOIS shells.
-//
-// Antes o desktop tinha um cartão inline (dentro do `renderFile` do
-// MessageList) e o celular tinha outro (`FileCard` em MobileShell). Eles
-// divergiam em tudo: o desktop não mostrava prévia de imagem/vídeo, o mobile não
-// mostrava velocidade, o texto do botão era "Baixar (43%)" num e "Salvar" no
-// outro, e nenhum dos dois dizia por que um download tinha parado.
-//
-// Aqui a regra é única:
-//   • prévia inline de imagem/vídeo (o mobile já fazia);
-//   • barra + porcentagem + VELOCIDADE embaixo do envio (o pedido);
-//   • botão "Baixar" que só salva em Downloads — nada baixa por engano;
-//   • erro do download visível (motivo real, não "0%" parado).
-//
-// Componente de APRESENTAÇÃO: recebe tudo pronto do shell (que é quem conhece o
-// swarm e a fila). Assim dá para testar sem WebView/Tauri.
-
 import type { ReactNode } from 'react'
 import { Ic } from '../shared/icons'
 import { formatFileSize } from '../shared/bytes'
@@ -54,18 +37,14 @@ export function FileCard({
   name: string
   size: number
   chunks: number
-  /** Enviei eu? (o "Tentar novamente" da mensagem só aparece nesse caso). */
   mine?: boolean
-  /** Status da MENSAGEM (para o reenvio em caso de falha de envio). */
   mstatus?: string
-  /** O anúncio do swarm já chegou? (= o arquivo é alcançável) */
   announced: boolean
   previewUrl?: string
   progress?: FileCardProgress
   pal: FileCardPalette
   onDownload: () => void
   onRetry?: () => void
-  /** Rodapé extra do shell (ex.: botão "Painel de downloads"). */
   extra?: ReactNode
 }) {
   const done = (progress?.pct ?? 0) >= 100 && progress?.status === 'completed'
@@ -87,7 +66,7 @@ export function FileCard({
         minWidth: 0,
       }}
     >
-      {/* PRÉVIA: imagem/vídeo aparece aqui, sem precisar salvar. */}
+      {}
       {previewUrl && video && (
         <video
           src={previewUrl}
@@ -121,8 +100,8 @@ export function FileCard({
         </div>
       </div>
 
-      {/* BARRA + % + VELOCIDADE. É o "embaixo do envio" pedido: mostra o que
-          está acontecendo agora, não um número congelado. */}
+      {
+}
       {showBar && (
         <div style={{ marginTop: 8 }}>
           <div style={{ height: 6, background: pal.main, borderRadius: 99, overflow: 'hidden' }}>
@@ -214,3 +193,4 @@ export function FileCard({
     </div>
   )
 }
+// Seção 1: fim

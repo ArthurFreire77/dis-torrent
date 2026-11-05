@@ -1,24 +1,3 @@
-// ScreenStage — TELA CHEIA de uma transmissão (tela ou câmera).
-//
-// ## Por que existe
-//
-// "Expandir" só aumentava o quadrado DENTRO do painel de chamada (no desktop o
-// painel ocupa no máximo `min(56vw, 720px)`, então a tela compartilhada nunca
-// passava disso). Para ler texto numa tela compartilhada isso não é tela cheia.
-//
-// Aqui a transmissão escolhida cobre a JANELA inteira (`position: fixed`), com:
-//   - `object-fit: contain` da fonte: ocupa o máximo possível sem
-//     esticar nem cortar (letterbox é o correto em tela cheia);
-//   - barra de controles que some sozinha e volta no mouse/teclado (não cobre
-//     conteúdo importante nem atrapalha a leitura);
-//   - os controles essenciais da chamada (mic, câmera, sair) continuam
-//     acessíveis, porque a reunião NÃO sai do ar;
-//   - `Esc` recolhe; botão explícito de recolher sempre visível no hover.
-//
-// IMPORTANTE: o painel da chamada continua MONTADO atrás desta camada. Trocar
-// o painel pela tela cheia desmontaria os `<audio>` remotos e a chamada ficaria
-// muda — por isso é um overlay, não uma substituição.
-
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon, Icons } from '../../shared/icons'
 import { attachStream } from '../../shared/mediaAttach'
@@ -37,19 +16,15 @@ export interface ScreenStageProps {
   tile: CallTileModel
   palette: ScreenStagePalette
   onCollapse: () => void
-  /** Ações essenciais: continuam funcionando com a tela cheia aberta. */
   muted?: boolean
   onToggleMute?: () => void
   cameraOn?: boolean
-  /** A tela está sendo transmitida agora (câmera bloqueada: mesma m-line). */
   sharing?: boolean
   onToggleCamera?: () => void
   onLeave?: () => void
-  /** Nome da chamada, para contexto no cabeçalho. */
   callTitle?: string
 }
 
-/** Quanto tempo a barra fica visível depois da última interação. */
 const CHROME_HIDE_MS = 2600
 
 export function ScreenStage({
@@ -68,8 +43,6 @@ export function ScreenStage({
   const [chromeVisible, setChromeVisible] = useState(true)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // Barra que some: só esconde quando o ponteiro SAIR da área, para não
-  // desaparecer enquanto a pessoa procura o botão de recolher.
   const scheduleHide = useCallback(() => {
     if (hideTimer.current) clearTimeout(hideTimer.current)
     hideTimer.current = setTimeout(() => setChromeVisible(false), CHROME_HIDE_MS)
@@ -84,14 +57,13 @@ export function ScreenStage({
     return () => { if (hideTimer.current) clearTimeout(hideTimer.current) }
   }, [scheduleHide])
 
-  // Esc recolhe. Também sai da tela cheia do SO, se foi pedida (F11/duplo clique).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
         try {
           if (document.fullscreenElement) void document.exitFullscreen?.()
-        } catch { /* ignore */ }
+        } catch {  }
         onCollapse()
         return
       }
@@ -115,8 +87,6 @@ export function ScreenStage({
       onMouseEnter={showChrome}
       style={{
         position: 'fixed',
-        // cobre a JANELA inteira, acima do painel (88) e dos modais (90-92),
-        // abaixo dos menus/popovers da chamada (199+).
         inset: 0,
         zIndex: 150,
         background: '#000',
@@ -126,20 +96,8 @@ export function ScreenStage({
         cursor: chromeVisible ? 'default' : 'none',
       }}
     >
-      {/* Conteúdo: ocupa TODA a área e é o `object-fit: contain` que faz o
-          letterbox — preserva a proporção sem esticar nem cortar.
-
-          BUG REAL (a tela compartilhada aparecia pequena no meio de um mar de
-          preto): o `<video>` estava com `width:auto/height:auto` e apenas
-          `max-width/max-height:100%`. Com isso ele ficava no tamanho NATIVO do
-          stream (um share 1280×720 desenhava 1280px e parava — não crescia até
-          preencher a janela). O `aspectRatio` no wrapper também brigava com
-          `width/height: 100%`: com as duas dimensões fixas o `aspect-ratio` é
-          ignorado e o container não limitava nada.
-
-          Agora o wrapper é só 100%/100% e o vídeo/imagem ocupam tudo com
-          `object-fit: contain` — o dimensionamento é uma alavanca só, que é a
-          regra do projeto (nada de aspect-ratio + max-width ao mesmo tempo). */}
+      {
+}
       <div
         style={{
           width: '100%',
@@ -183,10 +141,10 @@ export function ScreenStage({
         )}
       </div>
 
-      {/* Áudio do participante continua saindo pelo <audio> do painel, que
-          segue montado atrás. Nada de segundo <audio> aqui (voz duplicada). */}
+      {
+}
 
-      {/* Barra de controles: por cima do conteúdo, mas discreta e auto-oculta. */}
+      {}
       <div
         style={{
           position: 'absolute',
@@ -237,8 +195,6 @@ export function ScreenStage({
           <button
             type="button"
             onClick={onToggleCamera}
-            // Câmera e tela dividem a mesma m-line de vídeo: com a tela no ar,
-            // ligar a câmera trocava a TELA pela câmera no outro lado.
             disabled={sharing && !cameraOn}
             title={sharing && !cameraOn ? 'Pare a tela para ligar a câmera' : (cameraOn ? 'Desligar câmera' : 'Ligar câmera')}
             aria-label={sharing && !cameraOn ? 'Câmera indisponível enquanto compartilha a tela' : (cameraOn ? 'Desligar câmera' : 'Ligar câmera')}
@@ -269,7 +225,7 @@ export function ScreenStage({
           </button>
         )}
 
-        {/* Recolher: botão explícito e sempre no mesmo lugar. */}
+        {}
         <button
           type="button"
           onClick={onCollapse}
@@ -285,7 +241,7 @@ export function ScreenStage({
         </button>
       </div>
 
-      {/* Dica de atalho, só enquanto a barra está visível. */}
+      {}
       <div
         style={{
           position: 'absolute',
@@ -308,4 +264,5 @@ export function ScreenStage({
   )
 }
 
+// Seção 1: ScreenStage
 export default ScreenStage

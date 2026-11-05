@@ -2,17 +2,8 @@ import { useSyncExternalStore } from 'react'
 
 export type NotifLevel = 'all' | 'mentions' | 'none'
 
-/** Presença escolhida pelo usuário (persistida entre sessões). */
 export type Presenca = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline'
 
-/**
- * Em segundo plano, "online" vira "ausente" por padrão.
- *
- * `away` (padrão): conexão em segundo plano NÃO te deixa online — é a regra
- *   "conexão ≠ presença".
- * `online`: o usuário pediu explicitamente para continuar online mesmo com a
- *   janela minimizada (ex.: está ouvindo um canal de voz).
- */
 export type PresencaEmSegundoPlano = 'away' | 'online'
 
 export interface Prefs {
@@ -29,24 +20,15 @@ export interface Prefs {
   echo: boolean
   noise: boolean
   gain: boolean
-  // ---- notificações do sistema / segundo plano ----
-  /** Mostrar avisos do SO (Windows toast / Android) quando em segundo plano. */
   notifySystem: boolean
-  /** Incluir texto da mensagem no aviso (se off: "Nova mensagem"). */
   notifyPreview: boolean
   notifySounds: boolean
   notifyCallSounds: boolean
-  /** Presença a anunciar com a janela fora de foco. */
   presenceInBackground: PresencaEmSegundoPlano
-  /** Fechar (X) esconde para a bandeja em vez de encerrar. */
   closeToTray: boolean
-  /** Abrir já na bandeja quando iniciado pelo autostart. */
   startMinimized: boolean
-  /** Espelho da preferência REAL do SO (o Rust é a fonte de verdade). */
   autostart: boolean
-  /** Já perguntamos sobre ativar notificações? (não perguntar de novo) */
   notifPromptDone: boolean
-  /** Presença do usuário, restaurável no próximo boot. */
   myPresence: Presenca
 }
 
@@ -103,7 +85,7 @@ const listeners = new Set<() => void>()
 function save() {
   try {
     localStorage.setItem(KEY, JSON.stringify(state))
-  } catch { /* noop */ }
+  } catch {  }
   for (const l of listeners) l()
 }
 
@@ -126,14 +108,6 @@ export function usePrefs(): Prefs {
   )
 }
 
-/**
- * Assina QUALQUER mudança de preferência (sem React).
- *
- * Existe porque o espelho das preferências de notificação no core Rust precisa
- * acompanhar o checkbox da UI: o aviso nativo é disparado pelo motor (que não
- * lê o localStorage), então desligar "notificações do sistema" só vale fora da
- * tela se o valor chegar lá.
- */
 export function subscribePrefs(cb: () => void): () => void {
   listeners.add(cb)
   return () => { listeners.delete(cb) }
@@ -210,21 +184,11 @@ export function moveServerToFolder(serverId: string, folderId: string | null) {
   })
 }
 
+// Seção 1: folderOf
 export function folderOf(serverId: string): string | null {
   return state.serverFolders.find(f => f.servers.includes(serverId))?.id ?? null
 }
 
-/**
- * Política de silenciamento em JSON, para o motor Rust.
- *
- * O aviso de mensagem é disparado pelo MOTOR (é ele quem recebe o frame com a
- * janela escondida/app no fundo no Android). O motor não lê o `localStorage`,
- * então o "silenciar canal", o "só menções" e o "silenciar servidor" precisam
- * viajar para lá — senão a preferência só valeria com a janela na frente, que
- * é justamente quando NADA é notificado.
- *
- * Forma: `{ default, channels: {conv: level}, servers: [community] }`.
- */
 export function notificationPolicyJson(): string {
   const mutedServers = state.mutedServers.slice(0, 2000)
   const channels: Record<string, NotifLevel> = {}

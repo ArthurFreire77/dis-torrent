@@ -1,6 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// BUG1: arquivo = mensagem com botão Baixar; envio funciona; limites validados.
 async function createAccount(page: Page, name: string) {
   await page.goto('/');
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
@@ -36,24 +35,19 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
   await createAccount(b, 'Bob');
   await befriend(a, b);
 
-  // A abre a DM com Bob
   await a.locator('.friend-row', { hasText: 'Bob' }).first().getByTitle('Conversar').click();
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
 
-  // A anexa um arquivo pequeno (input real — era o que faltava no mobile)
   await a.locator('input[type="file"]').setInputFiles({
     name: 'oi.txt',
     mimeType: 'text/plain',
     buffer: Buffer.from('ola do swarm! '.repeat(200)),
   });
 
-  // cartão com Baixar aparece para A…
   await expect(a.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
-  // …e AO VIVO para B ao abrir a DM (sem reload)
   await b.locator('.nav-row', { hasText: 'Alice' }).first().click();
   await expect(b.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
 
-  // B clica Baixar → busca chunks do swarm e salva (download via blob/âncora)
   const dlPromise = b.waitForEvent('download', { timeout: 30000 });
   await b.getByRole('button', { name: /Baixar/ }).first().click();
   const dl = await dlPromise;
@@ -64,8 +58,6 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
 test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   await createAccount(page, 'Carol');
 
-  // Acima do teto (o default e' 50 GB, configuravel por VITE_DISTORRENT_MAX_FILE_MB).
-  // Usa 8 GB para ser barrado independente do teto configurado.
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-big', name: 'big.bin',
@@ -74,7 +66,6 @@ test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   );
   await expect(page.getByText(/arquivo muito grande \(limite/)).toBeVisible({ timeout: 10000 });
 
-  // chunks acima do limite rejeitado
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-chunks', name: 'x.bin',

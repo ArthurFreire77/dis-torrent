@@ -1,7 +1,3 @@
-// DownloadManager — fila de downloads sobre o FileSwarm: progresso/velocidade,
-// pause/resume/cancel/retry reais, validação blake3 antes de salvar, notificação
-// de conclusão e fila persistida no localStorage. Estados em downloadQueue.ts.
-
 import { fileSwarm } from './fileSwarm'
 import { sleep } from '../shared/async.ts'
 import {
@@ -11,50 +7,36 @@ import {
 } from './downloadQueue'
 
 const LS_KEY = 'distorrent:downloads:v1'
-/** Janela de amostragem da velocidade (ms). */
 const SPEED_WINDOW_MS = 2000
-/** Sem seeder e sem progresso por este tempo → failed honesto (retry manual). */
 const NO_SEEDER_FAIL_MS = 30_000
-/** Espera máxima pelo anúncio do arquivo antes de falhar (boot tardio). */
 const ANNOUNCE_WAIT_MS = 30_000
-/** Persistir progresso no máximo 1x/s (evita churn de localStorage). */
 const PERSIST_INTERVAL_MS = 1000
 
 function now(): number { return Date.now() }
 
 export interface DownloadManagerEvents {
-  /** Item mudou (status/progresso) — UI re-renderiza. */
   onChange?: (items: DownloadItem[]) => void
-  /** Download completou (toast/notificação). */
   onDone?: (item: DownloadItem) => void
 }
 
 class DownloadManager {
-  /** fileId → item da fila. */
   private items = new Map<string, DownloadItem>()
   private running = new Set<string>()
-  // Guard contra finalize concorrente: `kick` remove de `running` antes do
-  // `finalize` acabar, e um novo poll/resume iniciava um SEGUNDO finalize
-  // (item ia para `failed` mesmo com o primeiro tendo dado certo).
   private finalizing = new Set<string>()
   private pausedFps = new Set<string>()
   private cancelled = new Set<string>()
-  /** fileId → {bytes, at} da janela de velocidade. */
   private speedWin = new Map<string, { bytes: number; at: number }>()
   private lastPersist = 0
   private listeners = new Set<(items: DownloadItem[]) => void>()
   private doneListeners = new Set<(item: DownloadItem) => void>()
 
-  /** Carrega fila persistida e retoma itens que estavam no meio. */
   load(): DownloadItem[] {
     let raw: string | null = null
-    try { raw = localStorage.getItem(LS_KEY) } catch { /* ignore */ }
+    try { raw = localStorage.getItem(LS_KEY) } catch {  }
     for (const it of deserializeQueue(raw)) {
       const status = rehydrateStatus(it.status)
       this.items.set(it.file_id, { ...it, status, speedBps: 0 })
     }
-    // Re-kick num tick seguinte: antes o `runLoop` achava o swarm vazio (o
-    // anúncio chega depois do boot) e marcava `failed`; agora ele ESPERA o anúncio.
     const pendentes = [...this.items.values()].filter((i) => i.status === 'queued')
     if (pendentes.length > 0) {
       setTimeout(() => {
@@ -85,13 +67,11 @@ class DownloadManager {
     return () => { this.doneListeners.delete(cb) }
   }
 
-  /** Coloca (ou reativa) um arquivo na fila. Retorna o item atual. */
   enqueue(meta: DownloadMeta): DownloadItem {
     const existing = this.items.get(meta.file_id)
     if (existing) {
       if (existing.status === 'completed') return existing
       if (existing.status === 'cancelled' || existing.status === 'failed') {
-        // Re-enfileirar = NOVO ciclo de vida.
         this.resetToQueued(existing)
       }
       return existing
@@ -160,7 +140,6 @@ class DownloadManager {
     }
   }
 
-  /** Remove o item da fila (dados no swarm seguem — dá pra re-adicionar). */
   remove(fileId: string): void {
     this.items.delete(fileId)
     this.pausedFps.delete(fileId)
@@ -169,11 +148,6 @@ class DownloadManager {
     this.emit()
   }
 
-  /**
-   * Remove da fila tudo que acabou, e solta os CHUNKS do swarm (antes ficavam
-   * até 200 MB em RAM e o filemeta crescia para sempre). Item continua
-   * re-adicionável.
-   */
   clearFinished(): void {
     const done: string[] = []
     for (const [fid, it] of [...this.items.entries()]) {
@@ -183,27 +157,25 @@ class DownloadManager {
       }
     }
     for (const fid of done) {
-      try { fileSwarm.releaseChunks(fid) } catch { /* best-effort */ }
+      try { fileSwarm.releaseChunks(fid) } catch {  }
     }
     this.persist()
     this.emit()
   }
 
-  /** Solta os chunks de um item removido da fila (RAM e spool em disco). */
   releaseIfRemoved(fileId: string): void {
     if (this.items.has(fileId)) return
-    try { fileSwarm.releaseChunks(fileId) } catch { /* best-effort */ }
+    try { fileSwarm.releaseChunks(fileId) } catch {  }
   }
 
   activeCount(): number {
+    // Seção 1: n
     let n = 0
     for (const it of this.items.values()) {
       if (it.status === 'queued' || it.status === 'downloading' || it.status === 'verifying' || it.status === 'saving') n++
     }
     return n
   }
-
-  // ── internos ────────────────────────────────────────────────────────────
 
   private setStatus(it: DownloadItem, ev: Parameters<typeof nextDownloadStatus>[1], error?: string) {
     const next = nextDownloadStatus(it.status, ev)
@@ -216,7 +188,6 @@ class DownloadManager {
     }
   }
 
-  /** Re-enqueue: novo ciclo de vida para item failed/cancelled. */
   private resetToQueued(it: DownloadItem) {
     it.status = 'queued'
     it.error = undefined
@@ -232,14 +203,14 @@ class DownloadManager {
 
   private emit() {
     const items = this.list()
-    for (const cb of this.listeners) { try { cb(items) } catch { /* listener nunca derruba */ } }
+    for (const cb of this.listeners) { try { cb(items) } catch {  } }
   }
 
   private persist() {
     const t = now()
     if (t - this.lastPersist < PERSIST_INTERVAL_MS && this.lastPersist !== 0) return
     this.lastPersist = t
-    try { localStorage.setItem(LS_KEY, serializeQueue(this.list())) } catch { /* quota — fila segue em memória */ }
+    try { localStorage.setItem(LS_KEY, serializeQueue(this.list())) } catch {  }
   }
 
   private kick(fileId: string) {
@@ -248,12 +219,6 @@ class DownloadManager {
     void this.runLoop(fileId).finally(() => { this.running.delete(fileId) })
   }
 
-  /**
-   * Laço por arquivo: pede chunks via swarm, mede progresso/velocidade,
-   * verifica integridade no fim e salva. Sai limpo em pause/cancel; o
-   * swarm NÃO faz mais pedidos (fileSwarm.pauseFile) e o progresso fica
-   * preservado para o resume.
-   */
   private async runLoop(fileId: string): Promise<void> {
     const item = this.items.get(fileId)
     if (!item) return
@@ -271,8 +236,6 @@ class DownloadManager {
         if (!it) return
         const sf = fileSwarm.files.get(fileId)
         if (!sf) {
-          // Anúncio chega DEPOIS do boot: espera até ANNOUNCE_WAIT_MS antes de
-          // falhar (antes era `fail` imediato sem retry).
           if (now() - waitStartedAt > ANNOUNCE_WAIT_MS) {
             this.setStatus(it, 'fail', 'o anúncio deste arquivo não chegou — o remetente pode estar offline; toque em retomar')
             return
@@ -287,10 +250,8 @@ class DownloadManager {
           return
         }
 
-        // pede os chunks que faltam (o swarm limita concorrência e faz retry)
-        void fileSwarm.fetchSwarm(sf).catch(() => { /* retry interno do swarm */ })
+        void fileSwarm.fetchSwarm(sf).catch(() => {  })
 
-        // mede progresso + velocidade
         const have = sf.have.size
         if (have !== lastHave) {
           lastHave = have
@@ -313,8 +274,6 @@ class DownloadManager {
           this.emit()
         }
 
-        // Sem seeder + sem progresso por muito tempo → failed honesto
-        // (`pruneSeeders` faz `seeders` encolher, tornando isto alcançável).
         fileSwarm.pruneSeeders(sf)
         if (sf.seeders.size === 0 && have < sf.chunks) {
           if (noSeederSince === null) noSeederSince = now()
@@ -337,7 +296,6 @@ class DownloadManager {
     }
   }
 
-  /** Verificação blake3 do arquivo montado + salvamento + notificação. */
   private async finalize(fileId: string, sf: import('./fileSwarm').SwarmFile): Promise<void> {
     if (this.finalizing.has(fileId)) return
     this.finalizing.add(fileId)
@@ -368,44 +326,39 @@ class DownloadManager {
       this.persist()
       this.emit()
       this.notifyDone(cur)
-      // Arquivo em disco: bytes da RAM não servem, mas o BITFIELD fica — o card
-      // mostra "100%" e o peer segue sendo seeder (`releaseChunks` aqui apagava
-      // o spool e deixava o anúncio mentindo).
-      try { fileSwarm.markDownloaded(fileId) } catch { /* best-effort */ }
+      try { fileSwarm.markDownloaded(fileId) } catch {  }
     } catch (e: any) {
       const cur = this.items.get(fileId)
       if (cur) this.setStatus(cur, 'save-fail', String(e?.message ?? e))
     }
   }
 
-  /** Notifica conclusão: listeners da UI + Notification do SO quando disponível. */
   private notifyDone(item: DownloadItem) {
-    for (const cb of this.doneListeners) { try { cb(item) } catch { /* ignore */ } }
+    for (const cb of this.doneListeners) { try { cb(item) } catch {  } }
     try {
       const N: any = typeof Notification !== 'undefined' ? Notification : null
       if (N) {
         if (N.permission === 'granted') {
           new N('Download concluído', { body: `${item.name} salvo${item.savedPath ? ` em ${item.savedPath}` : ''}` })
         } else if (N.permission === 'default' && typeof document !== 'undefined') {
-          // pede permissão uma vez (gesto de download conta como interação)
           void N.requestPermission?.().then((p: string) => {
             if (p === 'granted') new N('Download concluído', { body: `${item.name} salvo` })
           }).catch(() => {})
         }
       }
-    } catch { /* notificação é best-effort — nunca derruba o save */ }
+    } catch {  }
     try {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('distorrent:download_done', { detail: { file_id: item.file_id, name: item.name, savedPath: item.savedPath } }))
       }
-    } catch { /* ignore */ }
+    } catch {  }
   }
 }
 
+// Seção 2: downloadManager
 export const downloadManager = new DownloadManager()
 try {
   if (typeof window !== 'undefined') {
-    // a fila revive junto com o app (identidade ainda nem precisa existir)
-    window.addEventListener('DOMContentLoaded', () => { try { downloadManager.load() } catch { /* ignore */ } })
+    window.addEventListener('DOMContentLoaded', () => { try { downloadManager.load() } catch {  } })
   }
-} catch { /* SSR/none — ignore */ }
+} catch {  }

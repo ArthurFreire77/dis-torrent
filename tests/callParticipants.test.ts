@@ -28,28 +28,18 @@ test('estado remoto de microfone e ensurdecimento só muda quando chega um event
 })
 
 test('apelido real substitui o hex do fingerprint (sem isso "ninguém aparece")', () => {
-  // Regressão: todo participante de canal nascia com `fp.slice(0, 6)`, então a
-  // lista mostrava `a3f92c` em vez do nome. Para o usuário, "fulano não
-  // apareceu" — ele aparecia, sem nome.
   const participants: CallParticipantView[] = []
   addVoiceParticipant(participants, 'a3f92c11')
   assert.equal(participants[0].nickname, 'a3f92c')
 
   assert.equal(setParticipantNickname(participants, 'a3f92c11', 'Lucas'), true)
   assert.equal(participants[0].nickname, 'Lucas')
-  // Idempotente: o reconciliador de roster roda a cada 10 s.
   assert.equal(setParticipantNickname(participants, 'a3f92c11', 'Lucas'), false)
-  // Fingerprint fora do roster não inventa entrada.
   assert.equal(setParticipantNickname(participants, 'nao-existe', 'Fantasma'), false)
   assert.equal(participants.length, 1)
 })
 
 test('adicionar participante clona a lista antes de emitir (invalida o useMemo da UI)', () => {
-  // O bug mais grave do "conectado mas não vejo ninguém": os shells memoízam os
-  // tiles por IDENTIDADE do array de participantes. Como o manager mutava o
-  // array in-place e emitia `{ ...state }` (cópia rasa), o `useMemo` não
-  // recalculava — o cabeçalho contava 3 e o grid (e os `<audio>`) ficavam
-  // presos em 1. Aqui provamos que a leitura da UI muda com o roster.
   const participants: CallParticipantView[] = []
   addVoiceParticipant(participants, 'peer-b')
   const tilesVistos = participants.map((p) => p.fp)

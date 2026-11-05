@@ -13,15 +13,12 @@ async function createAccountMobile(page: Page, name: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  // mobile fica em /m mesmo após criar conta (sem redirect)
-  // bottom-nav "Você" tem texto; avatar do header é só aria-label — filtra por texto
   await expect(page.locator('button').filter({ hasText: 'Você' }).first()).toBeVisible({ timeout: 15000 });
 }
 
 test('desktop: diagnóstico oculta dados por padrão e copia após consentimento', async ({ page }) => {
   await createAccountDesktop(page, 'DiagAlice');
 
-  // Configurações (engrenagem no rodapé) → Diagnóstico de conexão
   await page.getByTitle('Configurações').click();
   await expect(page.getByText('versão', { exact: false }).first()).toBeVisible({ timeout: 10000 });
   await page.getByRole('button', { name: /Diagnóstico de conexão/ }).click();
@@ -45,12 +42,10 @@ test('desktop: diagnóstico oculta dados por padrão e copia após consentimento
   expect(report).toContain('(ocultado)');
   expect(report).not.toContain(fp.slice(0, 6));
 
-  // Desmarcar a proteção é o consentimento explícito para incluir dados pessoais.
   await page.getByRole('checkbox', { name: /Ocultar IPs, fingerprints, apelidos e portas/ }).uncheck();
   const consentedReport = (await page.getByTestId('diag-report-text').innerText()).trim();
   expect(consentedReport).toContain(fp);
 
-  // clipboard mock honesto (headless pode negar permissão real)
   await page.evaluate(() => {
     const w = window as unknown as { __copied?: string };
     w.__copied = '';
@@ -101,7 +96,7 @@ test('mobile: diagnóstico acessível pelo menu Você e copia relatório', async
         value: { writeText: (s: string) => { w.__copied = s; return Promise.resolve(); } },
         configurable: true,
       });
-    } catch { /* ignore */ }
+    } catch {  }
   });
   await page.getByRole('button', { name: 'Copiar relatório' }).click();
   await expect(page.getByText('Relatório copiado!')).toBeVisible({ timeout: 10000 });

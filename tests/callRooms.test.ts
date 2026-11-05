@@ -4,25 +4,17 @@ import assert from 'node:assert/strict'
 import { CallRoomStore, roomSummary } from '../src/services/callRooms.ts'
 import { isCollectiveRoom, leaveOutcome } from '../src/services/callRoomRules.ts'
 
-// Regressão do relato "chamada de 5 pessoas: um saiu, outro saiu e a chamada
-// acabou". O CallManager trava a coletividade na primeira vez que ela é
-// verdadeira; aqui reproduzimos a sequência de saídas sobre o MESMO valor
-// travado, que era exatamente onde o cálculo errado acontecia.
 test('cinco pessoas, duas saidas, a sala continua viva', () => {
   const room = { callId: 'call-grupo', participants: ['eu', 'a', 'b', 'c', 'd'] }
-  // A sala é coletiva desde o início e a trava nunca é recalculada.
   const collective = isCollectiveRoom(room)
   assert.equal(collective, true)
 
-  // 1ª saída: 'a' já foi removido do roster quando a checagem roda.
   let others = ['b', 'c', 'd']
   assert.equal(leaveOutcome({ collective, othersRemain: others.length > 0 }), 'keep')
 
-  // 2ª saída: 'b' sai e a checagem roda com o roster ainda MENOR.
   others = ['c', 'd']
   assert.equal(leaveOutcome({ collective, othersRemain: others.length > 0 }), 'keep')
 
-  // 3ª e 4ª saídas: mesmo eu ficando sozinho, a sala não é encerrada por isso.
   others = ['d']
   assert.equal(leaveOutcome({ collective, othersRemain: true }), 'keep')
   others = []
@@ -30,10 +22,7 @@ test('cinco pessoas, duas saidas, a sala continua viva', () => {
 })
 
 test('o calculo ERRADO (recalcular com roster reduzido) teria encerrado', () => {
-  // Prova de que a correção importa: com 1 pessoa restante o cálculo antigo
-  // dizia "não é coletiva", e era isso que matava a chamada.
   assert.equal(isCollectiveRoom({ callId: 'call-grupo', participants: ['eu'] }), false)
-  // A trava evita consultar isso de novo no meio da chamada.
   assert.equal(leaveOutcome({ collective: true, othersRemain: false }), 'keep')
 })
 
@@ -60,10 +49,8 @@ test('anúncio repetido não gera re-render (mesma referência)', () => {
   const s = new CallRoomStore()
   s.apply(open('conv-1', ['a', 'b']))
   const first = s.get('conv-1')
-  // Mesmo conteúdo: não emite, não troca o objeto.
   assert.equal(s.apply(open('conv-1', ['a', 'b'])), false)
   assert.equal(s.get('conv-1'), first)
-  // Lista diferente: atualiza.
   assert.equal(s.apply(open('conv-1', ['a', 'b', 'c'])), true)
   assert.equal(s.get('conv-1')?.participants.length, 3)
 })

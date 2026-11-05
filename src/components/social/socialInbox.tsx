@@ -1,8 +1,3 @@
-// Inbox: menções, não lidas e marcadores numa aba só.
-//
-// Extraído de `Social.tsx`. Sem ela o badge de menção é um número morto — é por
-// aqui que o usuário chega ao que realmente precisa ver.
-
 import React, { useEffect, useMemo, useState } from 'react'
 import type { ProfileView, SearchHit } from '../../services/models'
 import { services } from '../../services'
@@ -34,7 +29,7 @@ export function InboxPanel({ tab, onTab, profiles, onJump, onClose }: {
       } else {
         setUnreads([])
       }
-    } catch { /* mantém o que já estava na tela */ } finally { setBusy(false) }
+    } catch {  } finally { setBusy(false) }
   }, [tab])
 
   useEffect(() => { void load() }, [load])

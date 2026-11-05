@@ -1,26 +1,12 @@
-//! Métricas de runtime (dev mode / diagnóstico).
-//!
-//! Contadores atômicos globais + RTT EMA por peer. Sem custo perceptível no
-//! caminho quente (AtomicU64 relaxed). NUNCA registra conteúdo: só contagens
-//! e latências.
-//!
-//! Consumo: painel interno de dev via command `metrics_snapshot`. Em
-//! produção os números continuam coletados (custo ~0) mas a UI não os expõe.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// Classe de tráfego QoS — espelha a classificação do engine (menor = prioridade maior).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameClass {
-    /// Voz/vídeo/sinalização de chamada + liveness (Ping/Pong).
     Realtime = 0,
-    /// Controle de conexão/social: amizade, comunidades, PEX, punch.
     Control = 1,
-    /// Mensagens (Msg/ChannelMsg) + acks.
     Message = 2,
-    /// Transferência de arquivos (chunks/announce) — fundo da fila.
     Bulk = 3,
 }
 
@@ -29,7 +15,6 @@ impl FrameClass {
         self as usize
     }
 
-    /// Converte o índice da fila QoS (0-3) de volta para a classe.
     pub fn by_index(i: u8) -> FrameClass {
         match i & 3 {
             0 => FrameClass::Realtime,
@@ -81,7 +66,6 @@ impl Metrics {
     }
 }
 
-/// Registro global (uma instância por processo — apps headless e Tauri).
 static METRICS: OnceLock<Metrics> = OnceLock::new();
 
 pub fn metrics() -> &'static Metrics {
@@ -123,7 +107,6 @@ impl Metrics {
         self.vault_ops.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// RTT medido sobre Ping/Pong (EMA α≈0.3, ms).
     pub fn rtt_sample(&self, peer_fp: &str, rtt_ms: u64) {
         let mut map = self.rtt_by_peer.lock().unwrap_or_else(|e| e.into_inner());
         let next = match map.get(peer_fp) {
@@ -135,7 +118,6 @@ impl Metrics {
         };
         map.insert(peer_fp.to_string(), next);
         if map.len() > 1024 {
-            // anti-crescimento: descarta amostras excedentes (ordem arbitrária)
             let excess = map.len() - 1024;
             let drop: Vec<String> = map.keys().take(excess).cloned().collect();
             for k in drop {
@@ -144,13 +126,11 @@ impl Metrics {
         }
     }
 
-    /// RTT estimado do peer (ms) — None = sem amostra ainda.
     pub fn rtt_of(&self, peer_fp: &str) -> Option<u64> {
         let map = self.rtt_by_peer.lock().unwrap_or_else(|e| e.into_inner());
         map.get(peer_fp).copied()
     }
 
-    /// Snapshot para o painel dev (JSON). Só contagens — nada sensível.
     pub fn snapshot(&self) -> serde_json::Value {
         let frames_tx: Vec<u64> = self
             .frames_tx
@@ -188,12 +168,12 @@ impl Metrics {
 }
 
 #[cfg(test)]
+// Seção 1: tests
 mod tests {
     use super::*;
 
     #[test]
     fn counters_cumulativos() {
-        // usa a global mesmo (processo de teste isolado por binário de teste)
         let m = metrics();
         let tx_before = m.frames_tx[FrameClass::Bulk.index()].load(Ordering::Relaxed);
         m.frame_tx(FrameClass::Bulk, 1000);
@@ -212,7 +192,6 @@ mod tests {
         m.rtt_sample("fp-ema-test", 100);
         m.rtt_sample("fp-ema-test", 200);
         let v = m.rtt_of("fp-ema-test").unwrap();
-        // 100 → EMA(200): 0.3*200 + 0.7*100 = 130
         assert!((120..=140).contains(&v), "EMA deveria ficar ~130, veio {v}");
     }
 

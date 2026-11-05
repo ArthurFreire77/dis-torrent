@@ -1,10 +1,3 @@
-// Regras de notificação/presença — SEM WebView, sem SO.
-//
-// Estes testes travam os erros que mais doem num app de mensagens:
-//  • aviso duplicado para a mesma mensagem;
-//  • notificação de canal silenciado;
-//  • prévia de texto vazando com "mostrar prévia" desligado;
-//  • usuário aparecendo ONLINE só porque o processo está conectado.
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -57,7 +50,6 @@ describe('dedupe', () => {
     const t = createSeenTracker(3)
     for (const id of ['a', 'b', 'c', 'd']) t.seen(id)
     assert.equal(t.size, 3)
-    // 'a' foi evicted → visto de novo como novo
     assert.equal(t.seen('a'), false)
     assert.equal(t.seen('d'), true)
   })
@@ -119,8 +111,6 @@ describe('decisão de aviso de mensagem', () => {
   })
 
   it('a segunda mensagem da conversa NÃO mostra contador — mostra o texto', () => {
-    // O usuário pediu explicitamente: "não quero 'você tem tantas mensagens',
-    // quero saber o que a pessoa mandou". O contador continua no badge/não-lidas.
     const d = decideMessageNotice({ ...base, count: 3 })
     assert.equal(d.show, true)
     assert.equal(d.body, 'oi, tudo bem?')

@@ -1,12 +1,3 @@
-// Gerenciamento de canais e categorias.
-//
-// Duas tarefas que antes dividiam a mesma tela apertada: criar canal e criar
-// categoria. Agora são diálogos próprios, largos, com validação e explicação de
-// para que serve cada campo.
-//
-// Didático de propósito: o campo "categoria" não é óbvio para quem nunca usou
-// Discord, e a posição da categoria decide a ordem na barra lateral.
-
 import { useMemo, useState } from 'react'
 import type { ChannelMeta } from '../../services/models'
 import { CATEGORIAS_PADRAO, normChannelName as norm, validateChannelName } from './channelRules'
@@ -24,10 +15,7 @@ import {
   ui,
 } from '../../shared/ui'
 
-// Categorias e validação de nome agora vivem em `channelRules.ts` — módulo puro,
-// sem React/serviços. Reexportados aqui para não quebrar quem já importava daqui.
 export { CATEGORIAS_PADRAO, validateChannelName }
-// ---------- criar / editar canal ----------
 
 export function ChannelEditor({
   open,
@@ -44,7 +32,6 @@ export function ChannelEditor({
   channels: ChannelMeta[]
   channel: ChannelMeta | null
   categorias: string[]
-  /** Categoria já escolhida por quem abriu o diálogo (botão "+" da sidebar). */
   presetCategory?: string
   onSave: (data: {
     name: string
@@ -62,7 +49,6 @@ export function ChannelEditor({
   )
   const [novaCategoria, setNovaCategoria] = useState('')
   const [tipo, setTipo] = useState<'text' | 'voice' | 'video'>(
-    // `forum` existe no modelo mas não se cria aqui — só texto/voz/vídeo.
     channel?.kind === 'voice' || channel?.kind === 'video' ? channel.kind : 'text',
   )
   const [salvando, setSalvando] = useState(false)
@@ -71,7 +57,6 @@ export function ChannelEditor({
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   const erroNome = validateChannelName(nome, channels, channel?.id)
-  // Se a categoria não existe na lista, offercê-la como "criar nova".
   const categoriaNova = categoria.trim().toUpperCase()
   const precisaCriar = categoriaNova.length > 0 && !categorias.includes(categoriaNova)
 
@@ -176,6 +161,7 @@ export function ChannelEditor({
 
       <TextArea
         label="Tópico (opcional)"
+        // Seção 1: value
         value={topico}
         onChange={setTopico}
         rows={2}
@@ -220,10 +206,6 @@ export function ChannelEditor({
             {(
               [
                 { k: 'text', label: 'Texto', desc: 'Conversa por mensagem', ic: 'hash' },
-                // SÓ TEXTO E VOZ. O canal de vídeo foi removido da criação: o
-                // canal de VOZ já é uma chamada com câmera (é um botão dentro
-                // da chamada), então ter os dois tipos duplicava a mesma coisa
-                // e confundia — o dono pediu para tirar.
                 { k: 'voice', label: 'Voz', desc: 'Chamada de áudio e vídeo', ic: 'speaker' },
               ] as const
             ).map((opt) => (
@@ -268,8 +250,6 @@ export function ChannelEditor({
     </Modal>
   )
 }
-
-// ---------- lista de canais por categoria ----------
 
 export function ChannelList({
   channels,
@@ -360,6 +340,7 @@ export function ChannelList({
                   style={{
                     fontSize: 10,
                     fontWeight: 800,
+                    // Seção 2: letterSpacing
                     letterSpacing: 0.4,
                     color: ui.muted,
                     background: ui.surfaceHover,
@@ -382,8 +363,6 @@ export function ChannelList({
   )
 }
 
-// ---------- categorias ----------
-
 export function CategoryManager({
   channels,
   onCreate,
@@ -391,7 +370,6 @@ export function CategoryManager({
 }: {
   channels: ChannelMeta[]
   onCreate: (nome: string) => void
-  /** Mover o canal para outra categoria. */
   onMoveChannels: (canalId: string, categoria: string) => Promise<void>
 }) {
   const grupos = useMemo(() => groupByCategory(channels), [channels])
@@ -528,6 +506,7 @@ export function CategoryManager({
                           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ fontSize: 11, color: ui.muted }}>Mover para</span>
                             <select
+                              // Seção 3: value
                               value={c.category}
                               onChange={(e) => onMoveChannels(c.id, e.target.value)}
                               aria-label={`Mover canal ${c.name}`}

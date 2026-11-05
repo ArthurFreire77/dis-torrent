@@ -1,69 +1,81 @@
-// Grupos que EU apaguei (só para mim) — "lixeira" persistente.
-//
-// PROBLEMA QUE ISTO RESOLVE: apagar "só para mim" removia a conversa local, mas
-// qualquer mensagem nova de um amigo no mesmo `conv_id` passava pelo lazy-join
-// do `handle_frame` e **recriava o grupo** (era o "apago e depois de um tempo
-// ele reaparece"). O `GroupCreated` também reinseria o roster.
-//
-// Aqui fica a lista de `conv_id` que o usuário mandou apagar. O lazy-join e o
-// sync de grupo consultam antes de recriar; ao REENTRAR explicitamente no grupo
-// (aceitar convite novo / receber mensagem direcionada com `GroupCreated` de
-// quem me readicionou), a entrada é removida.
-//
-// Guardado no kv do SQLite, não em memória: reiniciar o app não pode ressuscitar
-// o grupo apagado.
-
 use crate::storage::Store;
 use crate::Result;
 
 const KEY: &str = "groups.dismissed";
 
-fn ler(store: &Store) -> Vec<String> {
+/// Cada linha é `conv_id|dono`; linha sem `|` é entrada antiga (dono desconhecido).
+fn ler(store: &Store) -> Vec<(String, String)> {
     store
         .kv_get(KEY)
         .map(|raw| {
             raw.split('\n')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(str::to_string)
+                .map(|linha| match linha.split_once('|') {
+                    Some((conv, dono)) => (conv.to_string(), dono.to_string()),
+                    None => (linha.to_string(), String::new()),
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn gravar(store: &Store, lista: &[String]) -> Result<()> {
-    // Teto: um usuário ativo não acumula milhares; se acumular, mantém os
-    // mais recentes (o vetor é gravado na ordem em que foi montado).
+fn gravar(store: &Store, lista: &[(String, String)]) -> Result<()> {
     let inicio = lista.len().saturating_sub(256);
-    store.kv_set(KEY, &lista[inicio..].join("\n"))
+    let texto = lista[inicio..]
+        .iter()
+        .map(|(conv, dono)| format!("{conv}|{dono}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    store.kv_set(KEY, &texto)
 }
 
-/// Marca o grupo como apagado por mim.
+/// Dispensa o grupo sem saber quem o criou (entradas antigas).
 pub fn dismiss(store: &Store, conv_id: &str) -> Result<()> {
+    dismiss_owned(store, conv_id, "")
+}
+
+/// Dispensa e guarda o criador: depois de sair a conversa é apagada, então só
+/// este registro permite saber de quem aceitar uma readição de propósito.
+pub fn dismiss_owned(store: &Store, conv_id: &str, owner_fp: &str) -> Result<()> {
     if conv_id.trim().is_empty() {
         return Ok(());
     }
     let mut lista = ler(store);
-    if lista.iter().any(|c| c == conv_id) {
+    if let Some((_, dono)) = lista.iter_mut().find(|(c, _)| c == conv_id) {
+        if !owner_fp.is_empty() && dono.is_empty() {
+            *dono = owner_fp.to_string();
+            gravar(store, &lista)?;
+        }
         return Ok(());
     }
-    lista.push(conv_id.to_string());
+    lista.push((conv_id.to_string(), owner_fp.to_string()));
     gravar(store, &lista)
 }
 
-/// Eu apaguei este grupo? (bloqueia recriação automática)
 pub fn is_dismissed(store: &Store, conv_id: &str) -> bool {
     if conv_id.trim().is_empty() {
         return false;
     }
-    ler(store).iter().any(|c| c == conv_id)
+    ler(store).iter().any(|(c, _)| c == conv_id)
 }
 
-/// Voltei ao grupo de propósito: para de bloquear a recriação.
+/// Criador gravado no momento em que o grupo foi dispensado, se conhecido.
+pub fn owner_of(store: &Store, conv_id: &str) -> Option<String> {
+    if conv_id.trim().is_empty() {
+        return None;
+    }
+    ler(store)
+        .into_iter()
+        .find(|(c, _)| c == conv_id)
+        .map(|(_, dono)| dono)
+        .filter(|dono| !dono.is_empty())
+}
+
 pub fn restore(store: &Store, conv_id: &str) -> Result<()> {
     let mut lista = ler(store);
     let antes = lista.len();
-    lista.retain(|c| c != conv_id);
+    lista.retain(|(c, _)| c != conv_id);
     if lista.len() == antes {
         return Ok(());
     }
@@ -86,7 +98,6 @@ mod tests {
         assert!(!is_dismissed(&s, "conv-1"));
         dismiss(&s, "conv-1").unwrap();
         assert!(is_dismissed(&s, "conv-1"));
-        // Outra instância lendo o MESMO banco (reinício do app).
         let s2 = Store::open(&_d.path().join("d.db")).unwrap();
         assert!(
             is_dismissed(&s2, "conv-1"),
@@ -117,5 +128,29 @@ mod tests {
         }
         assert!(is_dismissed(&s, "conv-299"), "o mais novo tem de ficar");
         assert!(!is_dismissed(&s, "conv-0"), "os mais antigos saem do teto");
+    }
+
+    #[test]
+    fn guarda_o_criador_para_reconhecer_readicao() {
+        let (s, _d) = store();
+        assert_eq!(owner_of(&s, "conv-1"), None);
+        dismiss_owned(&s, "conv-1", "criador-fp").unwrap();
+        assert_eq!(owner_of(&s, "conv-1").as_deref(), Some("criador-fp"));
+        let s2 = Store::open(&_d.path().join("d.db")).unwrap();
+        assert_eq!(
+            owner_of(&s2, "conv-1").as_deref(),
+            Some("criador-fp"),
+            "o criador tem de sobreviver ao reinício junto com o bloqueio"
+        );
+    }
+
+    #[test]
+    fn dispensar_de_novo_preenche_o_criador_que_faltava() {
+        let (s, _d) = store();
+        dismiss(&s, "conv-1").unwrap();
+        assert_eq!(owner_of(&s, "conv-1"), None);
+        dismiss_owned(&s, "conv-1", "criador-fp").unwrap();
+        assert!(is_dismissed(&s, "conv-1"), "não pode duplicar a entrada");
+        assert_eq!(owner_of(&s, "conv-1").as_deref(), Some("criador-fp"));
     }
 }

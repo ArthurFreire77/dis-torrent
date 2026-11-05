@@ -2,7 +2,6 @@ import * as ed from '@noble/ed25519'
 import { blake3 } from '@noble/hashes/blake3.js'
 import { sha512 } from '@noble/hashes/sha2.js'
 
-// enable sync methods
 ;(ed as any).hashes.sha512 = sha512
 
 function toHex(b: Uint8Array): string { return Array.from(b).map(x=>x.toString(16).padStart(2,'0')).join('') }

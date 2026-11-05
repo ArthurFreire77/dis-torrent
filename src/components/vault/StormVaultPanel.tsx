@@ -1,6 +1,3 @@
-// Cofre portátil .stormvault: exportar/importar conta, backups e modo pânico.
-// Nativo: opera de verdade. Browser: mostra aviso (requer app instalado).
-
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { services } from '../../services'
 import type { VaultBackupInfo, VaultImportReport } from '../../services/models'
@@ -33,7 +30,7 @@ export function StormVaultPanel() {
       const [list, days] = await Promise.all([services.stormvaultBackupsList(), services.stormvaultBackupGetRetention()])
       setBackups(list)
       setRetention(days)
-    } catch { /* silencioso */ }
+    } catch {  }
   }, [])
 
   useEffect(() => {
@@ -112,7 +109,6 @@ export function StormVaultPanel() {
     try {
       const r = await services.vaultWipe(wipeText)
       setWipeText('')
-      // espelha o wipe no estado web (WebView guarda prefs/downloads em distorrent:*)
       try {
         for (const storage of [localStorage, sessionStorage]) {
           const doomed: string[] = []
@@ -122,7 +118,7 @@ export function StormVaultPanel() {
           }
           doomed.forEach((k) => storage.removeItem(k))
         }
-      } catch { /* ignore */ }
+      } catch {  }
       const extra = r.leftovers.length > 0
         ? ` Apague também manualmente: ${r.leftovers.join(', ')}`
         : ''
@@ -166,12 +162,12 @@ export function StormVaultPanel() {
 
   return (
     <div>
-      {/* Feedback SEMPRE no topo: antes ficava no fim do painel (que é longo),
-          fora da tela — o usuário exportava e achava que não funcionou. */}
+      {
+}
       {msg && <div role="status" style={{ background: '#1a3329', border: '1px solid #23a55955', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, color: '#8cf5b8', lineHeight: 1.5 }}>{msg}</div>}
       {msgErr && <div role="alert" style={{ background: '#2a1518', border: '1px solid #f23f4355', borderRadius: 8, padding: '8px 10px', marginBottom: 10, fontSize: 12, color: '#ff9c9c', lineHeight: 1.5 }}>{msgErr}</div>}
 
-      {/* ── O COFRE: um arquivo só. Dois botões. Legenda explica o resto. ───── */}
+      {}
       <div style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 10, padding: '12px 14px', marginBottom: 12, fontSize: 11.5, color: t.muted, lineHeight: 1.6 }}>
         <b style={{ color: t.text }}>Seu cofre é um arquivo só, sempre criptografado.</b> Ele leva sua
         identidade (chave privada), amigos, conversas e mensagens. Serve para trocar de celular/computador
@@ -186,6 +182,7 @@ export function StormVaultPanel() {
       <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
         <input
           type="password"
+          // Seção 1: value
           value={expPass}
           onChange={(e) => setExpPass(e.target.value)}
           placeholder="crie uma senha (mín. 8 caracteres)"
@@ -343,3 +340,4 @@ function importSummary(r: VaultImportReport): string {
   const extra = r.messages_truncated ? '\nAtenção: o cofre tinha mais mensagens que o limite exportado.' : ''
   return `${what}: ${parts.join(', ')}.${extra} Use a senha do cofre para entrar.`
 }
+// Seção 2: fim

@@ -1,9 +1,3 @@
-// Testes de PRIVACIDADE × ICE: em proxy/full os SERVIDORES PÚBLICOS de
-// STUN/TURN (Google, openrelay) NÃO podem entrar na lista — o ICE do WebRTC
-// usa sockets UDP diretos do WebView (fora do SOCKS5/Tor do app), então
-// consultá-los entregaria o IP real a terceiros que o modo promete esconder.
-// Este é o bug real que o gate corrige: a lista era IGUAL em todos os modos.
-
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { getIceServers } from '../src/services/callIce.ts'
@@ -13,16 +7,19 @@ import {
   isIcePublicFallbackSuppressed,
 } from '../src/services/callIcePrivacy.ts'
 
-// helper: todas as URLs de uma lista de ICE como string única (comparações)
 function allUrls(list: ReturnType<typeof getIceServers>): string {
   return list.map(s => (Array.isArray(s.urls) ? s.urls.join(' ') : String(s.urls ?? ''))).join(' ')
 }
 
-test('modo comum (normal): rotas públicas de reserva presentes', () => {
+test('modo comum (normal): STUN de reserva presente e NENHUM TURN morto anunciado', () => {
   setCallPrivacyForIce('normal')
   const urls = allUrls(getIceServers())
   assert.ok(urls.includes('stun:'), 'modo normal precisa de STUN de reserva (4G/CGNAT depende disto)')
-  assert.ok(urls.includes('turn:'), 'modo normal precisa de TURN de reserva')
+  // openrelay.metered.ca resolve para 192.0.2.1 e não responde UDP: anunciá-lo
+  // prendia a chamada em "Conectando..." até esgotar o TURN. Sem TURN de
+  // terceiro, quem tem servidor próprio configura em Ajustes.
+  assert.ok(!urls.includes('turn:'), 'TURN público quebrado não pode voltar para a lista')
+  assert.ok(!urls.includes('openrelay'), 'openrelay saiu: o domínio não serve mais relay')
 })
 
 test('modo encrypted: igual ao normal (padrão do app)', () => {
@@ -57,6 +54,5 @@ test('override da UI tem precedência e volta ao normal', () => {
 test('null = sem override (comportamento legado do browser)', () => {
   setCallPrivacyForIce(null)
   assert.equal(getCallPrivacyForIce(), null, 'sem override e sem localStorage: null honesto')
-  // isIcePublicFallbackSuppressed não pode explodir sem modo conhecido
   assert.equal(typeof isIcePublicFallbackSuppressed(), 'boolean')
 })

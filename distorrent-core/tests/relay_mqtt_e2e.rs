@@ -1,7 +1,3 @@
-//! E2E MQTT REAL (broker público) — mesmo fluxo do relay_e2e, mas sobre a
-//! internet de verdade via corretoras MQTT, sem nenhum TCP direto entre nós.
-//! Ignorado por padrão em CI sem rede? Não — roda sempre; falha se sem net.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +12,6 @@ fn spawn_user(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     let engine = NetworkEngine::new(store, kp, nick.to_string(), dir.path().to_path_buf());
     let relay_fp = engine.identity().fingerprint.clone();
     engine.set_relay_backend(Arc::new(MultiRelay::of(vec![
-        // O broker expulsa a conexão anterior se dois peers usarem o mesmo
-        // client_id; espelhe a identidade por perna usada no backend de produção.
         Arc::new(MqttRelay::new_with_fp("broker.emqx.io", 1883, &relay_fp)),
         Arc::new(MqttRelay::new_with_fp(
             "test.mosquitto.org",
@@ -52,7 +46,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relay_mqtt_real_internet() {
-    // Relay-only determinístico (ver tests/relay_adverse.rs).
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     let (a, _da) = spawn_user("MqttA");
     let (b, _db) = spawn_user("MqttB");
@@ -84,7 +77,6 @@ async fn relay_mqtt_real_internet() {
     )
     .await;
 
-    // estado online via relay (evento já consumido acima — checa estado)
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         if a.peer_state(&fp_b) == NetworkState::Connected
