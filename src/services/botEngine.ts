@@ -4,6 +4,7 @@ import {
   renderTemplate,
   renderBotReply,
   channelInScope,
+  kindInScope,
   findCommand,
   botIsActive,
   normalizeBotCommandName,
@@ -11,6 +12,7 @@ import {
   permAllows,
   BOT_MAX_COOLDOWN_MS,
   BOT_MAX_SCRIPT_LINES,
+  type BotChannelKind,
   BOT_MAX_REPLY,
   type BotCommandDef,
   type BotConfig,
@@ -197,12 +199,17 @@ export class BotEngine {
     }
   }
 
-  private async channelIndex(cid: string): Promise<Set<string>> {
+  private async channelIndex(cid: string): Promise<Map<string, BotChannelKind>> {
     try {
       const channels = await this.deps.channelList(cid)
-      return new Set((channels ?? []).map((c) => c.id).filter((id) => typeof id === 'string'))
+      const map = new Map<string, BotChannelKind>()
+      for (const c of channels ?? []) {
+        if (typeof c.id !== 'string') continue
+        map.set(c.id, (c.kind ?? 'text') as BotChannelKind)
+      }
+      return map
     } catch {
-      return new Set()
+      return new Map()
     }
   }
 
@@ -224,6 +231,7 @@ export class BotEngine {
     if (!bots || bots.length === 0) return
     const ids = await this.channelIndex(cid)
     if (ids.size > 0 && !ids.has(convId)) return
+    const kind = ids.get(convId)
 
     const author = typeof ev.author_fp === 'string' ? ev.author_fp : ''
     for (const bot of bots) {
@@ -235,6 +243,7 @@ export class BotEngine {
         continue
       }
       if (!channelInScope(config, convId)) continue
+      if (!kindInScope(config, kind)) continue
 
       if (config.webhook?.url || config.events.includes('message_new')) {
         await this.deliverEvent(cid, bot, config, 'message_new', {
@@ -303,12 +312,14 @@ export class BotEngine {
           ? ev.channel_id
           : ''
     const ids = await this.channelIndex(cid)
+    const kind = convId ? ids.get(convId) : undefined
     for (const bot of bots) {
       if (!bot.config || !botIsActive(bot.online)) continue
       const config = parseBotConfig(bot.config)
       if (!config) continue
       if (!config.events.includes(eventId)) continue
       if (convId && !channelInScope(config, convId)) continue
+      if (!kindInScope(config, kind)) continue
       if (ids.size > 0 && convId && !ids.has(convId)) continue
       await this.deliverEvent(cid, bot, config, eventId, this.eventPayload(eventId, ev))
     }

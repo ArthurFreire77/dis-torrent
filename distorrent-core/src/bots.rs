@@ -141,6 +141,8 @@ pub struct BotConfig {
     pub prefix: String,
     pub commands: Vec<BotCommand>,
     pub channels: Vec<String>,
+    /// Tipos de canal onde o bot age (text/voice/video/forum). Vazio = todos.
+    pub channel_kinds: Vec<String>,
     pub webhook: Option<String>,
     pub events: Vec<String>,
     /// Bloqueia destinos em rede privada (RFC1918/loopback). Padrão: ligado.
@@ -537,6 +539,7 @@ pub fn parse_config(raw: &str) -> Result<BotConfig, String> {
         prefix,
         commands,
         channels: parse_list(v.get("channels"), 256, 128),
+        channel_kinds: parse_list(v.get("channelKinds"), 4, 16),
         webhook,
         events,
         block_private: v.get("blockPrivate").map(b).unwrap_or(true),
@@ -574,6 +577,19 @@ pub fn find_command<'a>(cfg: &'a BotConfig, name: &str) -> Option<&'a BotCommand
 
 pub fn channel_in_scope(cfg: &BotConfig, channel_id: &str) -> bool {
     cfg.channels.is_empty() || cfg.channels.iter().any(|c| c == channel_id)
+}
+
+/// Escopo por TIPO de canal. Vazio = todos os tipos.
+pub fn kind_in_scope(cfg: &BotConfig, kind: Option<&str>) -> bool {
+    if cfg.channel_kinds.is_empty() {
+        return true;
+    }
+    match kind {
+        Some(k) => cfg.channel_kinds.iter().any(|x| x == k),
+        // Tipo desconhecido (evento sem canal) não é bloqueado: o escopo por
+        // tipo é filtro de canal, não de evento global.
+        None => true,
+    }
 }
 
 // ---------------------------------------------------------------------------

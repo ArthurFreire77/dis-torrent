@@ -33,6 +33,7 @@ import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import { FileCard } from '../components/FileCard'
 import CreateServerWizard from '../components/CreateServerWizard'
+import { DynamicStyles } from '../shared/dynamicStyles'
 import { UpdateOverlay, useUpdateGate } from '../components/UpdateGate'
 import { UpdateBootScreen } from '../components/UpdateBootScreen'
 import ServerSettings from '../components/server/ServerSettings'
@@ -4234,10 +4235,12 @@ export default function ThemeShell({ designId }: {designId:string}){
       )}
 
       {}
-      <style>{`
-        .msg-row:hover .msg-tools{display:flex !important}
-        mark{background:#f0b232;color:#1e1f22;border-radius:2px}
-      `}</style>
+      <DynamicStyles
+        css={`
+          .msg-row:hover .msg-tools{display:flex !important}
+          mark{background:#f0b232;color:#1e1f22;border-radius:2px}
+        `}
+      />
 
       {}
       {profileFp && (

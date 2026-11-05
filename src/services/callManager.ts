@@ -1471,8 +1471,23 @@ export class CallManager {
       }
       if (anyAlive) return
       if (this.pcs.size === 0 && st.callId.startsWith('voice-')) {
-        this.connectWatchdogGrants = 0
-        this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
+        // "Esperar para sempre" só vale quando o canal está VAZIO (ninguém para
+        // conectar). Com outra pessoa na call e nenhum PC aberto, isso era
+        // "Conectando…" infinito: a criação do PC falha em silêncio e o
+        // watchdog reagendava sem nunca desistir.
+        const sozinho = !(st.participants ?? []).some(
+          (p: { fp?: string }) => !!p.fp && p.fp !== this.myFp,
+        )
+        if (sozinho) {
+          this.connectWatchdogGrants = 0
+          this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
+          return
+        }
+        this.setFailureCause(
+          'há gente na call mas nenhuma conexão abriu — o outro lado não mandou oferta ou a montagem da conexão falhou',
+        )
+        this.onCallNotice?.('não foi possível abrir a conexão com quem está na call')
+        this.applyPhase('reconnect-timeout')
         return
       }
       let stillGathering = false

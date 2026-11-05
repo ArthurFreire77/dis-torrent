@@ -6,6 +6,7 @@ import {
   renderTemplate,
   extractPath,
   channelInScope,
+  kindInScope,
   findCommand,
   renderBotReply,
   botIsActive,
@@ -137,6 +138,43 @@ test('channelInScope: [] = todos; lista = só os listados', () => {
   const scoped: BotConfig = { prefix: '!', commands: [], channels: ['c1'] }
   assert.equal(channelInScope(scoped, 'c1'), true)
   assert.equal(channelInScope(scoped, 'c2'), false)
+})
+
+test('kindInScope: escopo por TIPO de canal (texto, voz, vídeo, fórum)', () => {
+  const todos: BotConfig = { prefix: '!', commands: [], channels: [], channelKinds: [] }
+  assert.equal(kindInScope(todos, 'text'), true, 'sem tipo marcado = todos')
+  assert.equal(kindInScope(todos, 'voice'), true)
+  assert.equal(kindInScope(todos, undefined), true)
+
+  const soTexto: BotConfig = { prefix: '!', commands: [], channels: [], channelKinds: ['text'] }
+  assert.equal(kindInScope(soTexto, 'text'), true)
+  assert.equal(kindInScope(soTexto, 'voice'), false, 'não age em canal de voz')
+  assert.equal(kindInScope(soTexto, 'forum'), false)
+  // Evento sem canal (ex.: membro entrou no servidor) não é filtrado por tipo.
+  assert.equal(kindInScope(soTexto, undefined), true)
+})
+
+test('config do bot: channelKinds é lido, validado e sobrevive ao round-trip', () => {
+  const cfg = parseBotConfig(
+    JSON.stringify({ prefix: '!', channelKinds: ['text', 'forum', 'inexistente', 42] }),
+  )
+  assert.ok(cfg)
+  assert.deepEqual(cfg.channelKinds, ['text', 'forum'], 'só os tipos conhecidos entram')
+  const volta = parseBotConfig(serializeBotConfig(cfg))
+  assert.ok(volta)
+  assert.deepEqual(volta.channelKinds, ['text', 'forum'])
+})
+
+test('permissões: os bits antigos não perdem poder depois da separação', () => {
+  // Quem já tinha o bit "gerenciar" continua podendo montar/limpar: a
+  // atualização não pode tirar poder de bot que já estava configurado.
+  assert.equal(BOT_PERM_ALL & BOT_PERMS.MANAGE, BOT_PERMS.MANAGE)
+  assert.equal((BOT_PERM_ALL & BOT_PERMS.STRUCTURE) !== 0, true)
+  assert.equal((BOT_PERM_ALL & BOT_PERMS.PURGE) !== 0, true)
+  assert.equal(permAllows(BOT_PERM_ALL, 'channel_create'), true)
+  assert.equal(permAllows(BOT_PERM_ALL, 'clear'), true)
+  assert.equal(permAllows(0, 'channel_create'), false, 'sem bit, não monta servidor')
+  assert.equal(permAllows(0, 'ping'), true, 'ação sem permissão é livre')
 })
 
 test('botIsActive: só o false EXPLÍCITO desliga (payload antigo sem online segue ligado)', () => {

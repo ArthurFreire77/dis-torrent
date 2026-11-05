@@ -69,7 +69,7 @@ test('regenerar token troca o token visível (dono)', async ({ page }) => {
   await page.getByRole('button', { name: 'Configurar Bot' }).click();
   const panel = page.getByRole('region', { name: 'Configurar Bot' });
   await expect(panel).toBeVisible({ timeout: 10000 });
-  const tokenBox = panel.locator('.botp-mono').first();
+  const tokenBox = panel.locator('[data-bot-token]').first();
   const before = await tokenBox.textContent();
 
   await panel.getByRole('button', { name: 'Gerar novo token' }).click();

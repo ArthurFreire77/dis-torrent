@@ -7,18 +7,25 @@ pub const PERM_BAN: i64 = 1 << 0;
 pub const PERM_MUTE: i64 = 1 << 1;
 pub const PERM_DELETE: i64 = 1 << 2;
 pub const PERM_MANAGE: i64 = 1 << 3;
+/// Montar o servidor: criar/renomear/excluir canais e cargos.
+pub const PERM_STRUCTURE: i64 = 1 << 4;
+/// Limpar/purgar: apagar mensagens e trancar canais.
+pub const PERM_PURGE: i64 = 1 << 5;
 
 /// Conjunto COMPLETO de permissões administrativas que um bot pode receber.
-/// Nunca inclui nada além disso: não existe "modo deus" para bot.
-pub const PERM_ALL: i64 = PERM_BAN | PERM_MUTE | PERM_DELETE | PERM_MANAGE;
+/// Nunca inclui nada além disso: não existe "modo deus" para bot — cada bit
+/// libera um conjunto fechado de ações do core, nunca código livre.
+pub const PERM_ALL: i64 =
+    PERM_BAN | PERM_MUTE | PERM_DELETE | PERM_MANAGE | PERM_STRUCTURE | PERM_PURGE;
 
-/// Atalhos de exibição/atribuição no painel. `manage` cobre canais/cargos,
-/// `kick` é `PERM_MANAGE`, e `slowmode`/`warn`/`lock` cabem em `PERM_MANAGE`.
+/// Atalhos de exibição/atribuição no painel.
 pub const PERM_BOT_LABELS: &[(i64, &str)] = &[
     (PERM_BAN, "banir"),
     (PERM_MUTE, "silenciar"),
     (PERM_DELETE, "apagar mensagens"),
-    (PERM_MANAGE, "gerenciar canais/cargos"),
+    (PERM_MANAGE, "gerenciar membros"),
+    (PERM_STRUCTURE, "montar o servidor"),
+    (PERM_PURGE, "limpar canais"),
 ];
 
 /// Cada ação administrativa exige uma permissão explícita do bot.
@@ -26,13 +33,28 @@ pub fn perm_for_action(action: &str) -> Option<i64> {
     Some(match action {
         "ban" | "unban" => PERM_BAN,
         "mute" | "unmute" | "warn" | "warnings" => PERM_MUTE,
-        "delete_msg" | "clear" => PERM_DELETE,
-        "kick" | "lock" | "unlock" | "slowmode" => PERM_MANAGE,
-        "channel_create" | "channel_delete" | "role_create" | "role_delete" => PERM_MANAGE,
-        "role_assign" | "role_unassign" | "channel_edit" | "server_edit" => PERM_MANAGE,
+        "delete_msg" => PERM_DELETE,
+        "clear" | "lock" | "unlock" | "slowmode" => PERM_PURGE,
+        "kick" | "role_assign" | "role_unassign" => PERM_MANAGE,
+        "channel_create" | "channel_delete" | "role_create" | "role_delete" => PERM_STRUCTURE,
+        "channel_edit" | "server_edit" => PERM_STRUCTURE,
         "userinfo" | "serverinfo" | "ping" => 0,
         _ => return None,
     })
+}
+
+/// `PERM_MANAGE` era o bit único que liberava tudo antes da separação. Quem já
+/// tinha esse bit continua podendo tudo, senão a atualização tiraria poder de
+/// bots que já estavam configurados.
+pub fn perm_satisfied(granted: i64, need: i64) -> bool {
+    if need == 0 {
+        return true;
+    }
+    if (granted & need) != 0 {
+        return true;
+    }
+    let legado = PERM_STRUCTURE | PERM_PURGE | PERM_MANAGE;
+    (need & legado) != 0 && (granted & PERM_MANAGE) != 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

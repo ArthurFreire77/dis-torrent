@@ -3444,7 +3444,7 @@ impl NetworkEngine {
         }
         let need = crate::moderation::perm_for_action(action)
             .ok_or_else(|| DistorrentError::Protocol(format!("ação inválida: {action}")))?;
-        if need != 0 && (bot.perms & need) == 0 {
+        if !crate::moderation::perm_satisfied(bot.perms, need) {
             return Err(DistorrentError::Protocol(format!(
                 "o bot não tem permissão para `{action}` — conceda no painel de Bots"
             )));

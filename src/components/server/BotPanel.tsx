@@ -3,6 +3,7 @@ import type { BotBridgeInfo, BotBridgeStatus, BotLogView, BotPluginStatus, BotVi
 import { services } from '../../services'
 import {
   BOT_ADMIN_ACTIONS,
+  BOT_CHANNEL_KINDS,
   BOT_EVENTS,
   BOT_PERM_DEFS,
   BOT_PERM_ALL,
@@ -17,59 +18,70 @@ import {
   type BotConfig,
 } from '../../services/botCommands'
 import { copyBestEffort } from '../../shared/clipboard'
+import { DynamicStyles } from '../../shared/dynamicStyles'
 import { Button, Card, EmptyState, Modal, Notice, Select, TextArea, TextField, helpStyle, ui } from '../../shared/ui'
 import { Ic, type IconName } from '../../shared/icons'
 
+/* Layout NÃO mora aqui: vai em `style=` (ver `shared/dynamicStyles.ts` — o Tauri
+   injeta nonce no CSP e anula o `unsafe-inline`, então tag <style> não aplica).
+   Esta folha só cobre o que inline não expressa: hover/focus, estados e media. */
 const css = `
-.botp-tabs{ display:flex; flex-wrap:wrap; gap:4px; padding-bottom:10px; border-bottom:1px solid ${ui.border}; margin-bottom:14px }
-.botp-tab{ appearance:none; background:transparent; border:1px solid transparent; border-radius:8px; color:${ui.muted}; font-size:12.5px; font-weight:700; padding:8px 11px; cursor:pointer; display:inline-flex; align-items:center; gap:6px }
-.botp-tab:hover{ background:${ui.surfaceHover}; color:${ui.text} }
-.botp-tab[aria-selected="true"]{ background:rgba(88,101,242,.16); border-color:${ui.accent}; color:#fff }
-.botp-tab:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.botp-row{ width:100%; display:flex; align-items:center; gap:9px; padding:9px 10px; background:${ui.surface}; border:1px solid ${ui.border}; border-radius:9px; color:${ui.text}; font-size:12.5px; cursor:pointer; text-align:left }
-.botp-row:hover{ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.botp-row[data-open="true"]{ border-color:${ui.accent}; background:${ui.surfaceHover} }
-.botp-chip{ display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border-radius:99px; border:1px solid ${ui.border}; background:${ui.input}; color:${ui.muted}; font-size:9.5px; font-weight:800; letter-spacing:.4px; text-transform:uppercase; white-space:nowrap }
-.botp-chip[data-tone="ok"]{ color:#a5e5bd; background:rgba(35,165,89,.14); border-color:rgba(35,165,89,.5) }
-.botp-chip[data-tone="bad"]{ color:#ffb3b3; background:rgba(242,63,66,.14); border-color:rgba(242,63,66,.5) }
-.botp-chip[data-tone="warn"]{ color:#ffe0a3; background:rgba(240,178,50,.14); border-color:rgba(240,178,50,.5) }
-.botp-console{ font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; background:#15171b; border:1px solid ${ui.border}; border-radius:8px; padding:9px 10px; max-height:260px; overflow-y:auto; white-space:pre-wrap; word-break:break-word }
-.botp-line{ display:flex; gap:7px; padding:1px 0 }
-.botp-line[data-level="error"]{ color:#ff9c9c }
-.botp-line[data-level="warn"]{ color:#ffe0a3 }
-.botp-mono{ font-family:'JetBrains Mono',ui-monospace,monospace }
-
-.botp-overlay{ position:fixed; inset:0; z-index:95; background:rgba(0,0,0,.72); display:flex; align-items:center; justify-content:center; padding:16px }
-.botp-shell{ width:100%; max-width:1060px; height:min(92vh,900px); display:flex; flex-direction:column; background:${ui.bg}; border:1px solid ${ui.border}; border-radius:12px; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.55) }
-
-/* Embutido: o painel ocupa a área de conteúdo das configurações do servidor.
-   Sem overlay e sem segunda janela — era isso que deixava o painel "atrás"
-   das configurações, com dois fundos escuros empilhados. */
-.botp-embed{ display:flex; flex-direction:column; flex:1 1 auto; width:100%; min-width:0; height:100%; min-height:0 }
-.botp-embed .botp-shell{ max-width:none; height:100%; border:none; border-radius:0; box-shadow:none; background:${ui.bg} }
-.botp-embed .botp-body{ flex-direction:column }
-.botp-embed .botp-nav{ width:100%; flex-direction:row; overflow-x:auto; overflow-y:hidden; border-right:none; border-bottom:1px solid ${ui.border}; padding:8px; flex-shrink:0; background:${ui.bg} }
-.botp-embed .botp-navbtn{ white-space:nowrap; width:auto; flex-shrink:0 }
-.botp-embed .botp-navbtn .botp-navcount{ margin-left:6px }
-.botp-head{ display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid ${ui.border}; flex-shrink:0 }
-.botp-body{ flex:1; display:flex; min-height:0 }
-.botp-nav{ width:196px; flex-shrink:0; border-right:1px solid ${ui.border}; padding:10px 8px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; background:${ui.surface} }
-.botp-navbtn{ appearance:none; display:flex; align-items:center; gap:9px; width:100%; padding:9px 10px; border:none; border-radius:7px; background:transparent; color:${ui.muted}; font-size:13px; font-weight:600; cursor:pointer; text-align:left; font-family:inherit }
 .botp-navbtn:hover{ background:${ui.surfaceHover}; color:${ui.text} }
-.botp-navbtn[aria-selected="true"]{ background:${ui.accent}; color:#fff }
-.botp-navbtn .botp-navcount{ margin-left:auto; font-size:10.5px; font-weight:800; opacity:.75 }
-.botp-main{ flex:1; min-width:0; overflow-y:auto; padding:18px 20px }
-.botp-foot{ display:flex; align-items:center; gap:8px; padding:12px 18px; border-top:1px solid ${ui.border}; flex-shrink:0; background:${ui.surface} }
+.botp-navbtn:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
+.botp-row:hover{ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
+.botp-row:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
+.botp-console::-webkit-scrollbar{ width:8px }
+.botp-console::-webkit-scrollbar-thumb{ background:${ui.borderStrong}; border-radius:4px }
 @media (max-width: 720px){
-  .botp-shell{ height:96vh; max-height:96vh }
-  .botp-body{ flex-direction:column }
-  .botp-nav{ width:100%; flex-direction:row; overflow-x:auto; border-right:none; border-bottom:1px solid ${ui.border}; padding:8px }
-  .botp-navbtn{ white-space:nowrap; width:auto }
-  .botp-navbtn .botp-navcount{ margin-left:6px }
+  .botp-head{ flex-wrap:wrap }
 }
 `
 
 type Tab = 'credenciais' | 'comandos' | 'permissoes' | 'eventos' | 'runtime' | 'console'
+
+const CHIP_TONE: Record<string, { color: string; background: string; borderColor: string }> = {
+  ok: { color: '#a5e5bd', background: 'rgba(35,165,89,.14)', borderColor: 'rgba(35,165,89,.5)' },
+  bad: { color: '#ffb3b3', background: 'rgba(242,63,66,.14)', borderColor: 'rgba(242,63,66,.5)' },
+  warn: { color: '#ffe0a3', background: 'rgba(240,178,50,.14)', borderColor: 'rgba(240,178,50,.5)' },
+}
+
+const chip = (tone?: 'ok' | 'bad' | 'warn'): React.CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  padding: '2px 7px',
+  borderRadius: 99,
+  border: `1px solid ${tone ? CHIP_TONE[tone].borderColor : ui.border}`,
+  background: tone ? CHIP_TONE[tone].background : ui.input,
+  color: tone ? CHIP_TONE[tone].color : ui.muted,
+  fontSize: 9.5,
+  fontWeight: 800,
+  letterSpacing: 0.4,
+  textTransform: 'uppercase',
+  whiteSpace: 'nowrap',
+})
+
+const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, ui-monospace, monospace' }
+
+const consoleStyle: React.CSSProperties = {
+  ...mono,
+  fontSize: 11.5,
+  background: '#15171b',
+  border: `1px solid ${ui.border}`,
+  borderRadius: 8,
+  padding: '9px 10px',
+  maxHeight: 260,
+  overflowY: 'auto',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+}
+
+const lineStyle = (level?: string): React.CSSProperties => ({
+  display: 'flex',
+  gap: 7,
+  padding: '1px 0',
+  color: level === 'error' ? '#ff9c9c' : level === 'warn' ? '#ffe0a3' : undefined,
+})
 
 export function BotPanel({
   communityId,
@@ -340,7 +352,17 @@ export function BotPanel({
   const maskedToken =
     token.length > 12 ? `${token.slice(0, 10)}…${token.slice(-4)}` : token || '(sem token)'
   const header = (
-    <div className="botp-head">
+    <div
+      className="botp-head"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '14px 18px',
+        borderBottom: `1px solid ${ui.border}`,
+        flexShrink: 0,
+      }}
+    >
       <span
         aria-hidden="true"
         style={{
@@ -362,17 +384,17 @@ export function BotPanel({
       <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 15, fontWeight: 800, color: ui.heading }}>{bot.name}</span>
-          <span className="botp-chip">bot · #{bot.discriminator}</span>
-          <span className="botp-chip" data-tone={online ? 'ok' : 'mut'}>
+          <span style={chip()}>bot · #{bot.discriminator}</span>
+          <span style={chip(online ? 'ok' : undefined)}>
             {online ? 'online' : 'offline'}
           </span>
           {bridgeStatus?.running && (
-            <span className="botp-chip" data-tone="ok">ponte {bridgeStatus.port}</span>
+            <span style={chip('ok')}>ponte {bridgeStatus.port}</span>
           )}
           {plugin?.running && (
-            <span className="botp-chip" data-tone="ok">plugin {plugin.pid}</span>
+            <span style={chip('ok')}>plugin {plugin.pid}</span>
           )}
-          {dirty && <span className="botp-chip" data-tone="warn">não salvo</span>}
+          {dirty && <span style={chip('warn')}>não salvo</span>}
         </div>
       </div>
       <Button variant="ghost" icon="x" onClick={onClose} ariaLabel={embedded ? 'Voltar aos bots' : 'Fechar painel do bot'} />
@@ -386,13 +408,54 @@ export function BotPanel({
       onKeyDown={(e) => {
         if (e.key === 'Escape') onClose()
       }}
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: '1 1 auto',
+        width: '100%',
+        minWidth: 0,
+        minHeight: 0,
+        height: embedded ? '100%' : undefined,
+      }}
     >
-      <style>{css}</style>
-      <div className="botp-shell" role="region" aria-label={`Configurar ${bot.name}`}>
+      <DynamicStyles css={css} />
+      <div
+        className="botp-shell"
+        role="region"
+        aria-label={`Configurar ${bot.name}`}
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          width: '100%',
+          minWidth: 0,
+          height: '100%',
+          background: ui.bg,
+          overflow: 'hidden',
+        }}
+      >
         {header}
 
-        <div className="botp-body">
-          <nav className="botp-nav" role="tablist" aria-label="Seções do bot">
+        <div
+          className="botp-body"
+          style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+        >
+          <nav
+            className="botp-nav"
+            role="tablist"
+            aria-label="Seções do bot"
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              gap: 2,
+              width: '100%',
+              flexShrink: 0,
+              overflowX: 'auto',
+              overflowY: 'hidden',
+              borderBottom: `1px solid ${ui.border}`,
+              padding: 8,
+              background: ui.bg,
+            }}
+          >
             {tabs.map((t) => (
               <button
                 key={t.id}
@@ -401,17 +464,41 @@ export function BotPanel({
                 aria-selected={tab === t.id}
                 className="botp-navbtn"
                 onClick={() => setTab(t.id)}
+                style={{
+                  appearance: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 9,
+                  padding: '9px 10px',
+                  border: 'none',
+                  borderRadius: 7,
+                  background: tab === t.id ? ui.accent : 'transparent',
+                  color: tab === t.id ? '#fff' : ui.muted,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  fontFamily: 'inherit',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
+                  width: 'auto',
+                }}
               >
                 <Ic name={t.icon} size={14} />
                 {t.label}
                 {t.count !== undefined && t.count > 0 && (
-                  <span className="botp-navcount">{t.count}</span>
+                  <span style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 800, opacity: 0.75 }}>
+                    {t.count}
+                  </span>
                 )}
               </button>
             ))}
           </nav>
 
-          <div className="botp-main">
+          <div
+            className="botp-main"
+            style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', padding: '18px 20px' }}
+          >
             {error && (
               <div style={{ marginBottom: ui.md }}>
                 <Notice tone="danger">{error}</Notice>
@@ -428,8 +515,9 @@ export function BotPanel({
           <Card title="Token de acesso" subtitle="Segredo do bot. Só o dono do servidor vê e gera outro." icon="key">
             <div style={{ display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
               <div
-                className="botp-mono"
+                data-bot-token
                 style={{
+                  ...mono,
                   flex: '1 1 240px',
                   minWidth: 0,
                   wordBreak: 'break-all',
@@ -575,15 +663,29 @@ export function BotPanel({
                         data-open={open}
                         aria-expanded={open}
                         onClick={() => setExpanded(open ? null : uid)}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 9,
+                          padding: '9px 10px',
+                          background: open ? ui.surfaceHover : ui.surface,
+                          border: `1px solid ${open ? ui.accent : ui.border}`,
+                          borderRadius: 9,
+                          color: ui.text,
+                          fontSize: 12.5,
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        }}
                       >
                         <Ic name="chevronRight" size={14} rotate={open ? 90 : 0} />
-                        <span className="botp-mono" style={{ flex: 1, minWidth: 0, fontWeight: 700, color: ui.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{ ...mono, flex: 1, minWidth: 0, fontWeight: 700, color: ui.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {cfg.prefix}
                           {c.name || '…'}
                         </span>
-                        <span className="botp-chip">{c.exec ?? 'reply'}</span>
-                        {c.permission ? <span className="botp-chip" data-tone="warn">{c.permission}</span> : null}
-                        {problem ? <span className="botp-chip" data-tone="bad">revisar</span> : <span className="botp-chip" data-tone="ok">pronto</span>}
+                        <span style={chip()}>{c.exec ?? 'reply'}</span>
+                        {c.permission ? <span style={chip('warn')}>{c.permission}</span> : null}
+                        {problem ? <span style={chip('bad')}>revisar</span> : <span style={chip('ok')}>pronto</span>}
                       </button>
 
                       {open && (
@@ -762,26 +864,84 @@ export function BotPanel({
           </Card>
 
           <Card title="Canais" subtitle="Nada marcado = o bot age em todos os canais." icon="hash">
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 2, maxHeight: 220, overflowY: 'auto' }}>
-              {channels.map((ch) => {
-                const on = cfg.channels.includes(ch.id)
-                return (
-                  <label key={ch.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 7, cursor: 'pointer', background: on ? ui.surfaceHover : 'transparent' }}>
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      onChange={() =>
-                        setCfg((p) => ({
-                          ...p,
-                          channels: on ? p.channels.filter((id) => id !== ch.id) : [...p.channels, ch.id],
-                        }))
-                      }
-                    />
-                    <span style={{ fontSize: 12.5, color: on ? ui.text : ui.muted }}>{ch.name}</span>
-                  </label>
-                )
-              })}
+            <div style={{ marginBottom: ui.lg }}>
+              <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, color: ui.muted, textTransform: 'uppercase', marginBottom: 8 }}>
+                Tipos de canal
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 2 }}>
+                {BOT_CHANNEL_KINDS.map((k) => {
+                  const on = cfg.channelKinds.includes(k.id)
+                  return (
+                    <label
+                      key={k.id}
+                      title={k.hint}
+                      style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '7px 8px', borderRadius: 7, cursor: 'pointer', background: on ? ui.surfaceHover : 'transparent' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        style={{ marginTop: 2 }}
+                        onChange={() =>
+                          setCfg((p) => ({
+                            ...p,
+                            channelKinds: on
+                              ? p.channelKinds.filter((x) => x !== k.id)
+                              : [...p.channelKinds, k.id],
+                          }))
+                        }
+                      />
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: 12.5, fontWeight: 700, color: on ? ui.text : ui.muted }}>
+                          {k.label}
+                        </span>
+                        <span style={{ display: 'block', fontSize: 11, color: ui.muted }}>{k.hint}</span>
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+              {cfg.channelKinds.length === 0 && (
+                <div style={{ fontSize: 11.5, color: ui.muted, marginTop: 6 }}>
+                  Sem tipo marcado = age em todos os tipos de canal.
+                </div>
+              )}
             </div>
+
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, color: ui.muted, textTransform: 'uppercase', marginBottom: 8 }}>
+              Canais específicos
+            </div>
+            {channels.length === 0 ? (
+              <EmptyState
+                icon="hash"
+                title="Nenhum canal neste servidor"
+                hint="Crie um canal para poder limitar o bot a ele. Enquanto isso o escopo fica aberto."
+              />
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))', gap: 2, maxHeight: 220, overflowY: 'auto' }}>
+                {channels.map((ch) => {
+                  const on = cfg.channels.includes(ch.id)
+                  return (
+                    <label key={ch.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 7, cursor: 'pointer', background: on ? ui.surfaceHover : 'transparent' }}>
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() =>
+                          setCfg((p) => ({
+                            ...p,
+                            channels: on ? p.channels.filter((id) => id !== ch.id) : [...p.channels, ch.id],
+                          }))
+                        }
+                      />
+                      <Ic
+                        name={ch.kind === 'voice' ? 'speaker' : ch.kind === 'video' ? 'video' : ch.kind === 'forum' ? 'tag' : 'hash'}
+                        size={13}
+                      />
+                      <span style={{ fontSize: 12.5, color: on ? ui.text : ui.muted }}>{ch.name}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            )}
           </Card>
         </>
       )}
@@ -811,7 +971,7 @@ export function BotPanel({
             })}
           </div>
           <div style={{ marginTop: ui.md, display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="botp-chip" data-tone={perms === 0 ? 'mut' : 'ok'}>
+            <span style={chip(perms === 0 ? undefined : 'ok')}>
               {perms === 0 ? 'sem poder administrativo' : `${BOT_PERM_DEFS.filter((d) => (perms & d.bit) !== 0).length} de ${BOT_PERM_DEFS.length} concedidas`}
             </span>
             <Button variant="ghost" icon="minus" onClick={() => setPerms(0)}>
@@ -896,7 +1056,7 @@ export function BotPanel({
                     Fechar ponte
                   </Button>
                   {bridgeStatus?.running && (
-                    <span className="botp-chip" data-tone="ok">
+                    <span style={chip('ok')}>
                       {bridgeStatus.url} · {bridgeStatus.requests} req · {bridgeStatus.events_pending} evento(s)
                     </span>
                   )}
@@ -968,15 +1128,15 @@ export function BotPanel({
                 Parar plugin
               </Button>
               {plugin && (
-                <span className="botp-chip" data-tone={plugin.running ? 'ok' : 'mut'}>
+                <span style={chip(plugin.running ? 'ok' : undefined)}>
                   {plugin.running ? `rodando (pid ${plugin.pid})` : `parado${plugin.exited_code !== null ? ` (código ${plugin.exited_code})` : ''}`}
                 </span>
               )}
             </div>
             {plugin && plugin.lines.length > 0 && (
-              <div className="botp-console" style={{ marginTop: ui.sm }}>
+              <div className="botp-console" style={{ ...consoleStyle, marginTop: ui.sm }}>
                 {plugin.lines.slice(-60).map((l, i) => (
-                  <div key={i} className="botp-line" data-level={l.level}>
+                  <div key={i} className="botp-line" style={lineStyle(l.level)}>
                     <span style={{ color: ui.muted }}>{l.message}</span>
                   </div>
                 ))}
@@ -1004,11 +1164,11 @@ export function BotPanel({
           {logs.length === 0 && plugin?.lines.length === 0 ? (
             <EmptyState icon="file" title="Nada no console ainda" hint="Assim que o bot executar um comando ou reagir a um evento, aparece aqui." />
           ) : (
-            <div className="botp-console" ref={consoleRef}>
+            <div ref={consoleRef} style={consoleStyle}>
               {[...logs]
                 .reverse()
                 .map((l) => (
-                  <div key={l.id} className="botp-line" data-level={l.level}>
+                  <div key={l.id} style={lineStyle(l.level)}>
                     <span style={{ color: ui.muted, flexShrink: 0 }}>
                       {new Date(l.created_at).toLocaleTimeString()}
                     </span>
@@ -1016,7 +1176,7 @@ export function BotPanel({
                   </div>
                 ))}
               {plugin?.lines.map((l, i) => (
-                <div key={`p${i}`} className="botp-line" data-level={l.level}>
+                <div key={`p${i}`} style={lineStyle(l.level)}>
                   <span style={{ color: ui.muted, flexShrink: 0 }}>[plugin]</span>
                   <span>{l.message}</span>
                 </div>
@@ -1029,7 +1189,18 @@ export function BotPanel({
             </div>
           </div>
 
-          <div className="botp-foot">
+          <div
+            className="botp-foot"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '12px 18px',
+              borderTop: `1px solid ${ui.border}`,
+              flexShrink: 0,
+              background: ui.surface,
+            }}
+          >
             {dirty && (
               <span style={{ ...helpStyle, marginTop: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <Ic name="info" size={13} />

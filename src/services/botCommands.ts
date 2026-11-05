@@ -42,10 +42,22 @@ export interface BotWebhookDef {
   url: string
 }
 
+/** Tipo de canal em que o bot pode agir. */
+export type BotChannelKind = 'text' | 'voice' | 'video' | 'forum'
+
+export const BOT_CHANNEL_KINDS: { id: BotChannelKind; label: string; hint: string }[] = [
+  { id: 'text', label: 'Texto', hint: 'Comandos e respostas em #canais normais.' },
+  { id: 'forum', label: 'Fórum', hint: 'Canais de fórum (posts e tópicos).' },
+  { id: 'voice', label: 'Voz', hint: 'Só eventos (entrou/saiu). O bot não fala na call.' },
+  { id: 'video', label: 'Vídeo', hint: 'Só eventos. O bot não envia imagem nem som.' },
+]
+
 export interface BotConfig {
   prefix: string
   commands: BotCommandDef[]
   channels: string[]
+  /** Tipos de canal onde o bot age. Vazio = todos os tipos. */
+  channelKinds: BotChannelKind[]
   webhook?: BotWebhookDef
   events: string[]
   blockPrivate: boolean
@@ -67,10 +79,19 @@ export const BOT_PERMS = {
   MUTE: 1 << 1,
   DELETE: 1 << 2,
   MANAGE: 1 << 3,
+  /** Criar/renomear/excluir canais e cargos, e mudar o servidor. */
+  STRUCTURE: 1 << 4,
+  /** Apagar mensagens de qualquer autor e limpar canais inteiros. */
+  PURGE: 1 << 5,
 } as const
 
 export const BOT_PERM_ALL =
-  BOT_PERMS.BAN | BOT_PERMS.MUTE | BOT_PERMS.DELETE | BOT_PERMS.MANAGE
+  BOT_PERMS.BAN |
+  BOT_PERMS.MUTE |
+  BOT_PERMS.DELETE |
+  BOT_PERMS.MANAGE |
+  BOT_PERMS.STRUCTURE |
+  BOT_PERMS.PURGE
 
 export interface BotPermDef {
   bit: number
@@ -100,9 +121,21 @@ export const BOT_PERM_DEFS: BotPermDef[] = [
   },
   {
     bit: BOT_PERMS.MANAGE,
-    label: 'Gerenciar canais',
-    hint: 'Permite /kick, /lock, /unlock e /slowmode.',
-    commands: ['kick', 'lock', 'unlock', 'slowmode'],
+    label: 'Gerenciar membros',
+    hint: 'Permite /kick e /role_assign, /role_unassign (dar e tirar cargo).',
+    commands: ['kick', 'role_assign', 'role_unassign'],
+  },
+  {
+    bit: BOT_PERMS.STRUCTURE,
+    label: 'Montar o servidor',
+    hint: 'Permite criar/renomear/excluir canais e cargos e renomear o servidor.',
+    commands: ['channel_create', 'channel_delete', 'channel_edit', 'role_create', 'role_delete', 'server_edit'],
+  },
+  {
+    bit: BOT_PERMS.PURGE,
+    label: 'Limpar canais',
+    hint: 'Permite /clear e /lock, /unlock e /slowmode em qualquer canal.',
+    commands: ['clear', 'lock', 'unlock', 'slowmode'],
   },
 ]
 
@@ -115,18 +148,18 @@ export const BOT_ADMIN_ACTIONS: { action: string; perm: number; label: string }[
   { action: 'unmute', perm: BOT_PERMS.MUTE, label: 'Remover silêncio' },
   { action: 'warn', perm: BOT_PERMS.MUTE, label: 'Registrar aviso' },
   { action: 'warnings', perm: BOT_PERMS.MUTE, label: 'Listar avisos' },
-  { action: 'clear', perm: BOT_PERMS.DELETE, label: 'Apagar N mensagens' },
-  { action: 'lock', perm: BOT_PERMS.MANAGE, label: 'Trancar canal' },
-  { action: 'unlock', perm: BOT_PERMS.MANAGE, label: 'Destrancar canal' },
-  { action: 'slowmode', perm: BOT_PERMS.MANAGE, label: 'Definir slowmode (s)' },
-  { action: 'channel_create', perm: BOT_PERMS.MANAGE, label: 'Criar canal' },
-  { action: 'channel_delete', perm: BOT_PERMS.MANAGE, label: 'Excluir canal' },
-  { action: 'channel_edit', perm: BOT_PERMS.MANAGE, label: 'Renomear canal' },
-  { action: 'role_create', perm: BOT_PERMS.MANAGE, label: 'Criar cargo' },
-  { action: 'role_delete', perm: BOT_PERMS.MANAGE, label: 'Excluir cargo' },
+  { action: 'clear', perm: BOT_PERMS.PURGE, label: 'Apagar N mensagens' },
+  { action: 'lock', perm: BOT_PERMS.PURGE, label: 'Trancar canal' },
+  { action: 'unlock', perm: BOT_PERMS.PURGE, label: 'Destrancar canal' },
+  { action: 'slowmode', perm: BOT_PERMS.PURGE, label: 'Definir slowmode (s)' },
+  { action: 'channel_create', perm: BOT_PERMS.STRUCTURE, label: 'Criar canal' },
+  { action: 'channel_delete', perm: BOT_PERMS.STRUCTURE, label: 'Excluir canal' },
+  { action: 'channel_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear canal' },
+  { action: 'role_create', perm: BOT_PERMS.STRUCTURE, label: 'Criar cargo' },
+  { action: 'role_delete', perm: BOT_PERMS.STRUCTURE, label: 'Excluir cargo' },
   { action: 'role_assign', perm: BOT_PERMS.MANAGE, label: 'Dar cargo a membro' },
   { action: 'role_unassign', perm: BOT_PERMS.MANAGE, label: 'Tirar cargo de membro' },
-  { action: 'server_edit', perm: BOT_PERMS.MANAGE, label: 'Renomear servidor' },
+  { action: 'server_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear servidor' },
   { action: 'userinfo', perm: 0, label: 'Informações do membro' },
   { action: 'serverinfo', perm: 0, label: 'Informações do servidor' },
   { action: 'ping', perm: 0, label: 'Latência do bot' },
@@ -324,6 +357,7 @@ export function defaultBotConfig(): BotConfig {
     prefix: '!',
     commands: [],
     channels: [],
+    channelKinds: [],
     events: [],
     blockPrivate: true,
     maxRepliesPerMinute: 20,
@@ -376,10 +410,17 @@ export function parseBotConfig(raw: unknown): BotConfig | null {
   const events: string[] = Array.isArray(obj.events)
     ? obj.events.filter((e: unknown) => typeof e === 'string' && validEvents.has(e)).slice(0, 32)
     : []
+  const validKinds = new Set(BOT_CHANNEL_KINDS.map((k) => k.id))
+  const channelKinds: BotChannelKind[] = Array.isArray(obj.channelKinds)
+    ? obj.channelKinds
+        .filter((k: unknown): k is BotChannelKind => typeof k === 'string' && validKinds.has(k as BotChannelKind))
+        .slice(0, 4)
+    : []
   return {
     prefix,
     commands,
     channels,
+    channelKinds,
     webhook,
     events,
     blockPrivate: obj.blockPrivate === undefined ? true : obj.blockPrivate !== false,
@@ -425,6 +466,7 @@ export function serializeBotConfig(cfg: BotConfig): string {
       return out
     }),
     channels: cfg.channels,
+    channelKinds: cfg.channelKinds,
     events: cfg.events,
     blockPrivate: cfg.blockPrivate,
     maxRepliesPerMinute: cfg.maxRepliesPerMinute,
@@ -508,6 +550,20 @@ export function extractPath(obj: unknown, path: string): string | null {
 export function channelInScope(config: BotConfig, channelId: string): boolean {
   if (!config.channels || config.channels.length === 0) return true
   return config.channels.includes(channelId)
+}
+
+/**
+ * Escopo por TIPO de canal. `channelId` pode ser omitido quando quem chama já
+ * sabe o tipo (evento de voz, por exemplo).
+ */
+export function kindInScope(
+  config: BotConfig,
+  kind: BotChannelKind | undefined,
+): boolean {
+  const kinds = config.channelKinds ?? []
+  if (kinds.length === 0) return true
+  if (!kind) return true
+  return kinds.includes(kind)
 }
 
 // `online` ausente em payload antigo conta como ligado; só o `false` explícito desliga.

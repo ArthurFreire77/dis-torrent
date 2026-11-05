@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## [Não lançado]
+
+### Bots: escopo por tipo de canal, mais poder, e o "Conectando…" infinito
+
+**O painel do bot aparecia com botões crus do navegador.** O Tauri injeta um
+`nonce` no CSP e, pela spec, nonce **anula** o `'unsafe-inline'`: toda tag
+`<style>` que o React cria em runtime era descartada, e o painel (100% baseado
+em classes) caía no estilo padrão — abas sem fundo, sem espaçamento, sem raio.
+Todo o layout passou para `style=` inline, e o que inline não expressa
+(`:hover`, `:focus-visible`, `@media`) vai por `adoptedStyleSheets` (CSSOM), que
+não passa pelo parser de HTML. O mesmo problema afetava o assistente de criação
+de servidor e o `mark` de busca; os três usam o mesmo `DynamicStyles`.
+
+**Dá para escolher em que TIPO de canal o bot atua.** Além da lista de canais
+por id, existe `channelKinds`: `text`, `forum`, `voice` e `video`. Vazio = todos.
+As duas listas se somam — o bot responde no canal se o id estiver em `channels`
+(ou a lista estiver vazia) **e** o tipo estiver em `channelKinds` (ou vazia).
+Na aba **Comandos** há um seletor para os tipos e outro para os canais, com
+ícone por tipo.
+
+**Mais poder para o bot, com permissões separadas.** Antes o bit "gerenciar"
+liberava tudo junto. Agora são seis bits: banir, silenciar, apagar mensagens,
+gerenciar membros, **montar o servidor** (canais/cargos/renomear) e **limpar
+canais** (`/clear`, `/lock`, `/slowlock`). Quem já tinha o bit antigo continua
+podendo tudo — a separação não tirou poder de bot configurado (`perm_satisfied`
+no core).
+
+**"Conectando…" que nunca terminava.** Dois furos na máquina de fases:
+(1) o watchdog de conexão reagendava **para sempre** quando não havia
+`RTCPeerConnection` aberto num canal de voz, mesmo com outra pessoa na call — a
+tela ficava em "Conectando…" sem dizer que a conexão não abriu; (2) a fase
+`connecting` engolia o evento `reconnect-timeout`, então o aviso do watchdog era
+inútil. Agora só o canal **vazio** espera indefinidamente ("Esperando alguém
+entrar"); com gente na call sem rota, a chamada falha honestamente.
+
+**Documentação baixável atualizada.** O `.md` ganhou a seção de escopo por tipo
+de canal, a tabela de mídia por tipo (deixando claro que o bot **não** entra na
+call, não fala e não toca som) e os seis bits de permissão com a matriz
+ação → permissão corrigida.
+
+**Testes.** 598 unit (novos: `kindInScope`, round-trip de `channelKinds`,
+permissões legadas, `connecting + reconnect-timeout`, watchdog de voz com gente
+na call). E2E de bots 3/3.
+
 ## [1.1.58-pre-alpha] - 2026-11-05
 
 ### Configuração de bot dentro do servidor, sem segunda janela

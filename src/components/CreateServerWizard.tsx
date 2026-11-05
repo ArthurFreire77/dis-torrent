@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Ic, type IconName } from '../shared/icons'
+import { DynamicStyles } from '../shared/dynamicStyles'
 import { Modal, Notice, ui } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
 import { LocalLink } from '../shared/LocalLink'
@@ -370,7 +371,7 @@ export default function CreateServerWizard({
 
   return (
     <>
-      <style>{css}</style>
+      <DynamicStyles css={css} />
       <Modal
         open={open}
         onClose={busy ? () => {} : onClose}
