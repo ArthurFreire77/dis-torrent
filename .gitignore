@@ -136,3 +136,5 @@ Thumbs.db
 *.bak
 *.orig
 *.rej
+# Artefatos gerados pelo build local (nao versionar)
+dist-release/
