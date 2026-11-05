@@ -1,18 +1,12 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body,#root{height:100%}
-body{font-family:Inter,system-ui,sans-serif;background:#0a0a0a;color:#eee;overflow:hidden}
+body{font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;background:#0a0a0a;color:#eee;overflow:hidden}
 a{color:inherit;text-decoration:none}
 button{font:inherit}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:99px}
 ::-webkit-scrollbar-track{background:transparent}
 
-/* ==========================================================================
-   Barra de ações da mensagem (reagir/responder/⋯)
-   Fica só no hover ou no foco por teclado. Sempre visível, ela cobria o texto
-   das mensagens e o usuário lia aquilo como "reação bugada". No toque não
-   existe hover, então ali ela aparece direto.
-   ========================================================================== */
 .msg-tools{opacity:0;pointer-events:none;transition:opacity .12s ease}
 .msg-row:hover .msg-tools,
 .msg-row:focus-within .msg-tools{opacity:1;pointer-events:auto}
@@ -20,22 +14,17 @@ button{font:inherit}
   .msg-tools{opacity:1;pointer-events:auto}
 }
 
-/* Seletor de reação: usa o MESMO `EmojiPicker` do mobile (busca, abas,
-   recentes, emojis do servidor) — antes o desktop tinha um painel próprio,
-   pior e sem busca. Em telas pequenas ele precisa caber sem estourar a borda. */
 .reaction-picker{position:relative}
 .reaction-picker > div{max-width:min(330px, calc(100vw - 32px))}
 
-/* mobile polish */
 @media (max-width: 768px){
   .hide-mobile{ display:none !important }
 }
 @media (min-width: 769px){
   .hide-desktop{ display:none !important }
 }
-/* safe area + smooth */
 html{ -webkit-text-size-adjust:100% }
-input, button{ font-family: Inter, system-ui, sans-serif }
+input, button{ font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif }
 input, select, textarea{ font-size:16px }
 * { scrollbar-width: thin; scrollbar-color: #3a3a3a transparent }
 * { -webkit-tap-highlight-color: transparent }
@@ -45,13 +34,10 @@ button{ touch-action:manipulation; user-select:none }
 .m-full{ height:100vh; height:100dvh; height:100svh }
 @media (prefers-reduced-motion: reduce){ *{ animation:none !important; transition:none !important } }
 
-/* existing desktop helpers (kept for ThemeShell) */
 .rail-item{ position:relative; display:flex; align-items:center; justify-content:center }
 .rail-pill{ position:absolute; left:0; top:50%; transform:translateY(-50%); width:4px; height:0; background:#fff; border-radius:0 4px 4px 0; transition: height .2s, opacity .2s; opacity:0 }
 .rail-pill.on{ height:40px; opacity:1 }
 .rail-pill.dot{ height:10px; opacity:1 }
-/* Círculo por padrão, "squircle" no hover/ativo — o padrão do Discord e o que
-   o desktop já mostrava antes desta regra ir para a folha única. */
 .rail-btn{ width:48px; height:48px; border-radius:24px; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; transition: border-radius .15s, background .15s; overflow:hidden; flex-shrink:0; font-weight:800; font-size:15px; color:#fff }
 .rail-btn.active, .rail-btn:hover{ border-radius:16px }
 .rail-badge{ position:absolute; right:6px; bottom:2px; min-width:14px; height:14px; padding:0 4px; background:#f23f42; color:#fff; font-size:10px; font-weight:800; border-radius:99px; display:flex; align-items:center; justify-content:center; border:2px solid #1e1f22; pointer-events:none }
@@ -113,36 +99,18 @@ button{ touch-action:manipulation; user-select:none }
 .composer-icon:hover{ color:#fff }
 .composer-icon.send{ background:#5865f2 }
 
-/* arquivo swarm */
 @keyframes spin { to { transform: rotate(360deg) } }
 .spin{ animation: spin .7s linear infinite }
 @keyframes shimmer { 0%{ transform: translateX(-100%) } 100%{ transform: translateX(100%) } }
 
-/* ==========================================================================
-   Tooltip — só existe no hover/focus, e some no toque.
-   Em toque não há hover: o tooltip apareceria junto com o dedo e cobriria o
-   conteúdo. `pointer: coarse` pega celular e tablet de verdade, e não afeta
-   monitor com tela de toque.
-   ========================================================================== */
 .tooltip-desktop-only { }
 @media (hover: none), (pointer: coarse) {
   .tooltip-desktop-only { display: none !important; }
 }
 
-/* Foco visível só para quem navega por teclado — o clique não deve deixar
-   anel de foco sujando a tela, mas teclado precisa de retorno visível.
-   UMA regra só: a antiga `*:focus-visible{ box-shadow }` somava anel + sombra
-   em todo elemento focado (inclusive container genérico). */
 :focus-visible { outline: 2px solid #00a8fc; outline-offset: 2px; }
 
-/* ==========================================================================
-   Configurações do servidor — responsividade
-   A navegação lateral tem 248px, que é confortável no desktop mas come a
-   tela inteira num celular. Abaixo de 860px ela vira gaveta: some do fluxo e
-   reaparece por cima quando o botão de menu é pressionado.
-   ========================================================================== */
 @media (max-width: 860px) {
-  /* Só a nav marcada como aberta aparece; a versão fixa some. */
   .srv-settings-nav { display: none; }
   .srv-settings-nav.srv-nav-open {
     display: flex;
@@ -153,6 +121,5 @@ button{ touch-action:manipulation; user-select:none }
     box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
   }
   .srv-settings-topbar { display: flex !important; }
-  /* O grid de cargos (lista + detalhe) não cabe em coluna estreita. */
   .srv-roles-grid { grid-template-columns: 1fr !important; }
 }

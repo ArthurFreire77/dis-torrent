@@ -32,11 +32,32 @@ const css = `
 .botp-chip[data-tone="ok"]{ color:#a5e5bd; background:rgba(35,165,89,.14); border-color:rgba(35,165,89,.5) }
 .botp-chip[data-tone="bad"]{ color:#ffb3b3; background:rgba(242,63,66,.14); border-color:rgba(242,63,66,.5) }
 .botp-chip[data-tone="warn"]{ color:#ffe0a3; background:rgba(240,178,50,.14); border-color:rgba(240,178,50,.5) }
-.botp-console{ font-family:'JetBrains Mono',monospace; font-size:11.5px; background:#15171b; border:1px solid ${ui.border}; border-radius:8px; padding:9px 10px; max-height:260px; overflow-y:auto; white-space:pre-wrap; word-break:break-word }
+.botp-console{ font-family:'JetBrains Mono',ui-monospace,monospace; font-size:11.5px; background:#15171b; border:1px solid ${ui.border}; border-radius:8px; padding:9px 10px; max-height:260px; overflow-y:auto; white-space:pre-wrap; word-break:break-word }
 .botp-line{ display:flex; gap:7px; padding:1px 0 }
 .botp-line[data-level="error"]{ color:#ff9c9c }
 .botp-line[data-level="warn"]{ color:#ffe0a3 }
-.botp-mono{ font-family:'JetBrains Mono',monospace }
+.botp-mono{ font-family:'JetBrains Mono',ui-monospace,monospace }
+
+/* Painel: navegação lateral fixa + conteúdo com rolagem própria. Antes o
+   componente era despejado solto na página, por cima da interface. */
+.botp-overlay{ position:fixed; inset:0; z-index:95; background:rgba(0,0,0,.72); display:flex; align-items:center; justify-content:center; padding:16px }
+.botp-shell{ width:100%; max-width:1060px; height:min(92vh,900px); display:flex; flex-direction:column; background:${ui.bg}; border:1px solid ${ui.border}; border-radius:12px; overflow:hidden; box-shadow:0 24px 64px rgba(0,0,0,.55) }
+.botp-head{ display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid ${ui.border}; flex-shrink:0 }
+.botp-body{ flex:1; display:flex; min-height:0 }
+.botp-nav{ width:196px; flex-shrink:0; border-right:1px solid ${ui.border}; padding:10px 8px; display:flex; flex-direction:column; gap:2px; overflow-y:auto; background:${ui.surface} }
+.botp-navbtn{ appearance:none; display:flex; align-items:center; gap:9px; width:100%; padding:9px 10px; border:none; border-radius:7px; background:transparent; color:${ui.muted}; font-size:13px; font-weight:600; cursor:pointer; text-align:left; font-family:inherit }
+.botp-navbtn:hover{ background:${ui.surfaceHover}; color:${ui.text} }
+.botp-navbtn[aria-selected="true"]{ background:${ui.accent}; color:#fff }
+.botp-navbtn .botp-navcount{ margin-left:auto; font-size:10.5px; font-weight:800; opacity:.75 }
+.botp-main{ flex:1; min-width:0; overflow-y:auto; padding:18px 20px }
+.botp-foot{ display:flex; align-items:center; gap:8px; padding:12px 18px; border-top:1px solid ${ui.border}; flex-shrink:0; background:${ui.surface} }
+@media (max-width: 720px){
+  .botp-shell{ height:96vh; max-height:96vh }
+  .botp-body{ flex-direction:column }
+  .botp-nav{ width:100%; flex-direction:row; overflow-x:auto; border-right:none; border-bottom:1px solid ${ui.border}; padding:8px }
+  .botp-navbtn{ white-space:nowrap; width:auto }
+  .botp-navbtn .botp-navcount{ margin-left:6px }
+}
 `
 
 type Tab = 'comandos' | 'permissoes' | 'eventos' | 'runtime' | 'console'
@@ -230,55 +251,99 @@ export function BotPanel({
     [cfg, initial, perms, bot.perms],
   )
 
-  const tabs: { id: Tab; label: string; icon: IconName }[] = [
-    { id: 'comandos', label: `Comandos (${cfg.commands.length})`, icon: 'terminal' },
+  const tabs: { id: Tab; label: string; icon: IconName; count?: number }[] = [
+    { id: 'comandos', label: 'Comandos', icon: 'terminal', count: cfg.commands.length },
     { id: 'permissoes', label: 'Permissões', icon: 'shield' as IconName },
-    { id: 'eventos', label: `Eventos (${cfg.events.length})`, icon: 'plug' },
+    { id: 'eventos', label: 'Eventos', icon: 'plug', count: cfg.events.length },
     { id: 'runtime', label: 'Ponte e plugin', icon: 'globe' },
     { id: 'console', label: 'Console', icon: 'file' },
   ]
 
   return (
-    <div style={{ maxWidth: 900 }}>
+    <div
+      className="botp-overlay"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onClose()
+      }}
+    >
       <style>{css}</style>
-
-      <div style={{ display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap', marginBottom: ui.md }}>
-        <span style={{ fontSize: 13, fontWeight: 800, color: ui.heading }}>{bot.name}</span>
-        <span className="botp-chip">#{bot.discriminator}</span>
-        <span className="botp-chip" data-tone={bot.online ? 'ok' : 'mut'}>
-          {bot.online ? 'online' : 'offline'}
-        </span>
-        {bridgeStatus?.running && <span className="botp-chip" data-tone="ok">ponte {bridgeStatus.port}</span>}
-        {plugin?.running && <span className="botp-chip" data-tone="ok">plugin pid {plugin.pid}</span>}
-        {dirty && <span className="botp-chip" data-tone="warn">alterações não salvas</span>}
-      </div>
-
-      <div role="tablist" className="botp-tabs">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.id}
-            className="botp-tab"
-            onClick={() => setTab(t.id)}
+      <div
+        className="botp-shell"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Configurar ${bot.name}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="botp-head">
+          <span
+            aria-hidden="true"
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: '50%',
+              background: `${ui.accent}33`,
+              border: `2px solid ${ui.accent}`,
+              color: ui.accent,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 800,
+              flexShrink: 0,
+            }}
           >
-            <Ic name={t.icon} size={13} />
-            {t.label}
-          </button>
-        ))}
-      </div>
+            {bot.avatar && bot.avatar.length <= 2 ? bot.avatar : bot.name.charAt(0).toUpperCase()}
+          </span>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 15, fontWeight: 800, color: ui.heading }}>{bot.name}</span>
+              <span className="botp-chip">bot · #{bot.discriminator}</span>
+              <span className="botp-chip" data-tone={bot.online ? 'ok' : 'mut'}>
+                {bot.online ? 'online' : 'offline'}
+              </span>
+              {bridgeStatus?.running && (
+                <span className="botp-chip" data-tone="ok">ponte {bridgeStatus.port}</span>
+              )}
+              {plugin?.running && (
+                <span className="botp-chip" data-tone="ok">plugin {plugin.pid}</span>
+              )}
+              {dirty && <span className="botp-chip" data-tone="warn">não salvo</span>}
+            </div>
+          </div>
+          <Button variant="ghost" icon="x" onClick={onClose} ariaLabel="Fechar painel do bot" />
+        </div>
 
-      {error && (
-        <div style={{ marginBottom: ui.md }}>
-          <Notice tone="danger">{error}</Notice>
-        </div>
-      )}
-      {savedAt !== null && !error && (
-        <div style={{ marginBottom: ui.md }}>
-          <Notice tone="success">Configuração salva e validada pelo core.</Notice>
-        </div>
-      )}
+        <div className="botp-body">
+          <nav className="botp-nav" role="tablist" aria-label="Seções do bot">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === t.id}
+                className="botp-navbtn"
+                onClick={() => setTab(t.id)}
+              >
+                <Ic name={t.icon} size={14} />
+                {t.label}
+                {t.count !== undefined && t.count > 0 && (
+                  <span className="botp-navcount">{t.count}</span>
+                )}
+              </button>
+            ))}
+          </nav>
+
+          <div className="botp-main">
+            {error && (
+              <div style={{ marginBottom: ui.md }}>
+                <Notice tone="danger">{error}</Notice>
+              </div>
+            )}
+            {savedAt !== null && !error && (
+              <div style={{ marginBottom: ui.md }}>
+                <Notice tone="success">Configuração salva e validada pelo core.</Notice>
+              </div>
+            )}
 
       {tab === 'comandos' && (
         <>
@@ -783,15 +848,25 @@ export function BotPanel({
         </Card>
       )}
 
-      <div style={{ display: 'flex', gap: ui.sm, justifyContent: 'flex-end', alignItems: 'center', marginTop: ui.lg, flexWrap: 'wrap' }}>
-        <span style={{ flex: 1 }} />
-        <Button onClick={onClose}>Fechar</Button>
-        <Button variant="success" icon="save" busy={busy} onClick={() => void save()}>
-          Salvar
-        </Button>
+            </div>
+          </div>
+
+          <div className="botp-foot">
+            {dirty && (
+              <span style={{ ...helpStyle, marginTop: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <Ic name="info" size={13} />
+                alterações não salvas
+              </span>
+            )}
+            <span style={{ flex: 1 }} />
+            <Button onClick={onClose} disabled={busy}>Fechar</Button>
+            <Button variant="success" icon="save" busy={busy} onClick={() => void save()}>
+              Salvar
+            </Button>
+          </div>
+        </div>
       </div>
-    </div>
-  )
+    )
 }
 
 /** Resumo de uma linha por bot (usado pela lista do gerenciador). */

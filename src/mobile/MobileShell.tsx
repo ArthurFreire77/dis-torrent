@@ -27,6 +27,7 @@ import MobileCallStage from './MobileCallStage'
 import { cameraCycleLabel, shouldShowCameraFlip } from '../services/callCameras'
 import { useCallCameras } from '../services/useCallCameras'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
+import { resolveBootPhase } from '../services/bootPhase'
 import { isAndroidRuntime, isIOSRuntime } from '../shared/runtime'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import { isCallableChannel } from '../app/channels'
@@ -69,7 +70,9 @@ import { PRIVACY_MODES } from '../services/models'
 
 const MONO = "'JetBrains Mono', monospace"
 
-const FP_RE = /^[0-9a-f]{12}$/
+// Fingerprint (12 hex) OU chave pública completa (64 hex): a tela de perfil
+// oferece "copiar identidade" nos dois formatos, então os dois precisam entrar.
+const FP_RE = /^(?:[0-9a-f]{12}|[0-9a-f]{64})$/
 
 interface AutoItemMobile {
   key: string
@@ -257,7 +260,7 @@ function AuthCard({ children }: { children: any }) {
     { icon: Icons.key, title: 'Sua chave', desc: 'sem conta' },
   ]
   return (
-    <div style={{ minHeight: '100dvh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: 'Inter' }}>
+    <div style={{ minHeight: '100dvh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}>
       <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 24, width: '100%', maxWidth: 380, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
         <div style={{ textAlign: 'center', marginBottom: 12 }}>
           <span style={{ fontSize: 24, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
@@ -420,6 +423,17 @@ function BootScreen({ native }: { native: boolean }){
           : 'abrindo sua identidade e o nó P2P…'}
         {!native && <><br />modo navegador: a rede P2P só conecta abas desta máquina.</>}
       </div>
+      {slow && (
+        // Sem botão, um boot travado ficava girando para sempre e parecia
+        // janela morta — a tela não tinha como o usuário agir.
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          style={{ marginTop: 4, background: 'transparent', color: '#b7c0cd', border: '1px solid #2f3742', borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
+        >
+          Recarregar
+        </button>
+      )}
     </div>
   )
 }
@@ -616,16 +630,42 @@ export default function MobileShell() {
   useEffect(() => {
     services.version().then(setVersion).catch(() => {})
     services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {})
-    services.identityGet().then(id => {
-      if (id) { setIdentity(id); setPhase('app') }
-      else {
-        services.vaultStatus().then(v => {
-          if (!v.has_identity) setPhase('create')
-          else if (v.has_vault) services.vaultUnlock('').then(u => { setIdentity(u); setPhase('app') }).catch(() => setPhase('lock'))
-          else services.identityGet().then(retry => { if (retry) { setIdentity(retry); setPhase('app') } else setPhase('create') }).catch(() => setPhase('create'))
-        }).catch(() => setPhase('create'))
+    // Mesma escada de decisão do desktop (`bootPhase.ts`): antes os dois lados
+    // divergiam e o desktop abria o app sem identidade — tela vazia.
+    const decidir = async () => {
+      let id: Identity | null = null
+      try {
+        id = await services.identityGet()
+      } catch {
+        id = null
       }
-    }).catch(() => setPhase('create'))
+      let vault: { has_identity: boolean; has_vault: boolean } | null = null
+      try {
+        vault = await services.vaultStatus()
+      } catch {
+        vault = null
+      }
+      let unlocked: Identity | null = null
+      if (!id && vault?.has_vault) {
+        try {
+          unlocked = await services.vaultUnlock('')
+        } catch {
+          unlocked = null
+        }
+      }
+      if (!id && !unlocked && vault && !vault.has_vault) {
+        try {
+          id = await services.identityGet()
+        } catch {
+          id = null
+        }
+      }
+      const fase = resolveBootPhase({ identity: id, vault, unlocked })
+      const pronto = unlocked ?? id
+      if (pronto) setIdentity(pronto)
+      setPhase(fase)
+    }
+    void decidir()
   }, [])
 
   useEffect(() => {
@@ -1383,7 +1423,7 @@ export default function MobileShell() {
     if (!fp) return
     setError(null); setFriendSuccess(null); setFriendErr(null)
     if (!FP_RE.test(fp)) {
-      setFriendErr('Fingerprint inválido — são 12 caracteres hexadecimais (ex.: a1b2c3d4e5f6).')
+      setFriendErr('Identificador inválido — use o fingerprint (12 hex, ex.: a1b2c3d4e5f6) ou a chave pública completa (64 hex).')
       return
     }
     if (fp === (identity?.fingerprint ?? '').toLowerCase()) {
@@ -2163,7 +2203,7 @@ export default function MobileShell() {
     }
     const channelName = activeComm?.channels.find(([id]) => id === selConv)?.[1] ?? selConvObj?.title ?? peerTitle
     return (
-      <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden' }}>
+      <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", overflow: 'hidden' }}>
         {}
         <div style={{ height: 48, display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 8, paddingRight: 8, paddingBottom: 0, paddingTop: 'env(safe-area-inset-top)', background: t.sidebar, borderBottom: `1px solid ${t.border}`, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
           <button aria-label="Voltar" className="m-iconbtn" onClick={() => { setSelConv(null); setSelPeerFp(null); setShowMembers(false) }}>
@@ -2547,7 +2587,7 @@ export default function MobileShell() {
   }
 
   return (
-    <div className="m-root" style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: 'Inter', overflow: 'hidden', position: 'relative' } as any}>
+    <div className="m-root" style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: t.main, color: t.text, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", overflow: 'hidden', position: 'relative' } as any}>
 
       {}
       <div style={{ height: 48, display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 10, paddingRight: 10, paddingBottom: 0, paddingTop: 'env(safe-area-inset-top)', background: t.sidebar, borderBottom: `1px solid ${t.border}`, flexShrink: 0 }}>
@@ -2873,7 +2913,7 @@ export default function MobileShell() {
                   enterKeyHint="send"
                   onChange={e => { setFriendFpInput(e.target.value); setFriendErr(null) }}
                   onKeyDown={e => e.key === 'Enter' && addFriend()}
-                  placeholder="Ex.: a1b2c3d4e5f6"
+                  placeholder="Fingerprint (12) ou chave (64)"
                 />
                 <button className="m-btn" style={{ background: t.hover, color: t.text, whiteSpace: 'nowrap' }} onClick={pasteFp} title="Colar da área de transferência">Colar</button>
               </div>

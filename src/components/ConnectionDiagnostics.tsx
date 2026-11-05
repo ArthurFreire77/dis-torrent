@@ -1,10 +1,8 @@
-// Diagnóstico de conexão — DisTorrent visual congelado: usa a mesma paleta/tipografia
-// do ThemeShell (t.*), sem redesenhar nada. Reutilizado no desktop e no mobile.
 import { useEffect, useMemo, useState } from 'react'
 import { services } from '../services'
 import { diagnoseCallsSupport } from '../services/callManager'
 import { buildDiagReport, shortFp, stateLabel } from '../services/connectionDiagnostics'
-import type { NetworkState, PeerView, RelayLegStatus, NetDiag } from '../services/models'
+import type { NetworkState, PeerView, RelayLegStatus, NetDiag, FirewallStatus } from '../services/models'
 
 const t = {
   sidebar: '#2b2d31', main: '#313338', input: '#1e1f22', border: '#26272b',
@@ -28,6 +26,8 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
   const [copied, setCopied] = useState(false)
   const [copyError, setCopyError] = useState<string | null>(null)
   const [netDiag, setNetDiag] = useState<NetDiag | null>(null)
+  const [fw, setFw] = useState<FirewallStatus | null>(null)
+  const [fwBusy, setFwBusy] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -35,18 +35,20 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
       setLoading(true)
       setLoadError(null)
       try {
-        const [v, id, net, peerList, nd] = await Promise.all([
+        const [v, id, net, peerList, nd, fws] = await Promise.all([
           services.version().catch(() => '?'),
           services.identityGet().catch(() => null),
           services.networkStatus().catch(() => null),
           services.peersList().catch(() => [] as PeerView[]),
           services.netDiag().catch(() => null),
+          services.firewallStatus().catch(() => null),
         ])
         if (!alive) return
         setVersion(typeof v === 'string' ? v : '?')
         setFp(id?.fingerprint ?? '')
         setNickname(id?.nickname ?? '')
         setNetDiag(nd)
+        setFw(fws)
         if (net) {
           setState(net.state)
           setOnlinePeers(net.online_peers)
@@ -81,7 +83,6 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
     [version, fp, nickname, state, onlinePeers, listenPort, peers, legs, legsError, netDiag, redactSensitive],
   )
 
-  // Capacidade de chamada deste aparelho (WebView antigo = sem WebRTC).
   const callsDiag = useMemo(() => {
     try { return diagnoseCallsSupport() } catch {
       return { hasRTC: false, hasGetUserMedia: false, isWebViewLike: false, level: 'none' as const, missing: ['diagnóstico indisponível'] }
@@ -90,6 +91,40 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
   const uaLine = useMemo(() => {
     try { return String((navigator as any)?.userAgent ?? 'user-agent desconhecido') } catch { return 'user-agent desconhecido' }
   }, [])
+
+  async function liberarFirewall() {
+    setFwBusy(true)
+    try {
+      const r = await services.firewallAllow()
+      setFw(r)
+    } catch (e: unknown) {
+      setFw({
+        allowed: false,
+        profile: fw?.profile ?? 'unknown',
+        program: fw?.program ?? '',
+        reason: e instanceof Error ? e.message : String(e ?? 'falha ao liberar'),
+      })
+    } finally {
+      setFwBusy(false)
+    }
+  }
+
+  async function abrirFirewall() {
+    setFwBusy(true)
+    try {
+      const r = await services.openFirewallConsole()
+      setFw(r)
+    } catch (e: unknown) {
+      setFw({
+        allowed: false,
+        profile: fw?.profile ?? 'unknown',
+        program: fw?.program ?? '',
+        reason: e instanceof Error ? e.message : String(e ?? 'falha ao abrir o firewall'),
+      })
+    } finally {
+      setFwBusy(false)
+    }
+  }
 
   async function copyReport() {
     setCopyError(null)
@@ -117,7 +152,7 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
   }
 
   return (
-    <div data-testid="diag-panel" style={{ fontFamily: 'Inter', color: t.text }}>
+    <div data-testid="diag-panel" style={{ fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", color: t.text }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
         <h3 style={{ fontWeight: 900, color: t.heading, margin: 0, fontSize: 17, flex: 1 }}>Diagnóstico de conexão</h3>
         {onClose && (
@@ -162,9 +197,8 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
                     {p.last_relay_error && <div>relay: {p.last_relay_error} · {p.relay_attempts ?? 0}x</div>}
                   </div>
                 )}
-                {/* ONLINE mas sem entregar: a causa está na REJEIÇÃO do receptor,
-                    não no link. Antes o painel mostrava "conectado" e nada mais,
-                    e o motivo morria num log invisível. */}
+                {
+}
                 {(p.last_reject || (p.send_gave_up ?? 0) > 0) && (
                   <div data-testid="diag-peer-reject" style={{ fontSize: 10.5, color: t.yellow, marginTop: 5, lineHeight: 1.5, fontFamily: "'JetBrains Mono', monospace" }}>
                     {p.last_reject && <div>recusado pelo peer: {p.last_reject}</div>}
@@ -188,6 +222,42 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
               {netDiag?.dht_ok === true && <div>DHT BitTorrent: <span style={{ color: t.green, fontWeight: 800 }}>ok</span> — descoberta descentralizada ativa</div>}
               {netDiag != null && netDiag.dht_ok === null && <div>DHT BitTorrent: estado ainda não informado</div>}
               {netDiag?.dht_ok === false && <div>DHT BitTorrent: <span style={{ color: t.yellow, fontWeight: 800 }}>off/falhou</span> — (DISTORRENT_NO_DHT, UDP bloqueado ou modo proxy/Tor)</div>}
+            </div>
+            {/* Firewall é a causa nº1 de "mesma rede e não conecta": sem regra
+                de entrada o Windows descarta a conexão do outro PC. */}
+            <div data-testid="diag-firewall" style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '8px 10px', fontSize: 11, color: t.muted, lineHeight: 1.5 }}>
+              {fw == null && 'firewall: não foi possível consultar neste modo'}
+              {fw != null && fw.allowed && (
+                <span>firewall: <span style={{ color: t.green, fontWeight: 800 }}>liberado</span> para este app ({fw.profile})</span>
+              )}
+              {fw != null && !fw.allowed && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <span>
+                    firewall: <span style={{ color: t.yellow, fontWeight: 800 }}>fechado</span> para este app
+                    {fw.profile !== 'unknown' ? ` (perfil ${fw.profile})` : ''} — conexões de ENTRADA são
+                    descartadas e os outros PCs não conseguem falar com este, mesmo na mesma rede.
+                  </span>
+                  {fw.reason && <span style={{ color: '#ff9c9c' }}>{fw.reason}</span>}
+                  <button
+                    onClick={() => void liberarFirewall()}
+                    disabled={fwBusy}
+                    style={{ alignSelf: 'flex-start', background: t.accent, color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontWeight: 800, fontSize: 12, cursor: fwBusy ? 'progress' : 'pointer', opacity: fwBusy ? 0.7 : 1 }}
+                  >
+                    {fwBusy ? 'liberando…' : 'Liberar no firewall'}
+                  </button>
+                  <button
+                    onClick={() => void abrirFirewall()}
+                    disabled={fwBusy}
+                    style={{ alignSelf: 'flex-start', background: 'transparent', color: t.heading, border: `1px solid ${t.border}`, borderRadius: 8, padding: '8px 14px', fontWeight: 800, fontSize: 12, cursor: 'pointer' }}
+                  >
+                    Abrir Firewall do Windows
+                  </button>
+                  <span style={{ fontSize: 10.5 }}>
+                    o Windows pede administrador para criar a regra; se o botão acima falhar, use
+                    «Abrir Firewall do Windows» → Permitir um aplicativo → marque o DisTorrent.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -237,3 +307,4 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
     </div>
   )
 }
+// Seção 1: fim

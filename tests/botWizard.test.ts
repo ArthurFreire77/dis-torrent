@@ -67,7 +67,7 @@ test('documentação cobre o que o bot NÃO faz (honestidade no passo)', () => {
   assert.match(texto, /dono/, 'quem executa o bot')
   assert.match(texto, /fechado|não responde/, 'app fechado não responde')
   assert.match(texto, /token/, 'token é credencial')
-  assert.match(texto, /não reage/, 'gatilhos que não existem')
+  assert.match(texto, /não faz|não executa/, 'limites do bot')
 })
 
 test('markdown baixável: nome de arquivo, seções obrigatórias e sem token', () => {
@@ -80,7 +80,7 @@ test('markdown baixável: nome de arquivo, seções obrigatórias e sem token', 
   for (const trecho of [
     'o que um bot não pode fazer',
     'por que um bot não vira vírus',
-    '16 kb',
+    '64 kb',
     'placeholders',
     'modelos prontos',
     'exemplos prontos',
@@ -89,7 +89,11 @@ test('markdown baixável: nome de arquivo, seções obrigatórias e sem token', 
   ]) {
     assert.ok(low.includes(trecho), `o .md precisa falar de "${trecho}"`)
   }
-  assert.match(md, /executa shell|não executa código/i, 'barreira de processo citada')
+  // O documento precisa acompanhar o motor: DSL, admin e ponte existem.
+  for (const trecho of ['script (dsl)', 'permissões administrativas', 'ponte local']) {
+    assert.ok(low.includes(trecho), `o .md precisa falar de "${trecho}"`)
+  }
+  assert.match(md, /executa shell|não executa código|não executa shell/i, 'barreira de processo citada')
   assert.ok(!/bot_[a-z0-9]{6,}_/.test(md), 'o .md não pode vazar token')
   assert.ok(!md.includes('\r'), 'Markdown gerado usa \\n (sem CRLF)')
 

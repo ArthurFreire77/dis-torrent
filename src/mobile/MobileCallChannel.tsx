@@ -160,7 +160,7 @@ export default function MobileCallChannel({
     return (
       <div style={{
         height: '100dvh', display: 'flex', flexDirection: 'column',
-        background: '#0b0c0f', color: T.text, fontFamily: 'Inter', overflow: 'hidden',
+        background: '#0b0c0f', color: T.text, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", overflow: 'hidden',
       }}>
         {barraTopo}
 
@@ -240,7 +240,7 @@ export default function MobileCallChannel({
   return (
     <div style={{
       height: '100dvh', display: 'flex', flexDirection: 'column',
-      background: T.main, color: T.text, fontFamily: 'Inter', overflow: 'hidden',
+      background: T.main, color: T.text, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", overflow: 'hidden',
     }}>
       {barraTopo}
 

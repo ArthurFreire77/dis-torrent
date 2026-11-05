@@ -155,7 +155,7 @@ function AuthCard({ children }: { children: any }) {
     { icon: Icons.key, title: 'Sua chave', desc: 'sem conta online' },
   ]
   return (
-    <div style={{ minHeight: '100vh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: 'Inter' }}>
+    <div style={{ minHeight: '100vh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}>
       <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 28, width: 440, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
         <div style={{ textAlign: 'center', marginBottom: 14 }}>
           <span style={{ fontSize: 26, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
@@ -2116,7 +2116,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   )
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: bg, color: text, fontFamily: 'Inter', ['--sidebar' as any]: sidebarBg } as any}>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: bg, color: text, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", ['--sidebar' as any]: sidebarBg } as any}>
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <div style={railStyle} className="hide-mobile">
           {}
