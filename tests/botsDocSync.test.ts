@@ -135,6 +135,22 @@ test('o .md do painel continua sem token e sem CRLF depois do v3', () => {
   assert.equal((md.match(/^```/gm) ?? []).length % 2, 0, 'cerca de código desbalanceada')
 })
 
+test('as seções do .md do painel estão em ordem numérica', () => {
+  // A 9.1 já apareceu depois da 10 porque foi inserida no meio de outro bloco.
+  // Documento fora de ordem faz o leitor procurar a seção no lugar errado.
+  const md = botDocsMarkdown()
+  const numeros: number[] = []
+  for (const m of md.matchAll(/^## (\d+(?:\.\d+)?)\./gm)) numeros.push(Number(m[1]))
+  assert.ok(numeros.length >= 10, `poucas seções numeradas: ${numeros.length}`)
+  for (let i = 1; i < numeros.length; i += 1) {
+    assert.ok(
+      numeros[i] >= numeros[i - 1],
+      `seção ${numeros[i]} aparece depois de ${numeros[i - 1]}: ${numeros.join(', ')}`,
+    )
+  }
+  assert.equal(numeros[0], 1, 'o documento começa na seção 1')
+})
+
 test('a config exportada do painel é aceita de novo pelo parser (ida e volta v3)', () => {
   const cfg = defaultBotConfig()
   cfg.webhook = { url: 'https://exemplo.com/hook' }
