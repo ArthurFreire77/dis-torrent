@@ -39,6 +39,20 @@ pub struct Limits {
     /// porta aberta para script — quem faz flood de join é barrado.
     pub join_attempt_per_peer_10s: u32,
     pub join_attempt_burst: u32,
+    /// Atestação de build: desafio/resposta por peer. Baixo de propósito —
+    /// um cliente honesto manda um desafio e uma resposta por conexão.
+    pub attest_per_peer_10s: u32,
+    pub attest_burst: u32,
+    /// Manifestos empurrados por peer (P2P offline). Um punhado por minuto é
+    /// o suficiente para sincronizar; acima disso é abuso.
+    pub manifest_push_per_peer_10s: u32,
+    pub manifest_push_burst: u32,
+    /// Assinaturas inválidas: cada uma custa trabalho criptográfico. Passou do
+    /// teto, o peer fica em silêncio até a janela virar.
+    pub attest_fail_per_peer_10s: u32,
+    pub attest_fail_burst: u32,
+    /// Teto global de respostas de atestação em processamento simultâneo.
+    pub attest_global_conc: usize,
 }
 
 impl Default for Limits {
@@ -73,6 +87,13 @@ impl Default for Limits {
             friend_req_burst: 12,
             join_attempt_per_peer_10s: 6,
             join_attempt_burst: 3,
+            attest_per_peer_10s: 10,
+            attest_burst: 6,
+            manifest_push_per_peer_10s: 4,
+            manifest_push_burst: 2,
+            attest_fail_per_peer_10s: 3,
+            attest_fail_burst: 2,
+            attest_global_conc: 16,
         }
     }
 }
@@ -159,6 +180,22 @@ impl Limits {
                 d.join_attempt_per_peer_10s,
             ),
             join_attempt_burst: env_num("DISTORRENT_LIMIT_JOIN_BURST", d.join_attempt_burst),
+            attest_per_peer_10s: env_num("DISTORRENT_LIMIT_ATTEST_10S", d.attest_per_peer_10s),
+            attest_burst: env_num("DISTORRENT_LIMIT_ATTEST_BURST", d.attest_burst),
+            manifest_push_per_peer_10s: env_num(
+                "DISTORRENT_LIMIT_MANIFEST_PUSH_10S",
+                d.manifest_push_per_peer_10s,
+            ),
+            manifest_push_burst: env_num(
+                "DISTORRENT_LIMIT_MANIFEST_PUSH_BURST",
+                d.manifest_push_burst,
+            ),
+            attest_fail_per_peer_10s: env_num(
+                "DISTORRENT_LIMIT_ATTEST_FAIL_10S",
+                d.attest_fail_per_peer_10s,
+            ),
+            attest_fail_burst: env_num("DISTORRENT_LIMIT_ATTEST_FAIL_BURST", d.attest_fail_burst),
+            attest_global_conc: env_num("DISTORRENT_LIMIT_ATTEST_CONC", d.attest_global_conc),
         }
     }
 }
@@ -334,6 +371,11 @@ pub struct RejectedCounters {
     pub join_attempt: u64,
     pub dial_conc: u64,
     pub frames_allowed: u64,
+    pub attest: u64,
+    pub manifest_push: u64,
+    /// Assinatura inválida / prova inconsistente. Contador de diagnóstico, não
+    /// gatilho de banimento (o custo já é limitado pelo bucket).
+    pub attest_invalid: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -361,8 +403,12 @@ pub struct NetLimiter {
     call_sig: Mutex<KeyedBuckets>,
     friend_req: Mutex<KeyedBuckets>,
     join_attempt: Mutex<KeyedBuckets>,
+    attest: Mutex<KeyedBuckets>,
+    manifest_push: Mutex<KeyedBuckets>,
+    attest_fail: Mutex<KeyedBuckets>,
     handshake_slots: Arc<Slots>,
     dial_slots: Arc<Slots>,
+    attest_slots: Arc<Slots>,
     rejected: Mutex<RejectedCounters>,
 }
 
@@ -427,8 +473,21 @@ impl NetLimiter {
                 l.join_attempt_per_peer_10s as u64,
                 l.join_attempt_burst as u64,
             )),
+            attest: Mutex::new(KeyedBuckets::new(
+                l.attest_per_peer_10s as u64,
+                l.attest_burst as u64,
+            )),
+            manifest_push: Mutex::new(KeyedBuckets::new(
+                l.manifest_push_per_peer_10s as u64,
+                l.manifest_push_burst as u64,
+            )),
+            attest_fail: Mutex::new(KeyedBuckets::new(
+                l.attest_fail_per_peer_10s as u64,
+                l.attest_fail_burst as u64,
+            )),
             handshake_slots: Slots::new(l.handshake_conc),
             dial_slots: Slots::new(l.dial_conc),
+            attest_slots: Slots::new(l.attest_global_conc),
             rejected: Mutex::new(RejectedCounters::default()),
         };
         Arc::new(lim)
@@ -509,8 +568,27 @@ impl NetLimiter {
                 l.join_attempt_per_peer_10s as u64,
                 l.join_attempt_burst as u64,
             );
+        self.attest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reconfig(l.attest_per_peer_10s as u64, l.attest_burst as u64);
+        self.manifest_push
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reconfig(
+                l.manifest_push_per_peer_10s as u64,
+                l.manifest_push_burst as u64,
+            );
+        self.attest_fail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .reconfig(
+                l.attest_fail_per_peer_10s as u64,
+                l.attest_fail_burst as u64,
+            );
         self.handshake_slots.reconfig(l.handshake_conc);
         self.dial_slots.reconfig(l.dial_conc);
+        self.attest_slots.reconfig(l.attest_global_conc);
     }
 
     // Seção 3: bump
@@ -712,6 +790,76 @@ impl NetLimiter {
         g
     }
 
+    /// Teto de verificações criptográficas simultâneas: uma assinatura inválida
+    /// não pode virar CPU ilimitada (o atacante controla quantas manda).
+    pub fn try_attest_slot(&self) -> Option<SlotGuard> {
+        let g = try_slot(&self.attest_slots);
+        if g.is_none() {
+            self.bump(|r| r.attest += 1);
+        }
+        g
+    }
+
+    pub fn allow_attest(&self, peer_fp: &str) -> Decision {
+        let ok = self
+            .attest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_at(peer_fp, 1.0, Instant::now());
+        if ok {
+            Decision::Allowed
+        } else {
+            self.bump(|r| r.attest += 1);
+            Decision::Blocked
+        }
+    }
+
+    pub fn allow_manifest_push(&self, peer_fp: &str) -> Decision {
+        let ok = self
+            .manifest_push
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_at(peer_fp, 1.0, Instant::now());
+        if ok {
+            Decision::Allowed
+        } else {
+            self.bump(|r| r.manifest_push += 1);
+            Decision::Blocked
+        }
+    }
+
+    /// Registra uma falha de atestação (assinatura inválida / prova
+    /// inconsistente). Quando o bucket estoura, o peer entra em silêncio de
+    /// atestação: as respostas seguintes são descartadas SEM trabalho
+    /// criptográfico até a janela recarregar.
+    ///
+    /// Devolve `true` enquanto ainda pode verificar.
+    pub fn note_attest_failure(&self, peer_fp: &str) -> bool {
+        let ok = self
+            .attest_fail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_at(peer_fp, 1.0, Instant::now());
+        if !ok {
+            self.bump(|r| r.attest_invalid += 1);
+        }
+        ok
+    }
+
+    /// Consulta SEM consumir: o peer ainda tem orçamento para uma nova
+    /// tentativa de atestação? Usado antes de gastar CPU verificando.
+    pub fn attest_failure_budget(&self, peer_fp: &str) -> bool {
+        let b = self.attest_fail.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        b.cells
+            .get(peer_fp)
+            .map(|c| {
+                let dt = now.duration_since(c.last).as_secs_f64().max(0.0);
+                (c.tokens + dt * b.rate_per_s).min(b.burst) >= 1.0
+            })
+            .unwrap_or(true)
+    }
+
     pub fn forget_peer(&self, peer_fp: &str) {
         self.frames_ip
             .lock()
@@ -746,6 +894,18 @@ impl NetLimiter {
             .unwrap_or_else(|e| e.into_inner())
             .forget(peer_fp);
         self.join_attempt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget(peer_fp);
+        self.attest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget(peer_fp);
+        self.manifest_push
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget(peer_fp);
+        self.attest_fail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .forget(peer_fp);
@@ -787,8 +947,12 @@ mod tests {
             call_sig: Mutex::new(KeyedBuckets::new(240, 160)),
             friend_req: Mutex::new(KeyedBuckets::new(20, 12)),
             join_attempt: Mutex::new(KeyedBuckets::new(6, 3)),
+            attest: Mutex::new(KeyedBuckets::new(10, 6)),
+            manifest_push: Mutex::new(KeyedBuckets::new(4, 2)),
+            attest_fail: Mutex::new(KeyedBuckets::new(3, 2)),
             handshake_slots: Slots::new(64),
             dial_slots: Slots::new(64),
+            attest_slots: Slots::new(16),
             rejected: Mutex::new(RejectedCounters::default()),
         };
         l

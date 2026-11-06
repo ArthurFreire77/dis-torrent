@@ -10,6 +10,7 @@ pub mod moderation;
 pub mod names;
 pub mod net;
 pub mod protocol;
+pub mod release;
 pub mod social;
 pub mod storage;
 pub mod stormvault;

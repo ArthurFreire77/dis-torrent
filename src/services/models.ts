@@ -603,8 +603,12 @@ export interface DisTorrentServices {
   webrtcReport(info: string): Promise<void>
 
   updateCheck(): Promise<import('./updater').UpdateInfo>
-  updateDownload(url: string, name: string, digest: string): Promise<string>
+  updateDownload(name: string): Promise<string>
   updateApply(path: string): Promise<void>
+  updateVerifyReady(path: string): Promise<import('./updater').PendingUpdate>
+  updateTrustInfo(): Promise<import('./updater').TrustInfo>
+  peerTrustInfo(): Promise<import('./updater').PeerTrustPolicyInfo>
+  peerTrustPolicySet(policy: string): Promise<void>
   updateAutoGet(): Promise<boolean>
   updateAutoSet(enabled: boolean): Promise<void>
   updateFlagGet(key: string): Promise<string | null>

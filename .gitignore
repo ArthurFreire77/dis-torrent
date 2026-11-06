@@ -4,6 +4,14 @@
 # AGENTS.md é LOCAL de propósito (guia de agents com caminhos/senha da
 # máquina) — o deploy e as regras versionadas vivem em CONTRIBUTING/EXECUTAR.
 AGENTS.md
+# .opencode/ é LOCAL pelo mesmo motivo: as skills trazem caminhos absolutos
+# desta máquina (E:\Programas\..., C:\Users\lucas\...) e o runner de verificação.
+.opencode/
+# .github/: o dono decidiu que CI e release NÃO ficam no GitHub. Os workflows
+# continuam no disco (cópia em .local-ci/) para rodar/publicar localmente.
+.github/
+# Cópia local dos workflows (referência para rodar à mão).
+.local-ci/
 .env
 .env.*
 !.env.example
@@ -16,10 +24,25 @@ keystore.properties
 android-keystore/
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuração local do Cargo (o template .example É versionado)
+# Chaves de assinatura de RELEASE (Ed25519, 2-de-3) — NUNCA versionar.
+# A cerimônia grava em ~/.distorrent-release-keys (fora do repo). Estas regras
+# existem para o caso de alguém gerar no lugar errado.
 # ─────────────────────────────────────────────────────────────────────────────
-.cargo/config.toml
-.cargo/config
+*.key
+signer-*.key
+release-keys/
+release-keys-*/
+distorrent-release-keys/
+trust-set.txt
+trust-set-*.txt
+*.distorrent-key
+!tools/release-trust/**/*.example
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuração local do Cargo (o template .example também é local: caminhos de
+# NDK/mingw são desta máquina). Quem clonar gera o seu.
+# ─────────────────────────────────────────────────────────────────────────────
+.cargo/
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Node / Vite / React / TypeScript

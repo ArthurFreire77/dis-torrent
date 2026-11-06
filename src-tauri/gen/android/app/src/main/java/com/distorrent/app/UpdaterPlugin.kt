@@ -1,6 +1,8 @@
 package com.distorrent.app
 
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -11,9 +13,61 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
+import java.security.MessageDigest
 
 @TauriPlugin
 class UpdaterPlugin(private val activity: android.app.Activity) : Plugin(activity) {
+
+  /// Certificado do app instalado (SHA-256 do signer).
+  private fun assinaturaInstalada(): String? {
+    return try {
+      val pm = activity.packageManager
+      val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        pm.getPackageInfo(activity.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+      } else {
+        @Suppress("DEPRECATION")
+        pm.getPackageInfo(activity.packageName, PackageManager.GET_SIGNATURES)
+      }
+      val signers: Array<Signature>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        info.signingInfo?.apkContentsSigners
+      } else {
+        @Suppress("DEPRECATION")
+        info.signatures
+      }
+      val sig = signers?.firstOrNull() ?: return null
+      val md = MessageDigest.getInstance("SHA-256")
+      md.update(sig.toByteArray())
+      md.digest().joinToString("") { "%02x".format(it) }
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  /// Certificado de um APK lido do arquivo (fora do pacote instalado).
+  private fun assinaturaDoApk(file: File): String? {
+    return try {
+      val pm = activity.packageManager
+      val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        PackageManager.GET_SIGNING_CERTIFICATES
+      } else {
+        @Suppress("DEPRECATION")
+        PackageManager.GET_SIGNATURES
+      }
+      val info = pm.getPackageArchiveInfo(file.absolutePath, flags) ?: return null
+      val signers: Array<Signature>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        info.signingInfo?.apkContentsSigners
+      } else {
+        @Suppress("DEPRECATION")
+        info.signatures
+      }
+      val sig = signers?.firstOrNull() ?: return null
+      val md = MessageDigest.getInstance("SHA-256")
+      md.update(sig.toByteArray())
+      md.digest().joinToString("") { "%02x".format(it) }
+    } catch (_: Throwable) {
+      null
+    }
+  }
 
   @Command
   fun installApk(invoke: Invoke, path: String) {
@@ -29,6 +83,19 @@ class UpdaterPlugin(private val activity: android.app.Activity) : Plugin(activit
       }
       if (!file.name.lowercase().endsWith(".apk")) {
         invoke.reject("o arquivo não é um APK: ${file.name}")
+        return
+      }
+
+      // Continuidade de assinatura: um APK com outra chave é recusado AQUI,
+      // antes de qualquer intent. O Android também recusaria, mas o usuário
+      // veria "app não instalado" sem saber por quê.
+      val atual = assinaturaInstalada()
+      val novo = assinaturaDoApk(file)
+      if (atual == null || novo == null || atual != novo) {
+        invoke.reject(
+          "o APK não foi assinado com a mesma chave do DisTorrent instalado — " +
+            "atualização recusada (baixe o APK oficial da release)",
+        )
         return
       }
 

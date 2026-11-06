@@ -12,6 +12,17 @@ export interface UpdateInfo {
   platform: string
   label_mismatch?: boolean
   asset_version?: string
+  /** Procedência comprovada por 2-de-3 no Rust (nunca pela UI). */
+  verified?: boolean
+  manifest_hash?: string
+  security_epoch?: number
+  valid_signatures?: number
+  trust_epoch?: number
+  commit?: string
+  channel?: string
+  self_integrity?: 'CONFERE' | 'DIVERGE' | 'UNAVAILABLE'
+  verification_available?: boolean
+  verification_note?: string
 }
 
 export interface ParsedVersion {
@@ -79,6 +90,21 @@ export function compareVersions(a: string, b: string): number {
 
 export function isNewer(current: string, latest: string): boolean {
   return compareVersions(latest, current) > 0
+}
+
+/**
+ * Só exibe "atualização verificada" quando o Rust comprovou 2-de-3. Esta
+ * função é pura de propósito: a UI formata, ela não decide.
+ */
+export function procedenciaResumo(info: {
+  verified?: boolean
+  valid_signatures?: number
+  security_epoch?: number
+}): string {
+  if (!info.verified) return 'procedência NÃO comprovada'
+  const s = info.valid_signatures ?? 0
+  const e = info.security_epoch ?? 0
+  return `${s} assinaturas válidas · época ${e}`
 }
 
 export function shortNotes(notes: string, maxLines = 6): string {

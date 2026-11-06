@@ -509,6 +509,8 @@ fn boot_engine_with_secret(
             state.data_dir.clone(),
         );
         engine.start().map_err(err)?;
+        // Carrega raiz de confiança + cache de manifestos do banco local.
+        engine.init_release_trust();
         *state.engine.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine.clone());
         forward_events(app, engine);
         Ok(())
@@ -558,6 +560,8 @@ fn boot_engine_with_store(
             state.data_dir.clone(),
         );
         engine.start().map_err(err)?;
+        // Carrega raiz de confiança + cache de manifestos do banco local.
+        engine.init_release_trust();
         *state.engine.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine.clone());
         forward_events(app, engine);
         Ok(())
@@ -4953,6 +4957,11 @@ fn main() {
             updater::update_check,
             updater::update_download,
             updater::update_apply,
+            updater::update_verify_ready,
+            updater::update_trust_info,
+            updater::update_trust_apply,
+            updater::peer_trust_info,
+            updater::peer_trust_policy_set,
             updater::update_auto_get,
             updater::update_auto_set,
             updater::update_flag_get,

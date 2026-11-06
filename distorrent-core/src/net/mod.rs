@@ -19,6 +19,7 @@ pub mod netlimit;
 pub mod peer_relay;
 pub mod reaction_limit;
 pub mod relay;
+pub mod release_trust;
 pub mod socks5;
 pub mod stun;
 pub mod transport;

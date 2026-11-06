@@ -460,6 +460,29 @@ pub enum SecureFrame {
         emoji: crate::social::EmojiRow,
     },
     PresencePing,
+    /// Desafio de atestação de build (proto_v >= 5). O nonce impede replay
+    /// entre conexões e o hash do transcript amarra a resposta a ESTA sessão.
+    BuildChallenge {
+        nonce_hex: String,
+        transcript_hash: String,
+        #[serde(default)]
+        policy: String,
+    },
+    /// Resposta assinada ao desafio, com o manifesto assinado (wire hex).
+    BuildAttestResponse {
+        attestation_hex: String,
+    },
+    /// Push de manifesto recebido de um peer. O receptor RE-VERIFICA com as
+    /// próprias chaves antes de guardar; nunca é ordem de atualização.
+    BuildManifestPush {
+        manifest_hex: String,
+    },
+    /// Aviso de que existe atualização oficial. É só um aviso — o download é
+    /// decidido localmente, contra o manifesto verificado.
+    UpdateHint {
+        version: String,
+        manifest_hash: String,
+    },
     Typing {
         conv_id: String,
         until_ms: i64,

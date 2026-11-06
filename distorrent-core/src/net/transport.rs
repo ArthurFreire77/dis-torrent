@@ -361,7 +361,12 @@ fn build_nonce(dir: u8, counter: u64) -> Nonce {
     Nonce::from(n)
 }
 
-pub const PROTO_V: u32 = 4;
+/// Versão do protocolo anunciada no `Hello`/`HelloAck`.
+///
+/// 5 acrescenta os frames de atestação de build. Não há mudança de formato nos
+/// frames antigos: peers com `proto_v < 5` continuam conectando e conversando
+/// normalmente, só não são desafiados (ficam NAO_VERIFICADO, que é honesto).
+pub const PROTO_V: u32 = 5;
 
 pub async fn punch_dial(local_port: u16, remote: std::net::SocketAddr) -> Result<TcpStream> {
     let socket = match remote.ip() {
@@ -413,6 +418,13 @@ pub struct HandshakeResult {
     pub peer_nickname: String,
     pub initiator: bool,
     pub peer_proto_v: u32,
+    /// blake3 do transcript desta conexão, em hex. A atestação de build é
+    /// assinada sobre este valor: prova colhida em outra sessão não serve.
+    pub transcript_hash: String,
+}
+
+fn transcript_hex(transcript: &[u8]) -> String {
+    hex::encode(blake3::hash(transcript).as_bytes())
 }
 
 pub async fn handshake(
@@ -501,7 +513,8 @@ where
             .await?;
             // Seção 3: key
             let key = session_key(&eph, &ack.eph_pub, &nonce, &ack.nonce)?;
-            Ok((ack, key))
+            let th = transcript_hex(&transcript);
+            Ok((ack, key, th))
         } else {
             let HandshakeFrame::Hello(hello) = read_json::<HandshakeFrame>(&mut read).await? else {
                 return Err(DistorrentError::Protocol("esperava Hello".into()));
@@ -537,6 +550,7 @@ where
                 ));
             }
             let key = session_key(&eph, &hello.eph_pub, &hello.nonce, &nonce)?;
+            let th = transcript_hex(&transcript);
             Ok((
                 HelloAck {
                     fp: hello.fp,
@@ -548,13 +562,14 @@ where
                     proto_v: hello.proto_v,
                 },
                 key,
+                th,
             ))
         }
     })
     .await
     .map_err(|_| DistorrentError::Protocol("handshake timeout".into()))??;
 
-    let (peer, key) = result;
+    let (peer, key, transcript_hash) = result;
     debug!(peer_fp = %peer.fp, initiator, "handshake concluído");
     Ok(HandshakeResult {
         session: Session::new(read, write, key, initiator),
@@ -563,6 +578,7 @@ where
         peer_nickname: peer.nickname,
         initiator,
         peer_proto_v: peer.proto_v,
+        transcript_hash,
     })
 }
 
@@ -641,6 +657,7 @@ where
                             .await?;
                         }
                         let key = session_key(&eph, &ack.eph_pub, &nonce, &ack.nonce)?;
+                        let th = transcript_hex(&transcript);
                         debug!(peer_fp = %ack.fp, initiator, "handshake relay concluído (dial)");
                         return Ok(HandshakeResult {
                             session: Session::new(
@@ -654,6 +671,7 @@ where
                             peer_nickname: ack.nickname,
                             initiator,
                             peer_proto_v: ack.proto_v,
+                            transcript_hash: th,
                         });
                     }
                     Ok(HandshakeFrame::Hello(peer_hello)) => {
@@ -716,6 +734,7 @@ where
                                                     &peer_hello.nonce,
                                                     &nonce,
                                                 )?;
+                                                let th = transcript_hex(&transcript);
                                                 debug!(peer_fp = %peer_hello.fp, "handshake relay concluído (cruzado→responder)");
                                                 return Ok(HandshakeResult {
                                                     session: Session::new(
@@ -732,6 +751,7 @@ where
                                                     peer_nickname: peer_hello.nickname.clone(),
                                                     initiator: false,
                                                     peer_proto_v: peer_hello.proto_v,
+                                                    transcript_hash: th,
                                                 });
                                             }
                                             Ok(HandshakeFrame::Hello(dup))
@@ -838,6 +858,7 @@ where
                             ));
                         }
                         let key = session_key(&eph, &hello.eph_pub, &hello.nonce, &nonce)?;
+                        let th = transcript_hex(&transcript);
                         debug!(peer_fp = %hello.fp, initiator, "handshake relay concluído (responder)");
                         return Ok(HandshakeResult {
                             session: Session::new(
@@ -851,6 +872,7 @@ where
                             peer_nickname: hello.nickname.clone(),
                             initiator,
                             peer_proto_v: hello.proto_v,
+                            transcript_hash: th,
                         });
                     }
                     Ok(HandshakeFrame::Hello(dup)) if dup.fp == hello.fp => {

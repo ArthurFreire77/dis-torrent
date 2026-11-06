@@ -44,6 +44,13 @@
 | **Vazamento de metadados** | Broadcast UDP anuncia fp+nickname na LAN (necessário p/ discovery) | Modo stealth / intervalo variável futuro |
 | **Ataque de sincronização** (peer envia lixo ao reconectar) | Toda mensagem do outbox é assinada pelo autor e revalidada ao chegar | — |
 | **Abuso de permissões** | N/A nesta fase (sem comunidades). Fase comunidades: validação no CORE, nunca na UI | — |
+| **Release falsa** (instalador adulterado servido pelo GitHub, CDN ou espelho) | Manifesto canônico assinado 2-de-3 com chaves Ed25519 **offline**; hash SHA-256 e tamanho do instalador vêm do manifesto, não da API do GitHub; tag do GitHub não é fonte de versão. Ver [`docs/RELEASE_TRUST.md`](docs/RELEASE_TRUST.md) | Quem controlar 2 das 3 chaves assina qualquer coisa. Não há transparência pública de log de releases |
+| **Download adulterado em trânsito** | HTTPS + allowlist de hosts + revalidação de **cada** redirect + SHA-256 e tamanho conferidos contra o manifesto assinado; divergência apaga o `.part`; `update_apply` reconfere o hash imediatamente antes de executar | Comprometimento do build que assina (2 chaves) ou do processo em memória não é detectado |
+| **Rollback / downgrade para versão vulnerável** | `security_epoch` monotônico e piso local `release.epoch_floor`, combinado com `min_security_epoch` declarado pela autoridade (`piso = max(local, declarado)`); epoch abaixo do piso = `OBSOLETO`, recusado mesmo com 2 assinaturas válidas | O piso local só cresce para valores já aceitos; não há piso por arquitetura/canal |
+| **Replay de atestação de build** | Nonce de 32 bytes novo por consulta + binding ao `blake3(transcript)` do handshake + fingerprint do peer; nonce consumido após o veredito; `attest_nonce` e `attest_transcript` por peer | Sem chaves locais, `verification_available = false` e o estado fica `NAO_VERIFICADO` (informação, não bloqueio) |
+| **Peer empurrando manifesto falso** | `BuildManifestPush` é re-verificado com as chaves **locais** (`ReleaseTrust::accept`) e só entra no cache se `RELEASE_VERIFICADA`; rate limit 4/10 s por peer; nunca é ordem de atualização | Um manifesto válido de versão mais nova é aceito como informação; o piso só barra versão mais antiga |
+| **DoS pela camada de atestação** (assinaturas inválidas em massa, manifestos gigantes) | Buckets por peer (atestação 10/10 s, push 4/10 s), orçamento de falhas consultado **antes** da verificação (`attest_failure_budget`) e consumido por `note_attest_failure`, teto global de 16 verificações simultâneas (`attest_global_conc`), limite de 256 KiB de hex na resposta e de 64 KiB de corpo no manifesto | O orçamento de falhas reseta com a janela de 10 s; um atacante com muitas identidades multiplica o custo (mitigado por peer, não globalmente) |
+| **Comprometimento de uma chave de release** | Limiar de 2 assinaturas: uma chave sozinha não assina release, não roda rotação e não muda o conjunto. Rotação exige 2 assinaturas do conjunto **atual**, epoch nova e continuidade (≥ 1 chave em comum) | Duas chaves comprometidas = autoridade tomada. Se duas forem perdidas ao mesmo tempo, não há recuperação criptográfica dentro do modelo |
 
 ## Bootstrap HTTP (DISTORRENT_BOOTSTRAP_URL) — o que sai do seu dispositivo
 
@@ -89,6 +96,68 @@ Nunca logamos: chave privada, corpos de mensagem, segredos de sessão. Logs cobr
    comprimento do circuito é configuração do SEU Tor (padrão 3). Qualquer
    contagem diferente seria marketing, não engenharia.
 
+## Autenticidade de release — limites explícitos
+
+Esta seção existe para que ninguém leia "assinado" como "seguro contra tudo".
+Spec completa em [`docs/RELEASE_TRUST.md`](docs/RELEASE_TRUST.md).
+
+1. **Integridade do processo em execução NÃO é garantida.** O manifesto assinado
+   prova a procedência do **artefato** (versão, hash, URL, arquitetura). A
+   assinatura de identidade de um peer prova **posse da chave**, não que o
+   executável dele está intacto. `SelfIntegrityState` compara o SHA-256 do
+   arquivo do executável com um valor local — o arquivo pode ser trocado depois
+   do boot e a memória pode ser alterada em runtime.
+   Não existe atestação de runtime sem hardware medido.
+2. **Atestação de hardware está ausente.** Nenhuma plataforma deste build
+   produz prova verificável: TPM quote exigiria cadeia EK/endosso + política de
+   PCR + admin; IMA/TPM no Linux exigiria root; Key Attestation do Android
+   exigiria a cadeia raiz da Google embutida (não implementado). O campo
+   `hardware.proof_available` é **sempre `false`** com o motivo, e o receptor
+   recalcula localmente — um peer não se auto-promove a
+   `ATESTACAO_DE_HARDWARE`. O estado `ATESTACAO_DE_HARDWARE` é inalcançável.
+3. **Um usuário com acesso de escrita local derrota a verificação.** Quem pode
+   gravar no `distorrent.db` pode mudar `release.epoch_floor`,
+   `release.trust`, `release.self_integrity` ou `release.update_pending`, e quem
+   pode gravar na pasta do app pode trocar o executável. A camada é contra
+   *origem remota comprometida*, não contra *máquina local comprometida*. O
+   cache de manifestos é re-verificado no boot, o que impede que um cache
+   adulterado vire confiança — mas não impede adulterar as próprias chaves de
+   confiança gravadas.
+4. **Comprometimento da conta do GitHub, sozinho, não assina release.** O
+   atacante pode publicar assets, trocar `distorrent-manifest.bin`, apagar
+   releases e mudar notas — mas o manifesto forjado não verifica sem **2 das 3**
+   chaves privadas offline. Efeitos possíveis: negar atualização (apagar a
+   release), oferecer uma release antiga (recusada pelo piso de epoch) e enganar
+   quem baixa o instalador manualmente **sem** passar pelo app (aí a proteção é
+   o hash/assinatura que o usuário confere à mão).
+5. **Duas chaves comprometidas = autoridade tomada.** O limiar é 2 de 3 (ou
+   2 de até 5); com duas chaves o atacante assina release e rotação. É o custo
+   de qualquer esquema de limiar. Mitigação é operacional (3 locais separados,
+   cerimônia offline), não criptográfica.
+6. **Perda de duas chaves = sem recuperação.** Rotação exige 2 assinaturas do
+   conjunto **atual**. Se duas chaves forem perdidas ao mesmo tempo, não há
+   caminho criptográfico para publicar um conjunto novo; só um build novo com
+   outro `TRUST_SET_BOOTSTRAP` (e a confiança dos usuários nele) resolve.
+7. **Não há transparência pública de log.** Nada append-only e verificável
+   externamente registra quais manifestos existiram. Quem controla o GitHub pode
+   **esconder** uma release (não pode forjar uma).
+8. **Não há sandbox de execução.** Depois que `update_apply` inicia o
+   instalador, o app não controla mais o que ele faz; um `.deb` é entregue ao
+   gerenciador do sistema sem validação de pacote.
+9. **A raiz de confiança está embutida, mas é uma única cerimônia.** Este build
+   carrega epoch 1 com limiar 2-de-3. Não existe override em runtime (nem env,
+   nem arquivo, nem comando) — a constante é compilada. Se ela for esvaziada, a
+   verificação fica indisponível e o atualizador não oferece update (fail-closed,
+   nunca "confia em todos").
+10. **`SelfIntegrityState` fica `UNAVAILABLE` hoje.** Não há caminho que grave o
+    SHA-256 esperado do executável: o `update_apply` deixou de gravar o hash do
+    instalador (seria `DIVERGE` garantido) e o manifesto não publica o hash do
+    executável como asset próprio. A medição existe, a referência não.
+11. **Não há build reprodutível verificado.** O `commit` é assinado no
+    manifesto, mas nada no cliente reconstrói o binário para comparar.
+12. **Não há sandbox de execução.** Depois que o instalador é iniciado, o app não
+    controla o que ele faz.
+
 ## Rate limits e tetos de recurso (net/`netlimit.rs`)
 
 Todo caminho de entrada tem limite, em dois andares — **throttle** (excedente
@@ -110,6 +179,9 @@ de frames/s não substitui teto de bytes por mensagem. Defaults (env
 | Pedidos de chunk | 200/10s, burst 120 | — | — |
 | Sinalização de chamada (ICE) | 240/10s, burst 160 | — | — |
 | FriendRequest | 20/10s, burst 12 | — | — |
+| Atestação de build (desafio/resposta) | 10/10s, burst 6 | — (descarta) | 16 verificações simultâneas |
+| Push de manifesto de peer | 4/10s, burst 2 | — (descarta) | — |
+| Falhas de atestação | 3/10s, burst 2 | — | — |
 | Loops de dial outbound | — | — | 64 concorrentes |
 
 Isto É a fronteira anti-DoS do transporte: um par autenticado não consegue

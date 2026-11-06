@@ -94,3 +94,18 @@ console.log(`url: ${final.html_url}`)
 for (const a of final.assets ?? []) {
   console.log(`  ${a.name.padEnd(52)} ${(a.size / 1048576).toFixed(1)} MB  ${a.digest ?? '(sem digest)'}`)
 }
+
+// O APP SÓ SE ATUALIZA COM MANIFESTO ASSINADO. Se a release foi publicada sem
+// `distorrent-manifest.bin`, todo cliente recusa a atualização (fail-closed).
+// Falhar aqui, alto, evita descobrir isso depois que a release já está no ar.
+const temManifesto = (final.assets ?? []).some((a) => a.name === 'distorrent-manifest.bin')
+if (!temManifesto) {
+  console.error('')
+  console.error('AVISO: a release NAO tem distorrent-manifest.bin.')
+  console.error('Sem ele, o DisTorrent recusa esta atualizacao por falta de prova')
+  console.error('2-de-3 (comportamento intencional). Assine e suba o manifesto:')
+  console.error('  node tools/release-trust/sign-release.mjs --manifest <m.json> \\')
+  console.error('       --trust <trust-set.txt> --key <k1> --key <k2> --asset-dir <dist>')
+  console.error('  node scripts/publish-release.mjs <tag> <notes> <out>.bin')
+  process.exitCode = 3
+}

@@ -1,5 +1,73 @@
 # CHANGELOG
 
+## [1.1.62-pre-alpha] - 2026-11-06
+
+### Autenticidade de release: manifesto assinado 2-de-3, verificação entre peers e atualizador fail-closed
+
+**O problema.** O app confiava em "o GitHub é o repositório oficial" e num
+SHA-256 opcional. Não havia prova criptográfica de que um instalador foi
+autorizado pelo projeto: um asset trocado, um digest ausente ou um peer
+mentindo sobre a própria versão passavam. Pior: o receptor acreditava no que o
+peer *declarava* sobre si ("meu cliente é original") e a raiz de confiança podia
+ser trocada por variável de ambiente.
+
+**O que mudou.**
+
+- **Manifesto de release assinado 2-de-3.** Encoding binário canônico fechado
+  (`DTMF1`, ordem fixa, comprimentos explícitos) — não JSON, para não depender
+  de "JSON canônico". A assinatura Ed25519 cobre versão, canal, tag, commit,
+  data, época, arquitetura, URL e SHA-256 de cada instalador. O limiar é 2 de 3;
+  `key_id` duplicado conta uma vez, chave desconhecida é ignorada e assinatura
+  inválida de chave conhecida aborta a verificação.
+- **Raiz de confiança embutida e sem override.** As três chaves públicas vivem
+  em `trust_keys.rs` e são compiladas. O `DISTORRENT_TRUST_SET` foi **removido**:
+  era o botão para trocar a autoridade em runtime. Build sem a constante fica
+  fail-closed (nada verificado, atualizador não oferece nada), nunca "confia em
+  todos".
+- **Atualizador não aceita mais dados da UI.** `update_download` recebe só o
+  nome do asset; URL, tamanho e hash saem do manifesto verificado. `update_apply`
+  revalida symlink, pasta, tamanho e SHA-256 imediatamente antes de executar.
+  Allowlist HTTPS com cada redirect revalidado, `.part` + rename atômico,
+  recusa de downgrade por época e cache com ETag/backoff/jitter.
+- **Verificação entre peers, amarrada à conexão.** `proto_v` 5 acrescenta
+  desafio/resposta assinados sobre `blake3(transcript)` + nonce de 32 bytes + o
+  fingerprint do peer: prova de outra conexão ou de outra identidade não cola.
+  O receptor re-verifica o manifesto com as **suas** chaves e nunca promove por
+  declaração — o campo de hardware saiu da claim, e o estado máximo é
+  `RELEASE_VERIFICADA` (procedência do artefato, não integridade do processo).
+- **Quarentena com prazo.** Peer que não responde ao desafio em 15 s passa a
+  contar como não verificado (antes ficava liberado para sempre). Durante a
+  quarentena só Ping/Pong/Bye e os frames de atualização passam.
+- **Rate limits novos.** Atestação e push de manifesto têm buckets próprios por
+  peer, teto global de verificações simultâneas e orçamento de falhas: assinatura
+  inválida não vira CPU ilimitada.
+- **Rotação e revogação reais.** `TrustUpdate` é assinado pelo conjunto ATUAL
+  (2 de 3), exige época crescente e continuidade (ao menos uma chave antiga).
+  `revoked_versions` e `revoked_key_ids` são aplicados; o piso de segurança é
+  `max(piso local, min_security_epoch)`.
+- **Ferramental offline.** `tools/release-trust/` gera as chaves fora do
+  repositório, assina, verifica com decoder próprio, rotaciona e tem autoteste.
+  `scripts/scan-secrets.mjs` barra chave privada no CI, e o publish passa a
+  avisar (exit 3) quando a release sai sem `distorrent-manifest.bin`.
+
+### Correções de segurança encontradas na auditoria
+
+- Desafio de atestação era enviado antes de `peer_protos` ser preenchido: a
+  primeira conexão de cada peer nunca era verificada.
+- `TrustUpdate::from_wire` descartava as assinaturas, tornando rotação
+  impossível.
+- `self_integrity` e `hardware` declarados pelo peer eram aceitos como prova
+  (o receptor acreditava no réu).
+- `update_apply` gravaria o hash do instalador como se fosse o do executável,
+  produzindo `DIVERGE` garantido no boot seguinte.
+- CI e `.opencode`/`.cargo` saíram do versionamento: continham caminhos desta
+  máquina. A verificação passou a ser local (`run-verify.ps1`).
+
+**Limites declarados (não são bugs).** `SelfIntegrityState` fica `UNAVAILABLE`
+por falta de referência publicada; atestação de hardware não é implementada em
+nenhuma plataforma (sempre `proof_available: false` com motivo); não há build
+reprodutível nem log público de transparência.
+
 ## [1.1.61-pre-alpha] - 2026-11-06
 
 ### Bots: schema v3, plataforma honesta e janela própria

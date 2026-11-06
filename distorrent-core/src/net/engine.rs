@@ -323,6 +323,24 @@ pub enum EngineEvent {
         conv_id: String,
         until_ms: i64,
     },
+    /// Veredito de autenticidade de build do peer (re-verificado localmente).
+    PeerTrustChanged {
+        fp: String,
+        state: String,
+        version: String,
+        manifest_hash: String,
+        build_id: String,
+        commit: String,
+        channel: String,
+        valid_signatures: u8,
+        self_integrity: String,
+        hardware_proof: bool,
+        hardware_reason: String,
+        reason: String,
+        verification_available: bool,
+        quarantined: bool,
+        quarantine_reason: String,
+    },
     /// Entrou de fato no servidor (após convite aceito ou entrada pública).
     MemberJoined {
         community_id: String,
@@ -477,6 +495,12 @@ pub fn frame_class(frame: &SecureFrame) -> u8 {
         | FileHave { .. }
         | TunnelData { .. }
         | CommunityState { .. } => 3,
+        // Autenticidade de build: classe própria (baixa prioridade, volume
+        // baixo) para não competir com mensagens nem com sinalização de voz.
+        BuildChallenge { .. }
+        | BuildAttestResponse { .. }
+        | BuildManifestPush { .. }
+        | UpdateHint { .. } => 1,
     }
 }
 
@@ -595,6 +619,16 @@ pub struct NetworkEngine {
     spam_flood: StdMutex<HashMap<String, (u32, i64)>>,
     spam_dup: StdMutex<HashMap<String, (String, i64, u32)>>,
     reaction_limiter: StdMutex<ReactionLimiter>,
+    /// Conjunto de confiança + cache de manifestos verificados + piso de epoch.
+    release_trust: StdMutex<crate::release::ReleaseTrust>,
+    /// Confiança apurada por peer (RELEASE_VERIFICADA etc.) nesta sessão.
+    peer_trust: StdMutex<HashMap<String, crate::release::PeerTrust>>,
+    /// Nonce do desafio de atestação pendente, por peer.
+    attest_nonce: StdMutex<HashMap<String, [u8; 32]>>,
+    /// Quando o desafio foi enviado (ms), para o timeout de resposta.
+    attest_sent_at: StdMutex<HashMap<String, i64>>,
+    /// Transcript desta sessão, para assinar a própria atestação.
+    attest_transcript: StdMutex<HashMap<String, String>>,
     pub(crate) netlimiter: Arc<NetLimiter>,
     #[cfg(target_os = "linux")]
     pub(super) voice: StdMutex<Option<Arc<VoiceMedia>>>,
@@ -792,6 +826,11 @@ impl NetworkEngine {
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
             reaction_limiter: StdMutex::new(ReactionLimiter::new()),
+            release_trust: StdMutex::new(crate::release::ReleaseTrust::empty("inicializando")),
+            peer_trust: StdMutex::new(HashMap::new()),
+            attest_nonce: StdMutex::new(HashMap::new()),
+            attest_sent_at: StdMutex::new(HashMap::new()),
+            attest_transcript: StdMutex::new(HashMap::new()),
             netlimiter: NetLimiter::from_env(),
             #[cfg(target_os = "linux")]
             voice: StdMutex::new(build_voice_media()),
@@ -880,6 +919,11 @@ impl NetworkEngine {
             spam_flood: StdMutex::new(HashMap::new()),
             spam_dup: StdMutex::new(HashMap::new()),
             reaction_limiter: StdMutex::new(ReactionLimiter::new()),
+            release_trust: StdMutex::new(crate::release::ReleaseTrust::empty("inicializando")),
+            peer_trust: StdMutex::new(HashMap::new()),
+            attest_nonce: StdMutex::new(HashMap::new()),
+            attest_sent_at: StdMutex::new(HashMap::new()),
+            attest_transcript: StdMutex::new(HashMap::new()),
             netlimiter: NetLimiter::from_env(),
             #[cfg(target_os = "linux")]
             voice: StdMutex::new(build_voice_media()),
@@ -1640,6 +1684,290 @@ impl NetworkEngine {
 
     pub fn peers(&self) -> Vec<PeerRecord> {
         self.store.list_peers().unwrap_or_default()
+    }
+
+    // ---------------------------------------------------------------------
+    // Autenticidade de build (attestation)
+    // ---------------------------------------------------------------------
+
+    /// Carrega o conjunto de confiança do banco local (uma vez no boot).
+    pub fn init_release_trust(self: &Arc<Self>) {
+        let loaded = super::release_trust::load(&self.store);
+        let mut guard = self.release_trust.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = loaded;
+    }
+
+    pub fn release_trust_snapshot(&self) -> crate::release::ReleaseTrust {
+        self.release_trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn peer_trust_snapshot(&self, fp: &str) -> Option<crate::release::PeerTrust> {
+        self.peer_trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(fp)
+            .cloned()
+    }
+
+    pub fn peer_trust_all(&self) -> Vec<(String, crate::release::PeerTrust)> {
+        self.peer_trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    pub fn memory_floor(&self) -> u64 {
+        self.release_trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .epoch_floor()
+    }
+
+    /// Registra o transcript da conexão para assinar a própria atestação.
+    pub fn set_attest_transcript(&self, fp: &str, transcript_hash: &str) {
+        let mut m = self
+            .attest_transcript
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if m.len() > 4096 {
+            m.clear();
+        }
+        m.insert(fp.to_string(), transcript_hash.to_string());
+    }
+
+    /// Envia o desafio de atestação para um peer que fala proto_v >= 5.
+    pub fn send_build_challenge(self: &Arc<Self>, peer_fp: &str) {
+        if self.peer_proto(peer_fp) < crate::release::ATTEST_PROTO_V {
+            return;
+        }
+        let Some(transcript) = self
+            .attest_transcript
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(peer_fp)
+            .cloned()
+        else {
+            return;
+        };
+        let mut nonce = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+        {
+            let mut m = self.attest_nonce.lock().unwrap_or_else(|e| e.into_inner());
+            if m.len() > 4096 {
+                m.clear();
+            }
+            m.insert(peer_fp.to_string(), nonce);
+        }
+        {
+            let mut m = self
+                .attest_sent_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if m.len() > 4096 {
+                m.clear();
+            }
+            m.insert(peer_fp.to_string(), crate::identity::now_ms());
+        }
+        let policy = super::release_trust::peer_policy(&self.store);
+        self.send_to_peer(
+            peer_fp.to_string(),
+            SecureFrame::BuildChallenge {
+                nonce_hex: hex::encode(nonce),
+                transcript_hash: transcript,
+                policy: policy.as_str().to_string(),
+            },
+        );
+    }
+
+    /// Monta a própria atestação para responder a um desafio.
+    fn own_build_attestation(
+        &self,
+        nonce: [u8; 32],
+        transcript_hash: &str,
+    ) -> Option<crate::release::BuildAttestation> {
+        let trust = self.release_trust_snapshot();
+        let self_integrity = super::release_trust::self_integrity(&self.store);
+        let manifest = trust.latest_verified().map(|v| v.manifest.clone());
+        let claim = crate::release::BuildClaim {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            manifest_hash: manifest
+                .as_ref()
+                .map(|m| m.body.hash_hex().unwrap_or_default())
+                .unwrap_or_default(),
+            build_id: super::release_trust::build_id(
+                &self.identity.pubkey_hex,
+                env!("CARGO_PKG_VERSION"),
+            ),
+            commit: manifest
+                .as_ref()
+                .map(|m| m.body.commit.clone())
+                .unwrap_or_default(),
+            channel: manifest
+                .as_ref()
+                .map(|m| m.body.channel.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            protocol_version: crate::net::transport::PROTO_V,
+            security_epoch: trust.epoch_floor(),
+            self_integrity,
+        };
+        crate::release::BuildAttestation::sign(
+            &self.keypair,
+            transcript_hash,
+            &nonce,
+            claim,
+            manifest.as_ref(),
+        )
+        .ok()
+    }
+
+    /// Grava o veredito do peer e decide a quarentena.
+    fn record_peer_trust(
+        self: &Arc<Self>,
+        peer_fp: &str,
+        trust: crate::release::PeerTrust,
+    ) -> bool {
+        let policy = super::release_trust::peer_policy(&self.store);
+        let verification_available = self
+            .release_trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .verification_available();
+        let blocked = policy
+            .decision(&trust, verification_available)
+            .map(str::to_string);
+        let state = trust.state;
+        let version = trust.version.clone();
+        let manifest_hash = trust.manifest_hash.clone();
+        let build_id = trust.build_id.clone();
+        let commit = trust.commit.clone();
+        let channel = trust.channel.clone();
+        let valid_signatures = trust.valid_signatures;
+        let reason = trust.reason.clone();
+        let hardware = trust.hardware.clone();
+        let self_integrity = trust.self_integrity;
+        {
+            let mut m = self.peer_trust.lock().unwrap_or_else(|e| e.into_inner());
+            if m.len() > 4096 {
+                m.clear();
+            }
+            m.insert(peer_fp.to_string(), trust);
+        }
+        let _ = self.events.send(EngineEvent::PeerTrustChanged {
+            fp: peer_fp.into(),
+            state: state.as_str().into(),
+            version,
+            manifest_hash,
+            build_id,
+            commit,
+            channel,
+            valid_signatures,
+            self_integrity: match self_integrity {
+                crate::release::SelfIntegrityState::Confere => "CONFERE",
+                crate::release::SelfIntegrityState::Diverge => "DIVERGE",
+                crate::release::SelfIntegrityState::Unavailable => "UNAVAILABLE",
+            }
+            .into(),
+            hardware_proof: hardware.proof_available,
+            hardware_reason: hardware.reason,
+            reason: reason.clone(),
+            verification_available,
+            quarantined: blocked.is_some(),
+            quarantine_reason: blocked.clone().unwrap_or_default(),
+        });
+        if let Some(r) = &blocked {
+            debug!(peer_fp, reason = %r, "peer em quarentena (política de autenticidade)");
+        }
+        blocked.is_none()
+    }
+
+    /// `true` quando o peer está em quarentena e só pode falar o mínimo.
+    ///
+    /// Enquanto a atestação está PENDENTE dentro da janela de tolerância, o
+    /// peer não é bloqueado (a resposta está a caminho). Passada a janela sem
+    /// resposta, ele passa a contar como NAO_VERIFICADO — não fica "no limbo"
+    /// para sempre, que era a brecha de um peer que simplesmente não responde.
+    pub fn peer_quarantined(&self, peer_fp: &str) -> bool {
+        let map = self.peer_trust.lock().unwrap_or_else(|e| e.into_inner());
+        let policy = super::release_trust::peer_policy(&self.store);
+        let available = self
+            .release_trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .verification_available();
+        match map.get(peer_fp) {
+            Some(t) => policy.decision(t, available).is_some(),
+            None => {
+                // Sem veredito AINDA: se há desafio pendente e ele é recente,
+                // deixa passar (a prova está a caminho). Se venceu, trata como
+                // não verificado e aplica a política.
+                if !available {
+                    return false;
+                }
+                let sent = self
+                    .attest_sent_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(peer_fp)
+                    .copied();
+                let agora = crate::identity::now_ms();
+                let vencido = match sent {
+                    Some(t) => agora.saturating_sub(t) > crate::release::ATTEST_TIMEOUT_MS,
+                    // Nenhum desafio foi enviado (peer proto_v < 5): não há
+                    // prova possível, então é NAO_VERIFICADO de fato.
+                    None => self.peer_proto(peer_fp) < crate::release::ATTEST_PROTO_V,
+                };
+                if !vencido {
+                    return false;
+                }
+                policy
+                    .decision(
+                        &crate::release::PeerTrust::unavailable("sem prova"),
+                        available,
+                    )
+                    .is_some()
+            }
+        }
+    }
+
+    pub fn peer_proto(&self, fp: &str) -> u32 {
+        self.peer_protos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(fp)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Aceita um manifesto recebido de peer: RE-VERIFICA com as chaves locais
+    /// e só então guarda. Manifesto de peer nunca é ordem de nada.
+    pub fn accept_peer_manifest(&self, peer_fp: &str, hex_wire: &str) -> Result<bool> {
+        if hex_wire.len() > crate::release::MAX_MANIFEST_BYTES * 2 {
+            return Err(DistorrentError::Protocol(
+                "manifesto de peer acima do limite".into(),
+            ));
+        }
+        let wire = hex::decode(hex_wire)
+            .map_err(|_| DistorrentError::Protocol("manifesto de peer não é hex".into()))?;
+        let signed = crate::release::SignedManifest::from_wire(&wire)?;
+        let kv = super::release_trust::StoreKv(self.store.clone());
+        let mut trust = self.release_trust.lock().unwrap_or_else(|e| e.into_inner());
+        let verified = trust.accept(&kv, &signed)?;
+        let ok = verified.is_verified();
+        if ok {
+            debug!(
+                peer_fp,
+                version = %verified.manifest.body.version,
+                "manifesto de peer verificado e guardado"
+            );
+        } else {
+            debug!(peer_fp, reason = %verified.reason, "manifesto de peer recusado");
+        }
+        Ok(ok)
     }
 
     pub fn send_to_peer(&self, peer_fp: String, frame: SecureFrame) {
@@ -8239,6 +8567,7 @@ async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bool) -> Resu
                                         false,
                                         false,
                                         hs.peer_proto_v,
+                                        hs.transcript_hash.clone(),
                                     )
                                     .await;
                                 }
@@ -8800,6 +9129,7 @@ async fn connect_and_maintain(
                     true,
                     false,
                     hs.peer_proto_v,
+                    hs.transcript_hash.clone(),
                 )
                 .await;
                 if !registered {
@@ -9064,6 +9394,7 @@ async fn connect_relay_and_maintain(engine: Arc<NetworkEngine>, fp: String) {
                         true,
                         true,
                         hs.peer_proto_v,
+                        hs.transcript_hash.clone(),
                     )
                     .await;
                     liberar_entrada_relay(&engine, &fp, &my_in_tx);
@@ -9158,6 +9489,7 @@ fn spawn_relay_responder_force(engine: Arc<NetworkEngine>, from: String, first_f
                     false,
                     true,
                     hs.peer_proto_v,
+                    hs.transcript_hash.clone(),
                 )
                 .await;
             }
@@ -9232,6 +9564,7 @@ fn spawn_relay_responder(engine: Arc<NetworkEngine>, from: String, first_frame: 
                     false,
                     true,
                     hs.peer_proto_v,
+                    hs.transcript_hash.clone(),
                 )
                 .await;
             }
@@ -9424,6 +9757,7 @@ async fn register_and_run(
     initiator: bool,
     via_relay: bool,
     peer_proto_v: u32,
+    transcript_hash: String,
 ) -> bool {
     let my_fp = engine.identity.fingerprint.clone();
     let prefiro_outbound = my_fp.as_str() < peer_fp;
@@ -9494,6 +9828,9 @@ async fn register_and_run(
     info!(peer_fp, %peer_nick, via_relay, "peer ONLINE");
     engine.reset_dial_failures(peer_fp);
     {
+        // ORDEM IMPORTA: `peer_proto` é populado abaixo. Desafiar antes disso
+        // fazia `send_build_challenge` sair cedo e a primeira conexão de cada
+        // peer nunca era verificada.
         let mut map = engine.peer_protos.lock().unwrap_or_else(|e| e.into_inner());
         map.entry(peer_fp.to_string())
             .and_modify(|v| {
@@ -9502,6 +9839,13 @@ async fn register_and_run(
                 }
             })
             .or_insert(peer_proto_v);
+    }
+    {
+        // Atestação de build: guarda o transcript desta sessão e desafia o
+        // peer (só quem fala proto_v >= 5 entende). Sem isso o peer fica
+        // NAO_VERIFICADO, que é o estado honesto.
+        engine.set_attest_transcript(peer_fp, &transcript_hash);
+        engine.send_build_challenge(peer_fp);
     }
     let _ = engine.events.send(EngineEvent::PeerOnline {
         fp: peer_fp.into(),
@@ -9662,6 +10006,15 @@ async fn register_and_run(
                                 break Err(DistorrentError::Protocol(reason.to_string()));
                             }
                         }
+                        if engine.peer_quarantined(peer_fp)
+                            && !crate::release::frame_allowed_in_quarantine(&frame)
+                        {
+                            // Quarentena: o peer continua vivo (Ping/Bye e os
+                            // frames de atualização), mas nada de mensagem,
+                            // arquivo, chamada ou estado entra na rede.
+                            debug!(peer_fp, "frame bloqueado pela quarentena de autenticidade");
+                            continue;
+                        }
                         if let Err(e) = handle_frame(&engine, peer_fp, peer_pubkey, peer_nick, frame).await {
                             // Seção 51: motivo
                             let motivo = e.to_string();
@@ -9699,6 +10052,27 @@ async fn register_and_run(
     };
     if removed {
         engine.netlimiter.forget_peer(peer_fp);
+        {
+            // Estado de confiança é POR SESSÃO: reconectar sem nova prova não
+            // herda o veredito antigo.
+            let mut m = engine.peer_trust.lock().unwrap_or_else(|e| e.into_inner());
+            m.remove(peer_fp);
+            let mut n = engine
+                .attest_nonce
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            n.remove(peer_fp);
+            let mut sa = engine
+                .attest_sent_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            sa.remove(peer_fp);
+            let mut t = engine
+                .attest_transcript
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            t.remove(peer_fp);
+        }
         if engine.should_keep_dialing(peer_fp) {
             set_link_state(&engine, peer_fp, PeerLinkState::Reconnecting);
         }
@@ -9973,6 +10347,7 @@ async fn punch_once(engine: &Arc<NetworkEngine>, want_fp: &str, remote: SocketAd
                 true,
                 false,
                 hs.peer_proto_v,
+                hs.transcript_hash.clone(),
             )
             .await
         }
@@ -11963,6 +12338,162 @@ async fn handle_frame(
             }
         }
         SecureFrame::Bye => return Err(DistorrentError::Protocol("peer encerrou (Bye)".into())),
+        // ------------------------------------------------------------------
+        // Autenticidade de build
+        // ------------------------------------------------------------------
+        SecureFrame::BuildChallenge {
+            nonce_hex,
+            transcript_hash,
+            ..
+        } => {
+            if engine.netlimiter.allow_attest(peer_fp) == Decision::Blocked {
+                debug!(peer_fp, "desafio de atestação descartado (rate limit)");
+                return Ok(());
+            }
+            let nonce_bytes = hex::decode(&nonce_hex).ok();
+            let Some(nonce_arr) = nonce_bytes.and_then(|v| <[u8; 32]>::try_from(v).ok()) else {
+                debug!(
+                    peer_fp,
+                    "desafio de atestação com nonce inválido — ignorado"
+                );
+                return Ok(());
+            };
+            // O hash do transcript é conferido aqui: um peer não pode desafiar
+            // em nome de outra sessão.
+            let meu = engine
+                .attest_transcript
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(peer_fp)
+                .cloned();
+            if meu.as_deref() != Some(transcript_hash.as_str()) {
+                debug!(
+                    peer_fp,
+                    "desafio de atestação com transcript de outra sessão — ignorado"
+                );
+                return Ok(());
+            }
+            let Some(att) = engine.own_build_attestation(nonce_arr, &transcript_hash) else {
+                return Ok(());
+            };
+            let Ok(wire) = serde_json::to_vec(&att) else {
+                return Ok(());
+            };
+            engine.send_to_peer(
+                peer_fp.to_string(),
+                SecureFrame::BuildAttestResponse {
+                    attestation_hex: hex::encode(wire),
+                },
+            );
+        }
+        SecureFrame::BuildAttestResponse { attestation_hex } => {
+            if engine.netlimiter.allow_attest(peer_fp) == Decision::Blocked {
+                debug!(peer_fp, "resposta de atestação descartada (rate limit)");
+                return Ok(());
+            }
+            // Desafio que ESTE lado enviou: sem ele, não há o que verificar.
+            let expected = engine
+                .attest_nonce
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(peer_fp)
+                .copied();
+            let Some(expected_nonce) = expected else {
+                debug!(peer_fp, "resposta de atestação sem desafio pendente");
+                return Ok(());
+            };
+            let Some(transcript) = engine
+                .attest_transcript
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(peer_fp)
+                .cloned()
+            else {
+                return Ok(());
+            };
+            if attestation_hex.len() > 256 * 1024 {
+                debug!(peer_fp, "resposta de atestação acima do limite");
+                return Ok(());
+            }
+            let Ok(bytes) = hex::decode(&attestation_hex) else {
+                debug!(peer_fp, "resposta de atestação não é hex");
+                return Ok(());
+            };
+            let att: crate::release::BuildAttestation = match serde_json::from_slice(&bytes) {
+                Ok(a) => a,
+                Err(_) => {
+                    debug!(peer_fp, "resposta de atestação malformada");
+                    return Ok(());
+                }
+            };
+            // Sem orçamento de falhas: descarta ANTES de gastar CPU. Um peer
+            // que só manda assinatura inválida não escolhe quanto trabalho o
+            // receptor faz.
+            if !engine.netlimiter.attest_failure_budget(peer_fp) {
+                debug!(
+                    peer_fp,
+                    "orçamento de atestação esgotado — resposta ignorada"
+                );
+                return Ok(());
+            }
+            // Trabalho criptográfico com teto: um atacante não escolhe quanto
+            // de CPU o receptor gasta.
+            let Some(_slot) = engine.netlimiter.try_attest_slot() else {
+                debug!(peer_fp, "resposta de atestação descartada (teto global)");
+                return Ok(());
+            };
+            let trust = engine
+                .release_trust
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .trust()
+                .cloned();
+            let floor = engine.memory_floor();
+            let verdict = crate::release::verify_attestation(
+                trust.as_ref(),
+                &att,
+                peer_fp,
+                peer_pubkey,
+                &transcript,
+                &expected_nonce,
+                floor,
+            );
+            let veredito_ok = verdict.is_verified();
+            if !veredito_ok && !engine.netlimiter.note_attest_failure(peer_fp) {
+                debug!(
+                    peer_fp,
+                    "assinaturas inválidas repetidas — ignorando novas respostas"
+                );
+            }
+            engine.record_peer_trust(peer_fp, verdict);
+            // O nonce foi consumido: a próxima resposta precisa de novo desafio.
+            engine
+                .attest_nonce
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(peer_fp);
+        }
+        SecureFrame::BuildManifestPush { manifest_hex } => {
+            if engine.netlimiter.allow_manifest_push(peer_fp) == Decision::Blocked {
+                debug!(peer_fp, "push de manifesto descartado (rate limit)");
+                return Ok(());
+            }
+            match engine.accept_peer_manifest(peer_fp, &manifest_hex) {
+                Ok(true) => {}
+                Ok(false) => debug!(peer_fp, "manifesto de peer recusado na verificação"),
+                Err(e) => debug!(peer_fp, "manifesto de peer inválido: {e}"),
+            }
+        }
+        SecureFrame::UpdateHint {
+            version,
+            manifest_hash,
+        } => {
+            // Aviso só. Nada é baixado nem executado por causa dele; o
+            // atualizador decide contra o manifesto verificado localmente.
+            if engine.peer_proto(peer_fp) >= crate::release::ATTEST_PROTO_V {
+                debug!(peer_fp, %version, %manifest_hash, "peer avisou de atualização");
+            }
+        }
         SecureFrame::React {
             conv_id,
             msg_id,

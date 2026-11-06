@@ -72,9 +72,16 @@ export const tauriServices: DisTorrentServices = {
   webrtcReport: (info: string) => invoke('webrtc_report', { info }),
 
   updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check'),
-  updateDownload: (url, name, digest) =>
-    invoke<string>('update_download', { url, name, digest }),
+  // Só o NOME do asset: URL, hash e tamanho vêm do manifesto verificado no
+  // Rust. Aceitar URL/hash da UI permitiria trocar o instalador.
+  updateDownload: (name) => invoke<string>('update_download', { name }),
   updateApply: (path) => invoke<void>('update_apply', { path }),
+  updateVerifyReady: (path: string) =>
+    invoke<import('./updater').PendingUpdate>('update_verify_ready', { path }),
+  updateTrustInfo: () => invoke<import('./updater').TrustInfo>('update_trust_info'),
+  peerTrustInfo: () =>
+    invoke<import('./updater').PeerTrustPolicyInfo>('peer_trust_info'),
+  peerTrustPolicySet: (policy: string) => invoke<void>('peer_trust_policy_set', { policy }),
   updateAutoGet: () => invoke<boolean>('update_auto_get'),
   updateAutoSet: (enabled) => invoke<void>('update_auto_set', { enabled }),
   updateFlagGet: (key) => invoke<string | null>('update_flag_get', { key }),
