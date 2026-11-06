@@ -285,6 +285,20 @@ export const tauriServices: DisTorrentServices = {
   botBridgeStatus: (cid, botId) =>
     invoke<BotBridgeStatus | null>('bot_bridge_status', { communityId: cid, botId }),
   botBridgeList: () => invoke<BotBridgeInfo[]>('bot_bridge_list'),
+  botAudioOpen: (cid, botId) =>
+    invoke<boolean>('bot_audio_open', { communityId: cid, botId }),
+  botAudioPush: (cid, botId, pcmB64, gain) =>
+    invoke<{ accepted: number; dropped: number; delivered: string; to_call: boolean }>(
+      'bot_audio_push',
+      { communityId: cid, botId, pcmB64, gain: gain ?? null },
+    ),
+  botAudioStatus: (cid, botId) =>
+    invoke<{ accepted: number; dropped: number; delivered: string } | null>('bot_audio_status', {
+      communityId: cid,
+      botId,
+    }),
+  botAudioClose: (cid, botId) =>
+    invoke<boolean>('bot_audio_close', { communityId: cid, botId }),
   botFolderRead: (dir) => invoke<BotFolderInfo>('bot_folder_read', { dir }),
   botPluginStart: (cid, botId, dir, run) =>
     invoke<BotPluginStatus>('bot_plugin_start', { communityId: cid, botId, dir, run }),

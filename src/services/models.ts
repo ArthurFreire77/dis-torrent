@@ -698,6 +698,23 @@ export interface DisTorrentServices {
   botBridgeList?(): Promise<BotBridgeInfo[]>
   /** Abre (ou foca) a janela separada de Bots. Só existe no desktop. */
   openBotsWindow?(): Promise<void>
+  /**
+   * Áudio do bot. Toca no alto-falante DESTE PC (`delivered: "local"`), não na
+   * call. Só existe no Linux com mídia nativa; nas outras plataformas o comando
+   * devolve erro explicando.
+   */
+  botAudioOpen?(communityId: string, botId: string): Promise<boolean>
+  botAudioPush?(
+    communityId: string,
+    botId: string,
+    pcmB64: string,
+    gain?: number,
+  ): Promise<{ accepted: number; dropped: number; delivered: string; to_call: boolean }>
+  botAudioStatus?(
+    communityId: string,
+    botId: string,
+  ): Promise<{ accepted: number; dropped: number; delivered: string } | null>
+  botAudioClose?(communityId: string, botId: string): Promise<boolean>
   /** Lê uma pasta de bot (`bot.json`) sem gravar. */
   botFolderRead?(dir: string): Promise<BotFolderInfo>
   /** Executa o código do bot (plugin) com a ponte já aberta. */

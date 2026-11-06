@@ -1088,6 +1088,52 @@ export function BotPanel({
             })}
           </div>
           <div style={{ marginTop: ui.md, display: 'flex', flexDirection: 'column', gap: ui.sm }}>
+            <Notice tone="info" icon="info">
+              <b>Música:</b> a primitiva <code>audioFrame</code> toca no alto-falante
+              <b> deste PC</b>, junto com a voz. Ela <b>não</b> transmite aos outros participantes da
+              call — para isso seria preciso um track de saída por peer, que não existe. No Windows e
+              no Android o áudio da chamada é da WebView e o comando devolve erro explicando.
+            </Notice>
+            <div style={{ display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Button
+                variant="secondary"
+                icon="play"
+                disabled={typeof services.botAudioOpen !== 'function'}
+                onClick={async () => {
+                  try {
+                    const abriu = await services.botAudioOpen!(communityId, bot.id)
+                    setRuntimeError(null)
+                    setSavedAt(Date.now())
+                    void abriu
+                  } catch (e: unknown) {
+                    setRuntimeError(e instanceof Error ? e.message : String(e))
+                  }
+                }}
+              >
+                Abrir canal de áudio
+              </Button>
+              <Button
+                variant="ghost"
+                icon="stop"
+                disabled={typeof services.botAudioClose !== 'function'}
+                onClick={async () => {
+                  try {
+                    await services.botAudioClose?.(communityId, bot.id)
+                  } catch (e: unknown) {
+                    setRuntimeError(e instanceof Error ? e.message : String(e))
+                  }
+                }}
+              >
+                Parar áudio
+              </Button>
+              <span style={{ fontSize: 11.5, color: ui.muted }}>
+                {typeof services.botAudioOpen === 'function'
+                  ? 'O plugin controla o mesmo canal por /v1/audio/*.'
+                  : 'Esta plataforma não oferece áudio de bot.'}
+              </span>
+            </div>
+          </div>
+          <div style={{ marginTop: ui.md, display: 'flex', flexDirection: 'column', gap: ui.sm }}>
             <TextField
               label="Domínios permitidos para HTTP"
               value={cfg.httpAllow.join(', ')}
