@@ -110,6 +110,7 @@ export default function CallTilesGrid({
           display: 'flex',
           flexWrap: 'wrap',
           alignContent: 'flex-start',
+          alignItems: 'flex-start',
           justifyContent: 'center',
           gap: compact ? 6 : 10,
           padding,
@@ -123,8 +124,11 @@ export default function CallTilesGrid({
             style={{
               flex: `1 1 ${compact ? 220 : 300}px`,
               maxWidth: tiles.length === 1 ? 560 : undefined,
-              height: maxTileHeight,
-              maxHeight: '100%',
+              // Altura livre: quem manda na proporção é o aspect-ratio do card.
+              // Antes era `height: maxTileHeight` (420px) e um card de 300px de
+              // largura virava 300x420 — a "câmera achatada" do painel lateral.
+              height: 'auto',
+              maxHeight: maxTileHeight,
               minWidth: 0,
               display: 'flex',
             }}
@@ -162,7 +166,10 @@ export default function CallTilesGrid({
         gridTemplateColumns: `repeat(${spec.columns}, minmax(0, 1fr))`,
         gap,
         width: '100%',
-        height: spec.scroll ? 'auto' : '100%',
+        // Altura SEMPRE 100%: com 'auto' a grade ficava do tamanho do conteúdo
+        // e o `overflowY:'auto'` nunca podia rolar — o conteúdo extra era
+        // cortado no topo e no rodapé (o "vídeo quebrado" em área pequena).
+        height: '100%',
         justifyItems: 'center',
         alignItems: 'center',
         alignContent: spec.scroll ? 'start' : 'center',
@@ -249,7 +256,9 @@ export default function CallTilesGrid({
         minHeight: 0,
         display: 'flex',
         flexDirection: spot && spot.strip === 'bottom' ? 'column' : 'row',
-        alignItems: 'center',
+        // Com rolagem, o eixo precisa ser stretch: centralizar um filho maior
+        // que a caixa corta topo e rodapé em partes iguais.
+        alignItems: spec.scroll || (spot ? spot.scroll : false) ? 'stretch' : 'center',
         justifyContent: 'center',
         gap,
         padding,

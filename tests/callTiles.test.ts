@@ -321,3 +321,39 @@ test('tela cheia é overlay: a lista de quadrados não perde ninguém', () => {
   assert.ok(tiles.some((t) => t.fp === PEER), 'o remoto continua na lista')
   assert.equal(tiles.length, 3, 'eu + minha tela + Bob')
 })
+
+test('sinal diz cameraOn:false mas a trilha esta viva: o video APARECE', () => {
+  // Cenário real: a pessoa compartilhou a tela (sinal cameraOn:false), parou
+  // e ligou a câmera. Ninguém reenvia o booleano, então antes o vídeo ficava
+  // suprimido para sempre — prévia local ok, remoto sem imagem.
+  const stream = fakeStream({ video: true, live: true })
+  const tiles = buildCallTiles({
+    myFp: ME,
+    participants: [{ fp: PEER, nickname: "Fepo", stream, cameraOn: false }],
+  })
+  const peer = tiles.find((t) => t.fp === PEER)!
+  assert.equal(peer.stream, stream, "a trilha viva manda mais que o booleano")
+  assert.equal(peer.cameraOn, true, "o selo CÂMERA segue a trilha viva")
+})
+
+test('remoto com trilha de video encerrada nao rende <video> preto', () => {
+  const morta = fakeStream({ video: true, live: false })
+  const tiles = buildCallTiles({
+    myFp: ME,
+    participants: [{ fp: PEER, stream: morta, cameraOn: true }],
+  })
+  const peer = tiles.find((t) => t.fp === PEER)!
+  assert.equal(peer.stream, undefined, "sem trilha viva é avatar, não tela preta")
+  assert.equal(peer.audioStream, morta, "o áudio continua")
+})
+
+test('stream so-de-audio do remoto nao vira quadrado preto', () => {
+  const soAudio = fakeStream({ video: false })
+  const tiles = buildCallTiles({
+    myFp: ME,
+    participants: [{ fp: PEER, stream: soAudio, cameraOn: true }],
+  })
+  const peer = tiles.find((t) => t.fp === PEER)!
+  assert.equal(peer.stream, undefined, "primeiro ontrack costuma ser áudio")
+  assert.equal(peer.audioStream, soAudio)
+})

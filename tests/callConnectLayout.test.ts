@@ -73,7 +73,18 @@ test('fase presa em connecting é promovida pelo estado REAL do PC', () => {
 
 test('quadrado tem TETO de altura (não estica a janela toda)', () => {
   assert.match(grid, /maxTileHeight/, 'existe teto configurável')
-  assert.match(grid, /height: maxTileHeight/, 'o card recebe a altura do teto')
+  assert.match(grid, /maxHeight: maxTileHeight/, 'o card respeita o teto')
+  assert.match(grid, /height: 'auto'/, 'altura livre: quem manda na forma é a proporção')
+  assert.doesNotMatch(
+    grid,
+    /\bheight: maxTileHeight,/,
+    'altura fixa quebrava a proporção: 300 de largura virava 300x420 (vídeo achatado)',
+  )
+  assert.match(
+    readFileSync('src/components/calls/CallTile.tsx', 'utf8'),
+    /aspectRatio: PARTICIPANT_ASPECT[\s\S]{0,200}height: 'auto'/,
+    'o card é 16:9 com altura livre (width+height definidos anulam o aspect-ratio)',
+  )
   assert.match(grid, /flexWrap: 'wrap'/, 'fora do palco a grade é wrap com teto')
 })
 
@@ -86,5 +97,11 @@ test('palco do canal de voz PREENCHE a área toda (relato do dono: "completar a 
 
 test('em chamada de canal o painel lateral fica fora da tela unificada', () => {
   assert.match(shell, /resolveVoiceLayout\(/)
-  assert.match(shell, /painelLateralVisivel \? \(callPanelSize/, 'a margem do conteúdo segue o layout')
+  assert.match(shell, /resolveCallDock\(/, 'a largura do painel é calculada, não um clamp fixo')
+  assert.doesNotMatch(
+    shell,
+    /marginRight: painelLateralVisivel \? \(callPanelSize/,
+    'clamp(320px,36vw,520px) deixava o composer com 85px (uma letra por linha)',
+  )
+  assert.match(shell, /callDock\.mainInsetPx/, 'a margem vem do cálculo com largura mínima')
 })

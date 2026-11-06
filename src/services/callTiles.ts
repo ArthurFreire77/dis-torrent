@@ -122,9 +122,13 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
   for (const p of byFp.values()) {
     const isLocal = !!myFp && p.fp === myFp
     const nickname = (p.nickname || '').trim() || p.fp.slice(0, 8)
+    const remoteHasLiveVideo = streamHasLiveVideo(!isLocal ? p.stream ?? null : null)
     const cameraOn = isLocal
       ? pickBoolean(local?.cameraOn, p.cameraOn)
-      : pickBoolean(p.cameraOn)
+      // Para o remoto, trilha viva é a evidência; o sinal só complementa. Antes
+      // o selo "CÂMERA" nunca aparecia em peer remoto e o aviso "câmera
+      // desligada" era desenhado por cima de vídeo ao vivo.
+      : (pickBoolean(p.cameraOn) || remoteHasLiveVideo)
     const sharing = isLocal
       ? pickBoolean(local?.sharing, p.sharing)
       : pickBoolean(p.sharing)
@@ -147,9 +151,15 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
 
     const cameraConsumedByScreen = !isLocal && !!fallbackScreen && !remoteScreenStream
     const audioOwnerIsScreen = !isLocal && cameraConsumedByScreen
+    // O `<video>` remoto é decidido pela TRILHA, nunca por um booleano de sinal.
+    // `p.cameraOn === false` já era suprimido para sempre: quem compartilhava
+    // tela mandava `cameraOn:false`, e esse estado nunca voltava para `true`
+    // quando a pessoa desligava a tela e ligava a câmera. Resultado: prévia
+    // local ok e o outro lado sem imagem, sem erro. `cameraOn` agora só
+    // alimenta o selo.
     const participantStream = isLocal
       ? (cameraOn && streamHasLiveVideo(localCameraStream) ? localCameraStream ?? undefined : undefined)
-      : (cameraConsumedByScreen || p.cameraOn === false ? undefined : cameraStream ?? undefined)
+      : (cameraConsumedByScreen || !streamHasLiveVideo(remoteCameraStream) ? undefined : cameraStream ?? undefined)
 
     const participantVideoUrl = isLocal
       ? undefined

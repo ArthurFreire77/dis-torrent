@@ -3605,6 +3605,14 @@ export class CallManager {
     this.screenStream = stream
     this.state.sharing = true
     this.screenError = null
+    // Se o sistema exigiu compartilhar sem áudio, avise: silêncio aqui era o
+    // "compartilhei a tela e ninguém ouve o jogo".
+    try {
+      const queriaAudio = this.screenOptions.audio === 'system' || this.screenOptions.audio === 'system+mic'
+      if (queriaAudio && stream.getAudioTracks().length === 0) {
+        this.noteScreenEvent('tela compartilhada SEM áudio do sistema (este WebView não entregou o áudio)')
+      }
+    } catch {  }
     this.screenRecoveryAttempts = 0
     this.screenBadSamples = 0
     this.screenGoodSamples = 0
@@ -3654,12 +3662,23 @@ export class CallManager {
       return await md.getDisplayMedia(constraints) as MediaStream
     } catch (e) {
       const derived = derivedDisplayConstraints(constraints)
-      if (!derived) throw e
+      if (derived) {
+        try {
+          return await md.getDisplayMedia(derived) as MediaStream
+        } catch { /* cai para o último degrau */ }
+      }
+      // Último degrau NUNCA repete o áudio do sistema. O WebView2 costuma
+      // recusar `audio:true` na captura de tela, e repetir a mesma exigência
+      // fazia o compartilhamento falhar sempre, com erro genérico. Melhor
+      // compartilhar sem áudio e avisar do que não compartilhar.
       try {
-        return await md.getDisplayMedia(derived) as MediaStream
+        return await md.getDisplayMedia({ video: true, audio: false } as never) as MediaStream
       } catch {
-        const minimal = { video: true, audio: !!constraints.audio }
-        return await md.getDisplayMedia(minimal) as MediaStream
+        try {
+          return await md.getDisplayMedia({ video: true } as never) as MediaStream
+        } catch {
+          throw e
+        }
       }
     }
   }
@@ -4271,15 +4290,27 @@ export class CallManager {
     logIceState(pc, fp, callId)
     pc.ontrack = (e) => {
       try {
+        // PC velho não pode sobrescrever o novo: `createPC` fecha o anterior e
+        // põe outro em `this.pcs`, mas o handler antigo continua vivo. Um
+        // `ontrack` atrasado dele entregava um stream de trilhas já `ended` e
+        // apagava a imagem boa (preto permanente). Mesma guarda de `handleIce`.
+        if (this.pcs.get(fp) !== pc) return
         const st = (e.streams && e.streams[0]) ?? (e.track ? new MediaStream([(e.track as MediaStreamTrack)]) : null)
-        if (st && this.state) attachRemoteTrack(this.state, (s) => this.onUpdate(s), fp, st)
+        if (!st) return
+        // Stream sem nenhuma trilha viva não é mídia: é resíduo de negociação.
+        const temViva = (st.getTracks?.() ?? []).some((t) => t.readyState === 'live')
+        if (!temViva) return
+        if (this.state) attachRemoteTrack(this.state, (s) => this.onUpdate(s), fp, st)
       } catch {  }
       try {
         const st2 = this.state
         if (st2 && st2.callId === callId) {
-          const iceOk = pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed'
+          // ICE conectado NÃO é mídia: falta DTLS/SRTP. Declarar "conectado" no
+          // ICE deixava a UI verde com vídeo preto (o quadro nunca chegava).
+          // só `connectionState === 'connected'` prova o transporte de mídia;
+          // antes disso, o máximo honesto é "sinalizando".
           const connOk = (pc as any).connectionState === 'connected'
-          if (iceOk || connOk) this.applyPhase('media-connected')
+          if (connOk) this.applyPhase('media-connected')
           else this.promoteOnSignal(callId)
         }
       } catch {  }
@@ -4295,10 +4326,14 @@ export class CallManager {
       pc.addEventListener('iceconnectionstatechange', () => {
         try {
           if (pc.iceConnectionState === 'failed') void this.tryIceRestart(fp, pc, callId)
+          // ICE conectado não é mídia: NÃO promove para `media-connected` aqui.
+          // Sem DTLS/SRTP o quadro não chega, e era isso que deixava a chamada
+          // "verde" com vídeo preto. A promoção fica no `connectionstatechange`
+          // (`connected`) e no primeiro RTP recebido.
           if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
             try {
               const st = this.state
-              if (st && st.callId === callId) this.applyPhase('media-connected')
+              if (st && st.callId === callId) this.promoteOnSignal(callId)
             } catch {  }
           }
         } catch {  }

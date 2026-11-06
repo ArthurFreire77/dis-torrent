@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { attachStream } from '../../shared/mediaAttach'
+import { attachStream, detachStream } from '../../shared/mediaAttach'
 import { Icon, Icons } from '../../shared/icons'
 import { ParticipantAudioControls } from './ParticipantAudioControls'
 import { applyParticipantPlayback } from '../../services/callPlayback'
@@ -66,6 +66,13 @@ export function CallTile({
   const [aspect, setAspect] = useState<string | null>(null)
   const isScreen = tile.kind === 'screen'
 
+  // Solta a mídia ao desmontar: `attachStream` pode ter deixado listeners de
+  // gesto e um retry de play() apontando para o elemento que saiu da tela.
+  useEffect(() => () => {
+    detachStream(videoRef.current)
+    detachStream(audioRef.current)
+  }, [])
+
   const audioSrc = (tile.isLocal ? null : (tile.audioStream ?? tile.stream)) ?? null
   const audioKey = tile.audioKey ?? tile.fp
   useEffect(() => {
@@ -112,7 +119,15 @@ export function CallTile({
         borderRadius: 12,
         overflow: 'hidden',
         position: 'relative',
-        minHeight: expanded ? 0 : thumbnail ? 72 : minHeight,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        // Card com proporção NÃO leva `minHeight`: `min-height` vence o
+        // `aspect-ratio`, então qualquer célula mais estreita que
+        // `minHeight*16/9` saía achatada. A forma vem do aspect-ratio e quem
+        // garante o tamanho é a grade. O card de TELA (sem proporção) mantém o
+        // piso, senão some quando a área é pequena.
+        ...(isScreen ? { minHeight: expanded ? 0 : thumbnail ? 72 : minHeight } : { minHeight: 0 }),
         ...(isScreen && aspect
           ? expanded
             ? {
@@ -125,20 +140,23 @@ export function CallTile({
                 justifySelf: 'center',
               }
             : thumbnail
-              ? null
+              ? { aspectRatio: PARTICIPANT_ASPECT, width: '100%', height: 'auto', minHeight: 0 }
               : { width: '100%', height: '100%', minHeight: 0, alignSelf: 'stretch', justifySelf: 'stretch' }
           : null),
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
         ...(isScreen || expanded || thumbnail
           ? null
           : {
+              // Proporção é do CARD. Antes vinha junto de width:100% E
+              // height:100%; com os dois lados definidos o navegador ignora o
+              // aspect-ratio e o card assume a forma do pai (vídeo "achatado"
+              // quando o painel lateral encolhia a área).
               aspectRatio: PARTICIPANT_ASPECT,
               width: '100%',
-              height: '100%',
-              alignSelf: 'stretch',
-              justifySelf: 'stretch',
+              height: 'auto',
+              minWidth: 0,
+              minHeight: 0,
+              alignSelf: 'center',
+              justifySelf: 'center',
             }),
         border: `2px solid ${
           tile.speaking && !isScreen ? c.green : tile.muted ? `${c.red}55` : isScreen ? `${c.accent}66` : 'transparent'

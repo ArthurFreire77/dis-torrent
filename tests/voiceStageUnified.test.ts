@@ -70,7 +70,8 @@ test('o desktop tem UMA tela de chamada para lobby e chamada', () => {
 
 test('o painel lateral antigo não duplica a tela unificada', () => {
   assert.match(shell, /\{painelLateralVisivel && \(/, 'painel lateral só fora da tela unificada')
-  assert.match(shell, /painelLateralVisivel \? \(callPanelSize/, 'a margem acompanha o layout')
+  assert.match(shell, /painelChamadaVisivel \? callDock\.mainInsetPx/, 'a margem acompanha o cálculo')
+  assert.match(shell, /resolveCallDock\(/, 'a largura do painel tem largura mínima garantida')
 })
 
 test('a barra lateral lê o canal do callId (não de estado paralelo)', () => {

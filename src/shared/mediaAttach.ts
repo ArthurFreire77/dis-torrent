@@ -45,4 +45,7 @@ export function detachStream(el: MediaEl | null): void {
     }
     pendingGestureRetry.delete(el)
   }
+  // Sem isto, cada tile que desmonta com autoplay pendente deixa 4 listeners
+  // em `window` para sempre (vazamento por troca de layout/participante).
+  try { el.srcObject = null } catch {  }
 }

@@ -1144,7 +1144,7 @@ export default function MobileShell() {
   const netState: NetworkState | null = status?.state ?? null
   const nativeKind = services.kind === 'native'
   const peerCount = status?.online_peers ?? 0
-  const netOnline = peerCount > 0 && (netState === 'CONNECTED' || netState === 'DISCONNECTED')
+  const netOnline = peerCount > 0 && netState === 'CONNECTED'
   const pillColor = !nativeKind ? t.accent : netState === null ? t.yellow : netOnline ? t.green : netState === 'DISCONNECTED' ? '#80848e' : t.yellow
   const pillLabel = !nativeKind ? 'LOCAL' : netState === null ? 'INICIANDO…' : netOnline ? 'ONLINE' : stateLabel[netState as NetworkState]
   const linkedCount = linkedOnline.size || peerCount

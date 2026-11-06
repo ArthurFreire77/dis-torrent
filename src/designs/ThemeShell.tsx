@@ -20,7 +20,13 @@ import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import CallTilesGrid from '../components/calls/CallTilesGrid'
 import VoiceStage from '../components/calls/VoiceStage'
-import { resolveVoiceLayout, callScreenTitle } from '../services/voiceLayout'
+import {
+  resolveVoiceLayout,
+  resolveCallDock,
+  callPanelWidth,
+  callScreenTitle,
+  type CallPanelSize,
+} from '../services/voiceLayout'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
 import { resolveBootPhase } from '../services/bootPhase'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
@@ -731,7 +737,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [callActionBusy, setCallActionBusy] = useState(false)
   const peerNickCacheRef = useRef<Record<string, string>>({})
   const [callDuration, setCallDuration] = useState(0)
-  const [callPanelSize, setCallPanelSize] = useState<'compact' | 'normal' | 'expanded'>('normal')
+  const [callPanelSize, setCallPanelSize] = useState<CallPanelSize>('normal')
+  const [callPanelHidden, setCallPanelHidden] = useState(false)
   const [pinnedTileId, setPinnedTileId] = useState<string | null>(null)
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [showAddToCall, setShowAddToCall] = useState(false)
@@ -1013,6 +1020,39 @@ export default function ThemeShell({ designId }: {designId:string}){
     const onResize = () => setViewportWidth(window.innerWidth)
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  /**
+   * Largura que a coluna principal realmente tem, medida no DOM.
+   *
+   * Estimar por `innerWidth - constantes` erra feio: com servidor aberto existe
+   * a lista de membros (240px) além do rail e da lista de canais, e é essa
+   * soma que decide se o painel da chamada cabe. Medir o container é a única
+   * fonte honesta.
+   */
+  const mainColRef = useRef<HTMLDivElement | null>(null)
+  const [chromeWidth, setChromeWidth] = useState(0)
+  useEffect(() => {
+    const el = mainColRef.current
+    const pai = el?.parentElement ?? null
+    if (!el || !pai) return
+    // Mede o chrome REAL: `pai - coluna`. Medir a coluna criaria laço, porque
+    // ela já inclui a margem que este cálculo vai aplicar.
+    const medir = () => {
+      const w = Math.max(0, pai.clientWidth - el.clientWidth)
+      setChromeWidth((cur) => (Math.abs(cur - w) < 2 ? cur : w))
+    }
+    medir()
+    let ro: ResizeObserver | null = null
+    try {
+      ro = new ResizeObserver(medir)
+      ro.observe(pai)
+    } catch {  }
+    window.addEventListener('resize', medir)
+    return () => {
+      try { ro?.disconnect() } catch {  }
+      window.removeEventListener('resize', medir)
+    }
   }, [])
 
   const visibleCallTiles = useMemo(() => {
@@ -1350,7 +1390,23 @@ export default function ThemeShell({ designId }: {designId:string}){
     widthPx: viewportWidth,
   })
   const inCallHere = inThisCall
-  const painelLateralVisivel = !!activeCall && !inCallHere
+  // O painel da chamada não pode esmagar a conversa: a largura é resolvida em
+  // px e nunca come a coluna abaixo do mínimo legível (era o composer com uma
+  // letra por linha). Quando não cabe ao lado, ele sobrepõe.
+  const callDock = resolveCallDock({
+    hasActiveCall: !!activeCall,
+    inThisCall: inCallHere,
+    panelSize: callPanelSize,
+    chromePx: chromeWidth,
+    widthPx: viewportWidth,
+  })
+  const painelLateralVisivel = callDock.panelVisible
+  const painelChamadaVisivel = painelLateralVisivel && !callPanelHidden
+  useEffect(() => {
+    // Sem chamada ativa o painel volta a aparecer na próxima; o "esconder" é
+    // só da sessão atual e não pode virar preferência escondida.
+    if (!painelLateralVisivel) setCallPanelHidden(false)
+  }, [painelLateralVisivel])
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
   const groupMemberFps = useMemo<Set<string>>(() => {
     // Seção 8: s
@@ -2094,7 +2150,9 @@ export default function ThemeShell({ designId }: {designId:string}){
       )
     }
     const hasPeers = count > 0
-    const online = hasPeers && (state === 'CONNECTED' || state === 'DISCONNECTED')
+    // `DISCONNECTED` com peers conhecidos NÃO é online: é exatamente o caso de
+    // rota morta que a pílula verde escondia. Só `CONNECTED` pinta de verde.
+    const online = hasPeers && state === 'CONNECTED'
     const color = online ? t.green : state === 'DISCONNECTED' ? '#80848e' : t.yellow
     const label = online ? 'ONLINE' : stateLabel[state as NetworkState]
     const tip = !hasPeers && listening
@@ -2556,7 +2614,7 @@ export default function ThemeShell({ designId }: {designId:string}){
 
         {
 }
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: bg, minWidth: 0, marginRight: painelLateralVisivel ? (callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)') : 0, transition: 'margin-right 180ms ease' }}>
+        <div ref={mainColRef} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', background: bg, minWidth: 0, marginRight: painelChamadaVisivel ? callDock.mainInsetPx : 0, transition: 'margin-right 180ms ease' }}>
           {view === 'servidores' && selCommunity ? (
             <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
               <span style={{ color: muted, display: 'flex' }}>
@@ -3073,7 +3131,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               </>
           )}
 
-          {selConv && showSearch && (
+          {selConv && !selCallChannel && showSearch && (
             <SearchPanel
               convId={selConv}
               convLabel={view === 'servidores' ? '#' + channelLabel : (peerTitle || 'conversa')}
@@ -3082,7 +3140,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               onJump={(hit) => { setShowSearch(false); void jumpToMessage(hit.conv_id || selConv, hit.id) }}
             />
           )}
-          {selConv && showPins && (
+          {selConv && !selCallChannel && showPins && (
             <PinsPanel
               convId={selConv}
               messages={messages}
@@ -3090,7 +3148,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               onJump={(m) => { setShowPins(false); void jumpToMessage(m.conv_id || selConv, m.id) }}
             />
           )}
-          {selConv && showBookmarks && (
+          {selConv && !selCallChannel && showBookmarks && (
             <BookmarksPanel
               convId={selConv}
               messages={messages}
@@ -3098,7 +3156,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               onJump={(id) => { setShowBookmarks(false); void jumpToMessage(selConv, id) }}
             />
           )}
-          {showInbox && (
+          {!selCallChannel && showInbox && (
             <InboxPanel
               tab={inboxTab}
               onTab={setInboxTab}
@@ -3563,7 +3621,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       {
 }
       {painelLateralVisivel && (
-        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callPanelSize === 'compact' ? 300 : callPanelSize === 'normal' ? 'clamp(320px, 36vw, 520px)' : 'min(56vw, 720px)', background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
+        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callDock.sideBySide ? callDock.mainInsetPx || callPanelWidth(callPanelSize, viewportWidth) : Math.min(callPanelWidth(callPanelSize, viewportWidth), Math.max(360, viewportWidth - 96)), background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
           <div style={{ minHeight: 56, height: 'auto', background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', gap: 8 }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 250, flex: '1 1 250px' }}>
               <span style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}22`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={16} /> : <Icon d={Icons.phone} size={16} />}</span>
@@ -3579,6 +3637,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }} aria-label="Tamanho do painel da chamada">
                 <button type="button" data-testid="call-panel-smaller" aria-label="Diminuir painel da chamada" title={callPanelSize === 'compact' ? 'Painel já está compacto' : 'Diminuir painel'} disabled={callPanelSize === 'compact'} onClick={() => setCallPanelSize(callPanelSize === 'expanded' ? 'normal' : 'compact')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'compact' ? muted : text, opacity: callPanelSize === 'compact' ? 0.5 : 1, cursor: callPanelSize === 'compact' ? 'default' : 'pointer' }}>↑</button>
                 <button type="button" data-testid="call-panel-larger" aria-label="Aumentar painel da chamada" title={callPanelSize === 'expanded' ? 'Painel já está expandido' : 'Aumentar painel'} disabled={callPanelSize === 'expanded'} onClick={() => setCallPanelSize(callPanelSize === 'compact' ? 'normal' : 'expanded')} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: callPanelSize === 'expanded' ? muted : text, opacity: callPanelSize === 'expanded' ? 0.5 : 1, cursor: callPanelSize === 'expanded' ? 'default' : 'pointer' }}>↓</button>
+                <button type="button" data-testid="call-panel-hide" aria-label="Esconder painel da chamada" title="Esconder o painel (a chamada continua)" onClick={() => setCallPanelHidden(true)} style={{ width: 28, height: 28, borderRadius: 6, border: `1px solid ${borderColor}`, background: inputBg, color: text, cursor: 'pointer' }}>✕</button>
               </span>
             </span>
             <span style={{ width: 1, height: 26, background: borderColor, flexShrink: 0 }} />
