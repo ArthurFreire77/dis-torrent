@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 
 pub const PRESENCE_TTL_MS: i64 = 90_000;
 
+/// Mensagens iniciais permitidas por direção antes de existir amizade aceita.
+/// O contador é persistido e conferido nos dois lados: um cliente alterado
+/// não consegue passar de três porque o receptor também conta.
+pub const DM_INTRO_LIMIT: i64 = 3;
+
+/// Solicitação sem resposta não pode viver para sempre: depois disso ela deixa
+/// de aparecer nas listas e o contador de introdução volta a valer.
+pub const FRIEND_REQUEST_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let sql = format!("PRAGMA table_info({table})");
     let Ok(mut stmt) = conn.prepare(&sql) else {
@@ -183,7 +192,47 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             payload TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             PRIMARY KEY (conv_id, name)
-         );",
+         );
+
+         -- Gate das três mensagens iniciais. A chave é a DIREÇÃO
+         -- (conversa + autor), não a conversa: apagar/reabrir a conversa não
+         -- zera o contador, e o receptor conta o mesmo que o emissor.
+         CREATE TABLE IF NOT EXISTS dm_intro (
+            conv_id TEXT NOT NULL,
+            author_fp TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (conv_id, author_fp)
+         );
+
+         -- Um lida por conversa e por membro. O read_cursors antigo é
+         -- global por conversa; num grupo isso marcava como lido para todos.
+         CREATE TABLE IF NOT EXISTS conv_read (
+            conv_id TEXT NOT NULL,
+            fp TEXT NOT NULL,
+            last_read_ts INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (conv_id, fp)
+         );
+
+         -- Dono do grupo. A convenção antiga era o primeiro membro da lista,
+         -- mas create_group_dm ORDENA os fingerprints: o criador quase nunca
+         -- é o primeiro, e qualquer membro virava dono para remover/apagar.
+         CREATE TABLE IF NOT EXISTS group_owners (
+            conv_id TEXT PRIMARY KEY,
+            owner_fp TEXT NOT NULL
+         );
+
+         -- Menção é fato registrado, não substring: sem esta tabela o
+         -- contador casava qualquer mensagem que citasse o fingerprint.
+         CREATE TABLE IF NOT EXISTS mentions (
+            msg_id TEXT NOT NULL,
+            conv_id TEXT NOT NULL,
+            target_fp TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (msg_id, target_fp)
+         );
+         CREATE INDEX IF NOT EXISTS idx_mentions_target ON mentions(target_fp, conv_id);",
     )?;
 
     for column in ["rev", "content_hash"] {
@@ -196,6 +245,31 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(ddl)?;
         }
     }
+
+    // v16: estado de amizade com carimbo de tempo e "quem pediu".
+    //
+    // A tabela `friends` antiga guardava só `status`. Isso impedia distinguir
+    // um pedido velho de um novo, e o desbloqueio fazia `DELETE`, perdendo a
+    // memória de que aquele peer já tinha sido bloqueado (o próximo
+    // ProfileSet o "amigava" de novo em silêncio).
+    for column in ["requested_by", "requested_at", "blocked_at"] {
+        if !column_exists(conn, "friends", column) {
+            let ddl = match column {
+                "requested_by" => {
+                    "ALTER TABLE friends ADD COLUMN requested_by TEXT NOT NULL DEFAULT '';"
+                }
+                "requested_at" => {
+                    "ALTER TABLE friends ADD COLUMN requested_at INTEGER NOT NULL DEFAULT 0;"
+                }
+                _ => "ALTER TABLE friends ADD COLUMN blocked_at INTEGER NOT NULL DEFAULT 0;",
+            };
+            conn.execute_batch(ddl)?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_friends_status ON friends(status, added_at);
+         CREATE INDEX IF NOT EXISTS idx_conv_read_fp ON conv_read(fp);",
+    )?;
     Ok(())
 }
 
@@ -338,6 +412,29 @@ pub struct ReadCursor {
     pub updated_at: i64,
 }
 
+/// Resumo de conversa para a lista: prévia, horário e não lidas do membro.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub peer_fp: String,
+    pub created_at: i64,
+    pub last_ts: i64,
+    pub last_body: String,
+    pub unread_count: i64,
+}
+
+/// Quanto do limite de introdução já foi usado nesta conversa/direção.
+/// A UI mostra isso; o Rust é quem recusa a mensagem excedente.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntroState {
+    pub used: i64,
+    pub limit: i64,
+    pub is_friend: bool,
+    pub remaining: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchHit {
     pub id: String,
@@ -358,6 +455,9 @@ pub struct SearchQuery {
     pub has: String,
     pub before: i64,
     pub limit: i64,
+    /// Quem está buscando. Necessário para "unread" saber o cursor certo.
+    #[serde(default)]
+    pub me: String,
 }
 
 impl crate::storage::Store {
@@ -738,16 +838,192 @@ impl crate::storage::Store {
     }
 
     pub fn read_set(&self, conv_id: &str, ts: i64) -> Result<(), String> {
+        let me = crate::identity::now_ms();
         let conn = self.locked();
         conn.execute(
             "INSERT INTO read_cursors (conv_id, last_read_ts, updated_at) VALUES (?1,?2,?3)
              ON CONFLICT(conv_id) DO UPDATE SET
                last_read_ts = MAX(read_cursors.last_read_ts, excluded.last_read_ts),
                updated_at = excluded.updated_at",
-            params![conv_id, ts, crate::identity::now_ms()],
+            params![conv_id, ts, me],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Leitura do ponto de vista de UM membro. `read_cursors` continua sendo
+    /// o "meu cursor" (chamadas antigas), mas grupo/canal precisam separar
+    /// quem leu o quê — senão o recibo de um virava "lido" para todos.
+    pub fn conv_read_set(&self, conv_id: &str, fp: &str, ts: i64) -> Result<(), String> {
+        let conn = self.locked();
+        conn.execute(
+            "INSERT INTO conv_read (conv_id, fp, last_read_ts, updated_at) VALUES (?1,?2,?3,?3)
+             ON CONFLICT(conv_id, fp) DO UPDATE SET
+               last_read_ts = MAX(conv_read.last_read_ts, excluded.last_read_ts),
+               updated_at = excluded.updated_at",
+            params![conv_id, fp, ts],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn conv_read_cursor(&self, conv_id: &str, fp: &str) -> Result<i64, String> {
+        let conn = self.locked();
+        // Compatibilidade: instalações antigas só têm o cursor global. O
+        // efetivo é o maior dos dois, então atualizar não "desmarca" leitura.
+        let ts: i64 = conn
+            .query_row(
+                "SELECT MAX(
+                    COALESCE((SELECT last_read_ts FROM conv_read WHERE conv_id=?1 AND fp=?2), 0),
+                    COALESCE((SELECT last_read_ts FROM read_cursors WHERE conv_id=?1), 0)
+                 )",
+                params![conv_id, fp],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(ts)
+    }
+
+    // Seção 9: gate de introdução
+    /// Consome uma das três mensagens iniciais. Devolve `true` quando a
+    /// mensagem pode sair AGORA e `false` quando o limite daquela direção já
+    /// estourou. `INSERT ... WHERE used < limite` é atômico no SQLite, então
+    /// duas abas/dispositivos não conseguem passar de três ao mesmo tempo.
+    pub fn dm_intro_take(
+        &self,
+        conv_id: &str,
+        author_fp: &str,
+        limit: i64,
+    ) -> Result<bool, String> {
+        let conn = self.locked();
+        let changed = conn
+            .execute(
+                "INSERT INTO dm_intro (conv_id, author_fp, used, updated_at)
+                 VALUES (?1,?2,1,?3)
+                 ON CONFLICT(conv_id, author_fp) DO UPDATE SET
+                   used = dm_intro.used + 1,
+                   updated_at = excluded.updated_at
+                 WHERE dm_intro.used < ?4",
+                params![conv_id, author_fp, crate::identity::now_ms(), limit],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(changed > 0)
+    }
+
+    pub fn dm_intro_used(&self, conv_id: &str, author_fp: &str) -> Result<i64, String> {
+        let conn = self.locked();
+        Ok(conn
+            .query_row(
+                "SELECT used FROM dm_intro WHERE conv_id=?1 AND author_fp=?2",
+                params![conv_id, author_fp],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0))
+    }
+
+    /// Estado que a UI precisa para não prometer o que o motor vai recusar.
+    pub fn dm_intro_state(
+        &self,
+        conv_id: &str,
+        peer_fp: &str,
+        my_fp: &str,
+    ) -> Result<IntroState, String> {
+        let is_friend = matches!(
+            self.get_friend(peer_fp).ok().flatten(),
+            Some((_, s)) if s == "accepted"
+        );
+        let used = if is_friend {
+            0
+        } else {
+            self.dm_intro_used(conv_id, my_fp)?
+        };
+        let limit = crate::social::DM_INTRO_LIMIT;
+        Ok(IntroState {
+            used,
+            limit,
+            is_friend,
+            remaining: if is_friend {
+                limit
+            } else {
+                (limit - used).max(0)
+            },
+        })
+    }
+
+    /// Devolve o crédito consumido por uma mensagem que NÃO chegou a existir
+    /// (duplicata/rejeição). Sem isso, reconexão ou retry queimava o limite.
+    pub fn dm_intro_refund(&self, conv_id: &str, author_fp: &str) -> Result<(), String> {
+        let conn = self.locked();
+        conn.execute(
+            "UPDATE dm_intro SET used = MAX(used - 1, 0), updated_at=?3
+              WHERE conv_id=?1 AND author_fp=?2",
+            params![conv_id, author_fp, crate::identity::now_ms()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Zera o crédito quando a amizade é aceita: o histórico fica, mas a
+    /// conversa deixa de ser "introdução".
+    pub fn dm_intro_reset(&self, conv_id: &str) -> Result<(), String> {
+        self.locked()
+            .execute("DELETE FROM dm_intro WHERE conv_id=?1", params![conv_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn mention_add(&self, msg_id: &str, conv_id: &str, target_fp: &str) -> Result<(), String> {
+        if target_fp.is_empty() {
+            return Ok(());
+        }
+        self.locked()
+            .execute(
+                "INSERT OR IGNORE INTO mentions (msg_id, conv_id, target_fp, created_at)
+                 VALUES (?1,?2,?3,?4)",
+                params![msg_id, conv_id, target_fp, crate::identity::now_ms()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn mention_targets(&self, body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(pos) = rest.find('@') {
+            rest = &rest[pos + 1..];
+            let token: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+            if token.len() == 12 && !out.contains(&token) {
+                out.push(token);
+            }
+        }
+        if out.is_empty() && body.contains("@everyone") {
+            out.push("everyone".into());
+        }
+        out
+    }
+
+    pub fn unread_mentions_for(&self, fp: &str) -> Result<i64, String> {
+        if fp.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.locked();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mentions m
+                   JOIN messages g ON g.id = m.msg_id
+              LEFT JOIN conv_read rc ON rc.conv_id = m.conv_id AND rc.fp = ?1
+                  WHERE m.target_fp = ?1
+                    AND g.author_fp <> ?1
+                    AND (rc.last_read_ts IS NULL OR g.ts > rc.last_read_ts)",
+                params![fp],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        Ok(n)
     }
 
     pub fn read_all(&self) -> Result<Vec<ReadCursor>, String> {
@@ -781,26 +1057,86 @@ impl crate::storage::Store {
         Ok(n)
     }
 
+    /// Não lidas de UM membro (grupo/canal), descontando as próprias.
+    pub fn unread_count_for(&self, conv_id: &str, fp: &str) -> Result<i64, String> {
+        let cursor = self.conv_read_cursor(conv_id, fp)?;
+        let conn = self.locked();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages
+                  WHERE conv_id=?1 AND ts > ?2 AND author_fp <> ?3",
+                params![conv_id, cursor, fp],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    /// Lista de conversas com o resumo que a interface móvel já tentava ler
+    /// (`unread_count`, `last_ts`, `last_body`) mas que o core nunca enviava —
+    /// os badges e a prévia ficavam sempre vazios.
+    pub fn conversations_with_counts(&self, fp: &str) -> Result<Vec<ConversationSummary>, String> {
+        if fp.is_empty() {
+            return Err("sem identidade".into());
+        }
+        let convs = self.list_conversations().map_err(|e| e.to_string())?;
+        let conn = self.locked();
+        let mut out = Vec::with_capacity(convs.len());
+        for c in convs {
+            let cursor: i64 = conn
+                .query_row(
+                    "SELECT MAX(
+                        COALESCE((SELECT last_read_ts FROM conv_read WHERE conv_id=?1 AND fp=?2), 0),
+                        COALESCE((SELECT last_read_ts FROM read_cursors WHERE conv_id=?1), 0)
+                     )",
+                    params![c.id, fp],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let (last_ts, last_body): (i64, String) = conn
+                .query_row(
+                    "SELECT ts, body FROM messages WHERE conv_id=?1 ORDER BY ts DESC, id DESC LIMIT 1",
+                    params![c.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or((0, String::new()));
+            let unread: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages
+                      WHERE conv_id=?1 AND ts > ?2 AND author_fp <> ?3",
+                    params![c.id, cursor, fp],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            out.push(ConversationSummary {
+                id: c.id,
+                kind: c.kind,
+                title: c.title,
+                peer_fp: c.peer_fp,
+                created_at: c.created_at,
+                last_ts,
+                last_body,
+                unread_count: unread,
+            });
+        }
+        out.sort_by(|a, b| {
+            b.last_ts
+                .cmp(&a.last_ts)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+        Ok(out)
+    }
+
     pub fn unread_mentions(&self, fp: &str) -> Result<i64, String> {
         if fp.is_empty() {
             return Ok(0);
         }
-        let conn = self.locked();
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM msg_meta m
-                   JOIN messages g ON g.id = m.msg_id
-              LEFT JOIN read_cursors rc ON rc.conv_id = m.conv_id
-                  WHERE m.mentioned = 1
-                    AND g.author_fp <> ?1
-                    AND (rc.last_read_ts IS NULL OR g.ts > rc.last_read_ts)",
-                params![fp],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .unwrap_or(0);
-        Ok(n)
+        // Tabela `mentions` é a fonte de verdade. O `msg_meta.mentioned` é
+        // apenas um booleano "alguém foi mencionado" e não dizer QUEM — não
+        // serve para contar menções de um membro específico.
+        self.unread_mentions_for(fp)
     }
 
     pub fn presence_set(
@@ -1836,6 +2172,33 @@ impl crate::storage::Store {
             .map_err(|e| e.to_string())?;
 
         let mut out = Vec::new();
+        // Cursor por conversa, uma vez só: o filtro "unread" precisa comparar
+        // cada mensagem com o que AQUELE usuário já leu naquela conversa.
+        let me = q.me.clone();
+        let mut cursors: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        if !me.is_empty() {
+            if let Ok(mut cs) = conn.prepare("SELECT conv_id, last_read_ts FROM read_cursors") {
+                if let Ok(rows) =
+                    cs.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                {
+                    for row in rows.flatten() {
+                        cursors.insert(row.0, row.1);
+                    }
+                }
+            }
+            if let Ok(mut cs) =
+                conn.prepare("SELECT conv_id, last_read_ts FROM conv_read WHERE fp=?1")
+            {
+                if let Ok(rows) = cs.query_map(params![me], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                }) {
+                    for row in rows.flatten() {
+                        let cur = cursors.entry(row.0).or_insert(0);
+                        *cur = (*cur).max(row.1);
+                    }
+                }
+            }
+        }
         for hit in rows.flatten() {
             if !needle.is_empty() && !hit.body.to_lowercase().contains(&needle) {
                 continue;
@@ -1850,6 +2213,14 @@ impl crate::storage::Store {
                 "poll" => hit.body.starts_with("{\"poll\""),
                 "image" => hit.body.contains("\"mime\":\"image/"),
                 "code" => hit.body.contains("```"),
+                // Não lidas DE VERDADE: recebidas depois do cursor da conversa.
+                "unread" => {
+                    if hit.direction != "in" || hit.author_fp == q.me {
+                        false
+                    } else {
+                        hit.ts > cursors.get(&hit.conv_id).copied().unwrap_or(0)
+                    }
+                }
                 _ => true,
             };
             if !ok {

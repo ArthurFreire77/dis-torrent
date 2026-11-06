@@ -43,6 +43,20 @@ pub struct PeerRecord {
     pub origin: String,
 }
 
+/// Estado persistido de um relacionamento. `requested_by` guarda quem enviou
+/// o pedido pendente (`""` nos demais estados) e `blocked_at` sobrevive à
+/// remoção da amizade — é o que impede o desbloqueio acidental.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FriendState {
+    pub fp: String,
+    pub nickname: String,
+    pub status: String,
+    pub added_at: i64,
+    pub requested_by: String,
+    pub requested_at: i64,
+    pub blocked_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ChannelMetaRow {
     pub id: String,
@@ -900,9 +914,34 @@ impl Store {
     }
 
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
-        let conn = self.locked();
-        conn.execute("DELETE FROM messages WHERE conv_id=?1", params![id])?;
-        conn.execute("DELETE FROM conversations WHERE id=?1", params![id])?;
+        // Tudo numa transação e cobrindo as tabelas satélites. Antes só
+        // `messages` e `conversations` saíam: `outbox` continuava tentando
+        // entregar mensagem de conversa inexistente e `read_cursors` voltava a
+        // marcar lido numa conversa que o usuário tinha apagado.
+        let mut conn = self.locked();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM outbox WHERE msg_id IN (SELECT id FROM messages WHERE conv_id=?1)",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM msg_reactions WHERE conv_id=?1", params![id])?;
+        tx.execute("DELETE FROM msg_meta WHERE conv_id=?1", params![id])?;
+        tx.execute(
+            "DELETE FROM read_receipts WHERE msg_id IN
+                    (SELECT id FROM messages WHERE conv_id=?1)",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM messages WHERE conv_id=?1", params![id])?;
+        tx.execute("DELETE FROM conversations WHERE id=?1", params![id])?;
+        tx.execute("DELETE FROM read_cursors WHERE conv_id=?1", params![id])?;
+        tx.execute("DELETE FROM conv_read WHERE conv_id=?1", params![id])?;
+        // `dm_intro` NÃO sai: apagar a conversa não pode zerar o limite de três
+        // mensagens iniciais (era o bypass óbvio: apagar e reabrir). O contador
+        // é por conversa+autor e continua valendo para a mesma DM, cujo id é
+        // determinístico.
+        tx.execute("DELETE FROM mentions WHERE conv_id=?1", params![id])?;
+        tx.execute("DELETE FROM pending_reacts WHERE conv_id=?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1463,10 +1502,110 @@ impl Store {
     }
 
     pub fn set_friend(&self, fp: &str, nickname: &str, status: &str) -> Result<()> {
+        let now = crate::identity::now_ms();
+        // Bloqueio é memória, não linha temporária: gravar `blocked` de novo
+        // atualiza o carimbo sem apagar quem pediu. O `CASE` do nickname
+        // evita que um FriendAccept vazio apague o nome já conhecido.
+        let blocked = if status == "blocked" { now } else { 0 };
         self.locked().execute(
-            "INSERT INTO friends(fp,nickname,status,added_at) VALUES(?1,?2,?3,?4)
-             ON CONFLICT(fp) DO UPDATE SET nickname=CASE WHEN excluded.nickname='' THEN friends.nickname ELSE excluded.nickname END, status=excluded.status",
-            params![fp, nickname, status, crate::identity::now_ms()],
+            "INSERT INTO friends(fp,nickname,status,added_at,requested_by,requested_at,blocked_at)
+             VALUES(?1,?2,?3,?4,'',0,?5)
+             ON CONFLICT(fp) DO UPDATE SET
+               nickname=CASE WHEN excluded.nickname='' THEN friends.nickname ELSE excluded.nickname END,
+               status=excluded.status,
+               blocked_at=CASE WHEN excluded.status='blocked' THEN excluded.blocked_at ELSE friends.blocked_at END",
+            params![fp, nickname, status, now, blocked],
+        )?;
+        Ok(())
+    }
+
+    /// Registra um pedido enviado. Não rebaixa amizade aceita nem bloqueio.
+    pub fn set_friend_request_out(&self, fp: &str, nickname: &str) -> Result<()> {
+        let now = crate::identity::now_ms();
+        self.locked().execute(
+            "INSERT INTO friends(fp,nickname,status,added_at,requested_by,requested_at)
+             VALUES(?1,?2,'pending_out',?3,?4,?3)
+             ON CONFLICT(fp) DO UPDATE SET
+               nickname=CASE WHEN excluded.nickname='' THEN friends.nickname ELSE excluded.nickname END,
+               status=CASE WHEN friends.status IN ('blocked','accepted') THEN friends.status ELSE 'pending_out' END,
+               requested_by=CASE WHEN friends.status IN ('blocked','accepted') THEN friends.requested_by ELSE excluded.requested_by END,
+               requested_at=CASE WHEN friends.status IN ('blocked','accepted') THEN friends.requested_at ELSE excluded.requested_at END",
+            params![fp, nickname, now, ""],
+        )?;
+        Ok(())
+    }
+
+    /// Registra um pedido recebido. Pedido repetido do mesmo peer mantém o
+    /// carimbo original (a UI não deve "pular" a solicitação para o topo).
+    pub fn set_friend_request_in(&self, fp: &str, nickname: &str) -> Result<()> {
+        let now = crate::identity::now_ms();
+        self.locked().execute(
+            "INSERT INTO friends(fp,nickname,status,added_at,requested_by,requested_at)
+             VALUES(?1,?2,'pending_in',?3,?4,?3)
+             ON CONFLICT(fp) DO UPDATE SET
+               nickname=CASE WHEN excluded.nickname='' THEN friends.nickname ELSE excluded.nickname END,
+               status=CASE WHEN friends.status IN ('blocked','accepted') THEN friends.status ELSE 'pending_in' END,
+               requested_by=CASE WHEN friends.status IN ('blocked','accepted') THEN friends.requested_by ELSE excluded.requested_by END,
+               requested_at=CASE WHEN friends.status IN ('blocked','accepted') THEN friends.requested_at ELSE excluded.requested_at END",
+            params![fp, nickname, now, fp],
+        )?;
+        Ok(())
+    }
+
+    /// Aceita nos dois sentidos: `accepted` é simétrico por definição.
+    pub fn accept_friend(&self, fp: &str, nickname: &str) -> Result<()> {
+        let now = crate::identity::now_ms();
+        self.locked().execute(
+            "INSERT INTO friends(fp,nickname,status,added_at,requested_by,requested_at)
+             VALUES(?1,?2,'accepted',?3,'',0)
+             ON CONFLICT(fp) DO UPDATE SET
+               nickname=CASE WHEN excluded.nickname='' THEN friends.nickname ELSE excluded.nickname END,
+               status=CASE WHEN friends.status='blocked' THEN friends.status ELSE 'accepted' END,
+               added_at=CASE WHEN friends.status='accepted' THEN friends.added_at ELSE excluded.added_at END",
+            params![fp, nickname, now],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a amizade mas PRESERVA o bloqueio. Antes, remover um amigo
+    /// bloqueado apagava a linha e com ela o próprio bloqueio.
+    pub fn clear_friendship(&self, fp: &str) -> Result<()> {
+        self.locked().execute(
+            "UPDATE friends
+                SET status = CASE WHEN blocked_at > 0 THEN 'blocked' ELSE 'removed' END,
+                    requested_by = '', requested_at = 0
+              WHERE fp = ?1",
+            params![fp],
+        )?;
+        Ok(())
+    }
+
+    /// Desbloqueio explícito: zera `blocked_at` e deixa a linha neutra.
+    /// Diferente de `clear_friendship`, aqui o usuário PEDIU para desbloquear.
+    pub fn unblock_friend(&self, fp: &str) -> Result<()> {
+        self.locked().execute(
+            "UPDATE friends
+                SET status='removed', blocked_at=0, requested_by='', requested_at=0
+              WHERE fp=?1 AND status='blocked'",
+            params![fp],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_blocked_fp(&self, fp: &str) -> bool {
+        matches!(
+            self.get_friend(fp).ok().flatten(),
+            Some((_, status)) if status == "blocked"
+        )
+    }
+
+    /// Só para teste: envelhece o carimbo do pedido para exercitar o TTL sem
+    /// dormir um mês. Não é usada em produção.
+    #[doc(hidden)]
+    pub fn age_friend_request_for_test(&self, fp: &str, age_ms: i64) -> Result<()> {
+        self.locked().execute(
+            "UPDATE friends SET requested_at=?2 WHERE fp=?1",
+            params![fp, crate::identity::now_ms() - age_ms],
         )?;
         Ok(())
     }
@@ -1482,30 +1621,84 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Estado completo com carimbos. `None` = nunca existiu relacionamento.
+    pub fn friend_state(&self, fp: &str) -> Result<Option<FriendState>> {
+        let conn = self.locked();
+        let r = conn
+            .query_row(
+                "SELECT fp, nickname, status, added_at, requested_by, requested_at, blocked_at
+                   FROM friends WHERE fp=?1",
+                params![fp],
+                |r| {
+                    Ok(FriendState {
+                        fp: r.get(0)?,
+                        nickname: r.get(1)?,
+                        status: r.get(2)?,
+                        added_at: r.get(3)?,
+                        requested_by: r.get(4)?,
+                        requested_at: r.get(5)?,
+                        blocked_at: r.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(r)
+    }
+
+    /// Devolve um pedido recebido ao estado pendente depois de uma recusa.
+    /// Sem isto, recusar apagava o histórico e o próximo pedido parecia novo.
+    pub fn reject_friend(&self, fp: &str) -> Result<()> {
+        let conn = self.locked();
+        // `blocked` é soberano: uma recusa atrasada não pode desfazer o
+        // bloqueio que o usuário aplicou de propósito.
+        conn.execute(
+            "UPDATE friends SET
+                status = CASE WHEN status='blocked' THEN 'blocked' ELSE 'rejected' END,
+                requested_by = CASE WHEN status='blocked' THEN requested_by ELSE '' END,
+                requested_at = CASE WHEN status='blocked' THEN requested_at ELSE 0 END
+              WHERE fp=?1",
+            params![fp],
+        )?;
+        Ok(())
+    }
+
     pub fn list_friends(&self, status: Option<&str>) -> Result<Vec<PeerRecord>> {
         let conn = self.locked();
         let sql = "SELECT f.fp, p.pubkey_hex, f.nickname, p.addr, f.added_at, 'friend'
                    FROM friends f LEFT JOIN peers p ON p.fp = f.fp";
+        let now = crate::identity::now_ms();
+        // Pedido vencido não é amizade nem solicitação: some das duas listas.
+        // `removed` também nunca aparece — é só a lápide que preserva o
+        // bloqueio para um eventual novo pedido.
+        let validade = "f.status <> 'removed' AND NOT (f.status IN ('pending_in','pending_out')
+                        AND f.requested_at > 0 AND f.requested_at < ?2)";
+        let corte = now - crate::social::FRIEND_REQUEST_TTL_MS;
         let mut st;
         let rows = match status {
             Some(s) => {
-                st = conn.prepare(&format!("{sql} WHERE f.status=?1 ORDER BY f.added_at DESC"))?;
-                st.query_map(params![s], friend_row())?
+                st = conn.prepare(&format!(
+                    "{sql} WHERE f.status=?1 AND {validade} ORDER BY f.added_at DESC"
+                ))?;
+                st.query_map(params![s, corte], friend_row())?
                     .collect::<std::result::Result<Vec<_>, _>>()?
             }
             None => {
-                st = conn.prepare(&format!("{sql} ORDER BY f.added_at DESC"))?;
-                st.query_map([], friend_row())?
+                st = conn.prepare(&format!(
+                    "{sql} WHERE f.status <> 'removed' AND NOT (f.status IN ('pending_in','pending_out')
+                        AND f.requested_at > 0 AND f.requested_at < ?1) ORDER BY f.added_at DESC"
+                ))?;
+                st.query_map(params![corte], friend_row())?
                     .collect::<std::result::Result<Vec<_>, _>>()?
             }
         };
         Ok(rows)
     }
 
+    /// Remove a amizade sem apagar a memória do bloqueio. É o que
+    /// `friend_remove`/cancelar solicitação deve chamar.
     pub fn remove_friend(&self, fp: &str) -> Result<()> {
-        self.locked()
-            .execute("DELETE FROM friends WHERE fp=?1", params![fp])?;
-        Ok(())
+        self.clear_friendship(fp)
     }
 
     pub fn create_community(
@@ -2002,16 +2195,25 @@ impl Store {
         }
         h.update(&crate::identity::now_ms().to_be_bytes());
         let id = hex::encode(h.finalize().as_bytes())[..24].to_string();
-        self.locked().execute(
+        let mut conn = self.locked();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO conversations(id,kind,title,peer_fp,created_at) VALUES(?1,'group',?2,'',?3)",
             params![id, title, crate::identity::now_ms()],
         )?;
         for fp in sorted {
-            self.locked().execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO group_members(conv_id,fp,nickname,added_at) VALUES(?1,?2,'',?3)",
                 params![id, fp, crate::identity::now_ms()],
             )?;
         }
+        // O dono é quem CRIOU, não quem ordenou primeiro na lista.
+        tx.execute(
+            "INSERT INTO group_owners(conv_id,owner_fp) VALUES(?1,?2)
+             ON CONFLICT(conv_id) DO UPDATE SET owner_fp=excluded.owner_fp",
+            params![id, my_fp],
+        )?;
+        tx.commit()?;
         Ok(Conversation {
             id,
             kind: "group".into(),
@@ -2019,6 +2221,35 @@ impl Store {
             peer_fp: "".into(),
             created_at: crate::identity::now_ms(),
         })
+    }
+
+    pub fn group_owner(&self, conv_id: &str) -> Result<Option<String>> {
+        let conn = self.locked();
+        let dono = conn
+            .query_row(
+                "SELECT owner_fp FROM group_owners WHERE conv_id=?1",
+                params![conv_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if dono.is_some() {
+            return Ok(dono);
+        }
+        // Compatibilidade com grupos criados antes da tabela: cai na
+        // convenção antiga (primeiro membro do roster).
+        Ok(Self::list_group_members_conn(&conn, conv_id)?
+            .first()
+            .map(|(fp, _)| fp.clone()))
+    }
+
+    pub fn group_owner_set(&self, conv_id: &str, owner_fp: &str) -> Result<()> {
+        self.locked().execute(
+            "INSERT INTO group_owners(conv_id,owner_fp) VALUES(?1,?2)
+             ON CONFLICT(conv_id) DO UPDATE SET owner_fp=excluded.owner_fp",
+            params![conv_id, owner_fp],
+        )?;
+        Ok(())
     }
 
     pub fn list_group_members(&self, conv_id: &str) -> Result<Vec<(String, String)>> {

@@ -84,3 +84,26 @@ Não é roadmap — está no core, com migration, comando Tauri e teste:
   mute e shadow-ban com registro em `audit_log`.
 - **Cargos e bots** — persistidos e sincronizados do dono para os membros, com
   fallback explícito para `localStorage` no modo navegador.
+
+## Amizade, contatos e mensagens iniciais (implementado)
+
+O relacionamento é local e simétrico por protocolo, sem servidor central:
+
+- `friends.status`: `accepted`, `pending_in`, `pending_out`, `blocked`,
+  `rejected`, `removed`. `blocked_at` sobrevive à remoção: desbloquear é uma
+  ação explícita, nunca efeito colateral de "remover amigo".
+- **Pedido cruzado** (A pede enquanto B também pede) termina `accepted` dos
+  dois lados. O `FriendRequest` que chega com `pending_out` local aceita.
+- **Perfil não cria amizade.** `ProfileSet` só grava o perfil; antes ele marcava
+  `accepted` e dava a qualquer peer permissão de DM e chamada.
+- **Pedido vencido** (30 dias) sai das listas de pendentes.
+- **Mensagens iniciais**: sem amizade aceita, até **3 por direção** numa DM. O
+  contador é persistido (`dm_intro`, por conversa e autor), conferido no emissor
+  E no receptor, e não é zerado ao apagar/reabrir a conversa. Aceitar a amizade
+  libera a conversa. O destinatário pode responder dentro do mesmo limite.
+- **Autorização**: roster de grupo é do criador (`group_owners`), não do
+  primeiro membro da lista; moderação de servidor exige permissão; `Forward`
+  para canal passa pelo host; mensagem de canal sem chave do autor é recusada.
+- **Presença** só é anunciada para contatos sociais (amigo, grupo, servidor em
+  comum) e vira `offline` quando o link cai — não espera o TTL de 90 s.
+
