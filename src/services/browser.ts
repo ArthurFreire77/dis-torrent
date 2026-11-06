@@ -33,7 +33,7 @@ import { profileContentHash } from './profileRevision'
 import { SessionDriver } from '../core/storage/sessionDriver'
 import { IdentityStore } from '../core/storage/identityStore'
 import * as LX from './localExtras'
-import { WEB_KEYS, readList, writeJson, writeString } from './browserStore'
+import { WEB_KEYS, readList, readString, writeJson, writeString } from './browserStore'
 import { parseBotConfig } from './botCommands'
 
 const sharedDriver = new LocalDriver()
@@ -769,6 +769,17 @@ export const browserServices: DisTorrentServices = {
   },
 
   conversationsList: () => Promise.resolve(readConvos()),
+  conversationsOverview: () => Promise.resolve(readConvos().map((c) => {
+    const msgs = readMsgs().filter((m) => m.conv_id === c.id)
+    const last = msgs.length ? msgs.reduce((a, b) => (a.ts >= b.ts ? a : b)) : null
+    const cursor = loadAll<ReadCursor>(READ_BASE)[c.id]?.last_read_ts ?? 0
+    return {
+      ...c,
+      last_ts: last?.ts ?? 0,
+      last_body: last?.body ?? '',
+      unread_count: msgs.filter((m) => m.ts > cursor && m.direction === 'in').length,
+    }
+  })),
   conversationDelete: (convId) => { writeConvos(readConvos().filter(c => c.id !== convId)); return Promise.resolve() },
 
   dmOpen: (peerFp, peerNick) => {
@@ -801,6 +812,19 @@ export const browserServices: DisTorrentServices = {
     const targetOnline = targetFp ? isOnline(targetFp) : false
     const blocked = getFriends('blocked')
     if (targetFp && blocked.some(f => f.fp === targetFp)) return Promise.reject(new Error('peer bloqueado'))
+
+    // Mesma regra do core: sem amizade aceita, até 3 mensagens iniciais por
+    // direção. O contador fica no armazenamento local para apagar/reabrir a
+    // conversa não devolver crédito.
+    const ehAmigo = !!targetFp && getFriends('accepted').some(f => f.fp === targetFp)
+    if (!ehAmigo) {
+      const key = `distorrent:intro:${convId}`
+      const usados = Math.max(0, Number(readString(key) ?? 0))
+      if (usados >= 3) {
+        return Promise.reject(new Error('limite de 3 mensagens antes da amizade — envie uma solicitação para continuar'))
+      }
+      writeString(key, String(usados + 1))
+    }
 
     const id = genMsgId()
     const msg: StoredMessage = {
@@ -1602,6 +1626,20 @@ export const browserServices: DisTorrentServices = {
       m.author_fp !== me && metas[m.id]?.mentioned &&
       m.ts > (cursors[m.conv_id]?.last_read_ts ?? 0)).length
   },
+  dmIntroState: async (convId) => {
+    const conv = readConvos().find(c => c.id === convId)
+    const friends = getFriends('accepted')
+    const isFriend = !!conv && friends.some(f => f.fp === conv.peer_fp)
+    // Mesmo limite do core (3) — o modo navegador não tem motor, mas também
+    // não pode prometer envio ilimitado que o app real recusaria. O contador
+    // fica no armazenamento local (não nas mensagens) para apagar/reabrir não
+    // devolver crédito.
+    const limit = 3
+    const key = `distorrent:intro:${convId}`
+    const usados = Math.max(0, Number(readString(key) ?? 0))
+    const used = isFriend ? 0 : Math.min(usados, limit)
+    return { used, limit, is_friend: isFriend, remaining: isFriend ? limit : Math.max(0, limit - used) }
+  },
 
   backgroundPrefs: async () => ({
     close_to_tray: false,
@@ -1620,6 +1658,7 @@ export const browserServices: DisTorrentServices = {
   notificationPermission: async () => 'unsupported',
   notificationRequestPermission: async () => 'unsupported',
   notifyPrefsSet: async () => {},
+  notifyUiAlive: async () => {},
   backgroundServiceSet: async () => false,
   callPendingAction: async () => ({ action: '', call_id: '' }),
   callNotifyShow: async () => {},

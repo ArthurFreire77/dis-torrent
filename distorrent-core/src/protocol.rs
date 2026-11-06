@@ -225,6 +225,10 @@ pub enum SecureFrame {
         conv_id: String,
         title: String,
         members: Vec<(String, String)>,
+        /// Quem criou. Ausente em frames antigos (0.0 lê como vazio) — nesse
+        /// caso o receptor cai na convenção do primeiro membro do roster.
+        #[serde(default)]
+        owner_fp: String,
     },
     GroupMemberAdded {
         conv_id: String,

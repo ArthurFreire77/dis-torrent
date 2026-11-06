@@ -154,6 +154,21 @@ export interface Conversation {
   created_at: number
 }
 
+/** Conversa com o resumo que a lista mostra (prévia, horário, não lidas). */
+export interface ConversationOverview extends Conversation {
+  last_ts: number
+  last_body: string
+  unread_count: number
+}
+
+/** Quanto do limite de 3 mensagens iniciais já foi usado nesta direção. */
+export interface DmIntroState {
+  used: number
+  limit: number
+  is_friend: boolean
+  remaining: number
+}
+
 export interface StoredMessage {
   id: string
   conv_id: string
@@ -640,6 +655,7 @@ export interface DisTorrentServices {
   communitySetPublic(communityId: string, isPublic: boolean): Promise<void>
   sendChannelMessage(communityId: string, channelId: string, body: string): Promise<StoredMessage>
   conversationsList(): Promise<Conversation[]>
+  conversationsOverview(): Promise<ConversationOverview[]>
   dmOpen(peerFp: string, peerNick: string): Promise<Conversation>
   conversationDelete(convId: string): Promise<void>
   messagesList(convId: string): Promise<StoredMessage[]>
@@ -832,6 +848,7 @@ export interface DisTorrentServices {
   readSet(convId: string, ts: number): Promise<void>
   readAll(): Promise<ReadCursor[]>
   unreadCount(convId: string): Promise<number>
+  dmIntroState(convId: string): Promise<DmIntroState>
   unreadMentions(): Promise<number>
 
   presenceSet(status: PresenceStatus, custom: string, customEmoji: string): Promise<void>
@@ -854,6 +871,8 @@ export interface DisTorrentServices {
   notificationPermission(): Promise<string>
   notificationRequestPermission(): Promise<string>
   notifyPrefsSet(system: boolean, preview: boolean, policy?: string | null): Promise<void>
+  /** Batida de vida: evita aviso duplicado entre o Rust e o frontend. */
+  notifyUiAlive?(): Promise<void>
   backgroundServiceSet(on: boolean): Promise<boolean>
   callPendingAction(): Promise<{ action: string; call_id: string }>
   callNotifyShow(callId: string, title: string, body: string): Promise<void>

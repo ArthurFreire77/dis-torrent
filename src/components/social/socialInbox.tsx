@@ -25,7 +25,7 @@ export function InboxPanel({ tab, onTab, profiles, onJump, onClose }: {
         setMentionCount(n)
         setMentions(await services.searchMessages({ text: '', from: '', conv: '', has: 'mention', before: 0, limit: 50 }))
       } else if (tab === 'unreads') {
-        setUnreads(await services.searchMessages({ text: '', from: '', conv: '', has: '', before: 0, limit: 50 }))
+        setUnreads(await services.searchMessages({ text: '', from: '', conv: '', has: 'unread', before: 0, limit: 50 }))
       } else {
         setUnreads([])
       }

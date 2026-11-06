@@ -21,11 +21,13 @@ export function SearchPanel({ convId, convLabel, profiles, onClose, onJump }: {
   async function run() {
     setBusy(true)
     try {
-      const r = await services.searchMessages({ text: q, from, conv: '', has, before: 0, limit: 50 })
+      // Busca com escopo na conversa aberta. Antes mandava `conv: ''` e o
+      // painel "Buscar em X" trazia resultados de OUTRAS conversas.
+      const r = await services.searchMessages({ text: q, from, conv: convId, has, before: 0, limit: 50 })
       setHits(r)
     } catch { setHits([]) } finally { setBusy(false) }
   }
-  useEffect(() => { const t = setTimeout(run, 220); return () => clearTimeout(t) }, [q, from, has])
+  useEffect(() => { const t = setTimeout(run, 220); return () => clearTimeout(t) }, [q, from, has, convId])
 
   return (
     <div style={{

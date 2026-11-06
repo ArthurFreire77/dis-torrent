@@ -7,6 +7,7 @@ import type {
   BotView,
   ChannelMeta,
   Conversation,
+  ConversationOverview,
   EngineEvent,
   DisTorrentServices,
   FriendView,
@@ -157,6 +158,8 @@ export const tauriServices: DisTorrentServices = {
     invoke<StoredMessage>('send_channel_message', { communityId, channelId, body }),
 
   conversationsList: () => invoke<Conversation[]>('conversations_list'),
+
+  conversationsOverview: () => invoke<ConversationOverview[]>('conversations_overview'),
 
   dmOpen: (peerFp, peerNick) => {
     if (!peerFp || typeof peerFp !== 'string' || peerFp.trim() === '') throw new Error('fingerprint inválido')
@@ -452,6 +455,7 @@ export const tauriServices: DisTorrentServices = {
   readAll: () => invoke<ReadCursor[]>('read_all'),
   unreadCount: (convId) => invoke<number>('unread_count', { convId }),
   unreadMentions: () => invoke<number>('unread_mentions'),
+  dmIntroState: (convId) => invoke<import('./models').DmIntroState>('dm_intro_state', { convId }),
 
   presenceSet: (status, custom, customEmoji) =>
     invoke<void>('presence_set', { status, custom, customEmoji }),
@@ -477,6 +481,7 @@ export const tauriServices: DisTorrentServices = {
   notificationRequestPermission: () => invoke<string>('notification_request_permission'),
   notifyPrefsSet: (system, preview, policy) =>
     invoke<void>('notify_prefs_set', { system, preview, policy: policy ?? null }),
+  notifyUiAlive: () => invoke<void>('notify_ui_alive'),
   backgroundServiceSet: async (on: boolean) => {
     if (!isAndroidRuntime()) return false
     try {

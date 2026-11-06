@@ -49,6 +49,7 @@ import { activeToken } from '../shared/markdown'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { useSocialWindow, useMessageActions, usePresence, useReadState } from '../app/useSocial'
 import { BookmarksPanel } from '../components/social/Social'
+import { introState, relationOf, effectivePresence } from '../services/socialRules'
 import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
@@ -59,7 +60,7 @@ import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
-  notifyMessage, notifyIncomingCall, notifyReaction, endCallNotice, markCallHandled,
+  notifyMessage, notifyIncomingCall, notifyReaction, notifyFriend, endCallNotice, markCallHandled,
   setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
@@ -494,7 +495,9 @@ export default function MobileShell() {
   const [showThread, setShowThread] = useState(false)
   const [threadMsgs, setThreadMsgs] = useState<StoredMessage[]>([])
   const [threadInput, setThreadInput] = useState('')
-  const [myPresence] = useState<PresenceStatus>('online')
+  // Antes era `useState('online')` fixo: o modo "não perturbe"/invisível
+  // escolhido nas preferências nunca valia no mobile (nem para silenciar som).
+  const myPresence: PresenceStatus = prefs.myPresence
   const [composerEmoji, setComposerEmoji] = useState(false)
   const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
@@ -1058,7 +1061,7 @@ export default function MobileShell() {
         })
       }, 3500)
     }
-    if (ev.type === 'friend_request_in' || ev.type === 'friend_accepted' || ev.type === 'friend_removed') { refreshFriends(); refreshConvos() }
+    if (ev.type === 'friend_request_in' || ev.type === 'friend_accepted' || ev.type === 'friend_removed') { refreshFriends(); refreshConvos(); const nome = (ev as unknown as { nickname?: string }).nickname || String((ev as unknown as { fp?: string }).fp ?? '').slice(0, 8); notifyFriend({ kind: ev.type === 'friend_request_in' ? 'request' : ev.type === 'friend_accepted' ? 'accepted' : 'removed', nome }) }
     if (ev.type === 'community_joined') { refreshCommunities(); refreshConvos() }
     if (ev.type === 'community_removed') { refreshCommunities(); refreshConvos(); if (selCommunity === ev.community_id) { setSelCommunity(null); setSelConv(null); setSelPeerFp(null) } }
     if (ev.type === 'group_synced') { refreshConvos(); refreshCommunities() }
@@ -1563,6 +1566,33 @@ export default function MobileShell() {
   }, [isChannel, selConv, channelListCache, activeCall, activeComm, selConvObj])
   const isGroupConv = selConvObj?.kind === 'group'
   const selConvRoom = selConv ? callRoomsMap.get(selConv) ?? null : null
+
+  // Relação e limite de introdução vêm do motor, não de uma cópia local.
+  const selPeerState = selConvObj?.kind === 'dm' && selConvObj.peer_fp
+    ? friendsAccepted.some(f => f.fp === selConvObj.peer_fp)
+      ? { fp: selConvObj.peer_fp, status: 'accepted' }
+      : friendRequests.some(f => f.fp === selConvObj.peer_fp)
+        ? { fp: selConvObj.peer_fp, status: 'pending_in' }
+        : pendingOut.some(f => f.fp === selConvObj.peer_fp)
+          ? { fp: selConvObj.peer_fp, status: 'pending_out' }
+          : friendsBlocked.some(f => f.fp === selConvObj.peer_fp)
+            ? { fp: selConvObj.peer_fp, status: 'blocked' }
+            : null
+    : null
+  const selRelation = relationOf(selPeerState, identity?.fingerprint ?? '')
+  const [introUsed, setIntroUsed] = useState(0)
+  useEffect(() => {
+    if (!selConv || selConvObj?.kind !== 'dm') { setIntroUsed(0); return }
+    let vivo = true
+    services.dmIntroState(selConv)
+      .then((s) => { if (vivo) setIntroUsed(Number(s?.used) || 0) })
+      .catch(() => { if (vivo) setIntroUsed(0) })
+    return () => { vivo = false }
+  }, [selConv, selConvObj?.kind, messages.length])
+  const intro = selConvObj?.kind === 'dm'
+    ? introState({ isFriend: selRelation === 'friend', used: introUsed })
+    : null
+
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [showGroupPanel, setShowGroupPanel] = useState(false)
   const [memberNicks, setMemberNicks] = useState<Record<string, string>>({})
@@ -2536,6 +2566,30 @@ export default function MobileShell() {
               anchor="up"
             />
           )}
+          {intro?.hint && (
+            <div
+              role="status"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
+                fontSize: 11, fontWeight: 700,
+                color: intro.blocked ? t.red : t.muted,
+                background: intro.blocked ? `${t.red}18` : t.main,
+                border: `1px solid ${intro.blocked ? `${t.red}55` : t.border}`,
+                borderRadius: 6, padding: '5px 8px',
+              }}
+            >
+              <Icon d={Icons.lock} size={12} />
+              <span style={{ flex: 1 }}>{intro.hint}</span>
+              {selPeerFp && intro.blocked && (
+                <button
+                  onClick={() => { setFriendsTab('adicionar'); setFriendFpInput(selPeerFp); setTab('friends') }}
+                  style={{ background: t.accent, color: '#fff', border: 'none', borderRadius: 5, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                >
+                  Pedir amizade
+                </button>
+              )}
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, background: t.composer, borderRadius: 8, padding: '8px 10px' }}>
             <input type="file" ref={(el: any) => fileInputRef.current = el} onChange={onPickFile} style={{ display: 'none' }} />
             <button aria-label="Anexar" title="Anexar arquivo (todos semeiam)" onClick={() => fileInputRef.current?.click()} style={{ width: 28, height: 28, borderRadius: '50%', background: t.accent, color: '#fff', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></button>
@@ -2573,8 +2627,8 @@ export default function MobileShell() {
               style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: t.text, fontSize: 15, fontFamily: 'Inter, sans-serif', resize: 'none', maxHeight: 140, lineHeight: 1.4 }}
             />
             <button aria-label="Emoji" onClick={() => setComposerEmoji((v) => !v)} style={{ background: 'transparent', border: 'none', color: composerEmoji ? t.accent : t.muted, display: 'flex', flexShrink: 0, cursor: 'pointer', padding: 2 }}><Icon d={Icons.smile} size={18} /></button>
-            <button onClick={send} disabled={!input.trim()} aria-label="Enviar"
-              style={{ background: input.trim() ? t.accent : 'transparent', color: input.trim() ? '#fff' : t.muted, border: 'none', borderRadius: 8, padding: '6px 8px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: !input.trim() ? 'default' : 'pointer', opacity: !input.trim() ? 0.45 : 1 }}>
+            <button onClick={send} disabled={!input.trim() || !!intro?.blocked} aria-label="Enviar"
+              style={{ background: input.trim() && !intro?.blocked ? t.accent : 'transparent', color: input.trim() && !intro?.blocked ? '#fff' : t.muted, border: 'none', borderRadius: 8, padding: '6px 8px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: !input.trim() || intro?.blocked ? 'default' : 'pointer', opacity: !input.trim() || intro?.blocked ? 0.45 : 1 }}>
               <Icon d={Icons.send} size={16} />
             </button>
           </div>
@@ -2712,9 +2766,11 @@ export default function MobileShell() {
                     : <div style={{ display: 'flex', flexDirection: 'column' }}>
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
+                          const mesmoGrupo = groupMemberFps.some(([fp]) => fp === p.fp)
+                          const podeConversar = ehAmigo || mesmoGrupo
                           const nome = resolveMemberName(p.fp) || p.nickname || p.fp.slice(0, 8)
                           return (
-                            <div key={p.fp} className="friend-row" onClick={() => { if (ehAmigo) void openDm(p.fp, nome) }} style={{ cursor: ehAmigo ? 'pointer' : 'default' }}>
+                            <div key={p.fp} className="friend-row" onClick={() => { if (podeConversar) void openDm(p.fp, nome) }} style={{ cursor: podeConversar ? 'pointer' : 'default' }}>
                               <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                                 <Avatar name={nome} fp={p.fp} size={32} avatarB64={profilesByFp[p.fp]?.avatar_b64} />
                                 <PeerDot on ring={t.sidebar} />
@@ -2722,7 +2778,7 @@ export default function MobileShell() {
                               <div style={{ flex: 1, minWidth: 0 }}>
                                 <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nome}</div>
                                 <div style={{ fontSize: 11, color: t.muted }}>
-                                  {ehAmigo ? 'amigo' : groupMemberFps.some(([fp]) => fp === p.fp) ? 'mesmo grupo' : 'contato'}
+                                  {ehAmigo ? 'amigo' : mesmoGrupo ? 'mesmo grupo' : 'contato'}
                                 </div>
                               </div>
                             </div>
@@ -2737,7 +2793,7 @@ export default function MobileShell() {
           <Section variant="mobile" title="CONVERSAS RECENTES" maxVisible={5}>
             {filteredConvs.length === 0
               ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
-              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={effectivePresence({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status }) !== 'offline'} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
           </Section>
 
           <Section variant="mobile" title={`SEUS SERVIDORES — ${filteredComms.length}`} maxVisible={6}>
@@ -2876,7 +2932,7 @@ export default function MobileShell() {
           <div className="m-sec">CONVERSAS DIRETAS — {filteredConvs.length}</div>
           {filteredConvs.length === 0
             ? <EmptyBlock msg="Nenhuma conversa" sub={<span>Adicione amigos em <button className="link-btn" onClick={() => setTab('friends')}>Amigos</button> e comece a conversar.</span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={onlineFps.has(c.peer_fp)} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={effectivePresence({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status }) !== 'offline'} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
         </>}
 
         {tab === 'friends' && <>
