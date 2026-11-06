@@ -92,9 +92,25 @@ export function useConversations(open: boolean) {
 
   const refresh = useCallback(async () => {
     try {
-      const list = await services.conversationsList()
+      // Visão com contadores: prévia, horário e não lidas por membro. O
+      // `conversationsList` continua existindo para quem só quer os metadados.
+      const list = await services.conversationsOverview()
       setConversations((prev) => {
-        if (prev.length === list.length && prev.every((c, i) => c.id === list[i]?.id && c.title === list[i]?.title)) return prev
+        if (
+          prev.length === list.length &&
+          prev.every((c, i) => {
+            const n = list[i]
+            return (
+              c.id === n?.id &&
+              c.title === n?.title &&
+              (c as Conversation & { unread_count?: number }).unread_count === n?.unread_count &&
+              (c as Conversation & { last_ts?: number }).last_ts === n?.last_ts &&
+              (c as Conversation & { last_body?: string }).last_body === n?.last_body
+            )
+          })
+        ) {
+          return prev
+        }
         return list
       })
     } catch {

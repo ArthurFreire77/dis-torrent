@@ -217,8 +217,41 @@ export async function clearConversation(convId: string) {
 const callsInFlight = new Map<string, { title: string; since: number }>()
 const missedNotified = new Set<string>()
 
-export function notifyIncomingCall(a: { callId: string; title: string }): boolean {
-  if (!a.callId) return false
+export interface FriendNotice {
+  kind: 'request' | 'accepted' | 'removed'
+  nome: string
+}
+
+/**
+ * Aviso de amizade. É curto e informativo: pedido chegando pede ação, aceite
+ * libera a conversa e remoção avisa que a outra pessoa encerrou.
+ *
+ * Sem isto, o pedido só aparecia como badge — quem estava em outra conversa
+ * não via nada até abrir a aba Amigos.
+ */
+export function notifyFriend(n: FriendNotice): boolean {
+  const nome = (n.nome || '').trim() || 'alguém'
+  if (!getPrefs().notifySystem) return false
+  if (typeof document !== 'undefined' && document.hasFocus() && n.kind !== 'request') {
+    // Aceite/remoção com o app em primeiro plano não precisa de popup do SO:
+    // a lista já muda na tela.
+    return false
+  }
+  const body =
+    n.kind === 'request'
+      ? `${nome} quer adicionar você — abra Amigos para aceitar`
+      : n.kind === 'accepted'
+        ? `${nome} aceitou sua solicitação de amizade`
+        : `${nome} não é mais seu amigo`
+  return show({
+    id: notificationIdFor(`friend:${n.kind}:${nome}`),
+    title: n.kind === 'request' ? 'Solicitação de amizade' : n.kind === 'accepted' ? 'Amizade aceita' : 'Amizade removida',
+    body,
+    silent: !getPrefs().notifySounds,
+  })
+}
+
+export function notifyIncomingCall(a: { callId: string; title: string }): boolean {  if (!a.callId) return false
   if (callsInFlight.has(a.callId)) return false
   callsInFlight.set(a.callId, { title: a.title, since: Date.now() })
 
@@ -285,6 +318,16 @@ export function initNotifications() {
   if (startWired) return
   startWired = true
   if (services.kind !== 'native') return
+
+  // Batida de vida do webview: o Rust usa isto para decidir se ele mesmo
+  // mostra o aviso de mensagem. Sem o batimento, os dois lados avisavam e o
+  // usuário recebia duas notificações idênticas.
+  const beat = () => { void services.notifyUiAlive?.().catch(() => {}) }
+  beat()
+  setInterval(beat, 30_000)
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', beat)
+  }
   void import('@tauri-apps/api/event')
     .then(({ listen }) => listen<{ action?: string; conversation?: string | null }>(
       'distorrent://notification-action',

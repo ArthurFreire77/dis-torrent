@@ -50,6 +50,7 @@ import {
   type ServerSummary,
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
+import { contactBadge, effectivePresence, introState, relationOf } from '../services/socialRules'
 import { Modal, Notice, Button } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
 import { GroupPanel } from '../components/social/GroupPanel'
@@ -76,7 +77,7 @@ import { AppearanceSettings } from '../components/prefs/AppearanceSettings'
 import { NotificationSettings } from '../components/prefs/NotificationSettings'
 import { SystemNotificationSettings } from '../components/prefs/SystemNotificationSettings'
 import {
-  notifyMessage, notifyIncomingCall, notifyReaction, endCallNotice, markCallHandled,
+  notifyMessage, notifyIncomingCall, notifyReaction, notifyFriend, endCallNotice, markCallHandled,
   setOpenConversation, onOpenConversation, onCallNotificationAction, registerConversationPeer,
 } from '../services/notifications'
 import { setDesiredPresence } from '../services/appState'
@@ -712,6 +713,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [friendRequests, setFriendRequests] = useState<{fp:string,nickname:string}[]>([])
   const [friendsAccepted, setFriendsAccepted] = useState<{fp:string,nickname:string}[]>([])
   const [friendsBlocked, setFriendsBlocked] = useState<{fp:string,nickname:string}[]>([])
+  const [pendingOut, setPendingOut] = useState<{fp:string,nickname:string}[]>([])
   const [showProfile, setShowProfile] = useState(false)
   const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
   const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
@@ -1248,6 +1250,12 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (ev.type === 'friend_request_in' || ev.type === 'friend_accepted' || ev.type === 'friend_removed') {
       refreshFriends()
       refreshConvos()
+      // Sem som/aviso, um pedido de amizade podia ficar dias sem ser visto:
+      // a única pista era o badge. `notifyFriend` respeita as preferências.
+      const nome = (ev as unknown as { nickname?: string }).nickname || String((ev as unknown as { fp?: string }).fp ?? '').slice(0, 8)
+      if (ev.type === 'friend_request_in') notifyFriend({ kind: 'request', nome })
+      else if (ev.type === 'friend_accepted') notifyFriend({ kind: 'accepted', nome })
+      else notifyFriend({ kind: 'removed', nome })
     }
     if (ev.type === 'community_joined' || ev.type === 'channel_created' || ev.type === 'channel_deleted' || ev.type === 'role_created' || ev.type === 'bot_created') {
       refreshCommunities()
@@ -1340,6 +1348,35 @@ export default function ThemeShell({ designId }: {designId:string}){
   const peerTitle = selConvObj?.title || selPeer?.nickname || selPeer?.fp || ''
   const ehGrupo = selConvObj?.kind === 'group'
 
+  // Relação real com o peer da conversa aberta. O limite de 3 mensagens é do
+  // Rust; aqui só traduzimos para a faixa do compositor.
+  const selPeerState = selPeerFp
+    ? selPeerFp === identity?.fingerprint
+      ? null
+      : friendsAccepted.some(f => f.fp === selPeerFp)
+        ? { fp: selPeerFp, status: 'accepted' }
+        : friendRequests.some(f => f.fp === selPeerFp)
+          ? { fp: selPeerFp, status: 'pending_in' }
+          : pendingOut.some(f => f.fp === selPeerFp)
+            ? { fp: selPeerFp, status: 'pending_out' }
+            : friendsBlocked.some(f => f.fp === selPeerFp)
+              ? { fp: selPeerFp, status: 'blocked' }
+              : null
+    : null
+  const selRelation = relationOf(selPeerState, identity?.fingerprint ?? '')
+  const [introUsed, setIntroUsed] = useState(0)
+  useEffect(() => {
+    if (!selConv || selConvObj?.kind !== 'dm') { setIntroUsed(0); return }
+    let vivo = true
+    services.dmIntroState(selConv)
+      .then((s) => { if (vivo) setIntroUsed(Number(s?.used) || 0) })
+      .catch(() => { if (vivo) setIntroUsed(0) })
+    return () => { vivo = false }
+  }, [selConv, selConvObj?.kind, messages.length])
+  const intro = selConvObj?.kind === 'dm'
+    ? introState({ isFriend: selRelation === 'friend', used: introUsed })
+    : null
+
   useEffect(() => {
     if (!selConv || !ehGrupo) { setGroupMemberCount(0); return }
     let vivo = true
@@ -1420,7 +1457,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     return s
   }, [conversations, groupRosters, identity?.fingerprint])
   const shownFriends = friendsTab === 'online'
-    ? friendsAccepted.filter(f => onlineFps.has(f.fp) && socialPresence[f.fp] !== 'invisible')
+    ? friendsAccepted.filter(f => effectivePresence({ connected: onlineFps.has(f.fp), chosen: socialPresence[f.fp] }) !== 'offline')
     : friendsAccepted
   const [, forceCallsRefresh] = useState(0)
   useEffect(() => {
@@ -1443,6 +1480,9 @@ export default function ThemeShell({ designId }: {designId:string}){
     setError(null)
     try {
       const conv = await services.dmOpen(p.fp.trim(), (p.nickname || p.fp).trim())
+      // Sem trocar de contexto, o composer acha que ainda está num canal e
+      // o envio vai por `sendChannelMessage` com o id da DM — falha silenciosa.
+      setSelCommunity(null)
       setSelPeerFp(p.fp.trim())
       setSelConv(conv.id)
       refreshConvos()
@@ -1851,7 +1891,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   }
 
   const [friendSuccess, setFriendSuccess] = useState<string | null>(null)
-  const [pendingOut, setPendingOut] = useState<{fp:string,nickname:string}[]>([])
 
   async function addFriend() {
     if (!friendFpInput.trim()) return
@@ -2517,14 +2556,22 @@ export default function ThemeShell({ designId }: {designId:string}){
                       <Section variant="desktop" title={`ONLINE — ${vinculados.length}`} maxVisible={8}>
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
+                          // Contato elegível (mesmo grupo/servidor) também
+                          // abre conversa: é a introdução de 3 mensagens.
+                          const mesmoGrupo = groupMemberFps.has(p.fp)
+                          const podeConversar = ehAmigo || mesmoGrupo
+                          const badge = contactBadge({
+                            relation: ehAmigo ? 'friend' : 'none',
+                            sharedGroup: mesmoGrupo,
+                          })
                           return (
-                            <button key={p.fp} onClick={() => { if (ehAmigo) openDm({ fp: p.fp, nickname: p.nickname }) }} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')} title={ehAmigo ? 'Abrir conversa' : 'Está no mesmo grupo ou servidor'}>
+                            <button key={p.fp} onClick={() => { if (podeConversar) void openDm({ fp: p.fp, nickname: p.nickname }) }} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')} title={podeConversar ? 'Abrir conversa' : 'Sem canal de contato — peça o fingerprint para adicionar'}>
                               <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                                 <Avatar name={p.nickname || p.fp} fp={p.fp} size={28} avatarB64={socialProfiles[p.fp]?.avatar_b64} />
-                                <PeerDot s={p.state} />
+                                <PeerDot s={effectivePresence({ connected: p.state === 'CONNECTED', chosen: socialPresence[p.fp] }) === 'offline' ? 'DISCONNECTED' : 'CONNECTED'} />
                               </span>
                               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{p.nickname || p.fp}</span>
-                              {!ehAmigo && <span style={{ fontSize: 10, color: muted, flexShrink: 0 }}>{groupMemberFps.has(p.fp) ? 'grupo' : 'contato'}</span>}
+                              {!ehAmigo && <span style={{ fontSize: 10, color: muted, flexShrink: 0 }}>{badge}</span>}
                             </button>
                           )
                         })}
@@ -2854,17 +2901,31 @@ export default function ThemeShell({ designId }: {designId:string}){
               ) : friendsTab === 'pendentes' ? (
                 friendRequests.length === 0 && pendingOut.length === 0 ? (
                   <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>Não há solicitações pendentes. Que pena.</div>
-                ) : friendRequests.map(r => (
-                  <div key={r.fp} className="friend-row">
-                    <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} avatarB64={socialProfiles[r.fp]?.avatar_b64} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</div>
-                      <div style={{ fontSize: 11, color: muted }}>Solicitação de amizade recebida</div>
-                    </div>
-                    <button onClick={() => respondFriend(r.fp, true)} title="Aceitar" className="row-icon ok"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12l5 5L20 7"/></svg></button>
-                    <button onClick={() => respondFriend(r.fp, false)} title="Recusar" className="row-icon no"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
-                  </div>
-                ))
+                ) : (
+                  <>
+                    {friendRequests.map(r => (
+                      <div key={`in-${r.fp}`} className="friend-row">
+                        <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} avatarB64={socialProfiles[r.fp]?.avatar_b64} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</div>
+                          <div style={{ fontSize: 11, color: muted }}>Solicitação de amizade recebida</div>
+                        </div>
+                        <button onClick={() => respondFriend(r.fp, true)} title="Aceitar" className="row-icon ok"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12l5 5L20 7"/></svg></button>
+                        <button onClick={() => respondFriend(r.fp, false)} title="Recusar" className="row-icon no"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M6 6l12 12 M18 6L6 18"/></svg></button>
+                      </div>
+                    ))}
+                    {pendingOut.map(r => (
+                      <div key={`out-${r.fp}`} className="friend-row">
+                        <Avatar name={r.nickname || r.fp} fp={r.fp} size={32} avatarB64={socialProfiles[r.fp]?.avatar_b64} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nickname || r.fp}</div>
+                          <div style={{ fontSize: 11, color: muted }}>Enviada — aguardando aceitação</div>
+                        </div>
+                        <button onClick={async () => { try { await services.friendRemove(r.fp); refreshFriends(); setFriendSuccess('Solicitação cancelada') } catch (e: any) { setError(String(e?.message ?? e)) } }} title="Cancelar solicitação" className="row-icon no" style={{ fontSize: 11, fontWeight: 800, width: 'auto', padding: '0 8px' }}>Cancelar</button>
+                      </div>
+                    ))}
+                  </>
+                )
               ) : friendsTab === 'bloqueados' ? (
                 friendsBlocked.length === 0 ? (
                   <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>Ninguém bloqueado.</div>
@@ -3227,6 +3288,30 @@ export default function ThemeShell({ designId }: {designId:string}){
               )}
               </div>
               {}
+              {intro?.hint && (
+                <div
+                  role="status"
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
+                    fontSize: 11, fontWeight: 700,
+                    color: intro.blocked ? t.red : muted,
+                    background: intro.blocked ? `${t.red}18` : inputBg,
+                    border: `1px solid ${intro.blocked ? `${t.red}55` : borderColor}`,
+                    borderRadius: 6, padding: '5px 8px',
+                  }}
+                >
+                  <Icon d={Icons.lock} size={12} />
+                  <span style={{ flex: 1 }}>{intro.hint}</span>
+                  {selPeerFp && intro.blocked && (
+                    <button
+                      onClick={() => { setFriendsTab('adicionar'); setFriendFpInput(selPeerFp) }}
+                      style={{ background: t.accent, color: '#fff', border: 'none', borderRadius: 5, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                    >
+                      Pedir amizade
+                    </button>
+                  )}
+                </div>
+              )}
               <div style={{ position: 'relative', display: 'flex', alignItems: 'flex-end', gap: 8, background: t.composer, borderRadius: 8, padding: '8px 10px' }}>
                 <input type="file" ref={(el:any)=> fileInputRef.current = el} onChange={onPickFile} style={{ display: 'none' }} />
                 <button onClick={() => setShowEmojiPicker(v => !v)} className="composer-icon" title="Mais: arquivo, enquete, emoji" aria-label="Mais" aria-expanded={showEmojiPicker} style={{ background: showEmojiPicker ? t.accent : t.accent, color: '#fff', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></button>
@@ -3252,7 +3337,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 {}
                 {activeCall && <button onClick={async () => { try { if (!supportsScreenShare() && !activeCall.sharing) { setError(SCREEN_UNAVAILABLE_MSG); return } await callManager.toggleScreen(); setError(null) } catch (e: any) { setError(String(e?.message ?? e)) } }} disabled={!supportsScreenShare() && !activeCall.sharing} title={supportsScreenShare() ? 'Compartilhar sua tela com quem está na chamada (o vídeo da tela substitui o da câmera)' : 'Seu navegador não permite compartilhar tela — use a câmera'} aria-label="Compartilhar tela" style={{ background: activeCall.sharing ? t.green : 'transparent', border: `1px solid ${borderColor}`, color: activeCall.sharing ? '#fff' : (supportsScreenShare() ? muted : t.muted), opacity: supportsScreenShare() || activeCall.sharing ? 1 : 0.5, cursor: supportsScreenShare() || activeCall.sharing ? 'pointer' : 'not-allowed', padding: '5px 8px', borderRadius: 6, fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4, alignSelf: 'center' }}><Icon d={Icons.screen} size={12} /> Tela</button>}
                 <button onClick={() => { setShowEmojiPicker(true); setComposerMenu(v => !v) }} className="composer-icon" title="Emoji (Ctrl+E)" aria-label="Emoji" aria-expanded={composerMenu} style={{ alignSelf: 'center' }}><Icon d={Icons.smile} size={18} /></button>
-                <button onClick={send} disabled={!input.trim()} className="composer-icon send" title={input.trim() ? 'Enviar (Enter)' : 'Digite uma mensagem'} aria-label="Enviar" style={{ opacity: !input.trim() ? 0.45 : 1, cursor: !input.trim() ? 'not-allowed' : 'pointer', background: input.trim() ? t.accent : 'transparent', color: input.trim() ? '#fff' : muted, borderRadius: 8, padding: '6px 10px', flexShrink: 0, alignSelf: 'flex-end' }}><Icon d={Icons.send} size={16} /></button>
+                <button onClick={send} disabled={!input.trim() || !!intro?.blocked} title={intro?.blocked ? 'Limite de mensagens iniciais — peça amizade' : input.trim() ? 'Enviar (Enter)' : 'Digite uma mensagem'} aria-label="Enviar" style={{ opacity: !input.trim() || intro?.blocked ? 0.45 : 1, cursor: !input.trim() || intro?.blocked ? 'not-allowed' : 'pointer', background: input.trim() && !intro?.blocked ? t.accent : 'transparent', color: input.trim() && !intro?.blocked ? '#fff' : muted, borderRadius: 8, padding: '6px 10px', flexShrink: 0, alignSelf: 'flex-end' }}><Icon d={Icons.send} size={16} /></button>
               </div>
               {}
               {input.trim().length > 0 && (
@@ -3270,7 +3355,13 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </div>
               )}
               <div style={{ fontSize: 10, color: muted, marginTop: 6, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                <span>{selPeer && selPeer.state !== 'CONNECTED' ? 'offline — mensagens ficarão pendentes e entregarão ao voltar' : '↵ Enter para enviar • Shift+Enter quebra linha'}</span>
+                <span>
+                  {selPeer && effectivePresence({ connected: selPeer.state === 'CONNECTED', chosen: socialPresence[selPeer.fp] }) === 'offline'
+                    ? 'offline — mensagens ficarão pendentes e entregarão ao voltar'
+                    : socialPresence[selPeerFp ?? ''] === 'invisible'
+                      ? 'contato invisível — pode receber mensagens mesmo sem aparecer online'
+                      : '↵ Enter para enviar • Shift+Enter quebra linha'}
+                </span>
                 <span style={{ opacity: 0.7, display: 'none' } as any}></span>
               </div>
               <div style={{ fontSize: 10, color: muted, marginTop: 2, textAlign: 'center', opacity: 0.7 }}>Arquivos 256KB • todos semeiam • status: pending → sent → delivered</div>
