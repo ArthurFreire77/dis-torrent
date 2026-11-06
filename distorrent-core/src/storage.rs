@@ -2682,10 +2682,14 @@ impl Store {
             b.online = o;
         }
         if let Some(c) = &patch.config {
-            if c.len() > 16 * 1024 {
-                return Err(DistorrentError::Protocol(
-                    "config de bot muito grande (máx 16KB)".into(),
-                ));
+            // Mesmo teto do parser (`bots::BOT_CONFIG_MAX`). Antes o banco
+            // cortava em 16 KB e o parser aceitava 64 KB: o editor deixava
+            // salvar e a gravação falhava com um limite que a UI não mostrava.
+            if c.len() > crate::bots::BOT_CONFIG_MAX {
+                return Err(DistorrentError::Protocol(format!(
+                    "config de bot muito grande (máx {} KB)",
+                    crate::bots::BOT_CONFIG_MAX / 1024
+                )));
             }
             b.config = c.clone();
         }

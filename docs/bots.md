@@ -76,9 +76,9 @@ WASM foi recusado de propósito: aceitar o campo e não rodar nada seria mentira
 
 ## 3. Schema v3 — campo a campo
 
-Limite do JSON: **64 KB** (`BOT_CONFIG_MAX`). No banco, `bot_update_patch`
-recusa acima de **16 KB** — divergência real entre a validação da casca e a
-gravação (config entre 16 e 64 KB passa no parser e falha ao salvar).
+Limite do JSON: **64 KB** (`BOT_CONFIG_MAX`). O banco usa o **mesmo** valor:
+antes `bot_update_patch` cortava em 16 KB e a config entre 16 e 64 KB passava no
+parser e falhava ao salvar, sem a UI mostrar o limite real.
 
 ```json
 {
@@ -884,7 +884,7 @@ HTML. Payload de webhook é sanitizado em até 2 níveis (40 chaves, strings ≤
 | Bot dar cargo forte a alguém | `perm_can_grant` |
 | Bot mirar o dono | `bot_action_in` recusa |
 | Bot religar rede privada pela ponte | `blockPrivate` do dono é preservado |
-| Bot apontar o webhook para outro destino | **não é impedido**: `webhook.url` vem da config nova; só a guarda SSRF (pública/http) vale. O segredo antigo se perde na gravação (§11) |
+| Bot apontar o webhook para outro destino | **não é impedido**: `webhook.url` vem da config nova; só a guarda SSRF (pública/http) vale. O **segredo** e a **allowlist** continuam os do dono: `bot_replace_config` restaura `webhook_secret`, `blockPrivate` e `http.allowDomains` da config atual (§11) |
 | Plugin escapar da pasta | `canonicalize` + `starts_with` |
 
 **O que um bot malicioso ainda pode fazer:** chamar uma URL pública arbitrária
@@ -952,7 +952,7 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 | comando não responde | prefixo errado, canal/tipo fora do escopo, `enabled:false` ou primitiva desligada | confira os quatro |
 | resposta vazia | `responsePath` não existe no JSON | ajuste o caminho ou o template |
 | "config inválida: ..." ao salvar | `schema`/`mode`/`prefix`/URL recusados pelo core | leia a mensagem: ela aponta o campo |
-| "config de bot muito grande (máx 16KB)" | config entre 16 e 64 KB | encurte scripts/templates |
+| "config de bot muito grande (máx 64KB)" | config acima de 64 KB | encurte scripts/templates |
 | "o bot não tem permissão para `ban`" | falta o bit | aba **Permissões** |
 | "o bot não pode dar um cargo com permissões que ele não tem" | `perm_can_grant` | conceda o mesmo bit ao bot ou use cargo mais fraco |
 | "rede privada bloqueada" | `blockPrivate` ligado | desligue na aba **Eventos**, se for LAN |
@@ -979,7 +979,7 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 |---|---|
 | Comandos, aliases, cooldown, rate limit, permissões | **funciona** |
 | Resposta fixa, HTTP, DSL, admin nativo | **funciona** |
-| Webhook de saída + HMAC (quando o segredo está gravado) | **funciona**, mas o segredo não sobrevive a uma gravação normalizada (§11) |
+| Webhook de saída + HMAC | **funciona**; o segredo mora na coluna local e sobrevive a regravação normalizada (§11) |
 | Eventos do runtime (§7.1) | **funciona** (só com app aberto no PC do dono) |
 | Ponte `127.0.0.1` com segredo no caminho | **funciona** (desktop) |
 | Execução de código como plugin | **funciona** (desktop; não é sandbox de SO) |

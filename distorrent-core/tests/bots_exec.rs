@@ -727,3 +727,54 @@ fn migracao_cria_a_coluna_do_segredo_e_bots_antigos_continuam() {
     assert!(lido.webhook_secret.is_empty(), "sem segredo por padrao");
     assert!(!lido.webhook_secret_set());
 }
+
+#[test]
+fn limite_de_config_e_o_mesmo_no_parser_e_no_banco() {
+    // O doc prometia 64 KB e `bot_update_patch` cortava em 16 KB: config entre
+    // os dois passava no editor e falhava ao salvar, com um limite que a UI nao
+    // mostrava. Os dois lados tem de usar `BOT_CONFIG_MAX`.
+    use distorrent_core::bots::BOT_CONFIG_MAX;
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "Grande", None, None).expect("bot");
+
+    // Config valida de ~32 KB: passa no parser e TEM de gravar.
+    let script = "reply \"x\"\n".repeat(2000); // 200 linhas * 9 chars, cortado pelo parser
+    let meio = serde_json::json!({
+        "prefix": "!",
+        "commands": [{ "name": "eco", "exec": "script", "script": script }],
+        "channels": [],
+    })
+    .to_string();
+    assert!(meio.len() > 16 * 1024, "o caso precisa passar de 16 KB");
+    assert!(meio.len() < BOT_CONFIG_MAX, "e ficar abaixo do teto real");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        distorrent_core::storage::BotPatch {
+            config: Some(meio.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("config abaixo de 64 KB precisa gravar");
+
+    // Acima do teto: recusa nos DOIS lados, com o mesmo numero.
+    let grande = "a".repeat(BOT_CONFIG_MAX + 1);
+    let err = e
+        .bot_update(
+            &cid,
+            &bot.id,
+            distorrent_core::storage::BotPatch {
+                config: Some(grande),
+                ..Default::default()
+            },
+        )
+        .expect_err("acima do teto tem de recusar");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("64"),
+        "a mensagem precisa citar o teto real (64 KB), nao 16: {msg}"
+    );
+}
