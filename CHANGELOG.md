@@ -1,5 +1,87 @@
 # CHANGELOG
 
+## [1.1.61-pre-alpha] - 2026-11-06
+
+### Bots: schema v3, plataforma honesta e janela própria
+
+**O problema.** O bot não tinha versão de schema, o segredo do HMAC do webhook
+morava em `bots.config` (que é sincronizado para **todos** os membros do
+servidor) e não havia como operar bots fora das Configurações do servidor. Além
+disso, três buracos de segurança: a guarda de SSRF comparava o host como texto,
+um redirect 302 alcançava a LAN, e um bot com "gerenciar membros" podia dar um
+cargo com "banir" criado pelo dono.
+
+**O que mudou.**
+
+- **Schema v3, retrocompatível.** Config sem `schema` é v1/v2 e continua
+  válida: o app migra na leitura e grava no formato novo. `mode` e `runtime`
+  passam a ser explícitos — inferir `plugin` de um `run` presente abriria
+  processo sem o dono pedir.
+- **As 20 primitivas, com honestidade.** `runtime: "wasm"` é **recusado** com
+  erro claro (aceitar e não rodar seria mentir). Nove primitivas funcionam; as
+  outras aparecem em `/v1/limits` e no painel como `implemented:false` —
+  "ainda não existe". Primitiva desligada nega o comando que depende dela já na
+  leitura da config.
+- **Guarda de URL canônica.** `http://2130706433/`, `http://127.1/` e
+  `http://a@127.0.0.1/` viram `127.0.0.1` pelo parser do WHATWG e são
+  bloqueados. Cada salto de redirect é revalidado: um 302 para a rede local não
+  passa mais.
+- **O bot não distribui poder que não tem.** `perm_can_grant`: dar um cargo
+  exige que o bot tenha as permissões daquele cargo. Antes, `manage` entregava
+  um cargo com `ban` criado pelo dono.
+- **Painel e core concordam.** `permAllows` espelha a exceção herdada de
+  `manage`; a UI dizia "sem permissão" enquanto a ponte executava.
+- **Segredo do HMAC fora da config.** Passou para a coluna local
+  `bots.webhook_secret` (schema 15): não vaza no estado sincronizado, não some
+  quando o bot regrava o JSON pela ponte e não vai no `bot.json` exportado. O
+  webhook assina com `x-distorrent-signature` e tenta duas vezes em 5xx.
+- **Ponte endurecida.** `Idempotency-Key` (5 min) contra retry duplicado, três
+  baldes de rate limit (um long-poll não consome o orçamento de escrita), teto
+  de 50 eventos por resposta, fim do auto-loop (a mensagem do próprio bot não
+  volta no stream dele), segredo comparado em tempo constante e rotas novas
+  `GET /v1/limits` e `GET /v1/health`.
+- **Console do plugin redigido.** `console.log(process.env)` não imprime mais a
+  URL autenticada da ponte no console do painel nem no banco.
+- **Janela própria de bots.** Rota `/bots` e segunda janela sob demanda
+  (`open_bots_window`); no Android o comando devolve erro honesto em vez de
+  fingir que abriu, e a janela não inicializa presença/notificações em dobro.
+
+### Chamadas: o painel vira coluna, não sobreposição
+
+Com o painel da chamada aberto em 1280 px, o composer ficava com ~85 px — uma
+letra por linha. O layout agora é decidido por números em `voiceLayout.ts`
+(módulo puro e testável): `MAIN_MIN_WIDTH_PX` (560) e `FIXED_CHROME_PX` (312)
+definem quando o painel encaixa como coluna e quando sobrepõe. O painel ganhou
+botão de esconder que **não** encerra a chamada.
+
+### Rede: peer morto em 12 s, não em 75 s
+
+`peer_alive` devolvia `true` para `last_rx == 0`, então um link recém-aberto
+parecia vivo sem ter recebido um único byte — o clássico "Conectado" com áudio
+mudo. `PING_TIMEOUT` caiu para 12 s, `RELAY_PING_TIMEOUT` para 45 s, e
+`FIRST_FRAME_GRACE` (15 s) separa "não provado" de "vivo". `network_status`
+passou a ler estado e contagem na mesma operação (`network_snapshot`).
+
+### Arquivos: download travado falha em 45 s
+
+Item parado em "Baixando 0%" não tinha teto: `STALL_FAIL_MS` (45 s) transforma
+estagnação em `failed`, e clicar em "Baixar" religa o laço em vez de virar
+no-op. `save_file_stream` confere o hash blake3 **antes** do rename: arquivo
+corrompido nunca vira "concluído" e o retry não reencontra os mesmos bytes.
+
+### Documentação
+
+- `docs/bots.md` e `docs/bots-criar.md` reescritos para o schema v3, com uma
+  tabela explícita do que **não** existe (WASM, SDK, marketplace, mídia por bot,
+  bot-a-bot, replay, OTel, canary).
+- `tests/botsDocSync` compara o `.md` gerado pelo painel com o doc humano: rota,
+  primitiva, modo, ação ou ordem de seção que divergirem quebram a suíte.
+- O `.md` baixável em **Baixar documentação (.md)** corrigiu a seção 9.1 (estava
+  depois da 10) e o texto do webhook (ainda dizia "sem retry").
+
+Testes: typecheck 0, lint 0, unit 661/661, `cargo test` 288 lib (WSL) + 24
+`bots_exec`, `cargo fmt` limpo, build OK, e2e 54/54.
+
 ## [1.1.60-pre-alpha] - 2026-11-05
 
 ### Bots: o repertório inteiro, com uma lista só
