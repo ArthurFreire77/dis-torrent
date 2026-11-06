@@ -68,6 +68,56 @@ por falta de referência publicada; atestação de hardware não é implementada
 nenhuma plataforma (sempre `proof_available: false` com motivo); não há build
 reprodutível nem log público de transparência.
 
+### Sistema social: amizade simétrica, limite de 3 mensagens e autorização no motor
+
+**O problema.** O relacionamento social divergia entre os dois lados e a
+autorização vivia na interface. Na prática: amizade aparecia para um só,
+solicitação "sumia", mensagem de amigo virava um grupo de uma pessoa, e clicar
+num contato não abria conversa. O caso mais grave: **receber um perfil criava
+amizade automaticamente** — qualquer peer que abrisse sessão ganhava permissão
+de DM e chamada sem ninguém aceitar nada.
+
+**O que mudou.**
+
+- **Perfil não cria mais amizade.** `ProfileSet` grava perfil e ponto. O
+  `social_profile_set_full` também parou de se auto-adicionar como amigo.
+- **Pedido cruzado aceita dos dois lados.** A→B e B→A ao mesmo tempo termina
+  `accepted` nas duas pontas; antes um ficava `pending_in` para sempre.
+- **Recusa e remoção não apagam o relacionamento.** Recusar vira `rejected` e o
+  bloqueio (`blocked_at`) sobrevive a "remover amigo" e a "desbloquear" — antes
+  um `DELETE` fazia o próximo perfil recriar a amizade.
+- **Pedido vencido** (30 dias) sai das listas de pendentes.
+- **Três mensagens iniciais por direção** antes da amizade, controladas pelo
+  Rust: contador persistido (`dm_intro`) por conversa e autor, conferido no
+  emissor **e** no receptor, sem crédito novo ao apagar/reabrir a conversa, e
+  sem contar retransmissão duplicada. Aceitar a amizade libera a conversa.
+- **Dono real do grupo.** O dono era inferido como "primeiro membro da lista",
+  mas `create_group_dm` ordena os fingerprints: quase nunca era o criador, e
+  qualquer membro podia renomear/expulsar/apagar. Agora há `group_owners` e o
+  frame `GroupCreated` carrega `owner_fp` (compatível com frames antigos).
+- **Autorização no core, não na UI.** Ban/timeout exigem permissão e alvo
+  membro; `Forward` para canal passa pelo host; mensagem de canal sem a chave do
+  autor é recusada (antes era aceita com um `warn`, permitindo forjar mensagem
+  em nome de outro membro); `CallAddParticipant` exige estar na chamada.
+- **Presença honesta.** Só é anunciada para contatos sociais (amigo, grupo ou
+  servidor em comum) e vira `offline` quando o link cai, em vez de esperar 90 s
+  de TTL mentindo "online".
+- **Banco sem órfãos.** `delete_conversation` virou transação e limpa outbox,
+  reações, metadados, recibos, cursores e menções. "Lida" passou a ser por
+  membro (`conv_read`) e menção é fato registrado (`mentions`), não substring.
+- **Interface.** Contato elegível (amigo, mesmo grupo, mesmo servidor) abre a
+  conversa e cai na introdução; o compositor mostra quantas mensagens iniciais
+  restam e bloqueia quando acabam; "Pendentes" mostra recebidas e enviadas com
+  cancelar; busca respeita a conversa aberta; "Não lidas" filtra pelo cursor
+  real; a lista de conversas ganhou prévia, horário e badge de não lidas.
+- **Aviso de amizade** (pedido/aceite/remoção) respeitando as preferências, e
+  o aviso nativo de mensagem não duplica mais com o do frontend.
+
+**Limites declarados.** Os fluxos entre dois usuários foram exercitados com
+dois motores reais em memória usando os mesmos frames do transporte; **não**
+foram medidos em dois dispositivos, com NAT/relay nem com reconexão de rede.
+
+
 ## [1.1.61-pre-alpha] - 2026-11-06
 
 ### Bots: schema v3, plataforma honesta e janela própria
