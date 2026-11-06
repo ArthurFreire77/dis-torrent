@@ -210,8 +210,7 @@ export function BotManager({
               }}
             >
               Importar pasta
-            </Button>
-          </>
+            </Button>          </>
         }
       >
         {importError && (
@@ -232,6 +231,11 @@ export function BotManager({
         <Notice tone="info" icon="info">
           A importação só cria o bot e a configuração. O token é gerado pelo servidor e o código só roda
           quando você iniciar o plugin no painel do bot.
+        </Notice>
+        <Notice tone="warning" icon="shield">
+          Permissões declaradas no <b>bot.json</b> são um <b>pedido</b>, não uma concessão: o bot importado
+          nasce sem nenhum poder administrativo. Abra <b>Configurar → Permissões</b> e conceda só o que
+          você confia.
         </Notice>
       </Modal>
 

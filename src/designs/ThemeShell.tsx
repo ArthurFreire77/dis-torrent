@@ -2283,6 +2283,25 @@ export default function ThemeShell({ designId }: {designId:string}){
                             <button className="dd-item" onClick={() => { setServerMenuOpen(false); setShowServerSettings(true); setServerTab('bots') }}>
                               <span style={{ display: 'flex' }}><Icon d={Icons.bot} size={14} /></span> Bots
                             </button>
+                            <button
+                              className="dd-item"
+                              title="Abre a tela de bots em janela própria (só no desktop)"
+                              onClick={() => {
+                                setServerMenuOpen(false)
+                                // Desktop abre janela separada; se a plataforma
+                                // não tiver (Android/navegador), cai na rota
+                                // `/bots` desta mesma janela.
+                                if (services.openBotsWindow) {
+                                  services.openBotsWindow().catch(() => {
+                                    window.location.assign('/bots')
+                                  })
+                                } else {
+                                  window.location.assign('/bots')
+                                }
+                              }}
+                            >
+                              <span style={{ display: 'flex' }}><Icon d={Icons.externalLink} size={14} /></span> Bots em janela
+                            </button>
                             <button className="dd-item" onClick={() => { setServerMenuOpen(false); setShowServerSettings(true); setServerTab('geral') }}>
                               <span style={{ display: 'flex' }}><Icon d={Icons.settings} size={14} /></span> Configurações
                             </button>
@@ -3491,6 +3510,9 @@ export default function ThemeShell({ designId }: {designId:string}){
                     name: info.name,
                     avatar: info.avatar,
                   })
+                  // `perms` do bot.json é um PEDIDO, não uma concessão: sem
+                  // querer o dono não dá poder de moderação ao importar. O
+                  // painel mostra o que o bot pediu na aba Permissões.
                   await services.botUpdate(selCommunity, id, { config: info.config })
                   refreshExtras(selCommunity)
                   return info.name

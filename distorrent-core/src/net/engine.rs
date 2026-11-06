@@ -2660,6 +2660,8 @@ impl NetworkEngine {
         if !is_owner_target {
             for b in bots.iter_mut() {
                 b.token = String::new();
+                // Segredo de assinatura é credencial: quem não é dono não vê.
+                b.webhook_secret = String::new();
             }
         }
         let (description, category, icon) = self.store.community_meta(&id).unwrap_or_default();
@@ -3308,6 +3310,7 @@ impl NetworkEngine {
             created_at: crate::identity::now_ms(),
             config: String::new(),
             perms: 0,
+            webhook_secret: String::new(),
         };
         self.store.bot_upsert(&row)?;
         let _ = self.events.send(EngineEvent::BotCreated {
@@ -3731,6 +3734,21 @@ impl NetworkEngine {
                     .ok_or_else(|| {
                         DistorrentError::Protocol(format!("cargo `{role_raw}` não existe"))
                     })?;
+                // O bot só distribui o poder que ele próprio tem: um cargo com
+                // `ban`/`mute` criado pelo dono não pode ser dado por um bot que
+                // só recebeu `manage`, senão ele escala moderação de lado.
+                let role_perms = self
+                    .store
+                    .roles_list(community_id)?
+                    .iter()
+                    .find(|r| r.id == role_id)
+                    .map(|r| r.permissions)
+                    .unwrap_or(0);
+                if !crate::moderation::perm_can_grant(bot.perms, role_perms) {
+                    return Err(DistorrentError::Protocol(
+                        "o bot não pode dar um cargo com permissões que ele não tem".into(),
+                    ));
+                }
                 let Some(member) = self.resolve_member(community_id, member_raw) else {
                     return Err(DistorrentError::Protocol("membro inexistente".into()));
                 };
@@ -4288,47 +4306,19 @@ impl NetworkEngine {
                 "bot está offline — ative-o no painel".into(),
             ));
         }
-        let parsed = crate::bots::parse_config(raw).map_err(DistorrentError::Protocol)?;
-        // Grava a forma NORMALIZADA: o que o parser descartou não volta.
-        let normalized = serde_json::json!({
-            "prefix": parsed.prefix,
-            "commands": parsed.commands.iter().map(|c| {
-                let mut o = serde_json::json!({
-                    "name": c.name,
-                    "method": c.method,
-                    "exec": c.exec.as_str(),
-                    "cooldownMs": c.cooldown_ms,
-                    "enabled": c.enabled,
-                });
-                if !c.aliases.is_empty() { o["aliases"] = serde_json::json!(c.aliases); }
-                if !c.description.is_empty() { o["description"] = serde_json::json!(c.description); }
-                if !c.need.as_str().is_empty() { o["permission"] = serde_json::json!(c.need.as_str()); }
-                if c.ephemeral { o["ephemeral"] = serde_json::json!(true); }
-                if c.autocomplete { o["autocomplete"] = serde_json::json!(true); }
-                if !c.url.is_empty() { o["url"] = serde_json::json!(c.url); }
-                if !c.headers.is_empty() {
-                    o["headers"] = serde_json::json!(c.headers);
-                }
-                if let Some(b) = &c.body { o["body"] = serde_json::json!(b); }
-                if let Some(p) = &c.response_path { o["responsePath"] = serde_json::json!(p); }
-                if let Some(t) = &c.template { o["template"] = serde_json::json!(t); }
-                if let Some(r) = &c.reply { o["reply"] = serde_json::json!(r); }
-                if let Some(s) = &c.script { o["script"] = serde_json::json!(s); }
-                if let Some(a) = &c.admin { o["admin"] = serde_json::json!(a); }
-                if !c.args.is_empty() {
-                    o["args"] = serde_json::json!(c.args.iter().map(|a| serde_json::json!({
-                        "name": a.name, "required": a.required, "rest": a.rest,
-                    })).collect::<Vec<_>>());
-                }
-                o
-            }).collect::<Vec<_>>(),
-            "channels": parsed.channels,
-            "events": parsed.events,
-            "blockPrivate": parsed.block_private,
-            "maxRepliesPerMinute": parsed.max_replies_per_min,
-            "webhook": parsed.webhook.map(|u| serde_json::json!({ "url": u })),
-        })
-        .to_string();
+        let mut parsed = crate::bots::parse_config(raw).map_err(DistorrentError::Protocol)?;
+        // Política do DONO, não do bot: um `POST /v1/commands` não pode religar
+        // rede privada nem trocar o webhook por um endereço próprio. Sem isto o
+        // bot desfazia o opt-in do dono e abria o SSRF que a guarda fecha.
+        let atual = crate::bots::parse_config(&bot.config).unwrap_or_default();
+        parsed.block_private = atual.block_private;
+        parsed.http_allow = atual.http_allow.clone();
+        // Segredo: vem da coluna local (nunca do JSON sincronizado) e o bot não
+        // consegue trocá-lo pela ponte.
+        parsed.webhook_secret = Some(bot.webhook_secret.clone());
+        // Grava a forma NORMALIZADA (v3): o que o parser descartou não volta, e
+        // os campos novos não somem quando o bot edita o próprio comando.
+        let normalized = crate::bots::normalize(&parsed).to_string();
         let n = parsed.commands.len();
         // `perms: None` de propósito: o bot NÃO altera as próprias permissões.
         self.store.bot_update_patch(

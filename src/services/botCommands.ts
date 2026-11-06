@@ -52,7 +52,123 @@ export const BOT_CHANNEL_KINDS: { id: BotChannelKind; label: string; hint: strin
   { id: 'video', label: 'Vídeo', hint: 'Só eventos. O bot não envia imagem nem som.' },
 ]
 
+export type BotMode = 'declarative' | 'plugin' | 'service' | 'remote'
+export type BotRuntime = 'none' | 'process' | 'wasm'
+
+export const BOT_MODES: { id: BotMode; label: string; hint: string }[] = [
+  {
+    id: 'declarative',
+    label: 'Declarativo',
+    hint: 'Só config: resposta fixa, HTTP, DSL e ação administrativa. Nada de código roda.',
+  },
+  {
+    id: 'plugin',
+    label: 'Plugin local',
+    hint: 'Código do criador roda no PC do dono, falando pela ponte 127.0.0.1. Capacidade total, sem hospedagem.',
+  },
+  {
+    id: 'service',
+    label: 'Serviço externo',
+    hint: 'O criador hospeda e recebe eventos por webhook assinado. Exige o app do dono aberto.',
+  },
+  {
+    id: 'remote',
+    label: 'Bot remoto',
+    hint: 'O criador conecta de fora por TLS. Quebra a promessa "nada roda em nuvem" — desligado por padrão.',
+  },
+]
+
+/** Primitivas: o que o bot pode ENTREGAR. Nome igual ao do core. */
+export interface BotPrimitives {
+  text: boolean
+  ephemeral: boolean
+  dm: boolean
+  embed: boolean
+  component: boolean
+  attachment: boolean
+  reaction: boolean
+  pin: boolean
+  thread: boolean
+  poll: boolean
+  edit: boolean
+  audioFrame: boolean
+  videoFrame: boolean
+  screenFrame: boolean
+  http: boolean
+  blob: boolean
+  kv: boolean
+  job: boolean
+  template: boolean
+  invokeBot: boolean
+}
+
+export interface BotPrimitiveDef {
+  id: keyof BotPrimitives
+  label: string
+  hint: string
+  /** `false` = o campo existe no schema, mas a plataforma não entrega ainda. */
+  implemented: boolean
+}
+
+/**
+ * O catálogo das 20 primitivas. `implemented:false` não vira rota: o painel
+ * mostra "ainda não existe" em vez de um botão que mente (§13 da doc).
+ */
+export const BOT_PRIMITIVES: BotPrimitiveDef[] = [
+  { id: 'text', label: 'Texto', hint: 'Mensagem em markdown no canal.', implemented: true },
+  { id: 'ephemeral', label: 'Resposta discreta', hint: 'Só quem interagiu vê (prefixo -#).', implemented: true },
+  { id: 'dm', label: 'Mensagem direta', hint: 'Conversa privada com um membro.', implemented: false },
+  { id: 'embed', label: 'Embed', hint: 'Cartão com título, campos e imagem.', implemented: false },
+  { id: 'component', label: 'Componentes', hint: 'Botões, selects e modais.', implemented: false },
+  { id: 'attachment', label: 'Anexo', hint: 'Arquivo por URL ou upload.', implemented: false },
+  { id: 'reaction', label: 'Reação', hint: 'Emoji em mensagem.', implemented: true },
+  { id: 'pin', label: 'Fixar', hint: 'Fixar/desafixar mensagem.', implemented: true },
+  { id: 'thread', label: 'Thread', hint: 'Criar e arquivar thread.', implemented: true },
+  { id: 'poll', label: 'Enquete', hint: 'Pergunta com opções.', implemented: true },
+  { id: 'edit', label: 'Editar', hint: 'Editar mensagem própria (streaming).', implemented: false },
+  { id: 'audioFrame', label: 'Áudio', hint: 'Pacotes Opus na chamada.', implemented: false },
+  { id: 'videoFrame', label: 'Vídeo', hint: 'Pacotes de vídeo na chamada.', implemented: false },
+  { id: 'screenFrame', label: 'Tela', hint: 'Pacotes de compartilhamento de tela.', implemented: false },
+  { id: 'http', label: 'HTTP de saída', hint: 'GET/POST para a allowlist.', implemented: true },
+  { id: 'blob', label: 'Blob', hint: 'Armazenamento binário por bot.', implemented: false },
+  { id: 'kv', label: 'Chave-valor', hint: 'Variáveis persistentes com TTL.', implemented: true },
+  { id: 'job', label: 'Agendamento', hint: 'Cron/atraso com retry.', implemented: false },
+  { id: 'template', label: 'Template', hint: 'Placeholders na resposta.', implemented: true },
+  { id: 'invokeBot', label: 'Chamar outro bot', hint: 'Bot-a-bot com profundidade limitada.', implemented: false },
+]
+
+export function defaultPrimitives(): BotPrimitives {
+  return {
+    text: true,
+    ephemeral: true,
+    dm: false,
+    embed: false,
+    component: false,
+    attachment: false,
+    reaction: true,
+    pin: true,
+    thread: true,
+    poll: true,
+    edit: true,
+    audioFrame: false,
+    videoFrame: false,
+    screenFrame: false,
+    http: true,
+    blob: false,
+    kv: true,
+    job: false,
+    template: true,
+    invokeBot: false,
+  }
+}
+
 export interface BotConfig {
+  /** 1/2 = config antiga (migrada na leitura), 3 = atual. */
+  schema: number
+  /** Explícito, nunca inferido do que foi preenchido. */
+  mode: BotMode
+  runtime: BotRuntime
+  primitives: BotPrimitives
   prefix: string
   commands: BotCommandDef[]
   channels: string[]
@@ -62,6 +178,13 @@ export interface BotConfig {
   events: string[]
   blockPrivate: boolean
   maxRepliesPerMinute: number
+  /** Domínios que o bot pode chamar. Vazio = qualquer http(s) público. */
+  httpAllow: string[]
+  maxHttpPerMinute: number
+  /** Segredo do HMAC do webhook. Nunca vai no corpo, no log nem no export. */
+  webhookSecret?: string
+  maxMessagesPerExecution: number
+  retentionHours: number
 }
 
 export const BOT_CONFIG_MAX_JSON = 64 * 1024
@@ -222,7 +345,13 @@ export const BOT_ADMIN_ACTIONS: { action: string; perm: number; label: string; a
 export function permAllows(botPerms: number, action: string): boolean {
   const def = BOT_ADMIN_ACTIONS.find((a) => a.action === action)
   if (!def) return false
-  return def.perm === 0 || (botPerms & def.perm) !== 0
+  if (def.perm === 0) return true
+  if ((botPerms & def.perm) !== 0) return true
+  // Mesma exceção herdada de `perm_satisfied` no core: quem já tinha
+  // "gerenciar membros" continua podendo estrutura e purga. Sem espelhar isto
+  // o painel dizia "não pode" e a ponte executava a ação.
+  const legado = BOT_PERMS.STRUCTURE | BOT_PERMS.PURGE | BOT_PERMS.MANAGE
+  return (def.perm & legado) !== 0 && (botPerms & BOT_PERMS.MANAGE) !== 0
 }
 
 export function permMaskFrom(list: number[]): number {
@@ -272,15 +401,18 @@ function isHttpUrl(url: string): boolean {
 }
 
 function hostOf(url: string): string | null {
-  const u = url.trim()
-  const m = /^https?:\/\/([^/?#]+)/i.exec(u)
-  if (!m) return null
-  const hostPort = m[1]
-  const host = hostPort.startsWith('[')
-    ? hostPort.slice(1, hostPort.indexOf(']'))
-    : hostPort.split(':')[0]
-  const clean = host.trim().replace(/\.$/, '').toLowerCase()
-  return clean || null
+  // `new URL` normaliza como o parser do Rust: `http://2130706433/`,
+  // `http://127.1/` e `http://a@127.0.0.1/` viram `127.0.0.1`. Comparar o host
+  // como texto deixava os três passarem e o bot alcançava a LAN.
+  try {
+    const u = new URL(url.trim())
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    const h = u.hostname.trim().replace(/\.$/, '').toLowerCase()
+    if (!h) return null
+    return h.startsWith('[') ? h.slice(1, -1) : h
+  } catch {
+    return null
+  }
 }
 
 function parseIPv4(host: string): number[] | null {
@@ -300,22 +432,58 @@ function parseIPv4(host: string): number[] | null {
 export function isBlockedHost(host: string): boolean {
   if (host === 'metadata.google.internal' || host === 'metadata') return true
   const ip = parseIPv4(host)
-  if (!ip) return false
-  return ip[0] === 169 && ip[1] === 254
+  if (!ip) return host === '::'
+  return (ip[0] === 169 && ip[1] === 254) || ip.every((n) => n === 0)
 }
 
 export function isPrivateHost(host: string): boolean {
   if (host === 'localhost' || host.endsWith('.localhost')) return true
   const ip = parseIPv4(host)
   if (ip) {
-    if (ip[0] === 10 || ip[0] === 127) return true
-    if (ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31) return true
-    if (ip[0] === 192 && ip[1] === 168) return true
-    if (ip[0] === 169 && ip[1] === 254) return true
+    if (
+      ip[0] === 0 ||
+      ip[0] === 10 ||
+      ip[0] === 127 ||
+      (ip[0] === 100 && ip[1] >= 64 && ip[1] <= 127) ||
+      (ip[0] === 172 && ip[1] >= 16 && ip[1] <= 31) ||
+      (ip[0] === 192 && (ip[1] === 168 || (ip[1] === 0 && ip[2] === 2))) ||
+      (ip[0] === 198 && (ip[1] === 18 || ip[1] === 19)) ||
+      (ip[0] === 198 && ip[1] === 51 && ip[2] === 100) ||
+      (ip[0] === 203 && ip[1] === 0 && ip[2] === 113) ||
+      (ip[0] === 169 && ip[1] === 254) ||
+      (ip[0] === 255 && ip[1] === 255 && ip[2] === 255 && ip[3] === 255)
+    ) {
+      return true
+    }
     return false
   }
-  const h = host.replace(/^\[|\]$/g, '')
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase()
+  // IPv4 mapeado em IPv6 aparece em DUAS formas: `::ffff:127.0.0.1` (texto) e
+  // `::ffff:7f00:1` (o que o parser URL devolve). As duas precisam cair na
+  // checagem IPv4, senão o loopback entra por uma delas.
+  if (h.startsWith('::ffff:')) {
+    const tail = h.slice(7)
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return isPrivateHost(tail)
+    const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail)
+    if (hex) {
+      const hi = parseInt(hex[1], 16)
+      const lo = parseInt(hex[2], 16)
+      return isPrivateHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`)
+    }
+  }
   return h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')
+}
+
+/** Host está na allowlist? Lista vazia = qualquer destino público. */
+export function hostAllowed(url: string, allow: string[] | undefined): boolean {
+  const list = (allow ?? []).filter((d) => d.trim().length > 0)
+  if (list.length === 0) return true
+  const host = hostOf(url)
+  if (!host) return false
+  return list.some((rule) => {
+    const clean = rule.trim().toLowerCase().replace(/^\*\./, '')
+    return host === clean || host.endsWith(`.${clean}`)
+  })
 }
 
 /** Mesma regra do core, para o editor recusar ANTES de salvar. */
@@ -408,6 +576,10 @@ function parseCommand(c: any): BotCommandDef | null {
 
 export function defaultBotConfig(): BotConfig {
   return {
+    schema: 3,
+    mode: 'declarative',
+    runtime: 'none',
+    primitives: defaultPrimitives(),
     prefix: '!',
     commands: [],
     channels: [],
@@ -415,6 +587,10 @@ export function defaultBotConfig(): BotConfig {
     events: [],
     blockPrivate: true,
     maxRepliesPerMinute: 20,
+    httpAllow: [],
+    maxHttpPerMinute: 60,
+    maxMessagesPerExecution: 20,
+    retentionHours: 24,
   }
 }
 
@@ -470,16 +646,78 @@ export function parseBotConfig(raw: unknown): BotConfig | null {
         .filter((k: unknown): k is BotChannelKind => typeof k === 'string' && validKinds.has(k as BotChannelKind))
         .slice(0, 4)
     : []
-  return {
+  // v1/v2 não tinham `schema`: ausência é migração, não erro. O modo é
+  // explícito no v3 porque inferir `plugin` de um `run` presente abriria
+  // processo sem o dono ter pedido.
+  const schema = typeof obj.schema === 'number' ? Math.trunc(obj.schema) : 2
+  if (schema < 1 || schema > 3) return null
+  // Modo desconhecido é ERRO, não "vira declarativo": aceitar em silêncio
+  // esconderia um typo do criador que achou que o plugin ia rodar.
+  if (obj.mode !== undefined && !BOT_MODES.some((m) => m.id === obj.mode)) return null
+  const mode: BotMode = (obj.mode as BotMode | undefined) ?? 'declarative'
+  let runtime: BotRuntime = 'none'
+  if (obj.runtime === 'process' || obj.runtime === 'none' || obj.runtime === 'wasm') runtime = obj.runtime
+  else if (mode === 'plugin') runtime = 'process'
+  // WASM ainda não existe. Recusar aqui é mais honesto que aceitar e não rodar.
+  if (runtime === 'wasm') return null
+  const primitives = { ...defaultPrimitives() }
+  if (obj.primitives && typeof obj.primitives === 'object' && !Array.isArray(obj.primitives)) {
+    for (const def of BOT_PRIMITIVES) {
+      const v = (obj.primitives as Record<string, unknown>)[def.id]
+      if (v !== undefined) primitives[def.id] = v === true
+    }
+  }
+  const integ = obj.integrations && typeof obj.integrations === 'object' ? obj.integrations : {}
+  const httpAllow: string[] = Array.isArray((integ as any).http?.allowDomains)
+    ? (integ as any).http.allowDomains
+        .filter((d: unknown): d is string => typeof d === 'string' && d.trim().length > 0 && d.length <= 253)
+        .map((d: string) => d.trim().toLowerCase())
+        .slice(0, 256)
+    : []
+  const cfg: BotConfig = {
+    schema: 3,
+    mode,
+    runtime,
+    primitives,
     prefix,
-    commands,
+    commands: pruneByPrimitives(commands, primitives),
     channels,
     channelKinds,
     webhook,
     events,
     blockPrivate: obj.blockPrivate === undefined ? true : obj.blockPrivate !== false,
     maxRepliesPerMinute: Math.max(1, Math.min(120, numberOr(obj.maxRepliesPerMinute, 20))),
+    httpAllow,
+    maxHttpPerMinute: Math.max(1, Math.min(600, numberOr((integ as any).http?.maxCallsPerMinute, 60))),
+    webhookSecret:
+      typeof (integ as any).webhook?.secret === 'string' && (integ as any).webhook.secret.length >= 16
+        ? String((integ as any).webhook.secret).slice(0, 128)
+        : undefined,
+    maxMessagesPerExecution: Math.max(
+      1,
+      Math.min(20, numberOr((integ as any).limits?.maxMessagesPerExecution, 20)),
+    ),
+    retentionHours: Math.max(0, Math.min(30 * 24, numberOr((integ as any).retention?.hours, 24))),
   }
+  return cfg
+}
+
+/**
+ * Primitiva desligada nega o comando que depende dela.
+ *
+ * Deixar o comando vivo responderia nada quando o membro o chamasse — pior que
+ * não existir. O core faz o mesmo em `parse_config`.
+ */
+export function pruneByPrimitives(
+  commands: BotCommandDef[],
+  p: BotPrimitives,
+): BotCommandDef[] {
+  return commands.filter((c) => {
+    const exec = c.exec ?? inferExec(c)
+    if (exec === 'reply') return p.text || p.ephemeral
+    if (exec === 'http') return p.http
+    return true
+  })
 }
 
 /** Infere o tipo quando o editor não preencheu `exec` (retrocompatível). */
@@ -492,7 +730,21 @@ export function inferExec(c: BotCommandDef): BotExec {
 
 /** Serializa de volta. Não inclui campo que o parser descartaria. */
 export function serializeBotConfig(cfg: BotConfig): string {
+  const integrations: Record<string, unknown> = {
+    http: { allowDomains: cfg.httpAllow ?? [], maxCallsPerMinute: cfg.maxHttpPerMinute ?? 60 },
+    limits: { maxMessagesPerExecution: cfg.maxMessagesPerExecution ?? 20 },
+    retention: { hours: cfg.retentionHours ?? 24 },
+  }
+  if (cfg.webhookSecret) {
+    // Só o marcador: o segredo real não volta para a config exportada nem para
+    // o JSON do editor (`bot.json` de um bot compartilhado não pode levá-lo).
+    integrations.webhook = { signed: true }
+  }
   return JSON.stringify({
+    schema: 3,
+    mode: cfg.mode,
+    runtime: cfg.runtime,
+    primitives: cfg.primitives,
     prefix: cfg.prefix,
     commands: cfg.commands.map((c) => {
       const exec = c.exec ?? inferExec(c)
@@ -525,6 +777,7 @@ export function serializeBotConfig(cfg: BotConfig): string {
     blockPrivate: cfg.blockPrivate,
     maxRepliesPerMinute: cfg.maxRepliesPerMinute,
     webhook: cfg.webhook,
+    integrations,
   })
 }
 

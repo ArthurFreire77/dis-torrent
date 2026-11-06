@@ -11,6 +11,21 @@ import { installExternalLinkHandler, OPEN_EXTERNAL_FAILED_EVENT, type OpenExtern
 // shell que a tela vai usar baixa sozinho, com a splash ainda visível.
 const ThemeShell = React.lazy(() => import('./designs/ThemeShell'))
 const MobileShell = React.lazy(() => import('./mobile/MobileShell'))
+const BotsApp = React.lazy(() => import('./routes/BotsApp'))
+
+/**
+ * A janela própria de bots abre em `index.html?bots=1` (ver `open_bots_window`
+ * no Rust). O sinal evita que a segunda webview suba a interface inteira e
+ * duplique efeitos globais: presença, notificações e deep link rodariam duas
+ * vezes, com dois processos disputando a mesma conta.
+ */
+const MODO_JANELA_BOTS = (() => {
+  try {
+    return new URLSearchParams(window.location.search).get('bots') === '1'
+  } catch {
+    return false
+  }
+})()
 
 const MOBILE_MAX_WIDTH = 768
 
@@ -65,12 +80,14 @@ function InviteRoute({ token }: { token: string }){
 }
 
 function AppRoutes(){
+  // A janela de bots não pode inicializar presença/notificações: seria um
+  // segundo "app" anunciando presença e reagindo a eventos globais.
   React.useEffect(() => {
+    if (MODO_JANELA_BOTS) return
     initAppState()
     initNotifications()
   }, [])
-
-  React.useEffect(() => installExternalLinkHandler(), [])
+  React.useEffect(() => (MODO_JANELA_BOTS ? undefined : installExternalLinkHandler()), [])
 
   // Falha ao abrir link: antes ia só para o console e o clique parecia morto.
   const [linkErro, setLinkErro] = React.useState<string | null>(null)
@@ -143,6 +160,14 @@ function AppRoutes(){
         <Route path="/m" element={<React.Suspense fallback={<ShellFallback />}><MobileShell /></React.Suspense>} />
         <Route path="/mobile" element={<React.Suspense fallback={<ShellFallback />}><MobileShell /></React.Suspense>} />
         <Route path="/invite/:token" element={<InviteRouteWrapper />} />
+        <Route
+          path="/bots"
+          element={
+            <React.Suspense fallback={<ShellFallback />}>
+              <BotsApp />
+            </React.Suspense>
+          }
+        />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       {linkErro && (
@@ -173,6 +198,14 @@ function AppRoutes(){
   )
 }
 export default function App(){
+  // Janela dedicada: nenhuma rota, nenhum prompt global. Só a tela de bots.
+  if (MODO_JANELA_BOTS) {
+    return (
+      <React.Suspense fallback={<ShellFallback />}>
+        <BotsApp />
+      </React.Suspense>
+    )
+  }
   return (
     <BrowserRouter>
       <AppRoutes />

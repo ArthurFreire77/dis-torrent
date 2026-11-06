@@ -325,6 +325,11 @@ pub fn perm_for_action(action: &str) -> Option<i64> {
 /// `PERM_MANAGE` era o bit único que liberava tudo antes da separação. Quem já
 /// tinha esse bit continua podendo tudo, senão a atualização tiraria poder de
 /// bots que já estavam configurados.
+///
+/// Isto é uma exceção HERDADA, não a regra: a UI precisa espelhar exatamente
+/// aqui (`permAllows` em `botCommands.ts`) ou o painel diz "sem permissão"
+/// enquanto a ponte executa. O rótulo do bit avisa o alcance na aba
+/// Permissões — conceder `manage` num bot novo dá estrutura e purga junto.
 pub fn perm_satisfied(granted: i64, need: i64) -> bool {
     if need == 0 {
         return true;
@@ -334,6 +339,21 @@ pub fn perm_satisfied(granted: i64, need: i64) -> bool {
     }
     let legado = PERM_STRUCTURE | PERM_PURGE | PERM_MANAGE;
     (need & legado) != 0 && (granted & PERM_MANAGE) != 0
+}
+
+/// Bit que o bot pode repassar a um membro ao dar cargo.
+///
+/// Sem isto, `role_assign` (que só exige `PERM_MANAGE`) distribuía um cargo com
+/// `PERM_BAN`/`PERM_MUTE` criado pelo dono e o bot transferia poder de
+/// moderação para qualquer um — escalada lateral, não auto-concessão.
+pub fn perm_can_grant(granted: i64, role_perms: i64) -> bool {
+    let extra = role_perms & PERM_ALL & !granted;
+    // `manage` herdado continua podendo os bits que ele já implica.
+    if extra == 0 {
+        return true;
+    }
+    let legado = PERM_STRUCTURE | PERM_PURGE | PERM_MANAGE;
+    (granted & PERM_MANAGE) != 0 && (extra & !legado) == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

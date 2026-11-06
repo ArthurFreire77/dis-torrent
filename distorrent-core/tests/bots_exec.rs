@@ -545,3 +545,185 @@ fn acao_de_canal_usa_o_canal_de_contexto() {
         "a enquete precisa nascer no canal do contexto"
     );
 }
+
+#[test]
+fn bot_nao_distribui_cargo_com_permissao_que_ele_nao_tem() {
+    // Escalada lateral: `role_assign` so exige PERM_MANAGE (ou o `manage`
+    // herdado), entao sem esta barreira um bot pegava um cargo criado pelo dono
+    // com PERM_BAN e entregava moderacao real a qualquer membro.
+    use distorrent_core::moderation::{PERM_BAN, PERM_MANAGE};
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "Delegador", None, None).expect("bot");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        distorrent_core::storage::BotPatch {
+            perms: Some(PERM_MANAGE),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let perigoso = e
+        .role_create(&cid, "Moderador", "#ed4245", PERM_BAN, false, false)
+        .expect("cargo");
+    membro(&e, &cid, "abcdabcdabcd", "Ana");
+    let erro = e
+        .bot_admin(&cid, &bot.id, "role_assign", "Moderador", "Ana", None)
+        .expect_err("nao pode dar cargo com ban sem ter ban");
+    let msg = format!("{erro}");
+    assert!(msg.contains("permiss"), "{msg}");
+    assert!(
+        e.store
+            .member_roles_list(&cid, "abcdabcdabcd")
+            .unwrap()
+            .is_empty(),
+        "o cargo perigoso nao pode ter sido atribuido"
+    );
+    // Cargo sem poder extra continua permitido.
+    let inofensivo = e
+        .role_create(&cid, "Visitante", "#949ba4", 0, false, false)
+        .expect("cargo");
+    e.bot_admin(&cid, &bot.id, "role_assign", "Visitante", "Ana", None)
+        .expect("cargo sem permissao pode ser dado");
+    assert!(e
+        .store
+        .member_roles_list(&cid, "abcdabcdabcd")
+        .unwrap()
+        .iter()
+        .any(|r| *r == inofensivo.id));
+    let _ = perigoso;
+}
+
+#[test]
+fn segredo_do_webhook_fica_fora_do_json_de_config() {
+    // A config do bot e enviada no estado da comunidade para TODOS os membros.
+    // Um segredo de assinatura ali vazaria para qualquer um e, pior, sumiria
+    // quando o bot regravasse o JSON pela ponte.
+    use distorrent_core::storage::BotPatch;
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "Assinado", None, None).expect("bot");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        BotPatch {
+            webhook_secret: Some("segredo-de-assinatura-123".into()),
+            config: Some(r#"{"prefix":"!","commands":[{"name":"ping","reply":"pong"}]}"#.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let salvo = e
+        .store
+        .bots_list(&cid)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.id == bot.id)
+        .expect("bot");
+    // O valor mora na coluna local, NAO no JSON de config.
+    assert_eq!(salvo.webhook_secret, "segredo-de-assinatura-123");
+    assert!(
+        !salvo.config.contains("segredo-de-assinatura-123"),
+        "config: {}",
+        salvo.config
+    );
+    // E o bot NAO apaga o segredo ao trocar a propria config pela ponte.
+    e.bot_replace_config(
+        &cid,
+        &bot.id,
+        r#"{"prefix":"!","commands":[{"name":"eco","reply":"eco"}]}"#,
+    )
+    .expect("bot troca a propria config");
+    let depois = e
+        .store
+        .bots_list(&cid)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.id == bot.id)
+        .expect("bot");
+    assert_eq!(
+        depois.webhook_secret, "segredo-de-assinatura-123",
+        "regravar a config nao pode apagar a assinatura"
+    );
+    assert!(depois.config.contains("eco"), "{}", depois.config);
+}
+
+#[test]
+fn bot_nao_religa_rede_privada_pela_ponte() {
+    // O dono decidiu bloquear a LAN; o bot nao desfaz essa decisao sozinho.
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "Rebelde", None, None).expect("bot");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        distorrent_core::storage::BotPatch {
+            config: Some(r#"{"prefix":"!","blockPrivate":true}"#.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    e.bot_replace_config(
+        &cid,
+        &bot.id,
+        r#"{"prefix":"!","blockPrivate":false,"commands":[{"name":"x","reply":"x"}]}"#,
+    )
+    .expect("config valida");
+    let depois = e
+        .store
+        .bots_list(&cid)
+        .unwrap()
+        .into_iter()
+        .find(|b| b.id == bot.id)
+        .expect("bot");
+    let cfg = distorrent_core::bots::parse_config(&depois.config).expect("config");
+    assert!(
+        cfg.block_private,
+        "a politica do dono (bloquear rede privada) precisa sobreviver: {}",
+        depois.config
+    );
+}
+
+#[test]
+fn migracao_cria_a_coluna_do_segredo_e_bots_antigos_continuam() {
+    let (e, dir) = engine("Dono");
+    drop(e);
+    let store = Store::open(&dir.path().join("distorrent.db")).expect("reabrir");
+    let cid = "c-antigo".to_string();
+    store
+        .create_community(&cid, "Antigo", "ffffffffffff", &[])
+        .expect("comunidade");
+    let antigo = distorrent_core::storage::BotRow {
+        id: "b-antigo".into(),
+        community_id: cid.clone(),
+        name: "Antigo".into(),
+        discriminator: "0001".into(),
+        avatar: "x".into(),
+        role_id: None,
+        token: "bot_x".into(),
+        online: true,
+        owner_fp: "ffffffffffff".into(),
+        created_at: 1,
+        config: r#"{"prefix":"!","commands":[{"name":"ping","reply":"pong"}]}"#.into(),
+        perms: 0,
+        webhook_secret: String::new(),
+    };
+    store.bot_upsert(&antigo).expect("upsert");
+    let lido = store
+        .bots_list(&cid)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("bot antigo");
+    assert_eq!(lido.name, "Antigo");
+    assert!(lido.webhook_secret.is_empty(), "sem segredo por padrao");
+    assert!(!lido.webhook_secret_set());
+}

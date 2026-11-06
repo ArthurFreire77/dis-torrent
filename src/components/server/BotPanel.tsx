@@ -7,6 +7,9 @@ import {
   BOT_EVENTS,
   BOT_PERM_DEFS,
   BOT_PERM_ALL,
+  BOT_PERMS,
+  BOT_PRIMITIVES,
+  BOT_MODES,
   parseBotConfig,
   serializeBotConfig,
   defaultBotConfig,
@@ -16,8 +19,10 @@ import {
   type BotCommandDef,
   type BotExec,
   type BotConfig,
+  type BotMode,
 } from '../../services/botCommands'
 import { copyBestEffort } from '../../shared/clipboard'
+import { baixarTexto } from './botDocsDownload'
 import { DynamicStyles } from '../../shared/dynamicStyles'
 import { Button, Card, EmptyState, Modal, Notice, Select, TextArea, TextField, helpStyle, ui } from '../../shared/ui'
 import { Ic, type IconName } from '../../shared/icons'
@@ -37,7 +42,7 @@ const css = `
 }
 `
 
-type Tab = 'credenciais' | 'comandos' | 'permissoes' | 'eventos' | 'runtime' | 'console'
+type Tab = 'credenciais' | 'comandos' | 'permissoes' | 'primitivas' | 'eventos' | 'runtime' | 'console'
 
 const CHIP_TONE: Record<string, { color: string; background: string; borderColor: string }> = {
   ok: { color: '#a5e5bd', background: 'rgba(35,165,89,.14)', borderColor: 'rgba(35,165,89,.5)' },
@@ -99,7 +104,12 @@ export function BotPanel({
   /** Ocupa a área das configurações do servidor em vez de abrir outro modal. */
   embedded?: boolean
 }) {
-  const initial = useMemo(() => parseBotConfig(bot.config ?? null) ?? defaultBotConfig(), [bot.config])
+  const initial = useMemo(() => {
+    const cfg = parseBotConfig(bot.config ?? null) ?? defaultBotConfig()
+    // O segredo mora na coluna local do banco, não no JSON sincronizado.
+    // Ler dele aqui evita que abrir e salvar o painel APAGUE a assinatura.
+    return { ...cfg, webhookSecret: bot.webhook_secret || undefined }
+  }, [bot.config, bot.webhook_secret])
   const [tab, setTab] = useState<Tab>('credenciais')
   const [cfg, setCfg] = useState<BotConfig>(initial)
   const [perms, setPerms] = useState<number>(bot.perms ?? 0)
@@ -233,6 +243,9 @@ export function BotPanel({
         perms,
         roleId: roleId || null,
         online,
+        // O segredo vai por campo próprio (coluna local); nunca entra no JSON
+        // de config, que é sincronizado para todos os membros do servidor.
+        webhookSecret: cfg.webhookSecret,
       })
       setSavedAt(Date.now())
       onSaved()
@@ -337,6 +350,7 @@ export function BotPanel({
     { id: 'credenciais', label: 'Credenciais', icon: 'key' },
     { id: 'comandos', label: 'Comandos', icon: 'terminal', count: cfg.commands.length },
     { id: 'permissoes', label: 'Permissões', icon: 'shield' as IconName },
+    { id: 'primitivas', label: 'Modo e primitivas', icon: 'gear' },
     { id: 'eventos', label: 'Eventos', icon: 'plug', count: cfg.events.length },
     { id: 'runtime', label: 'Ponte e plugin', icon: 'globe' },
     { id: 'console', label: 'Console', icon: 'file' },
@@ -1000,6 +1014,115 @@ export function BotPanel({
             Conceder banir/silenciar permite que o bot remova membros de verdade. A validação é feita no
             core a cada ação — a interface não é a barreira.
           </Notice>
+          {perms === BOT_PERM_ALL && (
+            <Notice tone="danger" icon="warn">
+              Tudo concedido inclui montar o servidor, limpar canais e abrir entrada pública. Um bot
+              comprometido pode apagar canais inteiros. Prefira conceder só o que ele usa.
+            </Notice>
+          )}
+          {(perms & BOT_PERMS.MANAGE) !== 0 && (perms & (BOT_PERMS.STRUCTURE | BOT_PERMS.PURGE)) === 0 && (
+            <Notice tone="info" icon="info">
+              "Gerenciar membros" é herdado da versão antiga: por compatibilidade ele também libera
+              criar/purgar canais e abrir a entrada pública. Marque os outros dois bits para ver o
+              alcance explícito, ou remova "Gerenciar" se o bot só precisa expulsar membros.
+            </Notice>
+          )}
+        </Card>
+      )}
+
+      {tab === 'primitivas' && (
+        <Card
+          title="Modo e primitivas"
+          subtitle="O que o bot pode ENTREGAR. Primitiva desligada nega a rota no core, não só esconde o botão."
+          icon="gear"
+        >
+          <Select
+            label="Modo de execução"
+            value={cfg.mode}
+            onChange={(v) => setCfg({ ...cfg, mode: v as BotMode, runtime: v === 'plugin' ? 'process' : 'none' })}
+            options={BOT_MODES.map((m) => ({ value: m.id, label: m.label }))}
+            hint={BOT_MODES.find((m) => m.id === cfg.mode)?.hint}
+          />
+          {cfg.mode === 'remote' && (
+            <Notice tone="warning" icon="warn">
+              No modo remoto o criador conecta de fora e a lógica sai deste PC — é o único modo que
+              quebra a promessa "nada roda em nuvem". Só use sabendo disso.
+            </Notice>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: ui.md }}>
+            {BOT_PRIMITIVES.map((p) => {
+              const on = cfg.primitives[p.id]
+              return (
+                <label
+                  key={p.id}
+                  title={p.hint}
+                  style={{
+                    display: 'flex', gap: 8, alignItems: 'flex-start', padding: '8px 9px',
+                    background: on ? ui.surfaceHover : ui.surface,
+                    border: `1px solid ${on ? ui.accent : ui.border}`,
+                    borderRadius: 8,
+                    opacity: p.implemented ? 1 : 0.55,
+                    cursor: p.implemented ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={!p.implemented}
+                    style={{ marginTop: 2 }}
+                    onChange={() => {
+                      if (!p.implemented) return
+                      setCfg({ ...cfg, primitives: { ...cfg.primitives, [p.id]: !on } })
+                    }}
+                  />
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: 'block', fontSize: 12.5, fontWeight: 700, color: ui.heading }}>
+                      {p.label}
+                    </span>
+                    <span style={{ display: 'block', fontSize: 11, color: ui.muted }}>
+                      {p.implemented ? p.hint : `${p.hint} — ainda não existe`}
+                    </span>
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+          <div style={{ marginTop: ui.md, display: 'flex', flexDirection: 'column', gap: ui.sm }}>
+            <TextField
+              label="Domínios permitidos para HTTP"
+              value={cfg.httpAllow.join(', ')}
+              onChange={(v) =>
+                setCfg({
+                  ...cfg,
+                  httpAllow: v.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 256),
+                })
+              }
+              placeholder="api.exemplo.com, cdn.exemplo.com"
+              hint="Vazio = qualquer destino público. Rede privada continua bloqueada abaixo."
+            />
+            <TextField
+              label="Segredo do webhook (HMAC)"
+              mono
+              value={cfg.webhookSecret ?? ''}
+              onChange={(v) => setCfg({ ...cfg, webhookSecret: v.trim() || undefined })}
+              placeholder="mínimo 16 caracteres"
+              hint="Assina cada evento com X-Distorrent-Signature. Fica só no banco local: nunca é sincronizado para os membros nem aparece no JSON exportado."
+            />
+            <div style={{ display: 'flex', gap: ui.sm, flexWrap: 'wrap' }}>
+              <TextField
+                label="Mensagens por execução"
+                value={String(cfg.maxMessagesPerExecution)}
+                onChange={(v) => setCfg({ ...cfg, maxMessagesPerExecution: Math.max(1, Math.min(20, Number(v) || 20)) })}
+                hint="1 a 20. Evita script que responde 200 vezes."
+              />
+              <TextField
+                label="Retenção do console (h)"
+                value={String(cfg.retentionHours)}
+                onChange={(v) => setCfg({ ...cfg, retentionHours: Math.max(0, Math.min(720, Number(v) || 24)) })}
+                hint="0 = não guarda. Padrão 24 h."
+              />
+            </div>
+          </div>
         </Card>
       )}
 
@@ -1223,6 +1346,30 @@ export function BotPanel({
               </span>
             )}
             <span style={{ flex: 1 }} />
+            <Button
+              variant="ghost"
+              icon="download"
+              title="Baixa um bot.json com a config e as permissões — sem token"
+              onClick={() => {
+                // Exportação leva config + perms e NUNCA o token nem o segredo
+                // do webhook (serializeBotConfig já omite o segredo).
+                const pacote = {
+                  schema: 3,
+                  name: bot.name,
+                  avatar: bot.avatar,
+                  description: '',
+                  perms,
+                  config: JSON.parse(serializeBotConfig(cfg)),
+                }
+                baixarTexto(
+                  `${bot.name.replace(/[^a-z0-9_-]+/gi, '-')}.bot.json`,
+                  JSON.stringify(pacote, null, 2),
+                  'application/json;charset=utf-8',
+                )
+              }}
+            >
+              Exportar
+            </Button>
             <Button onClick={onClose} disabled={busy}>{embedded ? 'Voltar' : 'Fechar'}</Button>
             <Button variant="success" icon="save" busy={busy} onClick={() => void save()}>
               Salvar

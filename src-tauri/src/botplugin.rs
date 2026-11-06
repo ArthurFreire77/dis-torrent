@@ -55,6 +55,8 @@ struct Running {
     started_at: i64,
     code: Mutex<Option<i32>>,
     lines: Mutex<Vec<PluginLine>>,
+    /// Segredo do caminho da ponte, usado só para redigir a saída do plugin.
+    secret: Option<String>,
 }
 
 #[derive(Default)]
@@ -62,8 +64,35 @@ pub struct Plugins {
     map: Mutex<HashMap<String, Arc<Running>>>,
 }
 
+/// `http://127.0.0.1:1234/b/segredo` → `/b/segredo` (só o segredo do caminho).
+fn secret_of(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1)?;
+    let slash = rest.find('/')?;
+    let path = &rest[slash..];
+    if path.len() > 4 {
+        Some(path.to_string())
+    } else {
+        None
+    }
+}
+
+/// Apaga o segredo da ponte de uma linha de log do plugin.
+///
+/// O criador costuma depurar com `console.log(process.env)`; sem isto a URL
+/// autenticada inteira ia para o console do painel — e de lá para o banco, para
+/// um print de tela ou para um relato de bug. O segredo não é para ser visto.
+fn redact(line: &str, secret: Option<&String>) -> String {
+    match secret {
+        Some(s) if !s.is_empty() => line.replace(s.as_str(), "/b/<segredo>"),
+        _ => line.to_string(),
+    }
+}
+
 fn push_line(r: &Running, level: &str, message: &str) {
-    let msg: String = message.chars().take(MAX_LINE).collect();
+    let msg: String = redact(message, r.secret.as_ref())
+        .chars()
+        .take(MAX_LINE)
+        .collect();
     let mut lines = r.lines.lock().unwrap_or_else(|e| e.into_inner());
     if lines.len() >= MAX_LINES {
         lines.remove(0);
@@ -213,6 +242,7 @@ impl Plugins {
             started_at: distorrent_core::identity::now_ms(),
             code: Mutex::new(None),
             lines: Mutex::new(Vec::new()),
+            secret: secret_of(bridge_url),
         });
         push_line(
             &running,
@@ -383,6 +413,28 @@ mod tests {
             )
             .unwrap_err();
         assert!(erro.contains("não encontrado"), "{erro}");
+    }
+
+    #[test]
+    fn saida_do_plugin_nunca_mostra_o_segredo_da_ponte() {
+        // O criador depura com `console.log(process.env)`; a URL autenticada
+        // inteira iria para o console do painel e para o banco.
+        let url = "http://127.0.0.1:41234/b/9f2c0d3e4b5a69788796a5b4c3d2e1f0";
+        let secret = secret_of(url).expect("segredo");
+        assert_eq!(secret, "/b/9f2c0d3e4b5a69788796a5b4c3d2e1f0");
+        let linha = format!("DISTORRENT_BOT_URL={url}");
+        let limpa = redact(&linha, Some(&secret));
+        assert!(
+            !limpa.contains("9f2c0d3e4b5a69788796a5b4c3d2e1f0"),
+            "{limpa}"
+        );
+        assert!(limpa.contains("/b/<segredo>"), "{limpa}");
+        assert!(
+            limpa.contains("127.0.0.1:41234"),
+            "a porta pode aparecer: {limpa}"
+        );
+        // Linha sem segredo passa intacta.
+        assert_eq!(redact("plugin iniciado", Some(&secret)), "plugin iniciado");
     }
 
     #[test]

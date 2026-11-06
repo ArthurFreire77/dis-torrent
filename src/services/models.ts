@@ -303,6 +303,11 @@ export interface BotView {
   config?: string
   /** Permissões administrativas concedidas pelo dono (bitmask). */
   perms?: number
+  /**
+   * Segredo do HMAC do webhook — local do dono, nunca sincronizado para os
+   * membros. Só chega aqui pelo `bots_list` (comando local do app).
+   */
+  webhook_secret?: string
 }
 
 /** Linha do console de um bot. */
@@ -352,6 +357,8 @@ export interface BotFolderInfo {
   run: string | null
   requires: string[]
   description: string
+  /** Permissões pedidas pelo autor do bot — o dono confirma, não são aplicadas sozinhas. */
+  perms?: number
   files: string[]
 }
 
@@ -667,7 +674,9 @@ export interface DisTorrentServices {
   memberKick(communityId: string, fp: string): Promise<void>
 
   botCreate(communityId: string, data: { name: string; avatar?: string; roleId?: string | null }): Promise<string>
-  botUpdate(communityId: string, botId: string, patch: Partial<Pick<BotView, 'name' | 'avatar' | 'roleId' | 'online' | 'config'>> & { perms?: number }): Promise<void>
+  botUpdate(communityId: string, botId: string, patch: Partial<Pick<BotView, 'name' | 'avatar' | 'roleId' | 'online' | 'config'>> & { perms?: number; webhookSecret?: string }): Promise<void>
+  /** Só informa se o webhook está assinado; o valor do segredo fica no backend. */
+  botWebhookSecretSet?(communityId: string, botId: string): Promise<boolean>
   botDelete(communityId: string, botId: string): Promise<void>
   botsList(communityId: string): Promise<BotView[]>
   botPostMessage(communityId: string, channelId: string, botId: string, body: string): Promise<StoredMessage>
@@ -687,6 +696,8 @@ export interface DisTorrentServices {
   botBridgeStop?(communityId: string, botId: string): Promise<boolean>
   botBridgeStatus?(communityId: string, botId: string): Promise<BotBridgeStatus | null>
   botBridgeList?(): Promise<BotBridgeInfo[]>
+  /** Abre (ou foca) a janela separada de Bots. Só existe no desktop. */
+  openBotsWindow?(): Promise<void>
   /** Lê uma pasta de bot (`bot.json`) sem gravar. */
   botFolderRead?(dir: string): Promise<BotFolderInfo>
   /** Executa o código do bot (plugin) com a ponte já aberta. */
@@ -696,7 +707,7 @@ export interface DisTorrentServices {
   botPluginList?(): Promise<BotPluginStatus[]>
   /** Abre o seletor de pasta do SO. */
   pickFolder?(): Promise<string | null>
-  httpFetch(url: string, method: 'GET' | 'POST', headers: Record<string, string>, body: string | null, timeoutMs: number): Promise<{ status: number; body: string }>
+  httpFetch(url: string, method: 'GET' | 'POST', headers: Record<string, string>, body: string | null, timeoutMs: number, allowPrivate?: boolean): Promise<{ status: number; body: string }>
 
   createGroup(title: string, members: string[]): Promise<Conversation>
   groupMembers(convId: string): Promise<[string,string][]>

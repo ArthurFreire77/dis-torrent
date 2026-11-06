@@ -82,6 +82,8 @@ export const tauriServices: DisTorrentServices = {
   updateCleanup: () => invoke<number>('update_cleanup'),
   openReleasePage: (url) => invoke<void>('open_release_page', { url }),
   openExternal: (url) => invoke<void>('open_external', { url }),
+  // Só o desktop tem janela própria: no Android o comando devolve erro honesto.
+  openBotsWindow: () => invoke<void>('open_bots_window'),
 
   relayStatus: () => invoke<RelayLegStatus[]>('relay_status'),
 
@@ -242,7 +244,10 @@ export const tauriServices: DisTorrentServices = {
     return typeof row === 'string' ? row : (row as any).id ?? String(row)
   },
   botUpdate: (cid, botId, patch) =>
-    invoke<void>('bot_update', { communityId: cid, botId: botId, name: patch.name ?? null, avatar: patch.avatar ?? null, roleId: patch.roleId === undefined ? null : (patch.roleId ?? ''), online: patch.online ?? null, config: patch.config ?? null, perms: patch.perms ?? null }),
+    invoke<void>('bot_update', { communityId: cid, botId: botId, name: patch.name ?? null, avatar: patch.avatar ?? null, roleId: patch.roleId === undefined ? null : (patch.roleId ?? ''), online: patch.online ?? null, config: patch.config ?? null, perms: patch.perms ?? null, webhookSecret: patch.webhookSecret === undefined ? null : (patch.webhookSecret ?? '') }),
+  /** Só diz se há assinatura configurada: o segredo nunca sai do backend. */
+  botWebhookSecretSet: (cid, botId) =>
+    invoke<boolean>('bot_webhook_secret_set', { communityId: cid, botId }),
   botDelete: (cid, botId) =>
     invoke<void>('bot_delete', { communityId: cid, botId: botId }),
   botsList: (cid) =>
@@ -287,20 +292,23 @@ export const tauriServices: DisTorrentServices = {
   botPluginStatus: (cid, botId) =>
     invoke<BotPluginStatus | null>('bot_plugin_status', { communityId: cid, botId }),
   botPluginList: () => invoke<BotPluginStatus[]>('bot_plugin_list'),
-  httpFetch: async (url, method, headers, body, timeoutMs) => {
-    const r = await invoke<{ status: number; body_b64: string; body_text: string | null; truncated: boolean }>('http_fetch', {
+  httpFetch: (url, method, headers, body, timeoutMs, allowPrivate) => {
+    return invoke<{ status: number; body_b64: string; body_text: string | null; truncated: boolean }>('http_fetch', {
       url, method,
       headers: Object.entries(headers ?? {}),
       body: body ?? null,
       timeoutMs,
+      // Sem isto o backend recusa rede privada: o opt-in do dono
+      // (`blockPrivate:false`) tem de chegar até a guarda do Rust.
+      allowPrivate: allowPrivate === true,
+    }).then((r) => {
+      let out: string
+      if (typeof r.body_text === 'string') out = r.body_text
+      else {
+        try { out = atob(r.body_b64) } catch { out = '' }
+      }
+      return { status: r.status, body: out }
     })
-    // Seção 1: out
-    let out: string
-    if (typeof r.body_text === 'string') out = r.body_text
-    else {
-      try { out = atob(r.body_b64) } catch { out = '' }
-    }
-    return { status: r.status, body: out }
   },
 
   createGroup: (title, members) => invoke<Conversation>('create_group', { title, members }),

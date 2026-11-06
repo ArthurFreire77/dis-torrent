@@ -9,6 +9,7 @@ import {
   botIsActive,
   normalizeBotCommandName,
   urlProblem,
+  hostAllowed,
   permAllows,
   BOT_MAX_COOLDOWN_MS,
   BOT_MAX_SCRIPT_LINES,
@@ -18,6 +19,7 @@ import {
   type BotConfig,
 } from './botCommands.ts'
 import { sanitizeText } from '../core/security/sanitize.ts'
+import { buildWebhook } from './botWebhook.ts'
 
 /**
  * Núcleo executável do bot, sem importar `services`.
@@ -35,7 +37,15 @@ export interface BotRuntimeDeps {
   subscribe: (cb: (ev: any) => void) => () => void
   communitiesList: () => Promise<{ id: string; owner_fp: string; name?: string }[]>
   botsList: (cid: string) => Promise<
-    { id: string; name: string; online?: boolean; config?: string; perms?: number }[]
+    {
+      id: string
+      name: string
+      online?: boolean
+      config?: string
+      perms?: number
+      /** Segredo local do HMAC do webhook (nunca sincronizado). */
+      webhook_secret?: string
+    }[]
   >
   channelList: (cid: string) => Promise<{ id: string; name?: string; kind?: string }[]>
   httpFetch: (
@@ -44,6 +54,7 @@ export interface BotRuntimeDeps {
     headers: Record<string, string>,
     body: string | null,
     timeoutMs: number,
+    allowPrivate?: boolean,
   ) => Promise<{ status: number; body: string }>
   botPostMessage: (cid: string, channelId: string, botId: string, body: string) => Promise<unknown>
   botAdmin: (
@@ -223,7 +234,7 @@ export class BotEngine {
     const convId = typeof ev.conv_id === 'string' ? ev.conv_id : ''
     if (!convId) return
 
-    let bots: { id: string; name: string; online?: boolean; config?: string; perms?: number }[]
+    let bots: { id: string; name: string; online?: boolean; config?: string; perms?: number; webhook_secret?: string }[]
     try {
       bots = await this.deps.botsList(cid)
     } catch {
@@ -302,7 +313,7 @@ export class BotEngine {
   private async onOtherEvent(cid: string, type: string, ev: any): Promise<void> {
     const eventId = this.mapEngineEvent(type, ev)
     if (!eventId) return
-    let bots: { id: string; name: string; online?: boolean; config?: string; perms?: number }[]
+    let bots: { id: string; name: string; online?: boolean; config?: string; perms?: number; webhook_secret?: string }[]
     try {
       bots = await this.deps.botsList(cid)
     } catch {
@@ -393,10 +404,16 @@ export class BotEngine {
     }
   }
 
-  /** Webhook (POST) + script de evento. Sem rede quando não há nada a fazer. */
+  /**
+   * Webhook (POST) + script de evento. Sem rede quando não há nada a fazer.
+   *
+   * Retry exponencial curto (2 tentativas): endpois instável do criador perde
+   * evento em silêncio hoje. O 5xx agora vira `warn` no console em vez de
+   * desaparecer, e o corpo vai assinado quando há segredo configurado.
+   */
   private async deliverEvent(
     cid: string,
-    bot: { id: string; name: string; perms?: number },
+    bot: { id: string; name: string; perms?: number; webhook_secret?: string },
     config: BotConfig,
     eventId: string,
     payload: Record<string, unknown>,
@@ -407,16 +424,40 @@ export class BotEngine {
       if (problem) {
         this.log(cid, bot.id, 'warn', `webhook ignorado: ${problem}`)
       } else {
-        try {
-          await this.deps.httpFetch(
-            config.webhook.url,
-            'POST',
-            { 'content-type': 'application/json' },
-            JSON.stringify(payloadFull),
-            HTTP_TIMEOUT_MS,
-          )
-        } catch (e: unknown) {
-          this.log(cid, bot.id, 'warn', `webhook falhou: ${e instanceof Error ? e.message : e}`)
+        const delivery = `${cid}:${bot.id}:${eventId}:${this.now()}`
+        const { body, headers } = buildWebhook(
+          eventId,
+          payloadFull,
+          // O segredo vem da coluna LOCAL do banco (nunca da config
+          // sincronizada); `webhook_secret` só existe no `bots_list` do dono.
+          bot.webhook_secret || undefined,
+          delivery,
+          Math.floor(this.now() / 1000),
+        )
+        let lastStatus = 0
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const res = await this.deps.httpFetch(
+              config.webhook.url,
+              'POST',
+              headers,
+              body,
+              HTTP_TIMEOUT_MS,
+              !config.blockPrivate,
+            )
+            lastStatus = res.status
+            // 2xx é entrega; 4xx é erro do criador (a URL está errada) e não
+            // adianta repetir; 5xx/timeout merece uma segunda tentativa.
+            if (res.status < 400) break
+            if (res.status < 500) break
+          } catch (e: unknown) {
+            this.log(cid, bot.id, 'warn', `webhook falhou: ${e instanceof Error ? e.message : e}`)
+          }
+        }
+        if (lastStatus >= 500) {
+          this.log(cid, bot.id, 'warn', `webhook respondeu HTTP ${lastStatus} (evento ${eventId})`)
+        } else if (lastStatus >= 400) {
+          this.log(cid, bot.id, 'warn', `webhook recusou o evento (HTTP ${lastStatus})`)
         }
       }
     }
@@ -495,7 +536,7 @@ export class BotEngine {
         return
       }
       default:
-        await this.runHttp(cid, channelId, bot, cmd, args)
+        await this.runHttp(cid, channelId, bot, cmd, args, config)
     }
   }
 
@@ -505,17 +546,34 @@ export class BotEngine {
     bot: { id: string; name: string },
     cmd: BotCommandDef,
     args: string[],
+    config?: BotConfig,
   ): Promise<void> {
-    const problem = urlProblem(cmd.url, true)
+    const problem = urlProblem(cmd.url, config?.blockPrivate ?? true)
     if (problem) {
       this.log(cid, bot.id, 'warn', `/${cmd.name}: ${problem}`)
       return
     }
     const url = renderTemplate(cmd.url, { args })
+    if (config && !hostAllowed(url, config.httpAllow)) {
+      this.log(
+        cid,
+        bot.id,
+        'warn',
+        `/${cmd.name}: domínio fora da allowlist (${url.slice(0, 60)})`,
+      )
+      return
+    }
     const reqBody = cmd.method === 'POST' && cmd.body ? renderTemplate(cmd.body, { args }) : null
     let res: { status: number; body: string }
     try {
-      res = await this.deps.httpFetch(url, cmd.method, cmd.headers ?? {}, reqBody, HTTP_TIMEOUT_MS)
+      res = await this.deps.httpFetch(
+        url,
+        cmd.method,
+        cmd.headers ?? {},
+        reqBody,
+        HTTP_TIMEOUT_MS,
+        !(config?.blockPrivate ?? true),
+      )
     } catch (e: unknown) {
       this.log(cid, bot.id, 'error', `/${cmd.name}: ${e instanceof Error ? e.message : e}`)
       return
@@ -828,6 +886,11 @@ export class BotEngine {
           vars.set(`${into}.status`, '0')
           continue
         }
+        if (!hostAllowed(url, config.httpAllow)) {
+          this.log(cid, bot.id, 'warn', `http bloqueado: domínio fora da allowlist`)
+          vars.set(`${into}.status`, '0')
+          continue
+        }
         try {
           const res = await this.deps.httpFetch(
             url,
@@ -835,6 +898,7 @@ export class BotEngine {
             body ? { 'content-type': 'application/json' } : {},
             body,
             HTTP_TIMEOUT_MS,
+            !config.blockPrivate,
           )
           httpCalls += 1
           vars.set(`${into}.status`, String(res.status))

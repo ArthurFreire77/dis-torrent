@@ -11,7 +11,9 @@ async function createAccount(page: Page, name: string) {
 
 async function openServerSettingsBots(page: Page): Promise<void> {
   await page.locator('.server-head').click();
-  await page.locator('.dd-item', { hasText: 'Bots' }).click();
+  // `exact: true`: existe também "Bots em janela" (abre a janela própria), que
+  // contém a palavra "Bots" e tornaria o seletor ambíguo.
+  await page.getByRole('button', { name: 'Bots', exact: true }).click();
 }
 
 async function createBot(page: Page, name: string): Promise<void> {

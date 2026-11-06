@@ -36,6 +36,10 @@ mdns-sd = "0.21.1"
 
 mainline = "2"
 unicode-normalization = "0.1"
+# Guarda de URL canônica: só `url` sabe que `http://2130706433/` e
+# `http://127.1/` são 127.0.0.1. Comparar o host como texto deixava passar
+# SSRF; o parser do WHATWG normaliza antes de decidir.
+url = "2"
 zstd = "0.13"
 filetime = "0.2"
 

@@ -138,6 +138,14 @@ impl BotCommand {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BotConfig {
+    /// Versão do schema. 1/2 = config antiga (migrada na leitura), 3 = atual.
+    pub schema: u32,
+    /// Onde a lógica roda. Explícito, nunca inferido do que foi preenchido.
+    pub mode: Mode,
+    /// Como o código roda dentro do modo `plugin`.
+    pub runtime: Runtime,
+    /// O que este bot pode entregar. Desligar aqui nega a rota/ação.
+    pub primitives: Primitives,
     pub prefix: String,
     pub commands: Vec<BotCommand>,
     pub channels: Vec<String>,
@@ -148,6 +156,205 @@ pub struct BotConfig {
     /// Bloqueia destinos em rede privada (RFC1918/loopback). Padrão: ligado.
     pub block_private: bool,
     pub max_replies_per_min: u32,
+    /// Domínios que o bot pode chamar. Vazio = qualquer http(s) público.
+    pub http_allow: Vec<String>,
+    pub max_http_per_min: u32,
+    /// Segredo do HMAC do webhook de saída. Nunca vai no corpo nem no log.
+    pub webhook_secret: Option<String>,
+    pub max_messages_per_exec: u32,
+    /// Retenção do console/replay em horas. 0 = não guarda.
+    pub retention_hours: u32,
+}
+
+/// Modo de execução declarado pelo criador.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Só config: resposta fixa, HTTP, DSL e ação administrativa.
+    #[default]
+    Declarative,
+    /// Código do criador no PC do dono, pela ponte local.
+    Plugin,
+    /// Serviço externo do criador, por webhook assinado.
+    Service,
+    /// Criador conecta de fora por TLS. Desligado por padrão e avisado.
+    Remote,
+}
+
+impl Mode {
+    pub fn parse(raw: &str) -> Option<Mode> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "declarative" | "declarativo" => Some(Mode::Declarative),
+            "plugin" | "local" => Some(Mode::Plugin),
+            "service" | "servico" | "serviço" | "webhook" => Some(Mode::Service),
+            "remote" | "remoto" => Some(Mode::Remote),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Declarative => "declarative",
+            Mode::Plugin => "plugin",
+            Mode::Service => "service",
+            Mode::Remote => "remote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Runtime {
+    /// Sem processo: só a DSL embutida.
+    #[default]
+    None,
+    /// Processo filho do criador (Node/Python/etc.).
+    Process,
+    /// Módulo WASM. Não implementado: declarar isto é recusado na leitura.
+    Wasm,
+}
+
+impl Runtime {
+    pub fn parse(raw: &str) -> Option<Runtime> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "none" | "nenhum" => Some(Runtime::None),
+            "process" | "processo" | "node" => Some(Runtime::Process),
+            "wasm" => Some(Runtime::Wasm),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Runtime::None => "none",
+            Runtime::Process => "process",
+            Runtime::Wasm => "wasm",
+        }
+    }
+}
+
+/// Primitivas de saída. Só as implementadas mudam comportamento; as demais são
+/// lidas, devolvidas em `/v1/limits` como `implemented:false` e nunca fingem
+/// funcionar (§13 da doc: "não existe" é resposta).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Primitives {
+    pub text: bool,
+    pub ephemeral: bool,
+    pub dm: bool,
+    pub embed: bool,
+    pub component: bool,
+    pub attachment: bool,
+    pub reaction: bool,
+    pub pin: bool,
+    pub thread: bool,
+    pub poll: bool,
+    pub edit: bool,
+    pub audio_frame: bool,
+    pub video_frame: bool,
+    pub screen_frame: bool,
+    pub http: bool,
+    pub blob: bool,
+    pub kv: bool,
+    pub job: bool,
+    pub template: bool,
+    pub invoke_bot: bool,
+}
+
+impl Default for Primitives {
+    fn default() -> Self {
+        // Ligado = o que o bot já fazia antes do v3, para nenhum bot existente
+        // perder capacidade com a migração. O que ainda não existe nasce
+        // desligado em vez de prometer rota que não há.
+        Primitives {
+            text: true,
+            ephemeral: true,
+            dm: false,
+            embed: false,
+            component: false,
+            attachment: false,
+            reaction: true,
+            pin: true,
+            thread: true,
+            poll: true,
+            edit: true,
+            audio_frame: false,
+            video_frame: false,
+            screen_frame: false,
+            http: true,
+            blob: false,
+            kv: true,
+            job: false,
+            template: true,
+            invoke_bot: false,
+        }
+    }
+}
+
+impl Primitives {
+    pub fn parse(v: Option<&serde_json::Value>) -> Primitives {
+        let mut p = Primitives::default();
+        let Some(serde_json::Value::Object(map)) = v else {
+            return p;
+        };
+        macro_rules! set {
+            ($($key:literal => $field:ident),* $(,)?) => {
+                $(if let Some(x) = map.get($key) { p.$field = b(x); })*
+            };
+        }
+        set!(
+            "text" => text,
+            "ephemeral" => ephemeral,
+            "dm" => dm,
+            "embed" => embed,
+            "component" => component,
+            "attachment" => attachment,
+            "reaction" => reaction,
+            "pin" => pin,
+            "thread" => thread,
+            "poll" => poll,
+            "edit" => edit,
+            "audioFrame" => audio_frame,
+            "videoFrame" => video_frame,
+            "screenFrame" => screen_frame,
+            "http" => http,
+            "blob" => blob,
+            "kv" => kv,
+            "job" => job,
+            "template" => template,
+            "invokeBot" => invoke_bot,
+        );
+        p
+    }
+
+    /// Nome canônico (`audioFrame`) e se a plataforma implementa de verdade.
+    pub fn iter(&self) -> Vec<(&'static str, bool, bool)> {
+        vec![
+            ("text", self.text, true),
+            ("ephemeral", self.ephemeral, true),
+            ("dm", self.dm, false),
+            ("embed", self.embed, false),
+            ("component", self.component, false),
+            ("attachment", self.attachment, false),
+            ("reaction", self.reaction, true),
+            ("pin", self.pin, true),
+            ("thread", self.thread, true),
+            ("poll", self.poll, true),
+            ("edit", self.edit, false),
+            ("audioFrame", self.audio_frame, false),
+            ("videoFrame", self.video_frame, false),
+            ("screenFrame", self.screen_frame, false),
+            ("http", self.http, true),
+            ("blob", self.blob, false),
+            ("kv", self.kv, true),
+            ("job", self.job, false),
+            ("template", self.template, true),
+            ("invokeBot", self.invoke_bot, false),
+        ]
+    }
+
+    pub fn allows(&self, id: &str) -> bool {
+        self.iter()
+            .into_iter()
+            .find(|(name, _, _)| *name == id)
+            .map(|(_, on, implemented)| on && implemented)
+            .unwrap_or(false)
+    }
 }
 
 pub fn normalize_command_name(raw: &str) -> String {
@@ -211,7 +418,7 @@ pub fn url_allowed(url: &str, block_private: bool) -> Result<(), String> {
     if !url_ok(url) {
         return Err("url precisa ser http:// ou https://".into());
     }
-    let host = host_of(url).ok_or_else(|| "url sem host".to_string())?;
+    let host = canonical_host(url).ok_or_else(|| "url sem host".to_string())?;
     if is_blocked_host(&host) {
         return Err(format!("destino bloqueado: {host}"));
     }
@@ -223,20 +430,22 @@ pub fn url_allowed(url: &str, block_private: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn host_of(url: &str) -> Option<String> {
-    let u = url.trim();
-    let rest = u
-        .strip_prefix("https://")
-        .or_else(|| u.strip_prefix("http://"))
-        .or_else(|| u.strip_prefix("HTTPS://"))
-        .or_else(|| u.strip_prefix("HTTP://"))?;
-    let hostport = rest.split(['/', '?', '#']).next()?;
-    let host = if let Some(inner) = hostport.strip_prefix('[') {
-        inner.split(']').next()?.to_string()
-    } else {
-        hostport.split(':').next()?.to_string()
+/// Host canônico da URL, já normalizado pelo parser do WHATWG.
+///
+/// Usa `url::Url` de propósito: `http://2130706433/`, `http://127.1/` e
+/// `http://a@127.0.0.1/` têm host textual diferente de `127.0.0.1`, e o split
+/// antigo em `:` liberava os três. O parser resolve todos para `127.0.0.1`
+/// antes de qualquer comparação.
+pub fn canonical_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url.trim()).ok()?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return None;
+    }
+    let host = match parsed.host()? {
+        url::Host::Ipv4(ip) => ip.to_string(),
+        url::Host::Ipv6(ip) => ip.to_string(),
+        url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
     };
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
         None
     } else {
@@ -264,7 +473,23 @@ pub fn is_blocked_host(host: &str) -> bool {
     if host == "metadata.google.internal" || host == "metadata" {
         return true;
     }
-    matches!(is_ipv4(host), Some([169, 254, _, _]) | Some([0, 0, 0, 0]))
+    // 169.254.169.254 é o endpoint de metadados de nuvem; link-local inteiro e
+    // 0.0.0.0 entram junto porque nunca são destino legítimo de um bot.
+    matches!(is_ipv4(host), Some([169, 254, _, _]) | Some([0, 0, 0, 0])) || host == "::"
+}
+
+/// Host está na allowlist declarada? Lista vazia = qualquer destino público.
+pub fn host_allowed(url: &str, allow: &[String]) -> bool {
+    if allow.is_empty() {
+        return true;
+    }
+    let Some(host) = canonical_host(url) else {
+        return false;
+    };
+    allow.iter().any(|rule| {
+        let rule = rule.trim().trim_start_matches("*.").to_ascii_lowercase();
+        host == rule || host.ends_with(&format!(".{rule}"))
+    })
 }
 
 pub fn is_private_host(host: &str) -> bool {
@@ -273,19 +498,36 @@ pub fn is_private_host(host: &str) -> bool {
     }
     if let Some(ip) = is_ipv4(host) {
         return match ip {
-            [10, ..] | [127, ..] => true,
+            // 0.0.0.0/8 ("este host"), loopback, link-local, CGNAT e
+            // "broadcast limitado" não são destino de bot.
+            [0, ..] | [10, ..] | [127, ..] | [255, 255, 255, 255] => true,
+            [100, b, ..] if (64..=127).contains(&b) => true,
             [172, b, ..] if (16..=31).contains(&b) => true,
-            [192, 168, ..] => true,
+            [192, 168, ..] | [198, 18, ..] | [198, 19, ..] => true,
             [169, 254, ..] => true,
+            // Faixa de documentação/teste (RFC 5737) também não é destino real.
+            [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _] => true,
             _ => false,
         };
     }
-    // IPv6 loopback / ULA / link-local.
-    if host == "::1" || host == "::" {
+    let h = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    // IPv6 loopback, unspecified, ULA (fc00::/7), link-local (fe80::/10) e
+    // IPv4 mapeado (::ffff:127.0.0.1) — este último era o furo: o endereço
+    // textual começa com `::ffff:` e escapava de todas as checagens IPv4.
+    if h == "::1" || h == "::" || h.starts_with("fc") || h.starts_with("fd") {
         return true;
     }
-    let h = host.trim_start_matches('[').trim_end_matches(']');
-    h.starts_with("fc") || h.starts_with("fd") || h.starts_with("fe80")
+    if let Some(rest) = h.strip_prefix("fe80") {
+        let _ = rest;
+        return true;
+    }
+    if let Some(v4) = h.strip_prefix("::ffff:") {
+        return is_private_host(v4);
+    }
+    false
 }
 
 fn parse_headers(v: Option<&serde_json::Value>) -> BTreeMap<String, String> {
@@ -489,9 +731,13 @@ pub fn parse_config(raw: &str) -> Result<BotConfig, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(BotConfig {
+            schema: 3,
             prefix: "!".into(),
             block_private: true,
             max_replies_per_min: 20,
+            max_http_per_min: 60,
+            max_messages_per_exec: 20,
+            retention_hours: 24,
             ..Default::default()
         });
     }
@@ -535,7 +781,45 @@ pub fn parse_config(raw: &str) -> Result<BotConfig, String> {
         .into_iter()
         .filter(|e| BOT_EVENTS.contains(&e.as_str()))
         .collect();
-    Ok(BotConfig {
+    // v1/v2 não tinham `schema`: a ausência é migração, não erro. O modo é
+    // explícito a partir do v3 porque inferir `plugin` de um `run` presente
+    // faria um bot antigo abrir processo sem o dono ter pedido.
+    let schema = v
+        .get("schema")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(if v.get("schema").is_some() { 3 } else { 2 });
+    if !(1..=3).contains(&schema) {
+        return Err(format!(
+            "schema {schema} não é suportado (este app entende 1, 2 e 3)"
+        ));
+    }
+    let mode = match v.get("mode").and_then(|x| x.as_str()) {
+        Some(raw) => Mode::parse(raw).ok_or_else(|| {
+            format!("modo desconhecido: `{raw}` (use declarative|plugin|service|remote)")
+        })?,
+        None => Mode::Declarative,
+    };
+    let runtime = match v.get("runtime").and_then(|x| x.as_str()) {
+        Some(raw) => Runtime::parse(raw)
+            .ok_or_else(|| format!("runtime desconhecido: `{raw}` (use none|process|wasm)"))?,
+        None if mode == Mode::Plugin => Runtime::Process,
+        None => Runtime::None,
+    };
+    if runtime == Runtime::Wasm {
+        return Err(
+            "runtime `wasm` ainda não existe nesta versão — use `process` (plugin) ou `declarative`"
+                .into(),
+        );
+    }
+    let prim = Primitives::parse(v.get("primitives"));
+    let (http_allow, max_http_per_min, webhook_secret, max_messages, retention_hours) =
+        parse_integrations(v.get("integrations"));
+    let mut cfg = BotConfig {
+        schema,
+        mode,
+        runtime,
+        primitives: prim,
         prefix,
         commands,
         channels: parse_list(v.get("channels"), 256, 128),
@@ -548,7 +832,166 @@ pub fn parse_config(raw: &str) -> Result<BotConfig, String> {
             .and_then(|x| x.as_u64())
             .unwrap_or(20)
             .clamp(1, 120) as u32,
-    })
+        http_allow,
+        max_http_per_min,
+        webhook_secret,
+        max_messages_per_exec: max_messages,
+        retention_hours,
+    };
+    // Primitiva desligada nega o comando que depende dela JÁ na leitura: se a
+    // resposta é `text` e não há `text`, o comando não pode existir "meio vivo".
+    cfg.commands.retain(|c| match c.exec {
+        Exec::Reply => cfg.primitives.text || cfg.primitives.ephemeral,
+        Exec::Http => cfg.primitives.http,
+        _ => true,
+    });
+    Ok(cfg)
+}
+
+/// Config normalizada para gravar: só o que o parser entende.
+pub fn normalize(cfg: &BotConfig) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "schema": 3,
+        "mode": cfg.mode.as_str(),
+        "runtime": cfg.runtime.as_str(),
+        "prefix": cfg.prefix,
+        "channels": cfg.channels,
+        "channelKinds": cfg.channel_kinds,
+        "events": cfg.events,
+        "blockPrivate": cfg.block_private,
+        "maxRepliesPerMinute": cfg.max_replies_per_min,
+    });
+    let mut prim = serde_json::Map::new();
+    for (name, on, _) in cfg.primitives.iter() {
+        prim.insert(name.to_string(), serde_json::json!(on));
+    }
+    out["primitives"] = serde_json::Value::Object(prim);
+    out["commands"] = serde_json::json!(cfg
+        .commands
+        .iter()
+        .map(|c| {
+            let mut o = serde_json::json!({
+                "name": c.name,
+                "method": c.method,
+                "exec": c.exec.as_str(),
+                "cooldownMs": c.cooldown_ms,
+                "enabled": c.enabled,
+            });
+            if !c.aliases.is_empty() {
+                o["aliases"] = serde_json::json!(c.aliases);
+            }
+            if !c.description.is_empty() {
+                o["description"] = serde_json::json!(c.description);
+            }
+            if !c.need.as_str().is_empty() {
+                o["permission"] = serde_json::json!(c.need.as_str());
+            }
+            if c.ephemeral {
+                o["ephemeral"] = serde_json::json!(true);
+            }
+            if c.autocomplete {
+                o["autocomplete"] = serde_json::json!(true);
+            }
+            if !c.url.is_empty() {
+                o["url"] = serde_json::json!(c.url);
+            }
+            if !c.headers.is_empty() {
+                o["headers"] = serde_json::json!(c.headers);
+            }
+            if let Some(b) = &c.body {
+                o["body"] = serde_json::json!(b);
+            }
+            if let Some(p) = &c.response_path {
+                o["responsePath"] = serde_json::json!(p);
+            }
+            if let Some(t) = &c.template {
+                o["template"] = serde_json::json!(t);
+            }
+            if let Some(r) = &c.reply {
+                o["reply"] = serde_json::json!(r);
+            }
+            if let Some(s) = &c.script {
+                o["script"] = serde_json::json!(s);
+            }
+            if let Some(a) = &c.admin {
+                o["admin"] = serde_json::json!(a);
+            }
+            if !c.args.is_empty() {
+                o["args"] = serde_json::json!(c
+                    .args
+                    .iter()
+                    .map(|a| serde_json::json!({
+                        "name": a.name, "required": a.required, "rest": a.rest,
+                    }))
+                    .collect::<Vec<_>>());
+            }
+            o
+        })
+        .collect::<Vec<_>>());
+    if let Some(w) = &cfg.webhook {
+        out["webhook"] = serde_json::json!({ "url": w });
+    }
+    let mut integ = serde_json::json!({
+        "http": {
+            "allowDomains": cfg.http_allow,
+            "maxCallsPerMinute": cfg.max_http_per_min,
+        },
+        "limits": { "maxMessagesPerExecution": cfg.max_messages_per_exec },
+        "retention": { "hours": cfg.retention_hours },
+    });
+    // O segredo do webhook NÃO é serializado aqui de propósito: ele vive na
+    // coluna `bots.webhook_secret`, porque este JSON é sincronizado para todos
+    // os membros do servidor. Aqui só vai o marcador de que há assinatura.
+    if cfg.webhook_secret.as_deref().map(str::is_empty) == Some(false) {
+        integ["webhook"] = serde_json::json!({ "signed": true });
+    }
+    out["integrations"] = integ;
+    out
+}
+
+fn parse_integrations(
+    v: Option<&serde_json::Value>,
+) -> (Vec<String>, u32, Option<String>, u32, u32) {
+    let Some(integ) = v else {
+        return (Vec::new(), 60, None, 20, 24);
+    };
+    let http = integ.get("http");
+    let allow: Vec<String> = http
+        .and_then(|h| h.get("allowDomains"))
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .take(256)
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty() && s.len() <= 253 && !s.contains('/'))
+                .collect()
+        })
+        .unwrap_or_default();
+    let per_min = http
+        .and_then(|h| h.get("maxCallsPerMinute"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(60)
+        .clamp(1, 600) as u32;
+    let secret = integ
+        .get("webhook")
+        .and_then(|w| w.get("secret"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() >= 16 && s.len() <= 128);
+    let max_messages = integ
+        .get("limits")
+        .and_then(|l| l.get("maxMessagesPerExecution"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(20)
+        .clamp(1, 20) as u32;
+    let retention = integ
+        .get("retention")
+        .and_then(|r| r.get("hours"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(24)
+        .min(30 * 24) as u32;
+    (allow, per_min, secret, max_messages, retention)
 }
 
 /// Texto depois do prefixo: `!clima sao paulo` → ("clima", ["sao","paulo"]).
@@ -1270,6 +1713,63 @@ mod tests {
         assert_eq!(c.cooldown_ms, DEFAULT_COOLDOWN_MS);
         assert_eq!(cfg.webhook.as_deref(), Some("https://h/x"));
         assert!(cfg.block_private, "padrão seguro bloqueia rede privada");
+        assert_eq!(cfg.schema, 2, "config sem schema é v2, migrada na leitura");
+        assert_eq!(cfg.mode, Mode::Declarative);
+        assert_eq!(cfg.runtime, Runtime::None);
+    }
+
+    #[test]
+    fn schema_v3_e_explicito_e_wasm_nao_e_aceito() {
+        let cfg = parse_config(r#"{"schema":3,"mode":"plugin","prefix":"!"}"#).unwrap();
+        assert_eq!(cfg.schema, 3);
+        assert_eq!(cfg.mode, Mode::Plugin);
+        assert_eq!(
+            cfg.runtime,
+            Runtime::Process,
+            "plugin sem runtime é processo"
+        );
+        assert!(parse_config(r#"{"schema":3,"runtime":"wasm"}"#).is_err());
+        assert!(parse_config(r#"{"schema":4}"#).is_err());
+        assert!(parse_config(r#"{"schema":3,"mode":"telepatia"}"#).is_err());
+    }
+
+    #[test]
+    fn normalize_devolve_v3_e_nunca_serializa_o_segredo() {
+        let cfg = parse_config(
+            r#"{"schema":3,"integrations":{"webhook":{"secret":"segredo-bem-longo-123"}},"prefix":"!"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.webhook_secret.as_deref(), Some("segredo-bem-longo-123"));
+        let out = normalize(&cfg).to_string();
+        assert!(
+            !out.contains("segredo-bem-longo-123"),
+            "o segredo do webhook não pode voltar na config: {out}"
+        );
+        assert!(out.contains("\"schema\":3"));
+        assert!(out.contains("\"signed\":true"));
+    }
+
+    #[test]
+    fn primitiva_desligada_nega_o_comando_que_depende_dela() {
+        let cfg = parse_config(
+            r#"{"schema":3,"primitives":{"text":false,"ephemeral":false,"template":false},"commands":[{"name":"oi","exec":"reply","reply":"ola"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            cfg.commands.is_empty(),
+            "sem text/ephemeral a resposta fixa não existe"
+        );
+        assert!(!cfg.primitives.allows("embed"), "embed não é implementado");
+        assert!(
+            !cfg.primitives.allows("text"),
+            "text foi desligado nesta config"
+        );
+        assert!(!cfg.primitives.allows("ephemeral"));
+        assert!(cfg.primitives.allows("reaction"), "react segue ligado");
+        let padrao = Primitives::default();
+        assert!(padrao.allows("text"));
+        assert!(!padrao.allows("audioFrame"), "mídia por bot não existe");
+        assert!(!padrao.allows("blob"));
     }
 
     #[test]
@@ -1339,6 +1839,41 @@ mod tests {
         assert!(url_allowed("http://192.168.0.10/x", false).is_ok());
         assert!(url_allowed("file:///etc/passwd", false).is_err());
         assert!(url_allowed("https://", false).is_err());
+    }
+
+    #[test]
+    fn guarda_de_url_resolve_o_host_canonico() {
+        // Os três primeiros passavam quando o host era comparado como texto.
+        for u in [
+            "http://2130706433/x",
+            "http://127.1/x",
+            "http://evil.com@127.0.0.1:8080/x",
+            "http://0.0.0.0/x",
+            "http://[::ffff:127.0.0.1]/x",
+            "http://100.64.0.1/x",
+            "http://198.18.0.1/x",
+            "http://192.0.2.10/x",
+        ] {
+            assert!(
+                url_allowed(u, true).is_err(),
+                "deveria bloquear como destino privado: {u}"
+            );
+        }
+        assert!(url_allowed("https://api.exemplo.com/x", true).is_ok());
+        assert!(url_allowed("https://8.8.8.8/x", true).is_ok());
+    }
+
+    #[test]
+    fn allowlist_de_dominio_aceita_subdominio_e_recusa_sufixo_solto() {
+        let allow = vec!["exemplo.com".to_string()];
+        assert!(host_allowed("https://api.exemplo.com/x", &allow));
+        assert!(host_allowed("https://exemplo.com/x", &allow));
+        assert!(!host_allowed("https://evil-exemplo.com/x", &allow));
+        assert!(!host_allowed("https://outro.com/x", &allow));
+        assert!(
+            host_allowed("https://qualquer.com/x", &[]),
+            "lista vazia = qualquer destino publico"
+        );
     }
 
     #[test]

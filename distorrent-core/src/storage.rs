@@ -87,6 +87,19 @@ pub struct BotRow {
     /// Sem isso o bot não executa `/ban`, `/kick`, etc.
     #[serde(default)]
     pub perms: i64,
+    /// Segredo do HMAC do webhook. **Local do dono**: fica fora do `config`
+    /// (que é sincronizado para todos os membros) e é zerado no estado enviado
+    /// a quem não é dono, exatamente como o `token`. O runtime do dono lê
+    /// daqui para assinar; o export do painel não o inclui.
+    #[serde(default)]
+    pub webhook_secret: String,
+}
+
+impl BotRow {
+    /// O dono precisa saber se há assinatura configurada, sem ver o valor.
+    pub fn webhook_secret_set(&self) -> bool {
+        !self.webhook_secret.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +110,8 @@ pub struct BotPatch {
     pub online: Option<bool>,
     pub config: Option<String>,
     pub perms: Option<i64>,
+    /// `Some("")` apaga o segredo; `None` mantém o atual.
+    pub webhook_secret: Option<String>,
 }
 
 /// Uma denúncia/aviso registrado pela moderação (comando `/warn`).
@@ -441,6 +456,16 @@ fn migrate(conn: &Connection) -> Result<()> {
         "INSERT INTO kv(key,value) VALUES('schema_version','14') ON CONFLICT(key) DO UPDATE SET value='14'",
         [],
     )?;
+    // v15: segredo do HMAC do webhook fora de `bots.config`. A config do bot é
+    // sincronizada para todos os membros; um segredo de assinatura ali vazaria
+    // para qualquer um e, pior, sumiria quando o bot regravasse o JSON.
+    if !column_exists(conn, "bots", "webhook_secret") {
+        conn.execute_batch("ALTER TABLE bots ADD COLUMN webhook_secret TEXT NOT NULL DEFAULT '';")?;
+    }
+    conn.execute(
+        "INSERT INTO kv(key,value) VALUES('schema_version','15') ON CONFLICT(key) DO UPDATE SET value='15'",
+        [],
+    )?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     Ok(())
 }
@@ -496,8 +521,8 @@ fn insert_role_row(conn: &Connection, r: &RoleRow) -> Result<()> {
 
 fn insert_bot_row(conn: &Connection, b: &BotRow) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO bots(id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        "INSERT OR REPLACE INTO bots(id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms,webhook_secret)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             b.id,
             b.community_id,
@@ -510,7 +535,8 @@ fn insert_bot_row(conn: &Connection, b: &BotRow) -> Result<()> {
             b.owner_fp,
             b.created_at,
             b.config,
-            b.perms
+            b.perms,
+            b.webhook_secret
         ],
     )?;
     Ok(())
@@ -2596,7 +2622,7 @@ impl Store {
     pub fn bots_list(&self, community_id: &str) -> Result<Vec<BotRow>> {
         let conn = self.locked();
         let mut st = conn.prepare(
-            "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms
+            "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms,webhook_secret
              FROM bots WHERE community_id=?1 ORDER BY created_at, id",
         )?;
         let rows = st
@@ -2614,6 +2640,7 @@ impl Store {
                     created_at: r.get(9)?,
                     config: r.get(10)?,
                     perms: r.get::<_, i64>(11).unwrap_or(0),
+                    webhook_secret: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2664,6 +2691,11 @@ impl Store {
         }
         if let Some(p) = patch.perms {
             b.perms = p & crate::moderation::PERM_ALL;
+        }
+        if let Some(s) = &patch.webhook_secret {
+            // `Some("")` apaga; o valor entra só na coluna local, nunca no JSON
+            // de config (que é sincronizado para todos os membros).
+            b.webhook_secret = s.trim().chars().take(128).collect();
         }
         self.bot_upsert(&b)?;
         Ok(true)
@@ -3165,7 +3197,7 @@ impl Store {
             let roles = self.roles_list(&id)?;
             let bots = self.with_conn(|conn| {
                 let mut st = conn.prepare(
-                    "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms
+                    "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms,webhook_secret
                      FROM bots WHERE community_id=?1 ORDER BY created_at",
                 )?;
                 let rows = st
@@ -3319,6 +3351,7 @@ impl Store {
                 created_at: r.get(9)?,
                 config: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
                 perms: r.get::<_, i64>(11).unwrap_or(0),
+                webhook_secret: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
             })
         }
     }

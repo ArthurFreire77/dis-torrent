@@ -1144,6 +1144,8 @@ struct BotPatch {
     config: Option<String>,
     #[serde(default)]
     perms: Option<i64>,
+    #[serde(default, rename = "webhookSecret", alias = "webhook_secret")]
+    webhook_secret: Option<String>,
 }
 
 #[tauri::command]
@@ -1543,6 +1545,7 @@ fn bot_update(
     online: Option<bool>,
     config: Option<String>,
     perms: Option<i64>,
+    webhook_secret: Option<String>,
     state: State<AppState>,
 ) -> Result<(), String> {
     // Seção 9: p
@@ -1562,6 +1565,7 @@ fn bot_update(
         online: online.or(p.online),
         config: config.or(p.config),
         perms: perms.or(p.perms),
+        webhook_secret: webhook_secret.or(p.webhook_secret),
     };
     if merged.name.is_none()
         && merged.avatar.is_none()
@@ -1569,6 +1573,7 @@ fn bot_update(
         && merged.online.is_none()
         && merged.config.is_none()
         && merged.perms.is_none()
+        && merged.webhook_secret.is_none()
     {
         return Err("nada para atualizar no bot".into());
     }
@@ -1593,6 +1598,23 @@ fn bots_list(
     state: State<AppState>,
 ) -> Result<Vec<distorrent_core::storage::BotRow>, String> {
     engine(&state)?.bots_list(&community_id).map_err(err)
+}
+
+/// O painel precisa saber se o webhook está assinado sem receber o segredo.
+#[tauri::command]
+fn bot_webhook_secret_set(
+    community_id: String,
+    bot_id: String,
+    state: State<AppState>,
+) -> Result<bool, String> {
+    Ok(engine(&state)?
+        .store
+        .bots_list(&community_id)
+        .map_err(err)?
+        .into_iter()
+        .find(|b| b.id == bot_id)
+        .map(|b| b.webhook_secret_set())
+        .unwrap_or(false))
 }
 
 #[tauri::command]
@@ -1910,6 +1932,44 @@ fn bot_plugin_list(state: State<'_, AppState>) -> Result<Vec<botplugin::PluginSt
         .collect())
 }
 
+/// Abre a janela própria de bots — ou só traz para a frente se já existir.
+///
+/// A janela nasce em `tauri.conf.json` com `create:false` e `visible:false`:
+/// criada sob demanda (não gasta um webview inteiro no boot) e mostrada só
+/// depois de construir, para não piscar branco.
+#[cfg(desktop)]
+#[tauri::command]
+fn open_bots_window(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("bots") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "bots")
+        .cloned()
+        .ok_or_else(|| "a janela de bots não está declarada em tauri.conf.json".to_string())?;
+    let janela = tauri::WebviewWindowBuilder::from_config(&app, &config)
+        .map_err(|e| e.to_string())?
+        .build()
+        .map_err(|e| e.to_string())?;
+    let _ = janela.show();
+    let _ = janela.set_focus();
+    Ok(())
+}
+
+/// No celular não existe segunda janela: a tela de bots é a rota `/bots`.
+#[cfg(not(desktop))]
+#[tauri::command]
+fn open_bots_window(_app: AppHandle) -> Result<(), String> {
+    Err("a tela de bots no celular usa a interface do app, não uma janela separada".into())
+}
+
 #[tauri::command]
 async fn http_fetch(
     url: String,
@@ -1917,9 +1977,15 @@ async fn http_fetch(
     headers: Vec<(String, String)>,
     body: Option<String>,
     timeout_ms: Option<u64>,
+    allow_private: Option<bool>,
     _state: State<'_, AppState>,
 ) -> Result<HttpResponse, String> {
     use base64::Engine as _;
+    // `allow_private` é o opt-in do dono do bot (`blockPrivate:false`). Sem ele,
+    // o destino privado é recusado aqui — antes a checagem era só no renderer,
+    // e `http_fetch` aceitava qualquer 127.0.0.1/192.168.x vindo da UI.
+    let block_private = !allow_private.unwrap_or(false);
+    distorrent_core::bots::url_allowed(&url, block_private)?;
     let parsed = reqwest::Url::parse(&url).map_err(|e| format!("URL inválida: {e}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err("só http/https são permitidos".into());
@@ -1950,9 +2016,21 @@ async fn http_fetch(
         _ => reqwest::Body::from(Vec::new()),
     };
     let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000).min(15_000));
+    // Redirect revalidado a CADA salto: `Policy::limited(3)` seguia um 302 para
+    // `http://127.0.0.1` sem olhar o destino, então bastava o endpoint público
+    // devolver `Location` privado para o bot alcançar a LAN.
+    let guarded = block_private;
     let client = reqwest::Client::builder()
         .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::limited(3))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.error("redirect demais (máx 3)");
+            }
+            match distorrent_core::bots::url_allowed(attempt.url().as_str(), guarded) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(format!("redirect bloqueado: {e}")),
+            }
+        }))
         .build()
         .map_err(err)?;
     let mut req = client.request(method, parsed);
@@ -4910,6 +4988,7 @@ fn main() {
             bot_update,
             bot_delete,
             bots_list,
+    bot_webhook_secret_set,
             bot_post_message,
             bot_regen_token,
             bot_admin,
@@ -4930,6 +5009,7 @@ fn main() {
             bot_plugin_stop,
             bot_plugin_status,
             bot_plugin_list,
+            open_bots_window,
             http_fetch,
             voice_join,
             voice_leave,
