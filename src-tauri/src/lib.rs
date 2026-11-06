@@ -3957,6 +3957,9 @@ fn save_file_stream(
     data_b64: String,
     flush: bool,
     total_bytes: u64,
+    // Hash blake3 (hex) do arquivo anunciado. Quando presente, é conferido
+    // ANTES do rename: arquivo corrompido nunca vira "concluído".
+    expect_blake3: Option<String>,
     state: State<AppState>,
 ) -> Result<String, String> {
     use std::fs::{self, OpenOptions};
@@ -4059,6 +4062,25 @@ fn save_file_stream(
     }
 
     if flush {
+        // Integridade ANTES do rename (e antes do strip de EXIF, que muda os
+        // bytes de propósito). Sem isso, um arquivo corrompido era salvo como
+        // concluído e o retry reencontrava os mesmos bytes ruins para sempre.
+        if let Some(esperado) = expect_blake3
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let bytes = fs::read(&tmp).map_err(|e| {
+                format!("save_file_stream: não consegui reler para conferir o hash: {e}")
+            })?;
+            let real = distorrent_core::blake3::hash(&bytes).to_hex().to_string();
+            if !real.eq_ignore_ascii_case(esperado) {
+                let _ = fs::remove_file(&tmp);
+                return Err(format!(
+                    "arquivo corrompido: o hash não bate (esperado {esperado}, recebido {real}). Baixe de novo."
+                ));
+            }
+        }
         if safety.strip_exif {
             if let Ok(mut f) = fs::File::open(&tmp) {
                 use std::io::Read;

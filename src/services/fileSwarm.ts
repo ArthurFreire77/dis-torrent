@@ -57,6 +57,8 @@ export interface SwarmFile {
   owner_fp: string
   lastSeen: Map<string, number>
   completed?: boolean
+  /** Blocos que esgotaram as tentativas. A UI precisa saber para não mentir. */
+  failedChunks?: Set<number>
 }
 
 function b64(bytes: Uint8Array): string {
@@ -342,16 +344,23 @@ export class FileSwarm {
 
     const eligible = missing.filter((i) => (this.attempts.get(this.key(file_id, i)) ?? 0) < MAX_CHUNK_ATTEMPTS)
     if (eligible.length === 0) {
-      this.lastError = 'sem progresso após várias tentativas — todos os chunks deste arquivo esgotaram o retry. Toque em Baixar de novo.'
       const ciclos = (this.retryAttempts.get(sf.file_id) ?? 0)
       if (ciclos >= MAX_RETRY_CYCLES) {
-        this.lastError = `sem progresso apos ${MAX_RETRY_CYCLES} ciclos de retry — nenhum seeder respondeu. Verifique se quem tem o arquivo esta online, ou pause e retome.`
+        // Antes isto era um `return` mudo: nenhum pedido novo, nenhum erro na
+        // UI, item preso em "Baixando 0%" para sempre. Agora o arquivo diz
+        // QUAIS blocos falharam e o manager consegue marcar `failed`.
+        const presos = missing.filter((i) => (this.attempts.get(this.key(file_id, i)) ?? 0) >= MAX_CHUNK_ATTEMPTS)
+        sf.failedChunks = new Set(presos)
+        this.lastError = `sem progresso após ${MAX_RETRY_CYCLES} ciclos — ${presos.length} bloco(s) sem resposta. Verifique se quem tem o arquivo está online.`
         return
       }
+      this.lastError = 'sem progresso após várias tentativas — reiniciando a rodada de retry'
       this.attempts.clear()
+      sf.failedChunks = undefined
       this.scheduleRetry(sf)
       return
     }
+    sf.failedChunks = undefined
 
     let inFlight = 0
     for (const k of this.pendingReq) if (k.startsWith(`${file_id}:`)) inFlight++
@@ -482,6 +491,22 @@ export class FileSwarm {
     for (const k of [...this.attempts.keys()]) if (k.startsWith(prefix)) this.attempts.delete(k)
   }
 
+  /**
+   * Reinicia a busca deste arquivo de verdade: tentativas, ciclos, peers ruins
+   * e a marca de "blocos presos". Sem isto, "tentar de novo" reencontrava o
+   * estado esgotado e não fazia nada (beco sem saída).
+   */
+  resetForRetry(file_id: string): void {
+    this.resetAttempts(file_id)
+    this.clearRetry(file_id)
+    const prefix = `${file_id}:`
+    for (const k of [...this.badPeers.keys()]) if (k.startsWith(prefix)) this.badPeers.delete(k)
+    const sf = this.files.get(file_id)
+    if (sf) {
+      sf.failedChunks = undefined
+    }
+  }
+
   private clearFileTimers(file_id: string) {
     for (const k of [...this.pendingReq]) {
       if (k.startsWith(`${file_id}:`)) this.clearChunkReq(k)
@@ -573,6 +598,25 @@ export class FileSwarm {
     this.clearFileTimers(file_id)
     sf.completed = true
     sf.data.clear()
+    this.hydratedFiles.delete(file_id)
+    this.onChange?.()
+  }
+
+  /**
+   * Descarta tudo o que foi baixado deste arquivo.
+   *
+   * Usado quando o hash do arquivo não bate: sem isto o retry reencontrava
+   * `have.size === chunks`, finalizava com os MESMOS bytes e falhava de novo,
+   * num laço infinito (a mensagem antiga prometia "rebaixar" e nada rebaixava).
+   */
+  invalidateChunks(file_id: string): void {
+    const sf = this.files.get(file_id)
+    this.resetForRetry(file_id)
+    this.clearFileTimers(file_id)
+    if (!sf) return
+    sf.have.clear()
+    sf.data.clear()
+    sf.completed = false
     this.hydratedFiles.delete(file_id)
     this.onChange?.()
   }
@@ -684,6 +728,9 @@ export class FileSwarm {
             const ultimo = i === sf.chunks - 1
             savedPath = await tauriInvoke<string>('save_file_stream', {
               jobId, name: safeName, dataB64: b64(c), flush: ultimo, totalBytes: sf.size,
+              // O hash vai no lote final: o Rust confere antes de renomear, então
+              // arquivo corrompido nunca aparece como concluído.
+              expectBlake3: ultimo ? sf.hash : null,
             })
           }
           if (typeof savedPath !== 'string' || !savedPath.trim()) savedPath = safeName

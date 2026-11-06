@@ -10,6 +10,11 @@ const LS_KEY = 'distorrent:downloads:v1'
 const SPEED_WINDOW_MS = 2000
 const NO_SEEDER_FAIL_MS = 30_000
 const ANNOUNCE_WAIT_MS = 30_000
+/**
+ * Tempo sem nenhum bloco novo, com blocos já marcados como presos, até virar
+ * `failed`. Antes não existia teto: o item ficava "Baixando 0%" para sempre.
+ */
+const STALL_FAIL_MS = 45_000
 const PERSIST_INTERVAL_MS = 1000
 
 function now(): number { return Date.now() }
@@ -74,6 +79,16 @@ class DownloadManager {
       if (existing.status === 'cancelled' || existing.status === 'failed') {
         this.resetToQueued(existing)
       }
+      // Se o status diz "baixando" mas não há laço vivo (travou, app voltou do
+      // background, exceção engolida), o clique em "Baixar" era um no-op. Aqui
+      // ele religa o download de verdade.
+      if (this.wantsTransfer(existing.status) && !this.running.has(meta.file_id)) {
+        this.pausedFps.delete(meta.file_id)
+        this.cancelled.delete(meta.file_id)
+        fileSwarm.resetForRetry(meta.file_id)
+        this.setStatus(existing, 'start')
+        this.kick(meta.file_id)
+      }
       return existing
     }
     const item: DownloadItem = {
@@ -135,7 +150,14 @@ class DownloadManager {
       this.setStatus(it, 'retry')
       this.pausedFps.delete(fileId)
       this.cancelled.delete(fileId)
+      // RetryHonesto: limpa tentativas/ciclos/peers ruins. Sem isso, "tentar de
+      // novo" reencontrava o estado esgotado e não pedia mais nada.
+      fileSwarm.resetForRetry(fileId)
       fileSwarm.resumeFile(fileId)
+      this.kick(fileId)
+    } else if (!this.running.has(fileId) && this.wantsTransfer(it.status)) {
+      // `retry` com status `downloading` era no-op; força a retomada.
+      fileSwarm.resetForRetry(fileId)
       this.kick(fileId)
     }
   }
@@ -219,6 +241,11 @@ class DownloadManager {
     void this.runLoop(fileId).finally(() => { this.running.delete(fileId) })
   }
 
+  /** Status em que o download deveria estar progredindo (tem laço vivo). */
+  private wantsTransfer(status: DownloadItem['status']): boolean {
+    return status === 'queued' || status === 'downloading' || status === 'verifying' || status === 'saving'
+  }
+
   private async runLoop(fileId: string): Promise<void> {
     const item = this.items.get(fileId)
     if (!item) return
@@ -257,6 +284,30 @@ class DownloadManager {
           lastHave = have
           lastProgressAt = now()
           noSeederSince = null
+          // Progresso imediato: esperar a janela de 2 s deixava o card em
+          // "Baixar"/0% mesmo com blocos chegando.
+          const itNow = this.items.get(fileId)
+          if (itNow && itNow.status === 'downloading') {
+            itNow.have = have
+            itNow.progress = computeProgress(have, sf.chunks)
+            itNow.updatedAt = now()
+            this.emit()
+          }
+        }
+
+        // Travado não é "baixando": se o swarm esgotou as tentativas de alguns
+        // blocos, isso TEM de virar erro visível. Antes o item ficava em 0%
+        // com status `downloading` para sempre (relato "nunca termina").
+        if (sf.failedChunks && sf.failedChunks.size > 0 && now() - lastProgressAt > STALL_FAIL_MS) {
+          const st = this.items.get(fileId)
+          if (st && (st.status === 'downloading' || st.status === 'queued')) {
+            this.setStatus(
+              st,
+              'fail',
+              fileSwarm.lastError ?? `${sf.failedChunks.size} bloco(s) não chegaram — toque em tentar de novo`,
+            )
+          }
+          return
         }
         const win = this.speedWin.get(fileId) ?? { bytes: 0, at: now() }
         const deltaBytes = Math.max(0, (have - win.bytes)) * 256 * 1024
@@ -310,7 +361,15 @@ class DownloadManager {
       const blob = fileSwarm.assembleAndDownload(sf)
       const bytes = new Uint8Array(await blob.arrayBuffer())
       if (!verifyFileIntegrity(bytes, sf.hash)) {
-        this.setStatus(it, 'verify-fail', 'integridade divergente (hash blake3) — o swarm rebaixa os chunks ruins no retry')
+        // Sem descartar os blocos, o retry reencontrava `have.size === chunks`,
+        // finalizava de novo com os MESMOS bytes e falhava para sempre. A
+        // mensagem antiga ("o swarm rebaixa") era falsa: ninguém rebaixava.
+        fileSwarm.invalidateChunks(fileId)
+        this.setStatus(
+          it,
+          'verify-fail',
+          'integridade divergente (hash blake3) — os blocos foram descartados; baixe de novo',
+        )
         return
       }
       this.setStatus(it, 'verify-ok')
