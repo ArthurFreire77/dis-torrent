@@ -18,6 +18,10 @@ pub mod vault;
 pub use identity::{Identity, Keypair};
 pub use net::engine::{EngineEvent, NetworkEngine, NetworkState};
 pub use protocol::{MessageEnvelope, SecureFrame};
+
+/// blake3 do core, reexportado para a casca conferir integridade de arquivo
+/// sem duplicar a dependência (e sem arriscar versões divergentes do hash).
+pub use blake3;
 pub use tokio::sync::broadcast::error::RecvError as BroadcastRecvError;
 pub use tokio::sync::broadcast::error::TryRecvError as BroadcastTryRecvError;
 

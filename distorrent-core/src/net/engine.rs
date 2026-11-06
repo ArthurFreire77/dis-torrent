@@ -38,9 +38,15 @@ use crate::storage::{
 use crate::{DistorrentError, Result};
 
 pub const PING_INTERVAL: Duration = Duration::from_secs(10);
-pub const PING_TIMEOUT: Duration = Duration::from_secs(25);
+// Detecção de rota morta: 12 s em vez de 25 s. Com heartbeat de 10 s ainda
+// tolera um pacote perdido, mas não deixa o par "Conectado" por 75 s.
+pub const PING_TIMEOUT: Duration = Duration::from_secs(12);
 pub const RELAY_PING_INTERVAL: Duration = Duration::from_secs(20);
-pub const RELAY_PING_TIMEOUT: Duration = Duration::from_secs(120);
+// Relay é mais lento, mas 120 s escondia peer morto por dois minutos.
+pub const RELAY_PING_TIMEOUT: Duration = Duration::from_secs(45);
+/// Tempo para o primeiro frame chegar depois de o link ficar online. Passou
+/// disso sem receber nada, o par não está vivo (ver `peer_alive`).
+pub const FIRST_FRAME_GRACE: Duration = Duration::from_secs(15);
 pub const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(90);
 pub const RELAY_DIAL_ATTEMPT: Duration = Duration::from_secs(20);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
@@ -2112,15 +2118,21 @@ impl NetworkEngine {
     }
 
     pub fn peer_alive(&self, fp: &str) -> bool {
-        let last_rx = self
-            .peer_diag
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(fp)
-            .map(|d| d.last_rx_ms)
-            .unwrap_or(0);
+        let now = crate::identity::now_ms();
+        let diag = self.peer_diag.lock().unwrap_or_else(|e| e.into_inner());
+        let info = match diag.get(fp) {
+            Some(d) => d,
+            None => return false,
+        };
+        let last_rx = info.last_rx_ms;
+        let online_desde = info.last_direct_ok_ms.max(info.last_relay_ok_ms);
+        drop(diag);
+        // Um link recém-conectado ainda não recebeu nada: isso NÃO é "vivo",
+        // é "não provado". Antes `last_rx == 0` devolvia `true` para sempre e a
+        // UI mostrava Conectado num par que nunca entregou um único frame.
         if last_rx == 0 {
-            return true;
+            let graca_ms = FIRST_FRAME_GRACE.as_millis() as i64;
+            return online_desde > 0 && now.saturating_sub(online_desde) <= graca_ms;
         }
         let via_relay = self
             .links
@@ -2134,22 +2146,41 @@ impl NetworkEngine {
         } else {
             PING_TIMEOUT.as_millis() as i64
         };
-        crate::identity::now_ms().saturating_sub(last_rx) <= janela_ms
+        now.saturating_sub(last_rx) <= janela_ms
     }
 
     // Seção 12: aggregated_state
     pub fn aggregated_state(&self) -> NetworkState {
+        self.network_snapshot().0
+    }
+
+    /// Estado agregado e contagem de online na MESMA leitura.
+    ///
+    /// Antes a UI chamava `aggregated_state()` e `online_peer_fps().len()` em
+    /// dois locks diferentes: entre um e outro o conjunto de links mudava e a
+    /// pílula mostrava o par impossível "DISCONNECTED com 1 pessoa online".
+    pub fn network_snapshot(&self) -> (NetworkState, usize) {
         let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
-        let any = |s: PeerLinkState| links.values().any(|l| l.get_state() == s);
-        if any(PeerLinkState::Online) {
+        let mut online = 0usize;
+        let mut reconnecting = false;
+        let mut connecting = false;
+        for l in links.values() {
+            match l.get_state() {
+                PeerLinkState::Online => online += 1,
+                PeerLinkState::Reconnecting => reconnecting = true,
+                PeerLinkState::Connecting => connecting = true,
+            }
+        }
+        let state = if online > 0 {
             NetworkState::Connected
-        } else if any(PeerLinkState::Reconnecting) {
+        } else if reconnecting {
             NetworkState::Reconnecting
-        } else if any(PeerLinkState::Connecting) {
+        } else if connecting {
             NetworkState::Connecting
         } else {
             NetworkState::Disconnected
-        }
+        };
+        (state, online)
     }
 
     pub fn store_list_communities(&self) -> Vec<(String, String, String)> {
@@ -9601,10 +9632,13 @@ async fn register_and_run(
     };
     let mut idle_step = 0usize;
     let mut ping_at = tokio::time::Instant::now() + base_interval;
+    // Teto para a escalada de timeout: sem ele, um par parado ficava até 75 s
+    // (ou 120 s no relay) sem ser declarado morto — "Conectado" mentiroso.
+    let max_idle = base_timeout * 2;
 
     let read_result = loop {
         let cur_interval = steps[idle_step.min(steps.len() - 1)];
-        let cur_timeout = std::cmp::max(base_timeout, cur_interval.mul_f64(2.5));
+        let cur_timeout = std::cmp::max(base_timeout, cur_interval.mul_f64(2.5)).min(max_idle);
         tokio::select! {
             res = timeout(cur_timeout, reader.recv_sized::<SecureFrame>()) => {
                 match res {

@@ -24,7 +24,10 @@ pub const RELAY_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_secs(80);
 const RELAY_EARLY_STASH_CAP: usize = 4 << 20;
 
 pub const SESSION_REORDER_WINDOW: u64 = 256;
-pub const SESSION_GAP_TIMEOUT: Duration = Duration::from_secs(4);
+// Espera por um nonce que falta. 4 s congelavam o read loop inteiro (todas as
+// classes de frame) a cada perda/duplicata no relay; 800 ms é o bastante para
+// reordenação real e devolve o link em menos de um segundo.
+pub const SESSION_GAP_TIMEOUT: Duration = Duration::from_millis(800);
 
 async fn write_frame(w: &mut (dyn AsyncWrite + Unpin + Send), bytes: &[u8]) -> Result<()> {
     let len = u32::try_from(bytes.len())

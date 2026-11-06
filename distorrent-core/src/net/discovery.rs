@@ -37,6 +37,24 @@ pub struct DiscoveredPeer {
     pub addr: SocketAddr,
 }
 
+/// Anúncio próprio, montado do estado local.
+pub fn announcement(
+    fp: &str,
+    pubkey_hex: &str,
+    nickname: &str,
+    tcp_port: u16,
+    ts: i64,
+) -> Announcement {
+    Announcement {
+        proto: crate::protocol::PROTOCOL_NAME.to_string(),
+        fp: fp.to_string(),
+        pubkey_hex: pubkey_hex.to_string(),
+        nickname: nickname.to_string(),
+        tcp_port,
+        ts,
+    }
+}
+
 pub struct Discovery {
     pub local_addr: SocketAddr,
 }
@@ -133,6 +151,58 @@ mod tests {
     }
 
     #[test]
+    fn anuncio_carrega_o_que_o_outro_lado_precisa_para_discar() {
+        let ann = announcement("abc123", "pubkey", "Fulano", 12345, 42);
+        assert_eq!(ann.proto, crate::protocol::PROTOCOL_NAME);
+        assert_eq!(ann.fp, "abc123");
+        assert_eq!(ann.tcp_port, 12345);
+        assert_eq!(ann.ts, 42);
+        // O que vai no fio e volta tem de ser o mesmo anúncio: é isso que
+        // permite responder em unicast sem esperar o tick de 2 s.
+        let json = serde_json::to_vec(&ann).unwrap();
+        let volta: Announcement = serde_json::from_slice(&json).unwrap();
+        assert_eq!(volta.fp, ann.fp);
+        assert_eq!(volta.pubkey_hex, ann.pubkey_hex);
+        assert_eq!(volta.tcp_port, ann.tcp_port);
+    }
+
+    #[tokio::test]
+    async fn resposta_ao_anuncio_chega_em_milissegundos_nao_em_2s() {
+        // Prova do ganho: A anuncia em unicast para B; B responde na hora.
+        // Antes, B só responderia quando o tick de 2 s disparasse.
+        let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b_addr = b.local_addr().unwrap();
+
+        let pedido = announcement("fp-a", "pk-a", "A", a.local_addr().unwrap().port(), 1);
+        let bytes = serde_json::to_vec(&pedido).unwrap();
+        a.send_to(&bytes, b_addr).await.unwrap();
+
+        let mut buf = [0u8; 2048];
+        let (n, de) = tokio::time::timeout(Duration::from_secs(2), b.recv_from(&mut buf))
+            .await
+            .expect("o anúncio tinha de chegar")
+            .unwrap();
+        assert_eq!(de.port(), a.local_addr().unwrap().port());
+        let recebido: Announcement = serde_json::from_slice(&buf[..n]).unwrap();
+        assert_eq!(recebido.fp, "fp-a");
+
+        // resposta imediata (mesmo caminho que o laço de recepção faz)
+        let resposta = announcement("fp-b", "pk-b", "B", b_addr.port(), 2);
+        let rbytes = serde_json::to_vec(&resposta).unwrap();
+        let t0 = std::time::Instant::now();
+        b.send_to(&rbytes, de).await.unwrap();
+
+        let (m, _) = tokio::time::timeout(Duration::from_secs(1), a.recv_from(&mut buf))
+            .await
+            .expect("a resposta tem de chegar em menos de 1 s, não no próximo tick")
+            .unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(1));
+        let volta: Announcement = serde_json::from_slice(&buf[..m]).unwrap();
+        assert_eq!(volta.fp, "fp-b");
+    }
+
+    #[test]
     fn alvos_reais_nao_incluem_loopback_nem_link_local() {
         for b in broadcast_targets() {
             let ip = *b.ip();
@@ -173,6 +243,11 @@ impl Discovery {
         }
         let local_addr = socket.local_addr()?;
         info!(%local_addr, "discovery UDP ativo");
+        // Dados próprios para responder um anúncio recebido sem esperar o tick.
+        let self_fp = keypair.fingerprint();
+        let self_pubkey = keypair.public_hex();
+        let self_nickname = nickname.clone();
+        let self_port = tcp_port;
 
         {
             let socket = socket.clone();
@@ -235,6 +310,10 @@ impl Discovery {
             let socket = socket;
             let allowed = allowed;
             let limiter = limiter;
+            let self_fp = self_fp;
+            let self_pubkey = self_pubkey;
+            let self_nickname = self_nickname;
+            let self_port = self_port;
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -256,12 +335,29 @@ impl Discovery {
                                 debug!(%from, "anúncio com fingerprint inválido — ignorado");
                                 continue;
                             }
+                            let ja_sou_eu = ann.fp == self_fp;
                             let _ = tx.send(DiscoveredPeer {
                                 fp: ann.fp,
                                 pubkey_hex: ann.pubkey_hex,
                                 nickname: ann.nickname,
                                 addr: SocketAddr::new(from.ip(), ann.tcp_port),
                             });
+                            // Responde em unicast para quem anunciou: o laço de
+                            // envio só fala de 2 em 2 s, então quem entrava
+                            // esperava até 2 s (e mais 2 s se o pacote caísse).
+                            // O limiter já limita 1/s por IP, então não vira eco.
+                            if !ja_sou_eu {
+                                let ack = announcement(
+                                    &self_fp,
+                                    &self_pubkey,
+                                    &self_nickname,
+                                    self_port,
+                                    crate::identity::now_ms(),
+                                );
+                                if let Ok(payload) = serde_json::to_vec(&ack) {
+                                    let _ = socket.send_to(&payload, from).await;
+                                }
+                            }
                         }
                         Err(e) => {
                             debug!("udp recv erro: {e}");

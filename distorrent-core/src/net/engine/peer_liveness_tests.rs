@@ -11,9 +11,34 @@ fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
 }
 
 #[test]
-fn sem_frame_recebido_o_peer_conta_como_vivo() {
+fn peer_sem_registro_nao_conta_como_vivo() {
+    // Antes `last_rx == 0` devolvia `true` para sempre: um par que nunca mandou
+    // um único frame era apresentado como "Conectado". Vivo exige evidência.
     let (e, _d) = mk_engine("vida-novo");
-    assert!(e.peer_alive("peer-sem-diag"));
+    assert!(!e.peer_alive("peer-sem-diag"));
+}
+
+#[test]
+fn link_recem_online_tem_graca_para_o_primeiro_frame() {
+    // Logo depois de conectar ainda não chegou frame: isso não é "morto",
+    // é "não provado ainda". A carência existe só para não derrubar na hora.
+    let (e, _d) = mk_engine("vida-graca");
+    let agora = crate::identity::now_ms();
+    e.diag_update("peer-novo", |d| {
+        d.last_rx_ms = 0;
+        d.last_direct_ok_ms = agora;
+    });
+    assert!(e.peer_alive("peer-novo"), "recém-online dentro da carência");
+
+    let velho = agora - (FIRST_FRAME_GRACE.as_millis() as i64) - 1_000;
+    e.diag_update("peer-mudo", |d| {
+        d.last_rx_ms = 0;
+        d.last_direct_ok_ms = velho;
+    });
+    assert!(
+        !e.peer_alive("peer-mudo"),
+        "passou a carência sem um frame: não está vivo"
+    );
 }
 
 #[test]

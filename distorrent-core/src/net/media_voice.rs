@@ -826,10 +826,8 @@ const JITTER_DEPTH: Duration = Duration::from_millis(50);
 const JITTER_CAPACITY: usize = 64;
 const BITRATE_BPS: i32 = 48_000;
 const STUN_DEFAULT: &str = "stun:stun.l.google.com:19302";
-const TURN_DEFAULT_HOST: &str = "openrelay.metered.ca";
-const TURN_DEFAULT_PORT: u16 = 80;
-const TURN_DEFAULT_USER: &str = "openrelayproject";
-const TURN_DEFAULT_SECRET: &str = "openrelayprojectsecret";
+// Sem TURN padrão: o antigo (openrelay.metered.ca) resolvia para 192.0.2.1 e
+// travava o ICE. Quem tem TURN define VOICE_TURN_URLS/USER/PASS.
 const SDP_WAIT: Duration = Duration::from_millis(1500);
 const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
 #[allow(dead_code)]
@@ -1831,12 +1829,14 @@ fn ice_servers() -> Vec<RTCIceServer> {
             ..Default::default()
         });
     }
-    let turn_urls = std::env::var("VOICE_TURN_URLS")
-        .unwrap_or_else(|_| format!("{TURN_DEFAULT_HOST}:{TURN_DEFAULT_PORT}"));
-    let turn_user =
-        std::env::var("VOICE_TURN_USER").unwrap_or_else(|_| TURN_DEFAULT_USER.to_string());
-    let turn_pass =
-        std::env::var("VOICE_TURN_PASS").unwrap_or_else(|_| TURN_DEFAULT_SECRET.to_string());
+    // TURN só entra se o usuário configurar. O padrão antigo apontava para
+    // `openrelay.metered.ca`, que hoje resolve para 192.0.2.1 (RFC 5737, nunca
+    // responde): o ICE gastava a alocação inteira num relay inexistente e a
+    // chamada ficava em "Conectando…". O lado JS já tinha corrigido isso em
+    // callIce.ts; o caminho nativo ficou para trás.
+    let turn_urls = std::env::var("VOICE_TURN_URLS").unwrap_or_default();
+    let turn_user = std::env::var("VOICE_TURN_USER").unwrap_or_default();
+    let turn_pass = std::env::var("VOICE_TURN_PASS").unwrap_or_default();
     for url in turn_urls
         .split(',')
         .map(str::trim)
