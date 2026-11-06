@@ -780,9 +780,11 @@ fn nivel_do_canal(
 #[tauri::command]
 fn network_status(state: State<AppState>) -> Result<NetworkStatusView, String> {
     let engine = engine(&state)?;
+    // Uma leitura só: estado e contagem coerentes (ver network_snapshot).
+    let (state, online_peers) = engine.network_snapshot();
     Ok(NetworkStatusView {
-        state: engine.aggregated_state(),
-        online_peers: engine.online_peer_fps().len(),
+        state,
+        online_peers,
         listen_port: engine.listen_port(),
     })
 }
