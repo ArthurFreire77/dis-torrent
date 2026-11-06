@@ -608,6 +608,23 @@ fn janela_em_primeiro_plano(app: &AppHandle) -> bool {
     }
 }
 
+/// O frontend renova este carimbo a cada 30 s. Janela minimizada/oculta
+/// continua viva (renova); webview morto/suspenso (Android em background)
+/// para de renovar e o Rust assume os avisos.
+fn ui_alive(store: &Option<distorrent_core::storage::Store>) -> bool {
+    const WINDOW_MS: i64 = 90_000;
+    let Some(st) = store.as_ref() else {
+        return false;
+    };
+    let Some(raw) = st.kv_get("notify.ui_alive") else {
+        return false;
+    };
+    let Ok(ts) = raw.parse::<i64>() else {
+        return false;
+    };
+    distorrent_core::identity::now_ms().saturating_sub(ts) < WINDOW_MS
+}
+
 fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
     use distorrent_core::EngineEvent as E;
 
@@ -624,6 +641,15 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
         })
         .unwrap_or((true, true));
     if !prefs.0 {
+        return;
+    }
+
+    // Aviso de MENSAGEM: o frontend tem a regra completa (nível por canal,
+    // horário, agrupamento por conversa, silenciado). O Rust só avisa quando
+    // o webview está morto/suspenso — sem isso o usuário recebia DOIS avisos
+    // idênticos por mensagem. O frontend renova `notify.ui_alive` enquanto
+    // está vivo (ver `notify_ui_alive`).
+    if matches!(ev, E::MessageNew(_)) && ui_alive(&store_for_prefs) {
         return;
     }
 
@@ -780,6 +806,18 @@ fn nivel_do_canal(
         .and_then(|x| x.as_str())
         .unwrap_or("all")
         .to_string()
+}
+
+#[tauri::command]
+fn notify_ui_alive(state: State<AppState>) -> Result<(), String> {
+    // Batida de vida do webview. `native_notice` usa isso para não duplicar
+    // avisos com o frontend — e para ainda avisar quando o webview morre.
+    open_store(&state)?
+        .kv_set(
+            "notify.ui_alive",
+            &distorrent_core::identity::now_ms().to_string(),
+        )
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2116,6 +2154,17 @@ fn conversations_list(
     Ok(engine(&state)?.conversations())
 }
 
+/// Lista com prévia, horário e não lidas do membro. A UI móvel já lia
+/// `unread_count`/`last_ts`/`last_body` destes objetos e recebia `undefined`.
+#[tauri::command]
+fn conversations_overview(
+    state: State<AppState>,
+) -> Result<Vec<distorrent_core::social::ConversationSummary>, String> {
+    let store = open_store(&state)?;
+    let fp = identity_fp(&state);
+    store.conversations_with_counts(&fp).map_err(err)
+}
+
 #[tauri::command]
 fn dm_open(
     peer_fp: String,
@@ -2791,7 +2840,13 @@ fn social_forward(
 
 #[tauri::command]
 fn read_set(conv_id: String, ts: i64, state: State<AppState>) -> Result<(), String> {
-    open_store(&state)?.read_set(&conv_id, ts).map_err(err)?;
+    let st = open_store(&state)?;
+    st.read_set(&conv_id, ts).map_err(err)?;
+    // Cursor POR MEMBRO: num grupo/canal o "lida" de um não pode marcar para
+    // todos. `read_set` legado continua gravando o cursor global por causa
+    // das chamadas antigas do serviço.
+    let fp = identity_fp(&state);
+    st.conv_read_set(&conv_id, &fp, ts).map_err(err)?;
     if let Ok(e) = engine(&state) {
         e.notify_read(&conv_id, ts);
     }
@@ -2805,7 +2860,28 @@ fn read_all(state: State<AppState>) -> Result<Vec<distorrent_core::social::ReadC
 
 #[tauri::command]
 fn unread_count(conv_id: String, state: State<AppState>) -> Result<i64, String> {
-    open_store(&state)?.unread_count(&conv_id).map_err(err)
+    let st = open_store(&state)?;
+    let fp = identity_fp(&state);
+    st.unread_count_for(&conv_id, &fp).map_err(err)
+}
+
+/// Estado do limite de introdução para a conversa aberta. A UI não recria a
+/// regra: pergunta ao core quanto já foi usado.
+#[tauri::command]
+fn dm_intro_state(
+    conv_id: String,
+    state: State<AppState>,
+) -> Result<distorrent_core::social::IntroState, String> {
+    let st = open_store(&state)?;
+    let fp = identity_fp(&state);
+    let conv = st
+        .get_conversation(&conv_id)
+        .map_err(err)?
+        .ok_or_else(|| "conversa inexistente".to_string())?;
+    if conv.kind != "dm" {
+        return Err("não é uma conversa direta".into());
+    }
+    st.dm_intro_state(&conv_id, &conv.peer_fp, &fp).map_err(err)
 }
 
 #[tauri::command]
@@ -2911,9 +2987,14 @@ fn nickname_get(
 
 #[tauri::command]
 fn message_search(
-    q: distorrent_core::social::SearchQuery,
+    mut q: distorrent_core::social::SearchQuery,
     state: State<AppState>,
 ) -> Result<Vec<distorrent_core::social::SearchHit>, String> {
+    // O filtro de não lidas precisa saber QUEM está buscando; a UI não deve
+    // poder falsificar isso (nem precisa saber o próprio fp para buscar).
+    if q.me.is_empty() {
+        q.me = identity_fp(&state);
+    }
     open_store(&state)?.message_search(&q).map_err(err)
 }
 
@@ -4975,6 +5056,7 @@ fn main() {
             join_community,
             send_channel_message,
             network_status,
+            notify_ui_alive,
             peers_list,
             net_diag,
             webrtc_report,
@@ -4990,6 +5072,7 @@ fn main() {
             friend_block,
             friend_unblock,
             conversations_list,
+            conversations_overview,
             dm_open,
             delete_conversation,
             messages_list,
@@ -5153,6 +5236,7 @@ fn main() {
             read_all,
             unread_count,
             unread_mentions,
+            dm_intro_state,
             presence_set,
             presence_list,
             presence_get,

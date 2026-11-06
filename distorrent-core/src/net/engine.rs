@@ -2343,8 +2343,6 @@ impl NetworkEngine {
         let env = MessageEnvelope::new(&self.keypair, conv_id, body);
         match conv.kind.as_str() {
             "dm" => {
-                self.store.insert_message(&env, "out", "sending")?;
-                crate::metrics::metrics().message_out();
                 let is_friend = self
                     .store
                     .get_friend(&conv.peer_fp)
@@ -2352,8 +2350,40 @@ impl NetworkEngine {
                     .flatten()
                     .map(|(_, s)| s == "accepted")
                     .unwrap_or(false);
+                if self.store.is_blocked_fp(&conv.peer_fp) {
+                    return Err(DistorrentError::Protocol(
+                        "peer bloqueado — desbloqueie para conversar".into(),
+                    ));
+                }
+                // Sem amizade, a conversa é uma INTRODUÇÃO: no máximo três
+                // mensagens por direção. O contador é consumido só depois de
+                // a mensagem existir, para retry não queimar crédito.
+                let intro = !is_friend;
+                if intro
+                    && !self.store.dm_intro_take(
+                        conv_id,
+                        &self.identity.fingerprint,
+                        crate::social::DM_INTRO_LIMIT,
+                    )?
+                {
+                    return Err(DistorrentError::Protocol(format!(
+                        "limite de {} mensagens antes da amizade — envie uma solicitação para continuar",
+                        crate::social::DM_INTRO_LIMIT
+                    )));
+                }
+                if let Err(e) = self.store.insert_message(&env, "out", "sending") {
+                    if intro {
+                        let _ = self
+                            .store
+                            .dm_intro_refund(conv_id, &self.identity.fingerprint);
+                    }
+                    return Err(e);
+                }
+                crate::metrics::metrics().message_out();
                 let online = self.link_tx(&conv.peer_fp).is_some();
-                if online && is_friend {
+                // Amigo ou introdução: os dois caminham pelo mesmo transporte.
+                // A diferença é que a introdução só tem crédito finito.
+                if online {
                     self.store.enqueue_outbox(&env.id, &conv.peer_fp)?;
                     if self
                         .cmd_tx
@@ -2387,11 +2417,9 @@ impl NetworkEngine {
                         msg_id: env.id.clone(),
                         status: "pending".into(),
                     });
-                    if !online {
-                        self.cmd_tx
-                            .send(EngineCmd::ConnectRelay(conv.peer_fp.clone()))
-                            .ok();
-                    }
+                    self.cmd_tx
+                        .send(EngineCmd::ConnectRelay(conv.peer_fp.clone()))
+                        .ok();
                 }
             }
             "group" => {
@@ -4414,17 +4442,24 @@ impl NetworkEngine {
                 "não é possível adicionar a si mesmo".into(),
             ));
         }
-        match self.store.get_friend(peer_fp)?.map(|(_, s)| s).as_deref() {
-            Some("accepted") => return Ok(FriendOutcome::Sent),
-            Some("blocked") => return Err(DistorrentError::Protocol("peer bloqueado".into())),
-            Some("pending_in") => {
+        match self.store.friend_state(peer_fp)? {
+            // Amizade já vale dos dois lados: repetir o pedido é no-op, não
+            // reenvia frame nem mexe no carimbo.
+            Some(s) if s.status == "accepted" => return Ok(FriendOutcome::Sent),
+            Some(s) if s.status == "blocked" => {
+                return Err(DistorrentError::Protocol("peer bloqueado".into()))
+            }
+            // Pedido dele chegou enquanto eu também pedia: aceitar os dois é
+            // o único desfecho que não deixa um lado "amigo" e o outro não.
+            Some(s) if s.status == "pending_in" => {
                 return self
                     .friend_respond(peer_fp, true)
                     .map(|_| FriendOutcome::Sent)
             }
             _ => {}
         }
-        self.store.set_friend(peer_fp, "", "pending_out")?;
+        self.store
+            .set_friend_request_out(peer_fp, &self.identity.nickname)?;
         let sent = self.deliver_friend_frame(
             peer_fp,
             SecureFrame::FriendRequest {
@@ -4444,58 +4479,92 @@ impl NetworkEngine {
     pub fn friend_respond(&self, peer_fp: &str, accept: bool) -> Result<()> {
         let peer_fp = Self::normalize_peer_id(peer_fp)?;
         let peer_fp = peer_fp.as_str();
-        match self.store.get_friend(peer_fp).ok().flatten() {
-            Some((_, status)) if status == "pending_in" => {}
-            Some((_, status)) => {
+        let state = self.store.friend_state(peer_fp)?;
+        match state.as_ref().map(|s| s.status.as_str()) {
+            Some("pending_in") => {}
+            Some("blocked") => {
+                return Err(DistorrentError::Protocol("peer bloqueado".into()));
+            }
+            Some(status) => {
                 return Err(DistorrentError::Protocol(format!(
                     "não há pedido pendente para responder (status: {status})"
                 )))
             }
             None => return Err(DistorrentError::Protocol("não há pedido pendente".into())),
         }
-        let status = if accept {
-            "accepted"
-        } else {
-            "pending_in_rejected"
-        };
-        let frame = if accept {
-            SecureFrame::FriendAccept {
-                nickname: self.identity.nickname.clone(),
-            }
-        } else {
-            SecureFrame::FriendReject
-        };
-        self.store.set_friend(peer_fp, "", status)?;
         if accept {
-            let _ = self.deliver_friend_frame(peer_fp, frame);
+            let nick = state
+                .as_ref()
+                .map(|s| s.nickname.clone())
+                .unwrap_or_default();
+            // Grava aceito ANTES de avisar: se o frame falhar, o outro lado
+            // reenvia o pedido no próximo tick e recebe FriendAccept.
+            self.store.accept_friend(peer_fp, &nick)?;
+            self.reset_dm_intro_for_peer(peer_fp);
+            let _ = self.deliver_friend_frame(
+                peer_fp,
+                SecureFrame::FriendAccept {
+                    nickname: self.identity.nickname.clone(),
+                },
+            );
             self.cmd_tx
                 .send(EngineCmd::ConnectRelay(peer_fp.to_string()))
                 .ok();
             self.cmd_tx
                 .send(EngineCmd::LookupAnnounce(peer_fp.to_string()))
                 .ok();
+            let _ = self.events.send(EngineEvent::FriendAccepted {
+                fp: peer_fp.into(),
+                nickname: nick,
+            });
         } else {
-            self.deliver_friend_frame(peer_fp, frame);
-            self.store.remove_friend(peer_fp)?;
+            self.store.reject_friend(peer_fp)?;
+            self.deliver_friend_frame(peer_fp, SecureFrame::FriendReject);
+            let _ = self
+                .events
+                .send(EngineEvent::FriendRemoved { fp: peer_fp.into() });
         }
         Ok(())
     }
 
+    /// Zera o crédito de introdução da DM com o peer quando a amizade é aceita.
+    fn reset_dm_intro_for_peer(&self, peer_fp: &str) {
+        let conv = crate::storage::Store::dm_conversation_id(&self.identity.fingerprint, peer_fp);
+        let _ = self.store.dm_intro_reset(&conv);
+    }
+
     // Seção 20: friend_remove
     pub fn friend_remove(&self, peer_fp: &str) -> Result<()> {
-        self.store.remove_friend(peer_fp)?;
-        self.deliver_friend_frame(peer_fp, SecureFrame::FriendRemove);
+        let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        self.store.clear_friendship(&peer_fp)?;
+        self.deliver_friend_frame(&peer_fp, SecureFrame::FriendRemove);
+        let _ = self.events.send(EngineEvent::FriendRemoved {
+            fp: peer_fp.clone(),
+        });
         Ok(())
     }
 
     pub fn friend_block(&self, peer_fp: &str) -> Result<()> {
-        self.store.set_friend(peer_fp, "", "blocked")?;
-        self.deliver_friend_frame(peer_fp, SecureFrame::FriendRemove);
+        let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        self.store.set_friend(&peer_fp, "", "blocked")?;
+        self.deliver_friend_frame(&peer_fp, SecureFrame::FriendRemove);
+        // Bloqueio é local e imediato: a UI precisa ver o peer sair da lista
+        // e da conversa sem esperar o próximo refresh.
+        let _ = self.events.send(EngineEvent::FriendRemoved {
+            fp: peer_fp.clone(),
+        });
         Ok(())
     }
 
     pub fn friend_unblock(&self, peer_fp: &str) -> Result<()> {
-        self.store.remove_friend(peer_fp)?;
+        let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        // Desbloquear NÃO recria amizade: volta ao estado neutro e o próximo
+        // pedido passa pelo fluxo normal. Antes um `DELETE` deixava o peer
+        // sem memória nenhuma e o próximo ProfileSet o "amigava" de novo.
+        self.store.unblock_friend(&peer_fp)?;
+        let _ = self.events.send(EngineEvent::FriendRemoved {
+            fp: peer_fp.clone(),
+        });
         Ok(())
     }
 
@@ -5084,8 +5153,21 @@ impl NetworkEngine {
         let env = MessageEnvelope::new(&self.keypair, channel_id, body);
         self.store.insert_message(&env, "out", "sending")?;
         let my = &self.identity.fingerprint;
-        if body.contains(my) || body.contains(&format!("<@{my}>")) {
+        let targets = self.store.mention_targets(body);
+        if targets.iter().any(|t| t == my) {
             self.store.msg_set_mentioned(&env.id, channel_id, true).ok();
+        }
+        for target in &targets {
+            if target.len() == 12 {
+                self.store.mention_add(&env.id, channel_id, target).ok();
+            }
+        }
+        if targets.iter().any(|t| t == "everyone") {
+            for (fp, _, _) in self.store.list_members(community_id)? {
+                if &fp != my {
+                    self.store.mention_add(&env.id, channel_id, &fp).ok();
+                }
+            }
         }
         crate::metrics::metrics().message_out();
         if comm.2 == self.identity.fingerprint {
@@ -5276,7 +5358,15 @@ impl NetworkEngine {
         if orig.author_fp != me {
             return Err(DistorrentError::Protocol("só o autor edita".into()));
         }
+        if orig.conv_id != conv_id {
+            return Err(DistorrentError::Protocol(
+                "mensagem de outra conversa".into(),
+            ));
+        }
         let nb = cap_str(body, 4000);
+        if nb.trim().is_empty() {
+            return Err(DistorrentError::Protocol("corpo vazio".into()));
+        }
         self.store.msg_edit(msg_id, conv_id, &nb)?;
         self.events
             .send(EngineEvent::MessageEdited {
@@ -5302,8 +5392,17 @@ impl NetworkEngine {
             .store
             .message_by_id(msg_id)?
             .ok_or_else(|| DistorrentError::Protocol("mensagem inexistente".into()))?;
+        if orig.conv_id != conv_id {
+            return Err(DistorrentError::Protocol(
+                "mensagem de outra conversa".into(),
+            ));
+        }
         let is_author = orig.author_fp == me;
-        if !is_author && !self.is_moderator(conv_id, &me) {
+        // `is_moderator` espera community_id; em DM/grupo a permissão vem do
+        // conv. Antes, passar o conv_id fazia `is_moderator` devolver false
+        // sempre e o autor de grupo não conseguia apagar a própria mensagem
+        // se o conv não fosse um canal.
+        if !is_author && !self.can_moderate_conv(conv_id, &me) {
             return Err(DistorrentError::Protocol(
                 "sem permissão para apagar".into(),
             ));
@@ -5327,6 +5426,18 @@ impl NetworkEngine {
 
     pub fn social_pin(&self, conv_id: &str, msg_id: &str, pinned: bool) -> Result<()> {
         let me = self.identity.fingerprint.clone();
+        if !self.can_pin_conv(conv_id, &me) {
+            return Err(DistorrentError::Protocol("sem permissão para fixar".into()));
+        }
+        let orig = self
+            .store
+            .message_by_id(msg_id)?
+            .ok_or_else(|| DistorrentError::Protocol("mensagem inexistente".into()))?;
+        if orig.conv_id != conv_id {
+            return Err(DistorrentError::Protocol(
+                "mensagem de outra conversa".into(),
+            ));
+        }
         self.store.msg_pin(msg_id, conv_id, pinned, &me)?;
         self.events
             .send(EngineEvent::MessagePinned {
@@ -5449,9 +5560,6 @@ impl NetworkEngine {
             clear_avatar,
             clear_banner,
         )?;
-        if !dn.is_empty() {
-            let _ = self.store.set_friend(&me, &dn, "accepted");
-        }
         let profile = self.store.profile_get(&me)?;
         self.events
             .send(EngineEvent::ProfileChanged {
@@ -6232,6 +6340,12 @@ impl NetworkEngine {
             .map(|c| c.title)
             .unwrap_or_default();
         let me = self.identity.fingerprint.clone();
+        let dono = self
+            .store
+            .group_owner(conv_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         for (fp, _) in &members {
             if *fp == me {
                 continue;
@@ -6244,6 +6358,7 @@ impl NetworkEngine {
                             conv_id: conv_id.to_string(),
                             title: title.clone(),
                             members: members.clone(),
+                            owner_fp: dono.clone(),
                         },
                     ))
                     .ok();
@@ -6251,11 +6366,10 @@ impl NetworkEngine {
         }
     }
 
-    pub fn group_members(&self, conv_id: &str) -> Vec<(String, String)> {
-        self.store.list_group_members(conv_id).unwrap_or_default()
-    }
-
-    pub fn group_add(&self, conv_id: &str, fp: &str) -> Result<()> {
+    /// Só quem criou o grupo gerencia roster e nome. Antes, qualquer membro
+    /// (ou o próprio peer removido, reenviando o frame) mudava o grupo de
+    /// todos — a autorização ficava só na UI.
+    fn require_group_owner(&self, conv_id: &str) -> Result<()> {
         let conv = self
             .store
             .get_conversation(conv_id)?
@@ -6263,7 +6377,42 @@ impl NetworkEngine {
         if conv.kind != "group" {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
-        self.store.add_group_member(conv_id, fp, "")?;
+        let me = &self.identity.fingerprint;
+        let dono = self.store.group_owner(conv_id)?.unwrap_or_default();
+        if &dono != me {
+            return Err(DistorrentError::Protocol(
+                "só quem criou o grupo pode alterar membros".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn group_members(&self, conv_id: &str) -> Vec<(String, String)> {
+        self.store.list_group_members(conv_id).unwrap_or_default()
+    }
+
+    pub fn group_add(&self, conv_id: &str, fp: &str) -> Result<()> {
+        self.require_group_owner(conv_id)?;
+        let fp = Self::normalize_peer_id(fp)?;
+        if fp == self.identity.fingerprint {
+            return Err(DistorrentError::Protocol("você já está no grupo".into()));
+        }
+        if self.store.is_blocked_fp(&fp) {
+            return Err(DistorrentError::Protocol(
+                "não é possível adicionar um peer bloqueado".into(),
+            ));
+        }
+        let atuais = self.store.list_group_members(conv_id)?;
+        if atuais.len() >= 10 {
+            return Err(DistorrentError::Protocol(
+                "máximo 9 membros + você (10 total)".into(),
+            ));
+        }
+        let conv = self
+            .store
+            .get_conversation(conv_id)?
+            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
+        self.store.add_group_member(conv_id, &fp, "")?;
         let _ = crate::group_trash::restore(&self.store, conv_id);
         let members = self.store.list_group_members(conv_id)?;
         let title = conv.title.clone();
@@ -6281,6 +6430,7 @@ impl NetworkEngine {
                                 conv_id: conv_id.to_string(),
                                 title: title.clone(),
                                 members: members.clone(),
+                                owner_fp: self.store.group_owner(conv_id)?.unwrap_or_default(),
                             },
                         ))
                         .ok();
@@ -6302,13 +6452,7 @@ impl NetworkEngine {
     }
 
     pub fn group_remove(&self, conv_id: &str, fp: &str) -> Result<()> {
-        let conv = self
-            .store
-            .get_conversation(conv_id)?
-            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
-        if conv.kind != "group" {
-            return Err(DistorrentError::Protocol("não é grupo".into()));
-        }
+        self.require_group_owner(conv_id)?;
         if fp == self.identity.fingerprint {
             return Err(DistorrentError::Protocol(
                 "o criador não pode sair do próprio grupo".into(),
@@ -6330,7 +6474,11 @@ impl NetworkEngine {
         }
         let me = self.identity.fingerprint.clone();
         let membros = self.store.list_group_members(conv_id)?;
-        let sou_criador = membros.first().map(|(fp, _)| fp == &me).unwrap_or(false);
+        let sou_criador = self
+            .store
+            .group_owner(conv_id)?
+            .map(|d| d == me)
+            .unwrap_or(false);
         if sou_criador {
             return Err(DistorrentError::Protocol(
                 "você criou este grupo — escolha apagar para todos ou só para você".into(),
@@ -6350,6 +6498,7 @@ impl NetworkEngine {
                         conv_id: conv_id.to_string(),
                         title: titulo.clone(),
                         members: restantes.clone(),
+                        owner_fp: self.store.group_owner(conv_id)?.unwrap_or_default(),
                     },
                 ))
                 .ok();
@@ -6359,10 +6508,7 @@ impl NetworkEngine {
         // Sem isto, o próximo GroupCreated/sync de qualquer membro recriava o
         // grupo minutos depois — era o "saio e ele volta". O criador vai junto
         // porque a conversa some e só ele pode me readicionar de propósito.
-        let dono = membros
-            .first()
-            .map(|(fp, _)| fp.clone())
-            .unwrap_or_default();
+        let dono = self.store.group_owner(conv_id)?.unwrap_or_default();
         let _ = crate::group_trash::dismiss_owned(&self.store, conv_id, &dono);
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
@@ -6381,7 +6527,11 @@ impl NetworkEngine {
         }
         let me = self.identity.fingerprint.clone();
         let membros = self.store.list_group_members(conv_id)?;
-        let sou_criador = membros.first().map(|(fp, _)| fp == &me).unwrap_or(false);
+        let sou_criador = self
+            .store
+            .group_owner(conv_id)?
+            .map(|d| d == me)
+            .unwrap_or(false);
         if !sou_criador {
             return Err(DistorrentError::Protocol(
                 "só quem criou o grupo pode apagar para todos".into(),
@@ -6414,12 +6564,10 @@ impl NetworkEngine {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
         let membros = self.store.list_group_members(conv_id).unwrap_or_default();
+        let dono = self.store.group_owner(conv_id)?.unwrap_or_default();
         self.store.leave_group_local(conv_id)?;
-        let dono = membros
-            .first()
-            .map(|(fp, _)| fp.clone())
-            .unwrap_or_default();
         let _ = crate::group_trash::dismiss_owned(&self.store, conv_id, &dono);
+        let _ = membros;
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
             title: String::new(),
@@ -6428,16 +6576,10 @@ impl NetworkEngine {
     }
 
     pub fn group_rename(&self, conv_id: &str, title: &str) -> Result<()> {
+        self.require_group_owner(conv_id)?;
         let nome = crate::names::sanitize_text(title, 64).trim().to_string();
         if nome.is_empty() {
             return Err(DistorrentError::Protocol("título vazio".into()));
-        }
-        let conv = self
-            .store
-            .get_conversation(conv_id)?
-            .ok_or_else(|| DistorrentError::Protocol("grupo inexistente".into()))?;
-        if conv.kind != "group" {
-            return Err(DistorrentError::Protocol("não é grupo".into()));
         }
         self.store.update_conversation_title(conv_id, &nome)?;
         self.broadcast_group_created(conv_id);
@@ -8631,6 +8773,12 @@ fn flush_group_to_peer(engine: &Arc<NetworkEngine>, peer_fp: &str) {
                         conv_id: conv_id.clone(),
                         title,
                         members,
+                        owner_fp: engine
+                            .store
+                            .group_owner(&conv_id)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default(),
                     },
                 ))
                 .ok();
@@ -9731,6 +9879,15 @@ async fn register_and_run(
         let _ = engine.events.send(EngineEvent::PeerOffline {
             fp: peer_fp.to_string(),
         });
+        // Presença persistida: sem isso o peer continuava "online" na UI por
+        // até 90 s (TTL) depois de a conexão cair — o clássico verde mentiroso.
+        let _ = engine.store.presence_offline(peer_fp);
+        let _ = engine.events.send(EngineEvent::PresenceChanged {
+            fp: peer_fp.to_string(),
+            status: "offline".into(),
+            custom: String::new(),
+            custom_emoji: String::new(),
+        });
         engine.drop_voice_presence_of(peer_fp);
         engine.emit_state();
     }
@@ -10280,7 +10437,44 @@ impl NetworkEngine {
     pub fn can_moderate_conv(&self, conv_id: &str, fp: &str) -> bool {
         match self.community_of_conv(conv_id) {
             Some(cid) => self.is_moderator(&cid, fp),
-            None => self.social_peers_of(conv_id).iter().any(|p| p == fp),
+            None => {
+                // DM/grupo: NÃO existe moderador de conversa. O autor mexe na
+                // própria mensagem (checado antes por quem chama); o criador
+                // do grupo gerencia roster, não o conteúdo dos outros. Antes
+                // "estar no conv" era tratado como permissão de moderação.
+                self.store
+                    .get_conversation(conv_id)
+                    .ok()
+                    .flatten()
+                    .filter(|c| c.kind == "group")
+                    .map(|_| {
+                        self.store
+                            .list_group_members(conv_id)
+                            .map(|m| m.first().map(|(owner, _)| owner == fp).unwrap_or(false))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            }
+        }
+    }
+
+    /// Fixar é anotação compartilhada: qualquer participante da conversa pode.
+    /// Diferente de apagar/editar, não destrói conteúdo de terceiro.
+    pub fn can_pin_conv(&self, conv_id: &str, fp: &str) -> bool {
+        match self.store.get_conversation(conv_id).ok().flatten() {
+            Some(c) if c.kind == "dm" => {
+                c.peer_fp == fp || (fp == self.identity.fingerprint && !c.peer_fp.is_empty())
+            }
+            Some(c) if c.kind == "group" => self
+                .store
+                .list_group_members(conv_id)
+                .map(|m| m.iter().any(|(m_fp, _)| m_fp == fp))
+                .unwrap_or(false),
+            Some(_) => match self.community_of_conv(conv_id) {
+                Some(cid) => self.store.member_role(&cid, fp).is_some(),
+                None => false,
+            },
+            None => false,
         }
     }
 
@@ -10300,27 +10494,62 @@ impl NetworkEngine {
         }
     }
 
-    pub fn announce_presence(&self) {
-        let Ok(p) = self.store.presence_get(&self.identity.fingerprint) else {
-            return;
-        };
-        if p.status == "invisible" {
-            return;
+    /// Quem pode ver meu status: amigos aceitos, membros de grupo e de
+    /// servidor em comum. Presença não é broadcast para todo peer conhecido —
+    /// isso vazava "estou online" para quem nunca foi contato.
+    pub fn is_social_contact(&self, fp: &str) -> bool {
+        if fp == self.identity.fingerprint {
+            return false;
         }
-        let frame = SecureFrame::PresenceSet {
-            status: p.status,
-            custom: p.custom,
-            custom_emoji: p.custom_emoji,
+        if matches!(
+            self.store.get_friend(fp).ok().flatten(),
+            Some((_, s)) if s == "accepted"
+        ) {
+            return true;
+        }
+        if self
+            .store
+            .group_convs_with_peer(fp)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        self.store
+            .list_communities()
+            .map(|cs| {
+                cs.iter()
+                    .any(|(id, _, _)| self.store.member_role(id, fp).is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn announce_presence(&self) {
+        let Ok(p) = self.store.presence_get_live(&self.identity.fingerprint) else {
+            return;
         };
-        for peer in self.store.list_peers().unwrap_or_default() {
-            if peer.fp == self.identity.fingerprint {
+        // Invisível: os contatos que já me viam precisam receber o offline,
+        // senão eu continuo verde para eles até o TTL vencer.
+        let frame = if p.status == "invisible" {
+            SecureFrame::PresenceSet {
+                status: "offline".into(),
+                custom: String::new(),
+                custom_emoji: String::new(),
+            }
+        } else {
+            SecureFrame::PresenceSet {
+                status: p.status,
+                custom: p.custom,
+                custom_emoji: p.custom_emoji,
+            }
+        };
+        for fp in self.online_peer_fps() {
+            if !self.is_social_contact(&fp) {
                 continue;
             }
-            if self.link_tx(&peer.fp).is_some() {
-                self.cmd_tx
-                    .send(EngineCmd::SendToPeer(peer.fp, frame.clone()))
-                    .ok();
-            }
+            self.cmd_tx
+                .send(EngineCmd::SendToPeer(fp, frame.clone()))
+                .ok();
         }
     }
 }
@@ -10780,8 +11009,17 @@ async fn handle_frame(
                     .flatten()
                     .map(|(_, s)| s == "accepted")
                     .unwrap_or(false)
+                && env.conv_id
+                    != crate::storage::Store::dm_conversation_id(
+                        &engine.identity.fingerprint,
+                        peer_fp,
+                    )
                 && !crate::group_trash::is_dismissed(&engine.store, &env.conv_id)
             {
+                // Só vira grupo se o conv_id NÃO é a DM determinística deste
+                // peer. Antes, apagar a conversa local e receber uma mensagem
+                // de amigo recriava um "grupo" chamado "Grupo" com uma pessoa
+                // — e a DM de verdade nunca voltava.
                 engine.store.upsert_group_state(
                     &env.conv_id,
                     "Grupo",
@@ -10819,11 +11057,6 @@ async fn handle_frame(
                     .flatten()
                     .map(|(_, s)| s == "accepted")
                     .unwrap_or(false);
-                if !is_friend {
-                    return Err(DistorrentError::Protocol(
-                        "DM apenas de amigo aceito".into(),
-                    ));
-                }
                 // Seção 58: conv
                 let conv = engine.open_dm(peer_fp, peer_nick)?;
                 if env.conv_id != conv.id {
@@ -10831,7 +11064,28 @@ async fn handle_frame(
                         "conv_id não corresponde à DM deste peer".into(),
                     ));
                 }
-                engine.store.insert_message(&env, "in", "ok")?;
+                // Introdução: o RECEPTOR também conta. Se o cliente do outro
+                // lado foi alterado (ou a mensagem é replay), o limite vale
+                // aqui — sem isso o gate do emissor seria a única barreira.
+                let intro = !is_friend;
+                if intro
+                    && !engine.store.dm_intro_take(
+                        &env.conv_id,
+                        peer_fp,
+                        crate::social::DM_INTRO_LIMIT,
+                    )?
+                {
+                    return Err(DistorrentError::Protocol(format!(
+                        "limite de {} mensagens iniciais deste peer atingido",
+                        crate::social::DM_INTRO_LIMIT
+                    )));
+                }
+                if let Err(e) = engine.store.insert_message(&env, "in", "ok") {
+                    if intro {
+                        let _ = engine.store.dm_intro_refund(&env.conv_id, peer_fp);
+                    }
+                    return Err(e);
+                }
                 crate::metrics::metrics().message_in();
                 let stored = engine.store.message_by_id(&env.id)?.unwrap_or_else(|| {
                     super::super::storage::StoredMessage {
@@ -10960,17 +11214,16 @@ async fn handle_frame(
                 ));
             }
             if engine.is_blocked(peer_fp) {
+                // Não confirma nem nega: um bloqueado não pode descobrir que
+                // está bloqueado pela resposta.
                 return Ok(());
             }
             let nick = cap_str(&nickname, 64);
-            let existing = engine
-                .store
-                .get_friend(peer_fp)
-                .ok()
-                .flatten()
-                .map(|(_, s)| s);
-            match existing.as_deref() {
+            let state = engine.store.friend_state(peer_fp)?;
+            match state.as_ref().map(|s| s.status.as_str()) {
                 Some("accepted") => {
+                    // Já somos amigos (o outro lado perdeu o estado): basta
+                    // reconfirmar. Não recria linha nem "re-aceita".
                     engine
                         .cmd_tx
                         .send(EngineCmd::SendToPeer(
@@ -10981,8 +11234,12 @@ async fn handle_frame(
                         ))
                         .ok();
                 }
+                // Pedido cruzado: os dois pediram. Aceitar aqui é o único
+                // desfecho simétrico; sem isto um lado ficava pendente para
+                // sempre enquanto o outro recebia FriendAccept.
                 Some("pending_out") | Some("pending_in") => {
-                    engine.store.set_friend(peer_fp, &nick, "accepted")?;
+                    engine.store.accept_friend(peer_fp, &nick)?;
+                    engine.reset_dm_intro_for_peer(peer_fp);
                     engine
                         .cmd_tx
                         .send(EngineCmd::SendToPeer(
@@ -10992,49 +11249,59 @@ async fn handle_frame(
                             },
                         ))
                         .ok();
-                    // Seção 59: _
                     let _ = engine.events.send(EngineEvent::FriendAccepted {
                         fp: peer_fp.into(),
-                        nickname,
+                        nickname: nick,
                     });
                 }
                 _ => {
-                    engine.store.set_friend(peer_fp, &nick, "pending_in")?;
+                    // `rejected`/`removed` voltam a ser pendentes, mas o
+                    // carimbo de quando o pedido chegou é renovado.
+                    engine.store.set_friend_request_in(peer_fp, &nick)?;
                     let _ = engine.events.send(EngineEvent::FriendRequestIn {
                         fp: peer_fp.into(),
-                        nickname,
+                        nickname: nick,
                     });
                 }
             }
         }
         SecureFrame::FriendAccept { nickname } => {
-            let status = engine
-                .store
-                .get_friend(peer_fp)
-                .ok()
-                .flatten()
-                .map(|(_, s)| s);
-            if !matches!(status.as_deref(), Some("pending_out") | Some("accepted")) {
-                return Err(DistorrentError::Protocol(
-                    "FriendAccept sem pedido pendente".into(),
-                ));
+            let state = engine.store.friend_state(peer_fp)?;
+            let status = state.as_ref().map(|s| s.status.as_str());
+            // Bloqueado: aceite atrasado é ignorado sem derrubar a sessão.
+            if status == Some("blocked") {
+                return Ok(());
             }
-            engine
-                .store
-                .set_friend(peer_fp, &cap_str(&nickname, 64), "accepted")?;
+            if !matches!(status, Some("pending_out") | Some("accepted")) {
+                // Frame antigo/replay: não é motivo para romper a conexão.
+                return Ok(());
+            }
+            if status == Some("accepted") {
+                return Ok(());
+            }
+            let nick = cap_str(&nickname, 64);
+            engine.store.accept_friend(peer_fp, &nick)?;
+            engine.reset_dm_intro_for_peer(peer_fp);
             let _ = engine.events.send(EngineEvent::FriendAccepted {
                 fp: peer_fp.into(),
-                nickname,
+                nickname: nick,
             });
         }
         SecureFrame::FriendReject => {
-            engine.store.remove_friend(peer_fp)?;
+            // Recusa é do PEDIDO, não da amizade: preserva histórico e o
+            // carimbo de bloqueio. Antes um `DELETE` apagava tudo e o
+            // próximo ProfileSet recriava a amizade sozinho.
+            engine.store.reject_friend(peer_fp)?;
             let _ = engine
                 .events
                 .send(EngineEvent::FriendRemoved { fp: peer_fp.into() });
         }
         SecureFrame::FriendRemove => {
-            engine.store.remove_friend(peer_fp)?;
+            // Quem bloqueou não pode ser "desamigado" pelo outro lado: o
+            // bloqueio é local e soberano.
+            if !engine.store.is_blocked_fp(peer_fp) {
+                engine.store.clear_friendship(peer_fp)?;
+            }
             let _ = engine
                 .events
                 .send(EngineEvent::FriendRemoved { fp: peer_fp.into() });
@@ -11263,6 +11530,7 @@ async fn handle_frame(
             conv_id,
             title,
             members,
+            owner_fp,
         } => {
             if !members.iter().any(|(fp, _)| fp == peer_fp) {
                 return Err(DistorrentError::Protocol(
@@ -11276,6 +11544,44 @@ async fn handle_frame(
             }
             let eu = &engine.identity.fingerprint;
             let me_incluiu = members.iter().any(|(fp, _)| fp == eu);
+            // Só o CRIADOR do grupo pode reescrever o roster. Antes qualquer
+            // membro mandava GroupCreated e mudava (ou esvaziava) o grupo de
+            // todos, e um peer removido reentrava sozinho reenviando o frame.
+            let dono_conhecido = engine
+                .store
+                .group_owner(&conv_id)?
+                .or_else(|| {
+                    if owner_fp.is_empty() {
+                        None
+                    } else {
+                        Some(owner_fp.clone())
+                    }
+                })
+                .or_else(|| crate::group_trash::owner_of(&engine.store, &conv_id))
+                .or_else(|| members.first().map(|(fp, _)| fp.clone()));
+            if let Some(dono) = dono_conhecido.filter(|d| !d.is_empty()) {
+                if dono != peer_fp {
+                    // Roster reenviado por quem não criou é ignorado em
+                    // silêncio: derrubar a sessão puniria o mensageiro e não
+                    // impede nada (o próximo tick reenviaria).
+                    return Ok(());
+                }
+            }
+            // Grava o dono. `owner_fp` do frame é a fonte nova; frames antigos
+            // vêm com vazio e a convenção do primeiro membro vale como antes.
+            let dono = if owner_fp.is_empty() {
+                peer_fp.to_string()
+            } else {
+                owner_fp.clone()
+            };
+            if dono != peer_fp {
+                return Err(DistorrentError::Protocol(
+                    "GroupCreated com owner_fp divergente do remetente".into(),
+                ));
+            }
+            if !members.is_empty() {
+                let _ = engine.store.group_owner_set(&conv_id, &dono);
+            }
             if crate::group_trash::is_dismissed(&engine.store, &conv_id) {
                 if !me_incluiu {
                     return Ok(());
@@ -11312,14 +11618,25 @@ async fn handle_frame(
             fp,
             nickname,
         } => {
-            let known = engine
-                .store
-                .list_group_members(&conv_id)?
-                .iter()
-                .any(|(f, _)| f == peer_fp);
-            if !known {
+            let membros = engine.store.list_group_members(&conv_id)?;
+            if !membros.iter().any(|(f, _)| f == peer_fp) {
                 return Err(DistorrentError::Protocol(
                     "GroupMemberAdded de fora do grupo".into(),
+                ));
+            }
+            // Só o criador adiciona. "Estar no grupo" não é permissão.
+            let dono = engine
+                .store
+                .group_owner(&conv_id)?
+                .unwrap_or_else(|| membros.first().map(|(f, _)| f.clone()).unwrap_or_default());
+            if dono != peer_fp {
+                return Err(DistorrentError::Protocol(
+                    "só quem criou o grupo adiciona membros".into(),
+                ));
+            }
+            if membros.len() >= 10 && !membros.iter().any(|(f, _)| f == &fp) {
+                return Err(DistorrentError::Protocol(
+                    "GroupMemberAdded acima do limite".into(),
                 ));
             }
             engine.store.add_group_member(&conv_id, &fp, &nickname)?;
@@ -11329,13 +11646,12 @@ async fn handle_frame(
             });
         }
         SecureFrame::GroupDeleted { conv_id } => {
-            let criador = engine
+            let membros = engine.store.list_group_members(&conv_id)?;
+            let dono = engine
                 .store
-                .list_group_members(&conv_id)?
-                .first()
-                .map(|(fp, _)| fp == peer_fp)
-                .unwrap_or(false);
-            if !criador {
+                .group_owner(&conv_id)?
+                .unwrap_or_else(|| membros.first().map(|(f, _)| f.clone()).unwrap_or_default());
+            if dono != peer_fp {
                 return Err(DistorrentError::Protocol(
                     "GroupDeleted de quem não criou o grupo".into(),
                 ));
@@ -11417,6 +11733,19 @@ async fn handle_frame(
                         .store
                         .insert_message_as_bot(&env, "in", "ok", &bot_id)?;
                 }
+                // Menções são registradas no host para TODOS os membros: é
+                // dele que sai o contador de "menções não lidas" de cada um.
+                for target in engine.store.mention_targets(&env.body) {
+                    if target == "everyone" {
+                        for (fp, _, _) in engine.store.list_members(&community_id)? {
+                            if fp != env.author_fp {
+                                engine.store.mention_add(&env.id, &channel_id, &fp).ok();
+                            }
+                        }
+                    } else {
+                        engine.store.mention_add(&env.id, &channel_id, &target).ok();
+                    }
+                }
                 crate::metrics::metrics().message_in();
                 let stored = engine.store.message_by_id(&env.id)?.unwrap_or_else(|| {
                     super::super::storage::StoredMessage {
@@ -11453,14 +11782,10 @@ async fn handle_frame(
                 } else {
                     match engine.store.get_peer(&env.author_fp)?.map(|p| p.pubkey_hex) {
                         Some(author_pub) => env.verify_with_pubkey(&author_pub),
-                        None => {
-                            tracing::warn!(
-                                channel_msg_no_author_key = %env.author_fp,
-                                env_id = %env.id,
-                                "channel msg aceita sem verificação de assinatura (autor não está no peerbook)"
-                            );
-                            true
-                        }
+                        // Sem a chave do autor não há como provar que foi ele.
+                        // Antes isso era aceito com um `warn` — uma mensagem
+                        // forjada em nome de um membro passava pelo host.
+                        None => false,
                     }
                 };
                 if !sig_ok {
@@ -11519,8 +11844,16 @@ async fn handle_frame(
         SecureFrame::CallInvite {
             call_id,
             kind,
-            target_fp: _,
+            target_fp,
         } => {
+            // `target_fp` vazio em versões antigas. Quando vem preenchido,
+            // precisa ser eu: um convite endereçado a outra pessoa não pode
+            // tocar a minha campainha.
+            if !target_fp.is_empty() && target_fp != engine.identity.fingerprint {
+                return Err(DistorrentError::Protocol(
+                    "CallInvite endereçado a outro peer".into(),
+                ));
+            }
             if engine.ring_is_new(&call_id, peer_fp) {
                 let _ = engine.events.send(EngineEvent::CallIncoming {
                     call_id: call_id.clone(),
@@ -11655,6 +11988,23 @@ async fn handle_frame(
             });
         }
         SecureFrame::CallAddParticipant { call_id, fp, kind } => {
+            // Quem adiciona precisa ter relação comigo (amigo/grupo/servidor),
+            // e a sala precisa ser de uma conversa em que eu esteja. Antes
+            // qualquer peer "adicionava" um terceiro à minha chamada.
+            if !engine
+                .store
+                .is_in_call(&call_id, &engine.identity.fingerprint)
+            {
+                return Err(DistorrentError::Protocol(
+                    "CallAddParticipant numa chamada em que não estou".into(),
+                ));
+            }
+            if fp != peer_fp && !engine.is_social_contact(&fp) && !engine.is_social_contact(peer_fp)
+            {
+                return Err(DistorrentError::Protocol(
+                    "CallAddParticipant de quem não é contato".into(),
+                ));
+            }
             #[cfg(target_os = "linux")]
             {
                 let ja_na_chamada = engine.voice_is_native(&call_id, peer_fp);
@@ -12156,6 +12506,32 @@ async fn handle_frame(
             if env.author_fp != peer_fp || !env.verify_with_pubkey(peer_pubkey) {
                 return Err(DistorrentError::Protocol("encaminhamento inválido".into()));
             }
+            // Encaminhar para um CANAL passa pelo host, como qualquer
+            // ChannelMsg. Antes um amigo injetava `Forward` direto no meu
+            // banco com conv_id de canal alheio, sem o host validar.
+            if !channel_id.is_empty() {
+                if let Some(cid) = engine.store.channel_community(&channel_id)? {
+                    let host = engine
+                        .store
+                        .get_community(&cid)?
+                        .map(|(_, _, owner)| owner)
+                        .unwrap_or_default();
+                    if engine.identity.fingerprint != host {
+                        return Err(DistorrentError::Protocol(
+                            "Forward para canal fora do host".into(),
+                        ));
+                    }
+                    if engine.store.member_role(&cid, peer_fp).is_none() {
+                        return Err(DistorrentError::Protocol(
+                            "Forward de quem não é membro".into(),
+                        ));
+                    }
+                }
+            } else if !engine.is_social_contact(peer_fp) {
+                return Err(DistorrentError::Protocol(
+                    "Forward de quem não é contato".into(),
+                ));
+            }
             // Seção 66: label
             let label = cap_str(&from_label, 120);
             if engine.store.message_by_id(&env.id)?.is_some() {
@@ -12167,7 +12543,6 @@ async fn handle_frame(
             if let Some(sm) = stored {
                 let _ = engine.events.send(EngineEvent::MessageNew(sm));
             }
-            let _ = channel_id;
         }
         SecureFrame::PresenceSet {
             status,
@@ -12175,6 +12550,10 @@ async fn handle_frame(
             custom_emoji,
         } => {
             if engine.is_blocked(peer_fp) {
+                return Ok(());
+            }
+            if !engine.is_social_contact(peer_fp) {
+                // Presença de quem não é contato é ruído (ou sonda): ignorar.
                 return Ok(());
             }
             let st = normalize_presence(&status);
@@ -12298,9 +12677,10 @@ async fn handle_frame(
             if !applied {
                 return Ok(());
             }
-            if !dn.is_empty() {
-                let _ = engine.store.set_friend(peer_fp, &dn, "accepted");
-            }
+            // Perfil NUNCA cria amizade. Antes, receber um `ProfileSet` com
+            // nome preenchido marcava `accepted` dos dois lados — qualquer
+            // peer que conseguisse abrir uma sessão virava "amigo" e ganhava
+            // permissão de DM e chamada sem ninguém aceitar nada.
             let p = engine.store.profile_get(peer_fp).unwrap_or_default();
             let _ = engine.events.send(EngineEvent::ProfileChanged {
                 fp: peer_fp.to_string(),
@@ -12421,6 +12801,20 @@ async fn handle_frame(
             if !is_owner {
                 return Err(DistorrentError::Protocol("só o dono baneia".into()));
             }
+            // Banir a si mesmo ou alguém fora do servidor não faz sentido e
+            // era aceito: o frame chegava com qualquer target_fp.
+            if target_fp == peer_fp || target_fp == engine.identity.fingerprint {
+                return Err(DistorrentError::Protocol(
+                    "não é possível banir a si ou ao dono".into(),
+                ));
+            }
+            if engine
+                .store
+                .member_role(&community_id, &target_fp)
+                .is_none()
+            {
+                return Err(DistorrentError::Protocol("alvo não é membro".into()));
+            }
             let _ = engine.store.ban_set(
                 &community_id,
                 &target_fp,
@@ -12456,6 +12850,18 @@ async fn handle_frame(
                 return Err(DistorrentError::Protocol(
                     "sem permissão de moderação".into(),
                 ));
+            }
+            if target_fp == peer_fp || target_fp == engine.identity.fingerprint {
+                return Err(DistorrentError::Protocol(
+                    "não é possível silenciar a si ou ao dono".into(),
+                ));
+            }
+            if engine
+                .store
+                .member_role(&community_id, &target_fp)
+                .is_none()
+            {
+                return Err(DistorrentError::Protocol("alvo não é membro".into()));
             }
             let _ = engine.store.timeout_set(
                 &community_id,
@@ -13695,7 +14101,10 @@ mod tests {
     #[test]
     fn profile_set_de_peer_bloqueado_e_ignorado() {
         let (e, _d) = mk_engine("perfil-bloqueio");
-        let autor = "fp-bloqueado";
+        // Fingerprint precisa ser hex de 12: o frame agora rejeita id
+        // inválido antes de qualquer escrita, e o teste precisa exercitar o
+        // caminho de BLOQUEIO, não o de validação.
+        let autor = "b10c0ad00001";
         e.friend_block(autor).unwrap();
         let r = perfil_block_on(handle_frame(
             &e,
@@ -13953,8 +14362,8 @@ mod tests {
     #[tokio::test]
     async fn grupo_dispensado_nao_volta_com_roster_reenviado() {
         let (e, _d) = mk_engine("grupo-nao-volta");
-        let criador = "fp-criador";
-        let outro_membro = "fp-outro";
+        let criador = "c0c0c0c00001";
+        let outro_membro = "c0c0c0c00002";
         let conv = e
             .store
             .create_group_dm(
@@ -13963,6 +14372,9 @@ mod tests {
                 "Grupo que eu saí",
             )
             .unwrap();
+        // O grupo foi criado por `criador` (não por mim): é o cenário real de
+        // quem recebe um convite e depois sai.
+        e.store.group_owner_set(&conv.id, criador).unwrap();
         let membros = e.store.list_group_members(&conv.id).unwrap();
         e.store.leave_group_local(&conv.id).unwrap();
         crate::group_trash::dismiss_owned(&e.store, &conv.id, criador).unwrap();
@@ -13977,6 +14389,7 @@ mod tests {
                 conv_id: conv.id.clone(),
                 title: "Grupo que eu saí".into(),
                 members: membros.clone(),
+                owner_fp: criador.into(),
             },
         )
         .await
@@ -13995,8 +14408,8 @@ mod tests {
     #[tokio::test]
     async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
         let (e, _d) = mk_engine("grupo-volta");
-        let criador = "fp-criador";
-        let outro_membro = "fp-outro";
+        let criador = "c0c0c0c00003";
+        let outro_membro = "c0c0c0c00004";
         let conv = e
             .store
             .create_group_dm(
@@ -14005,6 +14418,7 @@ mod tests {
                 "Grupo de volta",
             )
             .unwrap();
+        e.store.group_owner_set(&conv.id, criador).unwrap();
         let membros = e.store.list_group_members(&conv.id).unwrap();
         e.store.leave_group_local(&conv.id).unwrap();
         crate::group_trash::dismiss_owned(&e.store, &conv.id, criador).unwrap();
@@ -14019,6 +14433,7 @@ mod tests {
                 conv_id: conv.id.clone(),
                 title: "Grupo de volta".into(),
                 members: membros.clone(),
+                owner_fp: criador.into(),
             },
         )
         .await
@@ -14037,25 +14452,14 @@ mod tests {
     #[test]
     fn sair_do_grupo_marca_como_dispensado() {
         let (e, _d) = mk_engine("sair-dispensa");
-        let criador = "fp-criador";
+        let criador = "c0c0c0c00005";
         let eu = e.identity.fingerprint.clone();
         let conv = e
             .store
             .create_group_dm(&eu, &[criador.to_string()], "Grupo para sair")
             .unwrap();
-        // O roster é ordenado por `added_at`. Inserir os dois no mesmo
-        // milissegundo empata e a ordem fica arbitrária — se eu cair primeiro o
-        // código me trata como criador. Remove-me e readiciona depois de um
-        // intervalo para o criador ficar inequivocamente em primeiro.
-        e.store.remove_group_member(&conv.id, &eu).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        e.store.add_group_member(&conv.id, &eu, "Eu").unwrap();
-        let primeiro = e.store.list_group_members(&conv.id).unwrap();
-        assert_eq!(
-            primeiro.first().map(|(fp, _)| fp.clone()),
-            Some(criador.to_string()),
-            "cenário do teste exige o criador em primeiro"
-        );
+        // O convite veio do criador: ele é o dono, não eu (que apenas recebi).
+        e.store.group_owner_set(&conv.id, criador).unwrap();
         let mut commands = e.cmd_rx.lock().unwrap().take().unwrap();
 
         e.group_leave(&conv.id).unwrap();
@@ -14097,6 +14501,573 @@ mod tests {
             !e.store.is_in_call("call-a", "outro-fp"),
             "outro fp não é participante"
         );
+    }
+
+    // Seção 79: ciclo de vida social
+    fn peer_hex(n: u8) -> String {
+        format!("{n:02x}").repeat(6)
+    }
+
+    #[test]
+    fn profile_set_nao_cria_amizade() {
+        let (e, _d) = mk_engine("perfil-nao-amiga");
+        let peer = peer_hex(0x11);
+        perfil_block_on(handle_frame(
+            &e,
+            &peer,
+            "pk",
+            "Estranho",
+            SecureFrame::ProfileSet {
+                display_name: "Estranho".into(),
+                about: String::new(),
+                avatar_b64: String::new(),
+                banner_b64: String::new(),
+                accent: String::new(),
+                rev: 1,
+                content_hash: String::new(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            e.store.profile_get(&peer).unwrap().display_name,
+            "Estranho",
+            "perfil é aceito"
+        );
+        assert_eq!(
+            e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+            None,
+            "receber perfil NÃO pode virar amizade"
+        );
+    }
+
+    #[test]
+    fn pedido_cruzado_vira_amizade_dos_dois_lados() {
+        let a = mk_engine("a").0;
+        let b = mk_engine("b").0;
+        let fp_a = a.identity.fingerprint.clone();
+        let fp_b = b.identity.fingerprint.clone();
+
+        // Os dois pedem ao mesmo tempo; cada um recebe o pedido do outro.
+        a.store.set_friend_request_out(&fp_b, "b").unwrap();
+        b.store.set_friend_request_out(&fp_a, "a").unwrap();
+
+        perfil_block_on(handle_frame(
+            &b,
+            &fp_a,
+            "pk",
+            "a",
+            SecureFrame::FriendRequest {
+                nickname: "a".into(),
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(
+            b.store.get_friend(&fp_a).unwrap().map(|(_, s)| s),
+            Some("accepted".into()),
+            "quem recebeu o pedido cruzado aceita"
+        );
+        assert_eq!(
+            a.store.get_friend(&fp_b).unwrap().map(|(_, s)| s),
+            Some("pending_out".into()),
+            "o outro lado só muda quando o FriendAccept chegar"
+        );
+
+        perfil_block_on(handle_frame(
+            &a,
+            &fp_b,
+            "pk",
+            "b",
+            SecureFrame::FriendAccept {
+                nickname: "b".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            a.store.get_friend(&fp_b).unwrap().map(|(_, s)| s),
+            Some("accepted".into())
+        );
+    }
+
+    #[test]
+    fn aceite_atrasado_nao_recria_amizade_bloqueada() {
+        let (e, _d) = mk_engine("aceite-atrasado");
+        let peer = peer_hex(0x22);
+        e.friend_block(&peer).unwrap();
+        perfil_block_on(handle_frame(
+            &e,
+            &peer,
+            "pk",
+            "peer",
+            SecureFrame::FriendAccept {
+                nickname: "peer".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+            Some("blocked".into()),
+            "FriendAccept não desfaz bloqueio"
+        );
+    }
+
+    /// Recusa de um pedido vindo de quem já me bloqueou não rebaixa o
+    /// bloqueio — senão um "reject" atrasado me liberava para o abuso.
+    #[test]
+    fn recusa_preserva_bloqueio_e_nao_apaga_historico() {
+        let (e, _d) = mk_engine("recusa");
+        let peer = peer_hex(0x33);
+        e.store.set_friend_request_in(&peer, "peer").unwrap();
+        perfil_block_on(handle_frame(
+            &e,
+            &peer,
+            "pk",
+            "peer",
+            SecureFrame::FriendReject,
+        ))
+        .unwrap();
+        assert_eq!(
+            e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+            Some("rejected".into())
+        );
+        e.friend_block(&peer).unwrap();
+        perfil_block_on(handle_frame(
+            &e,
+            &peer,
+            "pk",
+            "peer",
+            SecureFrame::FriendReject,
+        ))
+        .unwrap();
+        assert_eq!(
+            e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+            Some("blocked".into())
+        );
+    }
+
+    #[test]
+    fn remover_amigo_bloqueado_nao_desbloqueia() {
+        let (e, _d) = mk_engine("remover-bloqueado");
+        let peer = peer_hex(0x44);
+        e.friend_block(&peer).unwrap();
+        e.friend_remove(&peer).unwrap();
+        assert!(
+            e.store.is_blocked_fp(&peer),
+            "remover não pode apagar a memória do bloqueio"
+        );
+    }
+
+    #[test]
+    fn desbloquear_nao_recria_amizade() {
+        let (e, _d) = mk_engine("desbloquear");
+        let peer = peer_hex(0x55);
+        e.friend_block(&peer).unwrap();
+        e.friend_unblock(&peer).unwrap();
+        assert_eq!(
+            e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+            Some("removed".into()),
+            "desbloqueado volta ao neutro, não a amigo"
+        );
+    }
+
+    #[test]
+    fn pedido_vencido_some_das_listas() {
+        let (e, d) = mk_engine("pedido-vencido");
+        let peer = peer_hex(0x66);
+        e.store.set_friend_request_in(&peer, "velho").unwrap();
+        {
+            let conn = e.store.locked();
+            conn.execute(
+                "UPDATE friends SET requested_at=?2 WHERE fp=?1",
+                rusqlite::params![
+                    peer,
+                    crate::identity::now_ms() - crate::social::FRIEND_REQUEST_TTL_MS - 1000
+                ],
+            )
+            .unwrap();
+        }
+        assert!(e.friends(Some("pending_in")).is_empty());
+        drop(d);
+    }
+
+    #[test]
+    fn gate_de_tres_mensagens_e_por_direcao_e_persistente() {
+        let (e, d) = mk_engine("intro");
+        let peer = peer_hex(0x77);
+        let conv = e.open_dm(&peer, "peer").unwrap();
+        e.social_profile_set("Eu", "", "", "", "").unwrap();
+
+        for i in 0..crate::social::DM_INTRO_LIMIT {
+            let m = e.send_dm(&conv.id, &format!("oi {i}")).unwrap();
+            assert!(m.id.len() > 8);
+        }
+        let err = e.send_dm(&conv.id, "quarta").unwrap_err().to_string();
+        assert!(
+            err.contains("limite"),
+            "quarta mensagem tem de falhar: {err}"
+        );
+
+        // Reabrir o app/banco não devolve crédito.
+        let store2 = crate::storage::Store::open(&d.path().join("distorrent.db")).unwrap();
+        assert_eq!(
+            store2
+                .dm_intro_used(&conv.id, &e.identity.fingerprint)
+                .unwrap(),
+            crate::social::DM_INTRO_LIMIT
+        );
+
+        // Aceitar a amizade libera a conversa e zera o contador.
+        e.store.accept_friend(&peer, "peer").unwrap();
+        e.reset_dm_intro_for_peer(&peer);
+        assert!(e.send_dm(&conv.id, "agora pode").is_ok());
+    }
+
+    #[test]
+    fn aceitar_amizade_zera_o_gate_da_dm() {
+        let (e, _d) = mk_engine("intro-aceite");
+        let peer = peer_hex(0x88);
+        let conv = e.open_dm(&peer, "peer").unwrap();
+        e.store.set_friend_request_in(&peer, "peer").unwrap();
+        assert!(e
+            .store
+            .dm_intro_take(
+                &conv.id,
+                &e.identity.fingerprint,
+                crate::social::DM_INTRO_LIMIT
+            )
+            .unwrap());
+        e.friend_respond(&peer, true).unwrap();
+        assert_eq!(
+            e.store
+                .dm_intro_used(&conv.id, &e.identity.fingerprint)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+            Some("accepted".into())
+        );
+    }
+
+    #[test]
+    fn mensagem_bloqueada_nao_sai() {
+        let (e, _d) = mk_engine("dm-bloqueada");
+        let peer = peer_hex(0x99);
+        let conv = e.open_dm(&peer, "peer").unwrap();
+        e.friend_block(&peer).unwrap();
+        let err = e.send_dm(&conv.id, "oi").unwrap_err().to_string();
+        assert!(err.contains("bloqueado"), "{err}");
+    }
+
+    #[test]
+    fn contadores_por_membro_nao_vazam_entre_grupo() {
+        let (e, _d) = mk_engine("contadores");
+        let peer_a = peer_hex(0xaa);
+        let peer_b = peer_hex(0xbb);
+        let conv = e
+            .store
+            .create_group_dm(
+                &e.identity.fingerprint,
+                &[peer_a.clone(), peer_b.clone()],
+                "g",
+            )
+            .unwrap();
+        // Autoria do OUTRO membro: a própria mensagem nunca conta como não
+        // lida para quem a escreveu.
+        let msg = crate::protocol::MessageEnvelope::new(&e.keypair, &conv.id, "oi");
+        let mut recebida = msg.clone();
+        recebida.author_fp = peer_a.clone();
+        e.store.insert_message(&recebida, "in", "ok").unwrap();
+
+        let me = &e.identity.fingerprint;
+        assert_eq!(e.store.unread_count_for(&conv.id, me).unwrap(), 1);
+        e.store.conv_read_set(&conv.id, me, recebida.ts).unwrap();
+        assert_eq!(e.store.unread_count_for(&conv.id, me).unwrap(), 0);
+        assert_eq!(
+            e.store.unread_count_for(&conv.id, &peer_b).unwrap(),
+            1,
+            "a leitura de um membro não marca para o outro"
+        );
+    }
+
+    #[test]
+    fn mencao_e_registrada_por_destinatario() {
+        let (e, _d) = mk_engine("mencoes");
+        let alvo = peer_hex(0xcc);
+        let autor = peer_hex(0xcc + 1);
+        let meu = e.identity.fingerprint.clone();
+        let conv = e
+            .store
+            .create_group_dm(&meu, &[alvo.clone(), autor.clone()], "g")
+            .unwrap();
+        let body = format!("oi @{alvo} e @{meu}");
+        let mut msg = crate::protocol::MessageEnvelope::new(&e.keypair, &conv.id, &body);
+        msg.author_fp = autor;
+        e.store.insert_message(&msg, "in", "ok").unwrap();
+        for t in e.store.mention_targets(&body) {
+            e.store.mention_add(&msg.id, &conv.id, &t).unwrap();
+        }
+        assert_eq!(e.store.unread_mentions_for(&meu).unwrap(), 1);
+        assert_eq!(e.store.unread_mentions_for(&alvo).unwrap(), 1);
+        e.store.conv_read_set(&conv.id, &meu, msg.ts).unwrap();
+        assert_eq!(e.store.unread_mentions_for(&meu).unwrap(), 0);
+    }
+
+    #[test]
+    fn busca_unread_respeita_cursor_por_conversa() {
+        let (e, _d) = mk_engine("busca-unread");
+        let peer = peer_hex(0xd0);
+        let conv = e.open_dm(&peer, "peer").unwrap();
+        let mut antes = crate::protocol::MessageEnvelope::new(&e.keypair, &conv.id, "antiga");
+        antes.ts = 1_000;
+        antes.author_fp = peer.clone();
+        let mut depois = crate::protocol::MessageEnvelope::new(&e.keypair, &conv.id, "nova");
+        depois.ts = 2_000;
+        depois.author_fp = peer.clone();
+        e.store.insert_message(&antes, "in", "ok").unwrap();
+        e.store.insert_message(&depois, "in", "ok").unwrap();
+
+        let mut q = crate::social::SearchQuery {
+            has: "unread".into(),
+            me: e.identity.fingerprint.clone(),
+            ..Default::default()
+        };
+        assert_eq!(e.store.message_search(&q).unwrap().len(), 2);
+
+        e.store
+            .conv_read_set(&conv.id, &e.identity.fingerprint, antes.ts)
+            .unwrap();
+        let hits = e.store.message_search(&q).unwrap();
+        assert_eq!(hits.len(), 1, "só a mensagem posterior ao cursor");
+        assert_eq!(hits[0].id, depois.id);
+
+        q.has.clear();
+        q.text = "antiga".into();
+        assert_eq!(
+            e.store.message_search(&q).unwrap().len(),
+            1,
+            "busca textual continua enxergando o histórico lido"
+        );
+    }
+
+    #[test]
+    fn mensagem_de_amigo_com_conversa_apagada_recria_a_dm_nao_um_grupo() {
+        let (e, _d) = mk_engine("dm-apagada");
+        // Peer real: a assinatura é verificada contra a pubkey da sessão.
+        let kp_amigo = Keypair::generate();
+        let amigo = kp_amigo.fingerprint();
+        e.store.accept_friend(&amigo, "amigo").unwrap();
+        let conv = e.open_dm(&amigo, "amigo").unwrap();
+        // Usuário apaga a conversa local; a amizade continua.
+        e.store.delete_conversation(&conv.id).unwrap();
+        assert!(e.store.get_conversation(&conv.id).unwrap().is_none());
+
+        let env = crate::protocol::MessageEnvelope::new(&kp_amigo, &conv.id, "oi");
+        perfil_block_on(handle_frame(
+            &e,
+            &amigo,
+            &kp_amigo.public_hex(),
+            "amigo",
+            SecureFrame::Msg(env),
+        ))
+        .unwrap();
+
+        let recriada = e
+            .store
+            .get_conversation(&conv.id)
+            .unwrap()
+            .expect("DM volta");
+        assert_eq!(recriada.kind, "dm", "não pode virar grupo de 1 pessoa");
+    }
+
+    #[test]
+    fn grupo_so_e_gerenciado_pelo_criador() {
+        let (e, _d) = mk_engine("dono-grupo");
+        let outro = peer_hex(0xdd);
+        let conv = e
+            .store
+            .create_group_dm(&e.identity.fingerprint, &[outro.clone()], "g")
+            .unwrap();
+        // O dono é quem criou (eu), não o primeiro do roster ordenado. Um
+        // membro comum tentando reescrever o grupo tem de ser ignorado.
+        let r = handle_frame(
+            &e,
+            &outro,
+            "pk",
+            "outro",
+            SecureFrame::GroupCreated {
+                conv_id: conv.id.clone(),
+                title: "sequestrado".into(),
+                members: vec![(outro.clone(), "outro".into())],
+                owner_fp: outro.clone(),
+            },
+        );
+        assert!(perfil_block_on(r).is_ok());
+        assert_ne!(
+            e.store.get_conversation(&conv.id).unwrap().unwrap().title,
+            "sequestrado"
+        );
+    }
+
+    #[test]
+    fn forward_de_canal_exige_host_e_membro() {
+        let (e, _d) = mk_engine("forward-guard");
+        let estranho = peer_hex(0xee);
+        let env = crate::protocol::MessageEnvelope::new(&e.keypair, "canal-alheio", "x");
+        // Sem canal no banco, o frame cai no ramo de "contato": um desconhecido
+        // não pode injetar mensagem.
+        let r = handle_frame(
+            &e,
+            &estranho,
+            "pk",
+            "estranho",
+            SecureFrame::Forward {
+                conv_id: "conv".into(),
+                channel_id: String::new(),
+                env,
+                from_label: "label".into(),
+            },
+        );
+        assert!(perfil_block_on(r).is_err());
+    }
+
+    #[test]
+    fn adicionar_participante_exige_estar_na_chamada() {
+        let (e, _d) = mk_engine("call-add-guard");
+        let amigo = peer_hex(0xef);
+        e.store.accept_friend(&amigo, "amigo").unwrap();
+        let r = handle_frame(
+            &e,
+            &amigo,
+            "pk",
+            "amigo",
+            SecureFrame::CallAddParticipant {
+                call_id: "call-inexistente".into(),
+                fp: peer_hex(0xf0),
+                kind: String::new(),
+            },
+        );
+        assert!(
+            perfil_block_on(r).is_err(),
+            "sem estar na chamada, ninguém adiciona participante"
+        );
+    }
+
+    #[test]
+    fn banir_exige_alvo_membro_e_nao_o_proprio() {
+        let (e, _d) = mk_engine("ban-guard");
+        let meu = e.identity.fingerprint.clone();
+        let outsider = peer_hex(0xf1);
+        // Eu sou o dono do servidor; recebo um ban de mim mesmo (frame forjado
+        // por um peer que se diz dono não passa, mas o alvo tem de ser válido).
+        e.store
+            .create_community("cid1", "Servidor", &meu, &[])
+            .unwrap();
+        let r = handle_frame(
+            &e,
+            &meu,
+            "pk",
+            "eu",
+            SecureFrame::MemberBan {
+                community_id: "cid1".into(),
+                target_fp: outsider,
+                until_ms: 0,
+                reason: String::new(),
+            },
+        );
+        assert!(
+            perfil_block_on(r).is_err(),
+            "banir quem não é membro tem de falhar"
+        );
+    }
+
+    /// Fluxo completo com dois motores reais: pedido de A, aviso em B,
+    /// aceite em B e confirmação em A. Cada passo usa o MESMO frame que o
+    /// transporte usaria, então uma quebra de simetria aparece aqui.
+    #[tokio::test]
+    async fn ciclo_de_amizade_entre_dois_motores_termina_igual_nos_dois() {
+        let (a, _da) = mk_engine("amizade-a");
+        let (b, _db) = mk_engine("amizade-b");
+        let fp_a = a.identity.fingerprint.clone();
+        let fp_b = b.identity.fingerprint.clone();
+
+        let outcome = a.friend_request(&fp_b).unwrap();
+        assert_eq!(outcome, FriendOutcome::QueuedOffline, "sem link: enfileira");
+        assert_eq!(
+            a.store.get_friend(&fp_b).unwrap().map(|(_, s)| s),
+            Some("pending_out".into())
+        );
+
+        // O pedido chega em B (o transporte entregaria este frame).
+        handle_frame(
+            &b,
+            &fp_a,
+            "pk-a",
+            "a",
+            SecureFrame::FriendRequest {
+                nickname: "a".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            b.store.get_friend(&fp_a).unwrap().map(|(_, s)| s),
+            Some("pending_in".into())
+        );
+
+        // B aceita pelo comando local (que também emite o FriendAccept).
+        b.friend_respond(&fp_a, true).unwrap();
+        assert_eq!(
+            b.store.get_friend(&fp_a).unwrap().map(|(_, s)| s),
+            Some("accepted".into())
+        );
+
+        // O aceite chega em A.
+        handle_frame(
+            &a,
+            &fp_b,
+            "pk-b",
+            "b",
+            SecureFrame::FriendAccept {
+                nickname: "b".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        for (quem, e, peer) in [("a", &a, &fp_b), ("b", &b, &fp_a)] {
+            assert_eq!(
+                e.store.get_friend(peer).unwrap().map(|(_, s)| s),
+                Some("accepted".into()),
+                "{quem} precisa terminar como amigo"
+            );
+        }
+    }
+
+    /// Remover de um lado chega ao outro e os dois terminam sem amizade.
+    #[tokio::test]
+    async fn remocao_propaga_e_nao_deixa_amizade_unilateral() {
+        let (a, _da) = mk_engine("rm-a");
+        let (b, _db) = mk_engine("rm-b");
+        let fp_a = a.identity.fingerprint.clone();
+        let fp_b = b.identity.fingerprint.clone();
+        a.store.accept_friend(&fp_b, "b").unwrap();
+        b.store.accept_friend(&fp_a, "a").unwrap();
+
+        a.friend_remove(&fp_b).unwrap();
+        handle_frame(&b, &fp_a, "pk-a", "a", SecureFrame::FriendRemove)
+            .await
+            .unwrap();
+
+        for (quem, e, peer) in [("a", &a, &fp_b), ("b", &b, &fp_a)] {
+            assert!(
+                !matches!(
+                    e.store.get_friend(peer).unwrap().map(|(_, s)| s),
+                    Some(s) if s == "accepted"
+                ),
+                "{quem} não pode continuar amigo depois da remoção"
+            );
+        }
     }
 }
 
