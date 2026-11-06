@@ -173,7 +173,7 @@ Regras de descarte na leitura: comando sem `name`, `reply` vazio, `script` vazio
 
 | Caminho | Regra | Padrão | Enforcement real |
 |---|---|---|---|
-| `integrations.http.allowDomains` | até 256 domínios, ≤253, sem `/`. Vazio = qualquer destino público. Sufixo conta (`exemplo.com` cobre `api.exemplo.com`). | `[]` | **sim** — `hostAllowed` em comando HTTP e `http` de script (§13) |
+| `integrations.http.allowDomains` | até 256 domínios, ≤253, sem `/`. Vazio = qualquer destino público. Sufixo conta (`exemplo.com` cobre `api.exemplo.com`). | `[]` | **sim** — `hostAllowed` em comando HTTP e `http` de script (§14) |
 | `integrations.http.maxCallsPerMinute` | 1..600 | 60 | **declarado e devolvido em `/v1/limits`; não é aplicado** |
 | `integrations.limits.maxMessagesPerExecution` | 1..20 | 20 | **declarado; o runtime corta em 8 mensagens por script** |
 | `integrations.retention.hours` | 0..720 | 24 | **declarado e devolvido; o console não apaga por idade** (guarda as 500 últimas) |
@@ -245,7 +245,7 @@ cortado em **1900** caracteres.
 }
 ```
 
-1. URL passa pela guarda de destino e pela allowlist (§13).
+1. URL passa pela guarda de destino e pela allowlist (§14).
 2. Timeout de **10 s** no runtime; teto de **15 s** no `http_fetch` da casca.
 3. `responsePath` inexistente ⇒ **não responde** (não inventa texto).
 4. Status ≥400 ⇒ só log (`warn`), sem resposta no canal.
@@ -334,7 +334,7 @@ São **20** no schema. `implemented` vem de `Primitives::iter()` no core e de
 | `thread` | **sim** | ações `thread_create`/`thread_archive` |
 | `poll` | **sim** | ação `poll_create` |
 | `edit` | não | — (o padrão vem ligado, mas `implemented:false` nega) |
-| `audioFrame` | não | — |
+| `audioFrame` | **parcial** | `/v1/audio/frames` toca no alto-falante do dono (Linux); **não** vai para a call (§12) |
 | `videoFrame` | não | — |
 | `screenFrame` | não | — |
 | `http` | **sim** | comando `http` e `http` de script |
@@ -760,7 +760,49 @@ coluna local.
 
 ---
 
-## 12. Plugin (código do criador)
+## 12. Música do bot (`/v1/audio/*`)
+
+**O que funciona:** o bot manda PCM i16 mono 48 kHz e o som sai no
+**alto-falante do PC do dono**, misturado com a voz da chamada. É o `AudioHub`
+(`media_voice.rs`) somando os `inbox` no buffer de saída.
+
+```bash
+curl -X POST "$DISTORRENT_BOT_URL/v1/audio/open"
+# 1 s de silêncio (48000 amostras * 2 bytes, base64), só para medir a rota:
+curl -X POST "$DISTORRENT_BOT_URL/v1/audio/frames" \
+  -H 'content-type: application/json' \
+  -d "{\"pcm\":\"$(head -c 96000 /dev/zero | base64 -w0)\",\"gain\":1.0}"
+curl "$DISTORRENT_BOT_URL/v1/audio/status"
+curl -X POST "$DISTORRENT_BOT_URL/v1/audio/stop"
+```
+
+| Rota | O que faz |
+|---|---|
+| `POST /v1/audio/open` | abre o canal (idempotente); devolve `delivered:"local"` |
+| `POST /v1/audio/frames` | `{"pcm":"<base64 i16 LE>","gain":1.0}` → `accepted`/`dropped` |
+| `GET /v1/audio/status` | `open`, `accepted`, `dropped` |
+| `POST /v1/audio/stop` | silencia e fecha o canal |
+
+Limites: fila de **250 frames de 20 ms** (5 s); passou disso, o frame **mais
+velho** cai e `dropped` sobe (backpressure visível, sem crescer a memória). Até
+**480 KB** de PCM por requisição. `gain` 0..2, com saturação (clipping é ruído
+para todos).
+
+**O que NÃO funciona, e por quê:** o som **não é transmitido aos outros
+participantes da call**. O caminho para isso é o `spawn_send_loop` de cada peer,
+alimentado pelo **microfone**; colocar música ali faria o bot soar como o
+próprio dono, e o cancelamento de eco (AEC) trataria a música como eco e a
+abafaria. Fazer isso direito exige um track de saída separado por peer no
+`media_voice.rs` — não existe ainda. A rota responde `to_call: false` em vez de
+deixar o criador acreditar que a call toda está ouvindo.
+
+**Plataforma:** só no **Linux** com mídia nativa. No Windows e no Android o
+áudio da chamada é da WebView (`RTCPeerConnection`), que o core não alcança; o
+comando devolve erro explicando isso em vez de falhar em silêncio.
+
+---
+
+## 13. Plugin (código do criador)
 
 O app executa a pasta como **processo filho**, com a ponte já aberta.
 
@@ -831,7 +873,7 @@ API da ponte + o opt-in do dono. **Não é sandbox de SO.**
 
 ---
 
-## 13. Segurança
+## 14. Segurança
 
 ### Guarda de URL canônica (SSRF)
 
@@ -893,7 +935,7 @@ como texto, e — no modo `plugin` — tudo o que o seu usuário pode no sistema
 
 ---
 
-## 14. Banco de dados
+## 15. Banco de dados
 
 | Tabela | Conteúdo |
 |---|---|
@@ -910,7 +952,7 @@ válidos: `perms` entra como `0` e a config antiga segue funcionando.
 
 ---
 
-## 15. Painel: o que existe de verdade
+## 16. Painel: o que existe de verdade
 
 Servidor → **Bots**, ou a rota `/bots` (tela cheia), ou o painel embutido.
 
@@ -944,7 +986,7 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 
 ---
 
-## 16. Solução de problemas
+## 17. Solução de problemas
 
 | Sintoma | Causa real | O que fazer |
 |---|---|---|
@@ -973,7 +1015,7 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 
 ---
 
-## 17. Limitações reais e o que não existe
+## 18. Limitações reais e o que não existe
 
 | Funcionalidade | Estado |
 |---|---|
@@ -985,7 +1027,7 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 | Execução de código como plugin | **funciona** (desktop; não é sandbox de SO) |
 | Bot responder com o app fechado | **não existe** (sem hospedagem) |
 | Ponte no Android | **não existe** (sem processo/servidor local) |
-| Bot em canal de voz, áudio ou tela | **não existe** |
+| Bot em canal de voz, áudio ou tela | **parcial**: `/v1/audio/*` toca PCM no alto-falante do PC do dono (Linux com mídia nativa). **Não** transmite aos outros participantes da call (§12.1) |
 | Bot em vários servidores com o mesmo processo | **não existe** — um bot pertence a um servidor e a ponte é por bot |
 | Interface web de edição na ponte | **não existe** — a ponte é canal de API |
 | Sandbox de SO para o código do bot | **não existe** |
@@ -1010,7 +1052,7 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 
 ---
 
-## 18. Ambiente de desenvolvimento
+## 19. Ambiente de desenvolvimento
 
 ```powershell
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:TEMP\node24\node-v24.22.1-win-x64;$env:PATH"
@@ -1050,7 +1092,7 @@ Suítes que travam o comportamento:
 
 ---
 
-## 19. Exemplos de `bot.json`
+## 20. Exemplos de `bot.json`
 
 Os exemplos **não vêm no repositório**: são publicados como plugins no GitHub.
 Para usar um, baixe a pasta e use **Adicionar bot existente**.
@@ -1133,7 +1175,7 @@ pelo protocolo de mídia, e o runtime de bot não tem caminho de áudio.
 
 ---
 
-## 20. Changelog
+## 21. Changelog
 
 ### 2026-11-06 — schema v3 e correções de segurança
 
@@ -1175,3 +1217,4 @@ pelo protocolo de mídia, e o runtime de bot não tem caminho de áudio.
   `implemented`) e **`GET /v1/health`**.
 - A mensagem do próprio bot **não** volta em `/v1/events` (fim do auto-loop).
 - `403` para `Origin`, `421` para `Host` não-loopback, `429` com `retry_after`.
+

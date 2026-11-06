@@ -92,6 +92,14 @@ struct ConfigBody {
     config: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AudioBody {
+    /// PCM i16 mono 48 kHz, base64.
+    pcm: String,
+    #[serde(default)]
+    gain: Option<f32>,
+}
+
 struct Shared {
     bot_id: String,
     community_id: String,
@@ -112,6 +120,9 @@ struct Shared {
     /// `Idempotency-Key` já vista → (status, corpo) para repetir a resposta sem
     /// duplicar mensagem/auditoria. Janela curta e tamanho limitado.
     idem: Mutex<VecDeque<(String, Instant, u16, String)>>,
+    /// Canal de música deste bot. Compartilhado com o `AppState` para o comando
+    /// `bot_audio_*` e a ponte verem o mesmo estado.
+    music: Arc<crate::botmusic::Music>,
 }
 
 pub struct Bridge {
@@ -192,6 +203,7 @@ pub fn start(
     community_id: String,
     bot_id: String,
     port: u16,
+    music: Arc<crate::botmusic::Music>,
 ) -> Result<Bridge, String> {
     let server = Server::http(("127.0.0.1", port))
         .map_err(|e| format!("não foi possível abrir 127.0.0.1:{port}: {e}"))?;
@@ -218,6 +230,7 @@ pub fn start(
         window_events: Mutex::new((Instant::now(), 0)),
         window_write: Mutex::new((Instant::now(), 0)),
         idem: Mutex::new(VecDeque::new()),
+        music,
     });
 
     // Pump de eventos: assina o motor e filtra o que interessa a este bot.
@@ -821,6 +834,82 @@ fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<NetworkEngine>) {
                 ),
             }
         }
+        (Method::Post, "/v1/audio/open") => {
+            // O bot abre o canal de música. O som toca no alto-falante DESTE
+            // PC, junto com a voz — não vai para a call (ver botmusic.rs).
+            let key = format!("{}|{}", shared.community_id, shared.bot_id);
+            let (abriu, _) = shared.music.open(&key);
+            respond(
+                req,
+                200,
+                serde_json::json!({
+                    "ok": true,
+                    "opened": abriu,
+                    "delivered": "local",
+                    "to_call": false,
+                    "sample_rate": 48_000,
+                    "channels": 1,
+                }),
+            )
+        }
+        (Method::Post, "/v1/audio/frames") => {
+            let body: AudioBody = match read_json(&mut req) {
+                Ok(b) => b,
+                Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
+            };
+            use base64::Engine as _;
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(body.pcm.as_bytes())
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    return respond(
+                        req,
+                        400,
+                        serde_json::json!({"error": format!("base64 inválido: {e}")}),
+                    )
+                }
+            };
+            let key = format!("{}|{}", shared.community_id, shared.bot_id);
+            match shared.music.push(&key, &bytes, body.gain.unwrap_or(1.0)) {
+                Ok((acc, drop)) => respond(
+                    req,
+                    200,
+                    serde_json::json!({
+                        "ok": true,
+                        "accepted": acc,
+                        "dropped": drop,
+                        "delivered": "local",
+                        "to_call": false,
+                    }),
+                ),
+                Err(e) => respond(req, 409, serde_json::json!({"error": e})),
+            }
+        }
+        (Method::Get, "/v1/audio/status") => {
+            let key = format!("{}|{}", shared.community_id, shared.bot_id);
+            let st = shared.music.status(&key);
+            respond(
+                req,
+                200,
+                match st {
+                    Some((acc, drop)) => serde_json::json!({
+                        "open": true,
+                        "accepted": acc,
+                        "dropped": drop,
+                        "delivered": "local",
+                        "to_call": false,
+                    }),
+                    None => {
+                        serde_json::json!({"open": false, "delivered": "local", "to_call": false})
+                    }
+                },
+            )
+        }
+        (Method::Post, "/v1/audio/stop") => {
+            let key = format!("{}|{}", shared.community_id, shared.bot_id);
+            let fechou = shared.music.close(&key);
+            respond(req, 200, serde_json::json!({"ok": true, "closed": fechou}))
+        }
         (Method::Post, "/v1/log") => {
             let body: LogBody = match read_json(&mut req) {
                 Ok(b) => b,
@@ -1116,7 +1205,14 @@ mod tests {
             .create_community("Servidor", &["geral".to_string()])
             .unwrap();
         let bot = engine.bot_create(&cid, "Ponte", None, None).unwrap();
-        let bridge = start(engine.clone(), cid.clone(), bot.id.clone(), 0).expect("ponte");
+        let bridge = start(
+            engine.clone(),
+            cid.clone(),
+            bot.id.clone(),
+            0,
+            Arc::new(crate::botmusic::Music::new()),
+        )
+        .expect("ponte");
         let prefix = bridge
             .info()
             .url

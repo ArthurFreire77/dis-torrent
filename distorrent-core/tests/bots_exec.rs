@@ -778,3 +778,25 @@ fn limite_de_config_e_o_mesmo_no_parser_e_no_banco() {
         "a mensagem precisa citar o teto real (64 KB), nao 16: {msg}"
     );
 }
+
+#[test]
+fn audio_do_bot_toca_local_e_nao_finge_transmitir() {
+    // O som sai no alto-falante do PC do dono (AudioHub). Nao vai para a call:
+    // esse caminho e o track de saida por peer, alimentado pelo microfone.
+    // A API tem de dizer isso, nao deixar o criador acreditar que transmitiu.
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "DJ", None, None).expect("bot");
+    assert!(e.bots_list(&cid).unwrap().iter().any(|b| b.id == bot.id));
+    // O gate de plataforma: no Windows compila sem o misturador; no Linux usa.
+    #[cfg(target_os = "linux")]
+    {
+        let mut sink = distorrent_core::net::bot_audio::open();
+        let (acc, drop) = sink.push_pcm(&vec![0i16; 4800]);
+        assert_eq!(acc, 5, "4800 amostras = 5 frames de 20 ms");
+        assert_eq!(drop, 0);
+        assert_eq!(sink.dropped(), 0);
+    }
+}

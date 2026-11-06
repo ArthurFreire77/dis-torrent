@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod background;
 mod botbridge;
+mod botmusic;
 mod botplugin;
 mod firewall;
 mod sharebar;
@@ -95,6 +96,10 @@ struct AppState {
     bot_bridges: Mutex<std::collections::HashMap<String, Arc<botbridge::Bridge>>>,
     /// Plugins de bot rodando como processo filho (código do usuário).
     bot_plugins: botplugin::Plugins,
+    /// Canais de música abertos, por `community_id|bot_id`. Só no desktop
+    /// Linux, onde existe o misturador nativo; nas outras plataformas o áudio
+    /// da chamada é da WebView e esta lista fica vazia.
+    bot_music: Arc<botmusic::Music>,
 }
 
 const AUTH_ORIGIN: &str = "desktop";
@@ -1814,6 +1819,10 @@ fn bot_bridge_start(
         return Err("bot inexistente".into());
     }
     let key = bridge_key(&community_id, &bot_id);
+    // Clonado ANTES do lock: `state` é `State<'_, _>` e pegar o campo com o
+    // `Mutex` das bridges preso funcionaria, mas manter a ordem evita um
+    // deadlock futuro se o `Music` também precisar do lock de bridges.
+    let music = state.bot_music.clone();
     let mut map = state.bot_bridges.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = map.get(&key) {
         return Ok(existing.info());
@@ -1823,6 +1832,7 @@ fn bot_bridge_start(
         community_id.clone(),
         bot_id.clone(),
         port.unwrap_or(0),
+        music,
     )?);
     let info = bridge.info();
     map.insert(key, bridge);
@@ -3766,6 +3776,87 @@ async fn voice_join(
         .map_err(err)
 }
 
+// --- Música do bot (`/v1/audio/*`) -----------------------------------------
+//
+// O SOM TOCA NO ALTO-FALANTE DESTE PC, junto com a voz. Não é transmitido aos
+// outros participantes: esse caminho é o track de saída por peer, alimentado
+// pelo microfone. A resposta diz `delivered: "local"` para o criador não
+// acreditar que a call toda está ouvindo.
+
+fn music_key(community_id: &str, bot_id: &str) -> String {
+    format!("{community_id}|{bot_id}")
+}
+
+/// Abre o canal de música de um bot. Idempotente.
+#[tauri::command]
+fn bot_audio_open(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    if engine(&state)?
+        .bots_list(&community_id)
+        .map_err(err)?
+        .iter()
+        .all(|b| b.id != bot_id)
+    {
+        return Err("bot inexistente".into());
+    }
+    let key = music_key(&community_id, &bot_id);
+    let (abriu, _) = state.bot_music.open(&key);
+    Ok(abriu)
+}
+
+/// Enfileira PCM i16 mono 48 kHz em base64. Devolve `(aceitos, descartados)`.
+#[tauri::command]
+fn bot_audio_push(
+    community_id: String,
+    bot_id: String,
+    pcm_b64: String,
+    gain: Option<f32>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(pcm_b64.as_bytes())
+        .map_err(|e| format!("base64 inválido: {e}"))?;
+    let key = music_key(&community_id, &bot_id);
+    let (acc, drop) = state.bot_music.push(&key, &bytes, gain.unwrap_or(1.0))?;
+    Ok(serde_json::json!({
+        "accepted": acc,
+        "dropped": drop,
+        // Honestidade: o áudio saiu neste PC, não na call.
+        "delivered": "local",
+        "to_call": false,
+    }))
+}
+
+#[tauri::command]
+fn bot_audio_status(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<serde_json::Value>, String> {
+    let key = music_key(&community_id, &bot_id);
+    Ok(state.bot_music.status(&key).map(|(acc, drop)| {
+        serde_json::json!({
+            "accepted": acc,
+            "dropped": drop,
+            "delivered": "local",
+        })
+    }))
+}
+
+#[tauri::command]
+fn bot_audio_close(
+    community_id: String,
+    bot_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let key = music_key(&community_id, &bot_id);
+    Ok(state.bot_music.close(&key))
+}
+
 #[tauri::command]
 async fn voice_leave(
     community_id: String,
@@ -5036,6 +5127,10 @@ fn main() {
             open_bots_window,
             http_fetch,
             voice_join,
+            bot_audio_open,
+            bot_audio_push,
+            bot_audio_status,
+            bot_audio_close,
             voice_leave,
             voice_state,
             voice_states,
@@ -5168,6 +5263,7 @@ fn main() {
                 auth_limit: distorrent_core::authlimit::AuthLimiter::new(),
                 bot_bridges: Mutex::new(std::collections::HashMap::new()),
                 bot_plugins: botplugin::Plugins::new(),
+                bot_music: Arc::new(botmusic::Music::new()),
             });
             app.manage(background::Background::new());
             background::init(app.handle());
