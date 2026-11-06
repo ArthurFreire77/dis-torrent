@@ -31,7 +31,14 @@ test('botão: completo mostra ação de salvar (com prévia) ou baixar de novo',
 
 test('botão: baixando mostra o percentual REAL (não "Baixar")', () => {
   assert.equal(downloadButtonLabel(true, false, prog({ pct: 43, status: 'downloading' }), false), 'Baixando 43%')
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 0, status: 'downloading' }), false), 'Baixar')
+  // 0% durante o download era rotulado "Baixar" e parecia que nada começou;
+  // o honesto é dizer que está conectando.
+  assert.equal(downloadButtonLabel(true, false, prog({ pct: 0, status: 'downloading' }), false), 'Conectando…')
+})
+
+test('botão: conferir e salvar têm rótulo próprio', () => {
+  assert.equal(downloadButtonLabel(true, false, prog({ pct: 100, status: 'verifying' }), false), 'Conferindo integridade…')
+  assert.equal(downloadButtonLabel(true, false, prog({ pct: 100, status: 'saving' }), false), 'Salvando…')
 })
 
 test('botão: pausado e com falha pedem a ação certa', () => {
