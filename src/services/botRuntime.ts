@@ -30,9 +30,9 @@ export const botRuntime = new BotEngine(
       services.httpFetch(url, method, headers, body, timeoutMs),
     botPostMessage: (cid, channelId, botId, body) =>
       services.botPostMessage(cid, channelId, botId, body),
-    botAdmin: (cid, botId, action, target, reason, number) =>
+    botAdmin: (cid, botId, action, target, reason, number, channel) =>
       services.botAdmin
-        ? services.botAdmin(cid, botId, action, target, reason, number)
+        ? services.botAdmin(cid, botId, action, target, reason, number, channel)
         : Promise.reject(new Error('execução administrativa indisponível nesta plataforma')),
     botLog: (cid, botId, level, message) =>
       services.botLogAppend

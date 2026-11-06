@@ -53,6 +53,7 @@ export interface BotRuntimeDeps {
     target: string,
     reason: string,
     number: number | null,
+    channel?: string,
   ) => Promise<string>
   botLog: (cid: string, botId: string, level: string, message: string) => Promise<unknown>
   botVarGet: (cid: string, botId: string, key: string) => Promise<string | null>
@@ -252,6 +253,8 @@ export class BotEngine {
           body,
           ts: typeof ev.ts === 'number' ? ev.ts : this.now(),
           mention: this.mentionsBot(body, bot),
+          // Sem o id, o bot não consegue reagir/apagar/fixar o que recebeu.
+          message_id: typeof ev.id === 'string' ? ev.id : '',
         })
       }
 
@@ -283,7 +286,7 @@ export class BotEngine {
         continue
       }
       try {
-        await this.runCommand(cid, convId, bot, config, cmd, parsed.args, author)
+        await this.runCommand(cid, convId, bot, config, cmd, parsed.args, author, ev)
       } catch (e: unknown) {
         this.log(
           cid,
@@ -465,6 +468,7 @@ export class BotEngine {
     cmd: BotCommandDef,
     args: string[],
     author: string,
+    ev?: any,
   ): Promise<void> {
     const started = this.now()
     switch (cmd.exec) {
@@ -479,7 +483,15 @@ export class BotEngine {
         return
       }
       case 'script': {
-        await this.runScript(cid, bot, config, cmd, args, author, undefined, channelId)
+        // O script recebe o evento da mensagem: `{{event.message_id}}` e
+        // `{{event.channel}}` permitem reagir/apagar sem adivinhar id.
+        const evt = {
+          channel: channelId,
+          author,
+          message_id: typeof ev?.id === 'string' ? ev.id : '',
+          mention: this.mentionsBot(String(ev?.body ?? ''), bot),
+        }
+        await this.runScript(cid, bot, config, cmd, args, author, evt, channelId)
         return
       }
       default:
@@ -543,7 +555,7 @@ export class BotEngine {
     const reason = args.slice(1).join(' ')
     const number = this.numericArg(action, args)
     try {
-      const out = await this.deps.botAdmin(cid, bot.id, action, target, reason, number)
+      const out = await this.deps.botAdmin(cid, bot.id, action, target, reason, number, channelId)
       this.log(cid, bot.id, 'info', `/${action} por ${author}: ${out}`)
       if (out) await this.post(cid, channelId, bot, cmd, out)
     } catch (e: unknown) {
@@ -555,6 +567,11 @@ export class BotEngine {
     // `/mute @x 10 motivo` → 10 minutos; `/slowmode #canal 30` → 30s.
     if (action === 'mute' || action === 'slowmode' || action === 'clear') {
       const n = Number(args[1])
+      if (Number.isFinite(n) && n >= 0) return Math.trunc(n)
+    }
+    // `/make_invite 48` e `/audit 20` têm o número como primeiro argumento.
+    if (action === 'make_invite' || action === 'audit') {
+      const n = Number(args[0])
       if (Number.isFinite(n) && n >= 0) return Math.trunc(n)
     }
     return null
@@ -874,9 +891,17 @@ export class BotEngine {
         continue
       }
       try {
-        const out = await this.deps.botAdmin(cid, bot.id, a.action, a.target, a.reason, a.number)
-        this.log(cid, bot.id, 'info', `/admin ${a.action}: ${out}`)
         const channel = replyChannel ?? String(event?.channel ?? '')
+        const out = await this.deps.botAdmin(
+          cid,
+          bot.id,
+          a.action,
+          a.target,
+          a.reason,
+          a.number,
+          channel || undefined,
+        )
+        this.log(cid, bot.id, 'info', `/admin ${a.action}: ${out}`)
         if (out && channel) {
           await this.deps.botPostMessage(cid, channel, bot.id, out).catch(() => {})
         }

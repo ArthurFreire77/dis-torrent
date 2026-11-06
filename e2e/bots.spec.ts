@@ -80,3 +80,28 @@ test('regenerar token troca o token visível (dono)', async ({ page }) => {
 
   await expect(tokenBox).not.toHaveText(before ?? '', { timeout: 15000 });
 });
+
+test('painel mostra as ações novas com os argumentos e salva comando de conteúdo', async ({ page }) => {
+  await createAccount(page, 'Autora');
+  await createServerViaWizard(page, 'ServidorAcoes');
+  await openServerSettingsBots(page);
+  await createBot(page, 'ConteudoBot');
+
+  await page.getByRole('button', { name: 'Configurar ConteudoBot' }).click();
+  const panel = page.getByRole('region', { name: 'Configurar ConteudoBot' });
+  await expect(panel).toBeVisible({ timeout: 10000 });
+
+  await panel.getByRole('tab', { name: 'Comandos' }).click();
+  await panel.getByRole('button', { name: /Adicionar comando/ }).click();
+  await panel.getByLabel('Nome do comando 1').fill('fixar');
+  await panel.getByLabel('Tipo do comando 1').selectOption('admin');
+  await panel.getByLabel('Ação administrativa do comando 1').selectOption('pin');
+
+  // A UI não pode oferecer a ação sem dizer o que ela espera.
+  await expect(panel.getByText('<id-da-mensagem>')).toBeVisible();
+  // O core só aceita a ação se o bot tiver o bit; o painel avisa antes.
+  await expect(panel.getByText(/permissão da ação precisa estar concedida/i)).toBeVisible();
+
+  await panel.getByRole('button', { name: 'Salvar', exact: true }).click();
+  await expect(panel.getByText('Configuração salva e validada pelo core.')).toBeVisible({ timeout: 10000 });
+});

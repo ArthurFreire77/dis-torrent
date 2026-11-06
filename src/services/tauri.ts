@@ -251,8 +251,16 @@ export const tauriServices: DisTorrentServices = {
     invoke<StoredMessage>('bot_post_message', { communityId: cid, channelId, botId, body }),
   botRegenToken: (cid, botId) =>
     invoke<string>('bot_regen_token', { communityId: cid, botId }),
-  botAdmin: (cid, botId, action, target, reason, number) =>
-    invoke<string>('bot_admin', { communityId: cid, botId, action, target, reason, number }),
+  botAdmin: (cid, botId, action, target, reason, number, channel) =>
+    invoke<string>('bot_admin', {
+      communityId: cid,
+      botId,
+      action,
+      target,
+      reason,
+      number,
+      channel: channel ?? null,
+    }),
   botLogAppend: (cid, botId, level, message) =>
     invoke<void>('bot_log_append', { communityId: cid, botId, level, message }),
   botLogs: (cid, botId, limit) =>

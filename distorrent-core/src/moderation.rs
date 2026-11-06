@@ -11,12 +11,14 @@ pub const PERM_MANAGE: i64 = 1 << 3;
 pub const PERM_STRUCTURE: i64 = 1 << 4;
 /// Limpar/purgar: apagar mensagens e trancar canais.
 pub const PERM_PURGE: i64 = 1 << 5;
+/// Conteúdo: reagir, fixar, thread, enquete, emoji. Não apaga nada de outro.
+pub const PERM_CONTENT: i64 = 1 << 6;
 
 /// Conjunto COMPLETO de permissões administrativas que um bot pode receber.
 /// Nunca inclui nada além disso: não existe "modo deus" para bot — cada bit
 /// libera um conjunto fechado de ações do core, nunca código livre.
 pub const PERM_ALL: i64 =
-    PERM_BAN | PERM_MUTE | PERM_DELETE | PERM_MANAGE | PERM_STRUCTURE | PERM_PURGE;
+    PERM_BAN | PERM_MUTE | PERM_DELETE | PERM_MANAGE | PERM_STRUCTURE | PERM_PURGE | PERM_CONTENT;
 
 /// Atalhos de exibição/atribuição no painel.
 pub const PERM_BOT_LABELS: &[(i64, &str)] = &[
@@ -26,21 +28,298 @@ pub const PERM_BOT_LABELS: &[(i64, &str)] = &[
     (PERM_MANAGE, "gerenciar membros"),
     (PERM_STRUCTURE, "montar o servidor"),
     (PERM_PURGE, "limpar canais"),
+    (PERM_CONTENT, "conteúdo e organização"),
 ];
+
+/// Uma ação que o bot pode pedir ao core. `args` é a ordem posicional que a
+/// DSL, a ponte e o painel usam — não há argumento nomeado escondido.
+pub struct BotActionDef {
+    pub action: &'static str,
+    pub perm: i64,
+    pub args: &'static str,
+    pub label: &'static str,
+}
+
+/// Registro ÚNICO das ações de bot. O painel, a ponte e a DSL leem daqui; ação
+/// nova entra nesta lista, nunca numa cadeia de `match` paralela que diverge.
+pub const BOT_ACTIONS: &[BotActionDef] = &[
+    // --- moderação ---
+    BotActionDef {
+        action: "ban",
+        perm: PERM_BAN,
+        args: "<membro> [motivo]",
+        label: "Banir membro",
+    },
+    BotActionDef {
+        action: "unban",
+        perm: PERM_BAN,
+        args: "<membro>",
+        label: "Desbanir membro",
+    },
+    BotActionDef {
+        action: "kick",
+        perm: PERM_MANAGE,
+        args: "<membro> [motivo]",
+        label: "Expulsar membro",
+    },
+    BotActionDef {
+        action: "mute",
+        perm: PERM_MUTE,
+        args: "<membro> [minutos] [motivo]",
+        label: "Silenciar por N minutos",
+    },
+    BotActionDef {
+        action: "unmute",
+        perm: PERM_MUTE,
+        args: "<membro> [motivo]",
+        label: "Remover silêncio",
+    },
+    BotActionDef {
+        action: "warn",
+        perm: PERM_MUTE,
+        args: "<membro> [motivo]",
+        label: "Registrar aviso",
+    },
+    BotActionDef {
+        action: "warnings",
+        perm: PERM_MUTE,
+        args: "<membro>",
+        label: "Listar avisos",
+    },
+    BotActionDef {
+        action: "warnings_clear",
+        perm: PERM_MUTE,
+        args: "<membro>",
+        label: "Limpar avisos",
+    },
+    BotActionDef {
+        action: "delete_msg",
+        perm: PERM_DELETE,
+        args: "<id-da-mensagem>",
+        label: "Apagar uma mensagem",
+    },
+    BotActionDef {
+        action: "clear",
+        perm: PERM_PURGE,
+        args: "[#canal] [N]",
+        label: "Apagar N mensagens",
+    },
+    BotActionDef {
+        action: "lock",
+        perm: PERM_PURGE,
+        args: "[#canal]",
+        label: "Trancar canal",
+    },
+    BotActionDef {
+        action: "unlock",
+        perm: PERM_PURGE,
+        args: "[#canal]",
+        label: "Destrancar canal",
+    },
+    BotActionDef {
+        action: "slowmode",
+        perm: PERM_PURGE,
+        args: "[#canal] [segundos]",
+        label: "Definir slowmode (s)",
+    },
+    // --- estrutura ---
+    BotActionDef {
+        action: "channel_create",
+        perm: PERM_STRUCTURE,
+        args: "<nome> [text|voice|video|forum]",
+        label: "Criar canal",
+    },
+    BotActionDef {
+        action: "channel_delete",
+        perm: PERM_STRUCTURE,
+        args: "[#canal]",
+        label: "Excluir canal",
+    },
+    BotActionDef {
+        action: "channel_edit",
+        perm: PERM_STRUCTURE,
+        args: "<canal> <novo-nome>",
+        label: "Renomear canal",
+    },
+    BotActionDef {
+        action: "channel_topic",
+        perm: PERM_STRUCTURE,
+        args: "<canal> <tópico>",
+        label: "Mudar tópico do canal",
+    },
+    BotActionDef {
+        action: "channel_category",
+        perm: PERM_STRUCTURE,
+        args: "<canal> <categoria>",
+        label: "Mudar categoria do canal",
+    },
+    BotActionDef {
+        action: "role_create",
+        perm: PERM_STRUCTURE,
+        args: "<nome> [#RRGGBB]",
+        label: "Criar cargo",
+    },
+    BotActionDef {
+        action: "role_delete",
+        perm: PERM_STRUCTURE,
+        args: "<cargo>",
+        label: "Excluir cargo",
+    },
+    BotActionDef {
+        action: "role_edit",
+        perm: PERM_STRUCTURE,
+        args: "<cargo> [novo-nome] [#RRGGBB]",
+        label: "Renomear/recolorir cargo",
+    },
+    BotActionDef {
+        action: "role_assign",
+        perm: PERM_MANAGE,
+        args: "<cargo> <membro>",
+        label: "Dar cargo a membro",
+    },
+    BotActionDef {
+        action: "role_unassign",
+        perm: PERM_MANAGE,
+        args: "<cargo> <membro>",
+        label: "Tirar cargo de membro",
+    },
+    BotActionDef {
+        action: "server_edit",
+        perm: PERM_STRUCTURE,
+        args: "<novo-nome>",
+        label: "Renomear servidor",
+    },
+    BotActionDef {
+        action: "server_meta",
+        perm: PERM_STRUCTURE,
+        args: "[descrição]",
+        label: "Mudar descrição do servidor",
+    },
+    BotActionDef {
+        action: "server_public",
+        perm: PERM_STRUCTURE,
+        args: "<on|off>",
+        label: "Abrir/fechar entrada pública",
+    },
+    BotActionDef {
+        action: "make_invite",
+        perm: PERM_STRUCTURE,
+        args: "[horas] [fp-alvo]",
+        label: "Gerar convite",
+    },
+    // --- conteúdo ---
+    BotActionDef {
+        action: "react",
+        perm: PERM_CONTENT,
+        args: "<id-da-mensagem> <emoji>",
+        label: "Reagir a mensagem",
+    },
+    BotActionDef {
+        action: "pin",
+        perm: PERM_CONTENT,
+        args: "<id-da-mensagem>",
+        label: "Fixar mensagem",
+    },
+    BotActionDef {
+        action: "unpin",
+        perm: PERM_CONTENT,
+        args: "<id-da-mensagem>",
+        label: "Desafixar mensagem",
+    },
+    BotActionDef {
+        action: "thread_create",
+        perm: PERM_CONTENT,
+        args: "<nome> [tag1,tag2]",
+        label: "Criar thread",
+    },
+    BotActionDef {
+        action: "thread_archive",
+        perm: PERM_CONTENT,
+        args: "<id-da-thread> [on|off]",
+        label: "Arquivar/desarquivar thread",
+    },
+    BotActionDef {
+        action: "poll_create",
+        perm: PERM_CONTENT,
+        args: "<pergunta> | <opção> | <opção>",
+        label: "Criar enquete",
+    },
+    BotActionDef {
+        action: "emoji_add",
+        perm: PERM_CONTENT,
+        args: "<nome> <emoji>",
+        label: "Adicionar emoji do servidor",
+    },
+    BotActionDef {
+        action: "emoji_del",
+        perm: PERM_CONTENT,
+        args: "<nome>",
+        label: "Remover emoji do servidor",
+    },
+    BotActionDef {
+        action: "typing",
+        perm: PERM_CONTENT,
+        args: "",
+        label: "Mostrar \"digitando\"",
+    },
+    // --- leitura (sem permissão) ---
+    BotActionDef {
+        action: "userinfo",
+        perm: 0,
+        args: "<membro>",
+        label: "Informações do membro",
+    },
+    BotActionDef {
+        action: "serverinfo",
+        perm: 0,
+        args: "",
+        label: "Informações do servidor",
+    },
+    BotActionDef {
+        action: "ping",
+        perm: 0,
+        args: "",
+        label: "Latência do bot",
+    },
+    BotActionDef {
+        action: "audit",
+        perm: 0,
+        args: "[N]",
+        label: "Últimas ações da auditoria",
+    },
+    BotActionDef {
+        action: "bans",
+        perm: 0,
+        args: "",
+        label: "Membros banidos",
+    },
+    BotActionDef {
+        action: "timeouts",
+        perm: 0,
+        args: "",
+        label: "Membros silenciados",
+    },
+    BotActionDef {
+        action: "channels",
+        perm: 0,
+        args: "",
+        label: "Listar canais",
+    },
+    BotActionDef {
+        action: "roles",
+        perm: 0,
+        args: "",
+        label: "Listar cargos",
+    },
+];
+
+pub fn bot_action(action: &str) -> Option<&'static BotActionDef> {
+    BOT_ACTIONS.iter().find(|d| d.action == action.trim())
+}
 
 /// Cada ação administrativa exige uma permissão explícita do bot.
 pub fn perm_for_action(action: &str) -> Option<i64> {
-    Some(match action {
-        "ban" | "unban" => PERM_BAN,
-        "mute" | "unmute" | "warn" | "warnings" => PERM_MUTE,
-        "delete_msg" => PERM_DELETE,
-        "clear" | "lock" | "unlock" | "slowmode" => PERM_PURGE,
-        "kick" | "role_assign" | "role_unassign" => PERM_MANAGE,
-        "channel_create" | "channel_delete" | "role_create" | "role_delete" => PERM_STRUCTURE,
-        "channel_edit" | "server_edit" => PERM_STRUCTURE,
-        "userinfo" | "serverinfo" | "ping" => 0,
-        _ => return None,
-    })
+    bot_action(action).map(|d| d.perm)
 }
 
 /// `PERM_MANAGE` era o bit único que liberava tudo antes da separação. Quem já

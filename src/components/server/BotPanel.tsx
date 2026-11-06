@@ -803,17 +803,32 @@ export function BotPanel({
                           )}
 
                           {c.exec === 'admin' && (
-                            <Select
-                              label="Ação"
-                              value={c.admin ?? ''}
-                              ariaLabel={`Ação administrativa do comando ${i + 1}`}
-                              options={[
-                                { value: '', label: 'Escolha a ação' },
-                                ...BOT_ADMIN_ACTIONS.map((a) => ({ value: a.action, label: `/${a.action} — ${a.label}` })),
-                              ]}
-                              hint="A permissão da ação precisa estar concedida na aba Permissões."
-                              onChange={(v) => patchCmd(i, { admin: v || undefined })}
-                            />
+                            <>
+                              <Select
+                                label="Ação"
+                                value={c.admin ?? ''}
+                                ariaLabel={`Ação administrativa do comando ${i + 1}`}
+                                options={[
+                                  { value: '', label: 'Escolha a ação' },
+                                  ...BOT_ADMIN_ACTIONS.map((a) => ({
+                                    value: a.action,
+                                    label: `/${a.action} — ${a.label}`,
+                                  })),
+                                ]}
+                                hint="A permissão da ação precisa estar concedida na aba Permissões."
+                                onChange={(v) => patchCmd(i, { admin: v || undefined })}
+                              />
+                              {(() => {
+                                const def = BOT_ADMIN_ACTIONS.find((a) => a.action === c.admin)
+                                if (!def?.args) return null
+                                return (
+                                  <div style={helpStyle}>
+                                    Argumentos: <code>{def.args}</code> — o canal onde a mensagem chegou
+                                    entra como contexto.
+                                  </div>
+                                )
+                              })()}
+                            </>
                           )}
 
                           {c.exec === 'script' && (
@@ -822,7 +837,7 @@ export function BotPanel({
                               value={c.script ?? ''}
                               rows={8}
                               ariaLabel={`Script do comando ${i + 1}`}
-                              hint={'Uma instrução por linha: reply "texto", let x = ..., if ... / else / end, http get "url" as res, admin ban @alvo, setvar chave = valor, stop.'}
+                              hint={'Uma instrução por linha: reply "texto", let x = ..., if ... / else / end, http get "url" as res, admin <ação> ..., getvar/setvar/incvar, stop. Placeholders: {{raw.args}}, {{author}}, {{channel}}, {{event.message_id}}.'}
                               onChange={(v) => patchCmd(i, { script: v })}
                             />
                           )}

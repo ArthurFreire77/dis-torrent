@@ -673,7 +673,7 @@ export interface DisTorrentServices {
   botPostMessage(communityId: string, channelId: string, botId: string, body: string): Promise<StoredMessage>
   botRegenToken(communityId: string, botId: string): Promise<string>
   /** Execução administrativa validada pelo core. Só existe no app nativo. */
-  botAdmin?(communityId: string, botId: string, action: string, target: string, reason: string, number: number | null): Promise<string>
+  botAdmin?(communityId: string, botId: string, action: string, target: string, reason: string, number: number | null, channel?: string): Promise<string>
   botLogAppend?(communityId: string, botId: string, level: string, message: string): Promise<void>
   botLogs?(communityId: string, botId: string, limit?: number): Promise<BotLogView[]>
   botLogsClear?(communityId: string, botId: string): Promise<number>

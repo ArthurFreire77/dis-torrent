@@ -69,6 +69,8 @@ struct AdminBody {
     reason: String,
     #[serde(default)]
     number: Option<i64>,
+    #[serde(default)]
+    channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,6 +445,15 @@ fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<NetworkEngine>) {
                 .map(|(id, name, owner)| {
                     serde_json::json!({"id": id, "name": name, "owner_fp": owner})
                 });
+            // O plugin descobre o repertório daqui em vez de adivinhar nomes.
+            let actions = distorrent_core::moderation::BOT_ACTIONS
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "action": a.action, "perm": a.perm, "args": a.args, "label": a.label,
+                    })
+                })
+                .collect::<Vec<_>>();
             respond(
                 req,
                 200,
@@ -452,6 +463,7 @@ fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<NetworkEngine>) {
                     "community": community,
                     "channels": channels,
                     "members": members,
+                    "actions": actions,
                 }),
             );
         }
@@ -585,13 +597,14 @@ fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<NetworkEngine>) {
                 Ok(b) => b,
                 Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
             };
-            match engine.bot_admin(
+            match engine.bot_action_in(
                 &shared.community_id,
                 &shared.bot_id,
                 body.action.trim(),
                 &body.target,
                 &body.reason,
                 body.number,
+                body.channel.as_deref(),
             ) {
                 Ok(text) => {
                     let _ =

@@ -83,6 +83,8 @@ export const BOT_PERMS = {
   STRUCTURE: 1 << 4,
   /** Apagar mensagens de qualquer autor e limpar canais inteiros. */
   PURGE: 1 << 5,
+  /** Reagir, fixar, thread, enquete e emoji. Não apaga nada de outro. */
+  CONTENT: 1 << 6,
 } as const
 
 export const BOT_PERM_ALL =
@@ -91,7 +93,8 @@ export const BOT_PERM_ALL =
   BOT_PERMS.DELETE |
   BOT_PERMS.MANAGE |
   BOT_PERMS.STRUCTURE |
-  BOT_PERMS.PURGE
+  BOT_PERMS.PURGE |
+  BOT_PERMS.CONTENT
 
 export interface BotPermDef {
   bit: number
@@ -110,14 +113,14 @@ export const BOT_PERM_DEFS: BotPermDef[] = [
   {
     bit: BOT_PERMS.MUTE,
     label: 'Silenciar',
-    hint: 'Permite /mute, /unmute, /warn e /warnings.',
-    commands: ['mute', 'unmute', 'warn', 'warnings'],
+    hint: 'Permite /mute, /unmute, /warn, /warnings e limpar avisos.',
+    commands: ['mute', 'unmute', 'warn', 'warnings', 'warnings_clear'],
   },
   {
     bit: BOT_PERMS.DELETE,
     label: 'Apagar mensagens',
-    hint: 'Permite /clear.',
-    commands: ['clear'],
+    hint: 'Permite /delete_msg (uma mensagem pelo id).',
+    commands: ['delete_msg'],
   },
   {
     bit: BOT_PERMS.MANAGE,
@@ -128,8 +131,21 @@ export const BOT_PERM_DEFS: BotPermDef[] = [
   {
     bit: BOT_PERMS.STRUCTURE,
     label: 'Montar o servidor',
-    hint: 'Permite criar/renomear/excluir canais e cargos e renomear o servidor.',
-    commands: ['channel_create', 'channel_delete', 'channel_edit', 'role_create', 'role_delete', 'server_edit'],
+    hint: 'Permite criar/renomear/excluir canais e cargos, mudar tópico/categoria, descrição e entrada pública, e gerar convite.',
+    commands: [
+      'channel_create',
+      'channel_delete',
+      'channel_edit',
+      'channel_topic',
+      'channel_category',
+      'role_create',
+      'role_delete',
+      'role_edit',
+      'server_edit',
+      'server_meta',
+      'server_public',
+      'make_invite',
+    ],
   },
   {
     bit: BOT_PERMS.PURGE,
@@ -137,32 +153,70 @@ export const BOT_PERM_DEFS: BotPermDef[] = [
     hint: 'Permite /clear e /lock, /unlock e /slowmode em qualquer canal.',
     commands: ['clear', 'lock', 'unlock', 'slowmode'],
   },
+  {
+    bit: BOT_PERMS.CONTENT,
+    label: 'Conteúdo e organização',
+    hint: 'Permite reagir, fixar mensagem, criar thread, enquete e emoji. Não apaga nada de outro autor.',
+    commands: [
+      'react',
+      'pin',
+      'unpin',
+      'thread_create',
+      'thread_archive',
+      'poll_create',
+      'emoji_add',
+      'emoji_del',
+      'typing',
+    ],
+  },
 ]
 
 /** Ações administrativas nativas e a permissão que cada uma exige. */
-export const BOT_ADMIN_ACTIONS: { action: string; perm: number; label: string }[] = [
-  { action: 'ban', perm: BOT_PERMS.BAN, label: 'Banir membro' },
-  { action: 'unban', perm: BOT_PERMS.BAN, label: 'Desbanir membro' },
-  { action: 'kick', perm: BOT_PERMS.MANAGE, label: 'Expulsar membro' },
-  { action: 'mute', perm: BOT_PERMS.MUTE, label: 'Silenciar por N minutos' },
-  { action: 'unmute', perm: BOT_PERMS.MUTE, label: 'Remover silêncio' },
-  { action: 'warn', perm: BOT_PERMS.MUTE, label: 'Registrar aviso' },
-  { action: 'warnings', perm: BOT_PERMS.MUTE, label: 'Listar avisos' },
-  { action: 'clear', perm: BOT_PERMS.PURGE, label: 'Apagar N mensagens' },
-  { action: 'lock', perm: BOT_PERMS.PURGE, label: 'Trancar canal' },
-  { action: 'unlock', perm: BOT_PERMS.PURGE, label: 'Destrancar canal' },
-  { action: 'slowmode', perm: BOT_PERMS.PURGE, label: 'Definir slowmode (s)' },
-  { action: 'channel_create', perm: BOT_PERMS.STRUCTURE, label: 'Criar canal' },
-  { action: 'channel_delete', perm: BOT_PERMS.STRUCTURE, label: 'Excluir canal' },
-  { action: 'channel_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear canal' },
-  { action: 'role_create', perm: BOT_PERMS.STRUCTURE, label: 'Criar cargo' },
-  { action: 'role_delete', perm: BOT_PERMS.STRUCTURE, label: 'Excluir cargo' },
-  { action: 'role_assign', perm: BOT_PERMS.MANAGE, label: 'Dar cargo a membro' },
-  { action: 'role_unassign', perm: BOT_PERMS.MANAGE, label: 'Tirar cargo de membro' },
-  { action: 'server_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear servidor' },
-  { action: 'userinfo', perm: 0, label: 'Informações do membro' },
-  { action: 'serverinfo', perm: 0, label: 'Informações do servidor' },
-  { action: 'ping', perm: 0, label: 'Latência do bot' },
+export const BOT_ADMIN_ACTIONS: { action: string; perm: number; label: string; args: string }[] = [
+  { action: 'ban', perm: BOT_PERMS.BAN, label: 'Banir membro', args: '<membro> [motivo]' },
+  { action: 'unban', perm: BOT_PERMS.BAN, label: 'Desbanir membro', args: '<membro>' },
+  { action: 'kick', perm: BOT_PERMS.MANAGE, label: 'Expulsar membro', args: '<membro> [motivo]' },
+  { action: 'mute', perm: BOT_PERMS.MUTE, label: 'Silenciar por N minutos', args: '<membro> [minutos] [motivo]' },
+  { action: 'unmute', perm: BOT_PERMS.MUTE, label: 'Remover silêncio', args: '<membro> [motivo]' },
+  { action: 'warn', perm: BOT_PERMS.MUTE, label: 'Registrar aviso', args: '<membro> [motivo]' },
+  { action: 'warnings', perm: BOT_PERMS.MUTE, label: 'Listar avisos', args: '<membro>' },
+  { action: 'warnings_clear', perm: BOT_PERMS.MUTE, label: 'Limpar avisos', args: '<membro>' },
+  { action: 'delete_msg', perm: BOT_PERMS.DELETE, label: 'Apagar uma mensagem (id)', args: '<id-da-mensagem>' },
+  { action: 'clear', perm: BOT_PERMS.PURGE, label: 'Apagar N mensagens', args: '[#canal] [N]' },
+  { action: 'lock', perm: BOT_PERMS.PURGE, label: 'Trancar canal', args: '[#canal]' },
+  { action: 'unlock', perm: BOT_PERMS.PURGE, label: 'Destrancar canal', args: '[#canal]' },
+  { action: 'slowmode', perm: BOT_PERMS.PURGE, label: 'Definir slowmode (s)', args: '[#canal] [segundos]' },
+  { action: 'channel_create', perm: BOT_PERMS.STRUCTURE, label: 'Criar canal', args: '<nome> [text|voice|video|forum]' },
+  { action: 'channel_delete', perm: BOT_PERMS.STRUCTURE, label: 'Excluir canal', args: '[#canal]' },
+  { action: 'channel_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear canal', args: '<canal> <novo-nome>' },
+  { action: 'channel_topic', perm: BOT_PERMS.STRUCTURE, label: 'Mudar tópico do canal', args: '<canal> <tópico>' },
+  { action: 'channel_category', perm: BOT_PERMS.STRUCTURE, label: 'Mudar categoria do canal', args: '<canal> <categoria>' },
+  { action: 'role_create', perm: BOT_PERMS.STRUCTURE, label: 'Criar cargo', args: '<nome> [#RRGGBB]' },
+  { action: 'role_delete', perm: BOT_PERMS.STRUCTURE, label: 'Excluir cargo', args: '<cargo>' },
+  { action: 'role_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear/recolorir cargo', args: '<cargo> [novo-nome] [#RRGGBB]' },
+  { action: 'role_assign', perm: BOT_PERMS.MANAGE, label: 'Dar cargo a membro', args: '<cargo> <membro>' },
+  { action: 'role_unassign', perm: BOT_PERMS.MANAGE, label: 'Tirar cargo de membro', args: '<cargo> <membro>' },
+  { action: 'server_edit', perm: BOT_PERMS.STRUCTURE, label: 'Renomear servidor', args: '<novo-nome>' },
+  { action: 'server_meta', perm: BOT_PERMS.STRUCTURE, label: 'Mudar descrição do servidor', args: '[descrição]' },
+  { action: 'server_public', perm: BOT_PERMS.STRUCTURE, label: 'Abrir/fechar entrada pública', args: '<on|off>' },
+  { action: 'make_invite', perm: BOT_PERMS.STRUCTURE, label: 'Gerar convite', args: '[horas] [fp-alvo]' },
+  { action: 'react', perm: BOT_PERMS.CONTENT, label: 'Reagir a mensagem', args: '<id-da-mensagem> <emoji>' },
+  { action: 'pin', perm: BOT_PERMS.CONTENT, label: 'Fixar mensagem', args: '<id-da-mensagem>' },
+  { action: 'unpin', perm: BOT_PERMS.CONTENT, label: 'Desafixar mensagem', args: '<id-da-mensagem>' },
+  { action: 'thread_create', perm: BOT_PERMS.CONTENT, label: 'Criar thread', args: '<nome> [tag1,tag2]' },
+  { action: 'thread_archive', perm: BOT_PERMS.CONTENT, label: 'Arquivar/desarquivar thread', args: '<id-da-thread> [on|off]' },
+  { action: 'poll_create', perm: BOT_PERMS.CONTENT, label: 'Criar enquete', args: '<pergunta> | <opção> | <opção>' },
+  { action: 'emoji_add', perm: BOT_PERMS.CONTENT, label: 'Adicionar emoji do servidor', args: '<nome> <emoji>' },
+  { action: 'emoji_del', perm: BOT_PERMS.CONTENT, label: 'Remover emoji do servidor', args: '<nome>' },
+  { action: 'typing', perm: BOT_PERMS.CONTENT, label: 'Mostrar "digitando"', args: '' },
+  { action: 'userinfo', perm: 0, label: 'Informações do membro', args: '<membro>' },
+  { action: 'serverinfo', perm: 0, label: 'Informações do servidor', args: '' },
+  { action: 'ping', perm: 0, label: 'Latência do bot', args: '' },
+  { action: 'audit', perm: 0, label: 'Últimas ações da auditoria', args: '[N]' },
+  { action: 'bans', perm: 0, label: 'Membros banidos', args: '' },
+  { action: 'timeouts', perm: 0, label: 'Membros silenciados', args: '' },
+  { action: 'channels', perm: 0, label: 'Listar canais', args: '' },
+  { action: 'roles', perm: 0, label: 'Listar cargos', args: '' },
 ]
 
 export function permAllows(botPerms: number, action: string): boolean {

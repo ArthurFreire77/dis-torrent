@@ -16,7 +16,16 @@ export default defineConfig({
     fs: { strict: true },
     // `dist-release` guarda os instaladores gerados: o Vite tentava vigiar os
     // .exe/.apk e morria com EBUSY (arquivo travado pelo Explorer/antivírus).
-    watch: { ignored: ['**/src-tauri/**', '**/dist/**', '**/dist-release/**', '**/test-results/**'] },
+    // O `target/` do Rust é o mesmo problema quando o cargo test está rodando.
+    watch: {
+      ignored: [
+        '**/src-tauri/**',
+        '**/dist/**',
+        '**/dist-release/**',
+        '**/test-results/**',
+        '**/target/**',
+      ],
+    },
   },
   preview: { port: 5173, host: '127.0.0.1', strictPort: true },
   build: {

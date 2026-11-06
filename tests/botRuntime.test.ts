@@ -412,6 +412,90 @@ test('runtime: mensagem do próprio bot não gera loop', async () => {
   assert.equal(d.posted.length, 0)
 })
 
+test('runtime: script recebe o id da mensagem e o canal do evento', async () => {
+  const d = makeDeps()
+  d.setBots([
+    {
+      id: 'b1',
+      name: 'Reator',
+      online: true,
+      config: cfg({
+        commands: [
+          {
+            name: 'fixar',
+            method: 'GET',
+            url: '',
+            exec: 'script',
+            cooldownMs: 0,
+            script: 'reply "canal={{event.channel}} msg={{event.message_id}}"',
+          },
+        ],
+      }),
+    },
+  ])
+  const rt = runtime(d.deps)
+  const stop = rt.start()
+  d.emit({
+    type: 'message_new',
+    direction: 'in',
+    conv_id: 'geral',
+    id: 'm-123',
+    author_fp: 'ana',
+    body: '!fixar',
+  })
+  await tick()
+  stop()
+  assert.equal(d.posted.length, 1)
+  assert.match(d.posted[0].body, /canal=geral/)
+  assert.match(d.posted[0].body, /msg=m-123/, 'sem o id o bot não reage nem apaga o que recebeu')
+})
+
+test('runtime: ação administrativa manda o canal de contexto', async () => {
+  const d = makeDeps()
+  const calls: string[] = []
+  d.setBots([
+    {
+      id: 'b1',
+      name: 'Enquete',
+      online: true,
+      perms: 0x7f,
+      config: cfg({
+        commands: [
+          {
+            name: 'votar',
+            method: 'GET',
+            url: '',
+            exec: 'admin',
+            admin: 'poll_create',
+            cooldownMs: 0,
+          },
+        ],
+      }),
+    },
+  ])
+  const deps = {
+    ...d.deps,
+    botAdmin: async (
+      _cid: string,
+      _bot: string,
+      action: string,
+      _target: string,
+      _reason: string,
+      _num: number | null,
+      channel?: string,
+    ) => {
+      calls.push(`${action}|${channel ?? ''}`)
+      return 'ok'
+    },
+  }
+  const rt = runtime(deps)
+  const stop = rt.start()
+  d.emit({ type: 'message_new', direction: 'in', conv_id: 'geral', author_fp: 'ana', body: '!votar' })
+  await tick()
+  stop()
+  assert.deepEqual(calls, ['poll_create|geral'])
+})
+
 test('runtime: stop() remove o assinante', async () => {
   const d = makeDeps()
   const rt = runtime(d.deps)

@@ -384,3 +384,164 @@ fn bot_offline_nao_troca_a_config() {
         .expect_err("offline");
     assert!(erro.to_string().contains("offline"), "{erro}");
 }
+
+/// Toda ação listada no registro precisa ser despachada pelo motor; senão o
+/// painel oferece um botão que responde "ação inválida".
+#[test]
+fn registro_de_acoes_e_o_mesmo_que_o_motor_executa() {
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "Tudo", None, None).expect("bot");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        distorrent_core::storage::BotPatch {
+            perms: Some(distorrent_core::moderation::PERM_ALL),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Argumentos vazios: o esperado é erro de ARGUMENTO, nunca "ação inválida".
+    for def in distorrent_core::moderation::BOT_ACTIONS {
+        let out = e.bot_admin(&cid, &bot.id, def.action, "", "", None);
+        if let Err(err) = &out {
+            let txt = err.to_string();
+            assert!(
+                !txt.contains("ação inválida"),
+                "`{}` está no registro mas o motor não a executa: {txt}",
+                def.action
+            );
+        }
+    }
+}
+
+#[test]
+fn acoes_de_conteudo_reagem_fixam_e_apagam() {
+    use distorrent_core::moderation::{PERM_ALL, PERM_CONTENT};
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let canal = e.resolve_channel(&cid, "").expect("canal");
+    let bot = e.bot_create(&cid, "Conteudo", None, None).expect("bot");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        distorrent_core::storage::BotPatch {
+            perms: Some(PERM_ALL),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let msg = e.send_channel_message(&cid, &canal, "oi").expect("msg");
+
+    // Reagir alterna (1ª adiciona, 2ª remove).
+    e.bot_admin(&cid, &bot.id, "react", &msg.id, "🔥", None)
+        .expect("reagir");
+    assert_eq!(e.store.reactions_for_msg(&msg.id).unwrap().len(), 1);
+    e.bot_admin(&cid, &bot.id, "react", &msg.id, "🔥", None)
+        .expect("desreagir");
+    assert!(e.store.reactions_for_msg(&msg.id).unwrap().is_empty());
+
+    e.bot_admin(&cid, &bot.id, "pin", &msg.id, "", None)
+        .expect("fixar");
+    assert_eq!(e.store.pins_list(&canal).unwrap().len(), 1);
+    e.bot_admin(&cid, &bot.id, "unpin", &msg.id, "", None)
+        .expect("desafixar");
+    assert!(e.store.pins_list(&canal).unwrap().is_empty());
+
+    // Apagar uma mensagem pelo id (antes: permissão existia, ação não).
+    // A exclusão é lógica (`msg_meta.deleted`), como no resto do app.
+    e.bot_admin(&cid, &bot.id, "delete_msg", &msg.id, "", None)
+        .expect("apagar");
+    assert!(
+        e.store
+            .msg_meta(&msg.id)
+            .unwrap()
+            .map(|m| m.deleted)
+            .unwrap_or(false),
+        "a mensagem precisa ficar marcada como apagada"
+    );
+
+    // O bit de conteúdo não dá poder de moderação.
+    let bot2 = e.bot_create(&cid, "SoConteudo", None, None).expect("bot2");
+    e.bot_update(
+        &cid,
+        &bot2.id,
+        distorrent_core::storage::BotPatch {
+            perms: Some(PERM_CONTENT),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let erro = e
+        .bot_admin(&cid, &bot2.id, "ban", "Alvo", "x", None)
+        .expect_err("conteúdo não bane");
+    assert!(erro.to_string().contains("permissão"), "{erro}");
+}
+
+#[test]
+fn acoes_de_leitura_nao_sujam_a_auditoria() {
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let bot = e.bot_create(&cid, "Leitor", None, None).expect("bot");
+    for acao in [
+        "serverinfo",
+        "ping",
+        "channels",
+        "roles",
+        "bans",
+        "timeouts",
+        "audit",
+    ] {
+        e.bot_admin(&cid, &bot.id, acao, "", "", None)
+            .unwrap_or_else(|err| panic!("{acao}: {err}"));
+    }
+    assert!(
+        e.store.list_audit(&cid, 50).unwrap().is_empty(),
+        "consulta não é ação: nada de audit log"
+    );
+}
+
+#[test]
+fn acao_de_canal_usa_o_canal_de_contexto() {
+    use distorrent_core::moderation::PERM_ALL;
+    let (e, _d) = engine("Dono");
+    let cid = e
+        .create_community("Servidor", &["geral".to_string()])
+        .expect("criar");
+    let segundo = e
+        .channel_create(&cid, "avisos", "", "", "text")
+        .expect("canal");
+    let bot = e.bot_create(&cid, "Enquete", None, None).expect("bot");
+    e.bot_update(
+        &cid,
+        &bot.id,
+        distorrent_core::storage::BotPatch {
+            perms: Some(PERM_ALL),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let out = e
+        .bot_action_in(
+            &cid,
+            &bot.id,
+            "poll_create",
+            "Qual jogo?",
+            "A | B",
+            None,
+            Some(&segundo.id),
+        )
+        .expect("enquete");
+    assert!(out.contains("enquete"), "{out}");
+    assert_eq!(
+        e.store.poll_list(&cid, &segundo.id).unwrap().len(),
+        1,
+        "a enquete precisa nascer no canal do contexto"
+    );
+}

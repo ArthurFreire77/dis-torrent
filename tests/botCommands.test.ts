@@ -16,6 +16,8 @@ import {
   permAllows,
   BOT_PERMS,
   BOT_PERM_ALL,
+  BOT_PERM_DEFS,
+  BOT_ADMIN_ACTIONS,
   BOT_EVENTS,
   type BotConfig,
   type BotCommandDef,
@@ -392,6 +394,33 @@ test('permAllows: cada ação administrativa exige o bit certo', () => {
   assert.equal(permAllows(BOT_PERMS.BAN, 'kick'), false)
   assert.equal(permAllows(0, 'ping'), true, 'leitura não exige permissão')
   assert.equal(permAllows(BOT_PERM_ALL, 'inexistente'), false)
+})
+
+test('permAllows: ações de conteúdo têm bit próprio e não dão moderação', () => {
+  assert.equal(permAllows(BOT_PERMS.CONTENT, 'react'), true)
+  assert.equal(permAllows(BOT_PERMS.CONTENT, 'pin'), true)
+  assert.equal(permAllows(BOT_PERMS.CONTENT, 'poll_create'), true)
+  assert.equal(permAllows(BOT_PERMS.CONTENT, 'ban'), false, 'conteúdo não bane')
+  assert.equal(permAllows(BOT_PERMS.CONTENT, 'delete_msg'), false)
+  assert.equal(permAllows(BOT_PERMS.DELETE, 'delete_msg'), true)
+  assert.equal(permAllows(BOT_PERMS.DELETE, 'clear'), false, 'delete_msg ≠ limpar canal')
+  assert.equal(permAllows(0, 'audit'), true, 'consulta é livre')
+  assert.equal(permAllows(0, 'channels'), true)
+})
+
+test('BOT_ADMIN_ACTIONS cobre todos os bits e não tem ação repetida', () => {
+  const nomes = BOT_ADMIN_ACTIONS.map((a) => a.action)
+  assert.equal(new Set(nomes).size, nomes.length, 'ação duplicada no registro')
+  for (const nome of nomes) assert.match(nome, /^[a-z_]+$/, `ação fora do padrão: ${nome}`)
+  for (const def of BOT_PERM_DEFS) {
+    assert.ok(
+      BOT_ADMIN_ACTIONS.some((a) => a.perm === def.bit),
+      `bit ${def.label} não corresponde a nenhuma ação`,
+    )
+    for (const c of def.commands) {
+      assert.ok(nomes.includes(c), `/${c} citado em ${def.label} não existe no registro`)
+    }
+  }
 })
 
 test('commandProblem: valida nome, duplicata e corpo por exec', () => {

@@ -715,62 +715,20 @@ fn render_key(key: &str, ctx: &RenderCtx<'_>) -> String {
 // DSL de scripts
 // ---------------------------------------------------------------------------
 
+/// Ação administrativa do script. Deixa de ser um enum fechado: a validade é
+/// conferida pelo registro único em [`crate::moderation::BOT_ACTIONS`], senão a
+/// DSL aceitaria menos ações do que o painel e a ponte oferecem.
 #[derive(Debug, Clone, PartialEq)]
-pub enum AdminAction {
-    Ban,
-    Unban,
-    Kick,
-    Mute,
-    Unmute,
-    Clear,
-    Lock,
-    Unlock,
-    Slowmode,
-    Warn,
-    Warnings,
-    UserInfo,
-    ServerInfo,
-    Ping,
-}
+pub struct AdminAction(pub String);
 
 impl AdminAction {
     pub fn parse(raw: &str) -> Option<AdminAction> {
-        Some(match raw.trim().to_ascii_lowercase().as_str() {
-            "ban" => AdminAction::Ban,
-            "unban" => AdminAction::Unban,
-            "kick" => AdminAction::Kick,
-            "mute" => AdminAction::Mute,
-            "unmute" => AdminAction::Unmute,
-            "clear" => AdminAction::Clear,
-            "lock" => AdminAction::Lock,
-            "unlock" => AdminAction::Unlock,
-            "slowmode" => AdminAction::Slowmode,
-            "warn" => AdminAction::Warn,
-            "warnings" => AdminAction::Warnings,
-            "userinfo" => AdminAction::UserInfo,
-            "serverinfo" => AdminAction::ServerInfo,
-            "ping" => AdminAction::Ping,
-            _ => return None,
-        })
+        let name = crate::moderation::bot_action(raw)?.action;
+        Some(AdminAction(name.to_string()))
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AdminAction::Ban => "ban",
-            AdminAction::Unban => "unban",
-            AdminAction::Kick => "kick",
-            AdminAction::Mute => "mute",
-            AdminAction::Unmute => "unmute",
-            AdminAction::Clear => "clear",
-            AdminAction::Lock => "lock",
-            AdminAction::Unlock => "unlock",
-            AdminAction::Slowmode => "slowmode",
-            AdminAction::Warn => "warn",
-            AdminAction::Warnings => "warnings",
-            AdminAction::UserInfo => "userinfo",
-            AdminAction::ServerInfo => "serverinfo",
-            AdminAction::Ping => "ping",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -1431,7 +1389,7 @@ mod tests {
         )
         .expect("script válido");
         assert_eq!(out.admin.len(), 1);
-        assert_eq!(out.admin[0].action, AdminAction::Ban);
+        assert_eq!(out.admin[0].action.as_str(), "ban");
         assert_eq!(out.admin[0].target, "abc");
     }
 

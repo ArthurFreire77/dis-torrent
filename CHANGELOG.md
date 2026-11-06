@@ -1,5 +1,48 @@
 # CHANGELOG
 
+## [1.1.60-pre-alpha] - 2026-11-05
+
+### Bots: o repertório inteiro, com uma lista só
+
+**O problema.** O bot tinha três listas de ações que já divergiam entre si: o
+enum `AdminAction` da DSL, o `perm_for_action` do core e o `BOT_ADMIN_ACTIONS`
+do painel. Na prática, `delete_msg` tinha **permissão** (`PERM_DELETE`) e
+**botão no editor**, mas o motor caía em "ação inválida" — e ações que o core já
+sabia fazer (tópico de canal, editar cargo, entrada pública, gerar convite,
+reagir, fixar, thread, enquete, emoji) simplemente não existiam para o bot.
+
+**O que mudou.**
+
+- Um **registro único**: `BOT_ACTIONS` em `distorrent_core::moderation`. O
+  painel, a DSL (`admin <ação>`) e a ponte leem a mesma lista; o `perm_for_action`
+  deixou de ser uma cadeia de `match` paralela. Ação nova entra num lugar só.
+- O repertório foi de **22 para 45 ações**: moderação (`delete_msg`,
+  `warnings_clear`), estrutura (`channel_topic`, `channel_category`, `role_edit`,
+  `server_meta`, `server_public`, `make_invite`), conteúdo (`react`, `pin`,
+  `unpin`, `thread_create`, `thread_archive`, `poll_create`, `emoji_add`,
+  `emoji_del`, `typing`) e leitura (`audit`, `bans`, `timeouts`, `channels`,
+  `roles`).
+- **Bit novo `PERM_CONTENT`** (1 << 6): reagir/fixar/thread/enquete/emoji sem
+  dar poder de moderação. `delete_msg` ficou no bit próprio (`PERM_DELETE`), que
+  antes não executava nada.
+- `bot_action_in(..., channel)`: ações que dependem de canal (enquete, thread,
+  `typing`) usam o canal onde a mensagem chegou. A ponte aceita `channel` no
+  corpo do `/v1/admin`; o `GET /v1/info` devolve a lista viva em `actions`.
+- **O bot agora sabe o id da mensagem que o acionou** (`{{event.message_id}}` no
+  script). Antes era impossível reagir/apagar/fixar o que acabou de chegar.
+- **Consulta não suja a auditoria**: só ação que muda estado grava
+  `bot:<ação>`. Antes um `/userinfo` virava linha de audit log.
+- `AdminAction` da DSL deixou de ser enum fechado: valida contra o registro, então
+  a DSL aceita exatamente o que o painel oferece.
+- O Vite passou a ignorar `**/target/**`: o `npm run dev` morria com `EBUSY`
+  quando um `cargo test` rodava junto (o watcher tentava abrir o `.exe` de teste).
+
+**Testes.** typecheck 0, lint 0, **unit 602/602** (4 novos: bits de conteúdo,
+registro sem ação repetida, id da mensagem no script, canal de contexto),
+`cargo test` **252 lib + 20 bots_exec**, `cargo fmt --check` limpo, build OK e
+e2e/bots **4/4**. `cargo clippy -D warnings` e `peer_relay_privacy` já falhavam
+antes destas mudanças (confirmado com `git stash`).
+
 ## [1.1.59-pre-alpha] - 2026-11-05
 
 ### Bots: escopo por tipo de canal, mais poder, e o "Conectando…" infinito

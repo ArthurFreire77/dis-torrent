@@ -1630,16 +1630,18 @@ fn bot_admin(
     target: Option<String>,
     reason: Option<String>,
     number: Option<i64>,
+    channel: Option<String>,
     state: State<AppState>,
 ) -> Result<String, String> {
     engine(&state)?
-        .bot_admin(
+        .bot_action_in(
             &community_id,
             &bot_id,
             action.trim(),
             target.as_deref().unwrap_or(""),
             reason.as_deref().unwrap_or(""),
             number,
+            channel.as_deref(),
         )
         .map_err(err)
 }

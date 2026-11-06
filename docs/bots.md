@@ -191,7 +191,7 @@ instruções, então código do usuário não tem acesso a `window`, `process`,
 | `http get "url" as res` | GET; corpo em `res`, status em `res.status`, campos JSON em `res.campo` |
 | `http post "url" body "{{args}}" as res` | POST |
 | `if <cond>` / `else` / `end` | desvio |
-| `admin ban @alvo motivo` | pede ação administrativa ao core |
+| `admin <ação> ...` | pede ação administrativa ao core (qualquer uma do registro) |
 | `stop` | encerra o script |
 
 Condições: `==`, `!=`, `>`, `<`, `>=`, `<=`, `contains`, `startswith`,
@@ -226,25 +226,50 @@ concedida em `bots.perms`. O dono do servidor **nunca é alvo** e toda ação vi
 | Ação | Permissão | Argumentos |
 |---|---|---|
 | `ban` / `unban` | banir | `<membro> [motivo]` |
-| `kick` | gerenciar | `<membro> [motivo]` |
+| `kick` | gerenciar membros | `<membro> [motivo]` |
 | `mute` / `unmute` | silenciar | `<membro> [minutos] [motivo]` |
 | `warn` / `warnings` | silenciar | `<membro> [motivo]` |
-| `clear` | apagar | `[#canal] [N]` |
-| `lock` / `unlock` | gerenciar | `[#canal]` |
-| `slowmode` | gerenciar | `[#canal] [segundos]` |
-| `channel_create` | gerenciar | `<nome> [text\|voice\|video]` |
-| `channel_delete` | gerenciar | `[#canal]` |
-| `role_create` | gerenciar | `<nome> [#RRGGBB]` |
-| `role_delete` | gerenciar | `<cargo>` |
-| `role_assign` | gerenciar | `<cargo> <membro>` |
-| `role_unassign` | gerenciar | `<cargo> <membro>` |
-| `channel_edit` | gerenciar | `<canal> <novo-nome>` |
-| `server_edit` | gerenciar | `<novo-nome>` |
+| `warnings_clear` | silenciar | `<membro>` |
+| `delete_msg` | apagar mensagens | `<id-da-mensagem>` |
+| `clear` | limpar canais | `[#canal] [N]` |
+| `lock` / `unlock` | limpar canais | `[#canal]` |
+| `slowmode` | limpar canais | `[#canal] [segundos]` |
+| `channel_create` | montar o servidor | `<nome> [text\|voice\|video\|forum]` |
+| `channel_delete` | montar o servidor | `[#canal]` |
+| `channel_edit` | montar o servidor | `<canal> <novo-nome>` |
+| `channel_topic` | montar o servidor | `<canal> <tópico>` |
+| `channel_category` | montar o servidor | `<canal> <categoria>` |
+| `role_create` | montar o servidor | `<nome> [#RRGGBB]` |
+| `role_delete` | montar o servidor | `<cargo>` |
+| `role_edit` | montar o servidor | `<cargo> [novo-nome] [#RRGGBB]` |
+| `role_assign` | gerenciar membros | `<cargo> <membro>` |
+| `role_unassign` | gerenciar membros | `<cargo> <membro>` |
+| `server_edit` | montar o servidor | `<novo-nome>` |
+| `server_meta` | montar o servidor | `[descrição]` |
+| `server_public` | montar o servidor | `<on\|off>` |
+| `make_invite` | montar o servidor | `[horas] [fp-alvo]` |
+| `react` | conteúdo e organização | `<id-da-mensagem> <emoji>` |
+| `pin` / `unpin` | conteúdo e organização | `<id-da-mensagem>` |
+| `thread_create` | conteúdo e organização | `<nome> [tags]` |
+| `thread_archive` | conteúdo e organização | `<id-da-thread> [on\|off]` |
+| `poll_create` | conteúdo e organização | `<pergunta> \| <opção> \| <opção>` |
+| `emoji_add` / `emoji_del` | conteúdo e organização | `<nome> <emoji>` / `<nome>` |
+| `typing` | conteúdo e organização | — |
 | `userinfo` | — | `<membro>` |
 | `serverinfo` | — | — |
 | `ping` | — | — |
+| `audit` / `bans` / `timeouts` | — | `[N]` / — / — |
+| `channels` / `roles` | — | — |
 
-O alvo aceita **fingerprint**, **apelido** ou menção `<@fp>`.
+O alvo aceita **fingerprint**, **apelido** ou menção `<@fp>`. Consulta
+(`userinfo`, `serverinfo`, `ping`, `audit`, `bans`, `timeouts`, `channels`,
+`roles`) não exige permissão e não grava auditoria — só o que muda estado entra
+em `audit_log`.
+
+As ações que dependem de um canal (`thread_create`, `poll_create`, `typing`) usam
+o canal onde a mensagem chegou. Na ponte, mande `channel` no corpo do
+`/v1/admin` para escolher outro. A lista completa e viva está em
+`distorrent_core::moderation::BOT_ACTIONS` (o `/v1/info` a devolve em `actions`).
 
 ---
 
@@ -304,10 +329,10 @@ header de autenticação.
 
 | Rota | O que faz |
 |---|---|
-| `GET /v1/info` | bot, servidor, canais e membros |
+| `GET /v1/info` | bot, servidor, canais, membros e a lista **viva** de ações (`actions`) |
 | `GET /v1/events?since=<seq>&wait=<ms>` | long-poll (até 25 s) dos eventos do servidor |
 | `POST /v1/message` | `{"channel":"geral","body":"texto"}` — publica como o bot |
-| `POST /v1/admin` | `{"action":"ban","target":"fp","reason":"spam","number":null}` |
+| `POST /v1/admin` | `{"action":"ban","target":"fp","reason":"spam","number":null,"channel":"opcional"}` |
 | `GET /v1/config` | a config atual **deste** bot (sem token de ninguém) |
 | `POST /v1/commands` | `{"config":"<json>"}` — o bot troca a **própria** config (comandos novos em tempo de execução) |
 | `POST /v1/log` | `{"level":"info","message":"..."}` — grava no console |
@@ -454,7 +479,10 @@ Valem para comando `http`, script `http` e webhook:
 ### Permissões
 
 - Bot nasce com `perms = 0` (zero poder administrativo).
-- Cada ação mapeia para um bit (`banir`, `silenciar`, `apagar`, `gerenciar`).
+- Cada ação mapeia para um bit (`banir`, `silenciar`, `apagar mensagens`,
+  `gerenciar membros`, `montar o servidor`, `limpar canais`,
+  `conteúdo e organização`), num registro único (`BOT_ACTIONS`) que o painel, a
+  DSL e a ponte compartilham.
 - O core confere **de novo** a cada ação — a interface não é a barreira.
 - O dono do servidor nunca é alvo.
 - `BotPatch.perms` é mascarado por `PERM_ALL` no core.
