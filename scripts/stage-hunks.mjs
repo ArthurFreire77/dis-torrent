@@ -15,7 +15,8 @@ if (!file || want.length === 0) {
 }
 const wanted = new Set(want.map(Number))
 
-const diff = execFileSync('git', ['diff', '-U3', '--', file], { encoding: 'utf8' })
+const ctx = Number(process.env.HUNK_CONTEXT ?? '3')
+const diff = execFileSync('git', ['diff', `-U${ctx}`, '--', file], { encoding: 'utf8' })
 const lines = diff.split('\n')
 const headerEnd = lines.findIndex((l) => l.startsWith('@@'))
 if (headerEnd < 0) {
