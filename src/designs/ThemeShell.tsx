@@ -2556,13 +2556,17 @@ export default function ThemeShell({ designId }: {designId:string}){
                       <Section variant="desktop" title={`ONLINE — ${vinculados.length}`} maxVisible={8}>
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
-                          // Contato elegível (mesmo grupo/servidor) também
-                          // abre conversa: é a introdução de 3 mensagens.
+                          // Elegível = amigo, mesmo grupo OU mesmo servidor.
+                          // O Rust aceita introdução de qualquer peer; a UI
+                          // não pode esconder o caminho para um membro do seu
+                          // próprio servidor.
                           const mesmoGrupo = groupMemberFps.has(p.fp)
-                          const podeConversar = ehAmigo || mesmoGrupo
+                          const mesmoServidor = (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
+                          const podeConversar = ehAmigo || mesmoGrupo || mesmoServidor
                           const badge = contactBadge({
                             relation: ehAmigo ? 'friend' : 'none',
                             sharedGroup: mesmoGrupo,
+                            sharedCommunity: mesmoServidor,
                           })
                           return (
                             <button key={p.fp} onClick={() => { if (podeConversar) void openDm({ fp: p.fp, nickname: p.nickname }) }} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')} title={podeConversar ? 'Abrir conversa' : 'Sem canal de contato — peça o fingerprint para adicionar'}>
