@@ -184,7 +184,6 @@ export function moveServerToFolder(serverId: string, folderId: string | null) {
   })
 }
 
-// Seção 1: folderOf
 export function folderOf(serverId: string): string | null {
   return state.serverFolders.find(f => f.servers.includes(serverId))?.id ?? null
 }

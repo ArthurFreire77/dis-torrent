@@ -171,5 +171,4 @@ export function MessageRetentionSettings({
   )
 }
 
-// Seção 1: MessageRetentionSettings
 export default MessageRetentionSettings

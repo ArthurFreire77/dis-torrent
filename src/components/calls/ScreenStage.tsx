@@ -264,5 +264,4 @@ export function ScreenStage({
   )
 }
 
-// Seção 1: ScreenStage
 export default ScreenStage

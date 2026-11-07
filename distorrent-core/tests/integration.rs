@@ -188,7 +188,6 @@ async fn reply_roundtrip_both_directions() {
     assert_eq!(conv_b.id, conv_a.id, "id de DM determinístico por par");
     b.send_dm(&conv_b.id, "resposta").unwrap();
 
-    // Seção 1: reply
     let reply = wait_event(
         &mut ev_a,
         |e| matches!(e, EngineEvent::MessageNew(_)),
@@ -383,7 +382,6 @@ async fn call_cycle_repeats_cleanly_round_after_round() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-// Seção 2: rejected_call_leaves_nothing_held_behind
 async fn rejected_call_leaves_nothing_held_behind() {
     let (a, _kp_a, _da) = spawn_engine("NodeA", false);
     let (b, _kp_b, _db) = spawn_engine("NodeB", false);

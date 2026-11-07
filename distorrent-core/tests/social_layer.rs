@@ -179,7 +179,6 @@ fn reacao_offline_tem_teto_por_peer() {
     assert!(!got.iter().any(|r| r.1 == "mx0"), "as mais velhas caem");
 }
 
-// Seção 1: test
 #[test]
 fn reacoes_de_varias_mensagens_vem_em_uma_travessia() {
     let (e, _d) = engine("ana");
@@ -349,7 +348,6 @@ fn reordenar_recusa_canal_de_outra_comunidade() {
     assert_eq!(e.store_ref().channel_position("a1").unwrap().unwrap(), 0);
 }
 
-// Seção 2: test
 #[test]
 fn reordenar_e_atomica() {
     let (e, _d) = engine("dono");
@@ -521,7 +519,6 @@ fn busca_resolve_comunidade_do_canal() {
     assert_eq!(hits[0].channel_id, "chan-9");
 }
 
-// Seção 3: test
 #[test]
 fn busca_filtra_por_autor() {
     let (e, _d) = engine("ana");
@@ -692,7 +689,6 @@ fn perfil_limpa_campos_vazios() {
         .is_empty());
 }
 
-// Seção 4: test
 #[test]
 fn perfil_edicao_efetiva_incrementa_revisao_e_repeticao_nao() {
     let (e, _d) = engine("ana");
@@ -859,7 +855,6 @@ fn enquete_multi_acumula() {
     assert!(total >= 2);
 }
 
-// Seção 5: test
 #[test]
 fn thread_cria_lista_e_arquiva() {
     let (e, _d) = engine("ana");
@@ -1022,7 +1017,6 @@ fn emoji_cria_lista_e_apaga() {
     assert!(!mine.is_empty());
 }
 
-// Seção 6: test
 #[test]
 fn emoji_exige_moderador() {
     let (e, _d) = engine("ana");
@@ -1191,7 +1185,6 @@ fn mute_expira_sozinho() {
     );
 }
 
-// Seção 7: test
 #[test]
 fn mute_nao_derruba_o_cargo_do_membro() {
     let (e, _d) = engine("host");

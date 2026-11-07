@@ -39,8 +39,6 @@ async function befriend(a: Page, b: Page) {
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
   await a.getByRole('button', { name: 'Todos' }).click();
-  // O nome no rail é o do PERFIL, não o da conta: criar uma conta "Bob" não
-  // garante que a linha se chame "Bob". Procura pelo fingerprint, que é estável.
   await expect(a.locator('.friend-row', { hasText: fpB }).first()).toBeVisible({ timeout: 15000 });
   return { fpA, fpB };
 }
@@ -81,9 +79,6 @@ test('badge de fase: Chamando… no A antes do aceitar; Conectado após conectar
   await expect(a.getByPlaceholder(/Conversar com/)).toBeVisible({ timeout: 10000 });
   await a.getByTitle(/Iniciar chamada de voz/).click();
 
-  // "Discando…" → "Chamando…" → "Conectando…": a fase `outgoing` mostra os
-  // dois primeiros conforme a sinalização chega, e o terceiro entra quando o
-  // outro lado aceita. Exigir só "Chamando…" era corrida.
   await expect(a.getByText(/^(Discando|Chamando)…$/)).toBeVisible({ timeout: 15000 });
 
   await expect(b.getByRole('button', { name: 'Aceitar' })).toBeVisible({ timeout: 20000 });

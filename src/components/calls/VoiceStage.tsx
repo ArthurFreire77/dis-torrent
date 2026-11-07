@@ -220,8 +220,6 @@ export function VoiceStage({
         border: `1px solid ${c.border}`,
         borderRadius: compact ? 0 : 999,
         boxShadow: compact ? 'none' : '0 6px 24px rgba(0,0,0,.45)',
-        // Nunca mais largo que o palco: em janela estreita a pílula vazava e
-        // os botões saíam da tela (o "botão em posição errada" no canto).
         maxWidth: 'calc(100% - 24px)',
         boxSizing: 'border-box',
         ...(compact
@@ -351,7 +349,6 @@ export function VoiceStage({
     </div>
   )
 
-  // Seção 2: cabecalho
   const cabecalho = (
     <div
       style={{
@@ -474,10 +471,6 @@ export function VoiceStage({
     </div>
   ) : null
 
-  // Lobby em COLUNA: o conteúdo rola e os controles ficam ancorados embaixo.
-  // Antes os controles eram `position:absolute` DENTRO da área que rola — em
-  // janela baixa eles saíam da tela junto com o conteúdo e o botão "Entrar"
-  // ficava inalcançável (o "botão que não responde").
   const lobby = !inCall && (
     <div
       style={{
@@ -548,14 +541,11 @@ export function VoiceStage({
       {compact ? (
         <div style={{ flexShrink: 0 }}>{controles}</div>
       ) : (
-        // Desktop: a pílula é absoluta DENTRO do lobby (position:relative),
-        // não dentro da área que rola — assim ela não sai da tela.
         controles
       )}
     </div>
   )
 
-  // Seção 3: painelPessoas
   const painelPessoas = painelAberto && inCall && (
     <>
       <div

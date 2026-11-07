@@ -170,7 +170,6 @@ async fn wait_both_not_online(
     }
 }
 
-// Seção 1: wait_both_online
 async fn wait_both_online(
     a: &Arc<NetworkEngine>,
     fp_b: &str,
@@ -347,7 +346,6 @@ async fn relay_simultaneous_redial_burst_3x() {
     .await
     .unwrap_or(false);
     eprintln!("t+{:?}: B viu pedido de A? {got}", t0.elapsed());
-    // Seção 2: _
     let _ = b.friend_respond(&fp_a, true);
     let _ = a.friend_respond(&fp_b, true);
 
@@ -510,7 +508,6 @@ async fn multirelay_dead_leg_unit() {
 
     let dead1 = Arc::new(FlakyLeg::new(Arc::new(StdMutex::new(HashMap::new())), 0));
     let dead2 = Arc::new(FlakyLeg::new(Arc::new(StdMutex::new(HashMap::new())), 0));
-    // Seção 3: multi_dead
     let multi_dead = MultiRelay::of(vec![dead1, dead2]);
     let r = multi_dead.post("t", "x").await;
     assert!(

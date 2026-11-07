@@ -24,8 +24,6 @@ async function befriend(a: Page, b: Page) {
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
-  // `b` estava na aba "Pendentes": sem voltar para "Todos" a lista de amigos
-  // (`.friend-row`) nem existe.
   await b.getByRole('button', { name: 'Todos' }).click();
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
@@ -52,8 +50,6 @@ test('Baixar enfileira no painel: item aparece com estado, pausar/resumir não q
   await b.locator('.friend-row', { hasText: fpA.slice(0, 12) }).first().click();
   await expect(b.getByRole('button', { name: /Baixar/ }).first()).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: /Baixar/ }).first().click();
-  // Clicar em "Baixar" no cartão enfileira mas NÃO abre o painel; quem abre é o
-  // botão "Downloads" do cabeçalho. O teste antigo assumia que abria sozinho.
   await b.getByRole('button', { name: 'Downloads', exact: true }).first().click();
   const panel = b.getByRole('dialog', { name: 'Downloads' });
   await expect(panel).toBeVisible({ timeout: 10000 });

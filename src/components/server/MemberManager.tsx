@@ -294,7 +294,6 @@ export function MemberManager({
                         <select
                           value=""
                           onChange={(e) => {
-                            // Seção 1: rid
                             const rid = e.target.value
                             if (rid) onAssign(fp, rid)
                           }}

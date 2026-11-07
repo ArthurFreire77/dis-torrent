@@ -181,7 +181,6 @@ fn roles_crud_e_assignments() {
         "assignments sumiram com o cargo"
     );
     assert!(a.roles_list(&cid).unwrap().iter().all(|r| r.id != role.id));
-    // Seção 1: bot
     let bot = a
         .bots_list(&cid)
         .unwrap()
@@ -353,7 +352,6 @@ fn community_full_sync_replica_estado_do_host() {
     );
 }
 
-// Seção 2: test
 #[test]
 fn send_dm_em_grupo_fica_pendente_sem_erro() {
     let (a, _ka, _da) = engine_for("Alice");

@@ -190,7 +190,6 @@ export default function ServerSettings(props: ServerSettingsProps) {
               style={{
                 fontSize: 10,
                 fontWeight: 800,
-                // Seção 1: letterSpacing
                 letterSpacing: 0.8,
                 color: ui.muted,
                 marginBottom: 6,
@@ -542,7 +541,6 @@ export default function ServerSettings(props: ServerSettingsProps) {
   )
 }
 
-// Seção 2: contagemDe
 function contagemDe(
   k: ServerSection,
   c: { channels: number; roles: number; members: number; bots: number; categorias: number },
@@ -778,5 +776,4 @@ function ConviteSection({
       )}
     </div>
   )
-}
-// Seção 3: fim
+}

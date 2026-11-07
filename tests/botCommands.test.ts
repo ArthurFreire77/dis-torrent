@@ -97,8 +97,6 @@ test('parseBotConfig: JSON inválido / raw nulo → null', () => {
 })
 
 test('parseBotConfig: config vazia é config padrão (bot recém-criado não é "inválido")', () => {
-  // O core devolve config "" ao criar o bot e o parse_config aceita vazio como
-  // padrão. Marcar isso como inválido pintava todo bot novo de "config inválida".
   for (const vazio of ['', '   ', '\n']) {
     const cfg = parseBotConfig(vazio)
     assert.ok(cfg, `config ${JSON.stringify(vazio)} precisa ser válida`)
@@ -168,8 +166,6 @@ test('config do bot: channelKinds é lido, validado e sobrevive ao round-trip', 
 })
 
 test('permissões: os bits antigos não perdem poder depois da separação', () => {
-  // Quem já tinha o bit "gerenciar" continua podendo montar/limpar: a
-  // atualização não pode tirar poder de bot que já estava configurado.
   assert.equal(BOT_PERM_ALL & BOT_PERMS.MANAGE, BOT_PERMS.MANAGE)
   assert.equal((BOT_PERM_ALL & BOT_PERMS.STRUCTURE) !== 0, true)
   assert.equal((BOT_PERM_ALL & BOT_PERMS.PURGE) !== 0, true)
@@ -442,4 +438,3 @@ test('BOT_EVENTS só tem ids que o parser aceita', () => {
   assert.ok(cfg)
   assert.equal(cfg.events.length, BOT_EVENTS.length, 'todo evento documentado precisa ser aceito')
 })
-// Seção 1: fim

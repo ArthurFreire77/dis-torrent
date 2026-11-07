@@ -63,8 +63,6 @@ test('preferência apontando para device removido cai na primeira', () => {
 })
 
 test('botão de inverter: no celular aparece mesmo com enumerateDevices mentindo', () => {
-  // Antes da permissão o Android devolve um único `videoinput` (ou nenhum) e
-  // o botão de inverter simplesmente não existia no aparelho.
   assert.equal(shouldShowCameraFlip({ devices: [], rawCount: 0, mobile: true }), true)
   assert.equal(shouldShowCameraFlip({ devices: [], rawCount: 1, mobile: true }), true)
   assert.equal(shouldShowCameraFlip({ devices: cameraDevices([cam('a')]), rawCount: 1, mobile: true }), true)

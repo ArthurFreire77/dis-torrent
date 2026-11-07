@@ -165,7 +165,6 @@ export function StepRoles({
               {aberto && (
                 <div className="csw-perms" style={layout.perms}>
                   {(Object.keys(PERMS) as (keyof typeof PERMS)[]).map((key) => {
-                    // Seção 1: bit
                     const bit = PERMS[key]
                     const pl = (PERM_LABELS as Record<number, string>)[bit] ?? key
                     return (

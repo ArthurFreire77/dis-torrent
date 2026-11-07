@@ -167,7 +167,6 @@ export function Modal({ title, onClose, children, width = 520, footer }: {
   )
 }
 
-// Seção 1: Field
 export function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 14 }}>

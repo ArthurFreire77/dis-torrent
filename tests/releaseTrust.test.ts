@@ -1,13 +1,6 @@
-// Contrato de autenticidade de releases, do lado que o app usa.
-//
-// A decisão de segurança é do Rust; estes testes travam o que a UI pode e não
-// pode fazer: ela nunca fornece URL/hash, nunca promove um peer a confiável e
-// nunca trata "não verificado" como "oficial". Onde o teste olha o código-fonte
-// é porque o contrato É a assinatura da função nativa (não há como exercitar
-// Tauri em Node).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -16,6 +9,17 @@ import type { UpdateInfo } from '../src/services/updateRules.ts'
 
 const raiz = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ler = (p: string) => readFileSync(resolve(raiz, p), 'utf8')
+
+/** updater.rs + os módulos updater_*.rs (o comando pode morar em qualquer um). */
+function lerUpdater(): string {
+  const base = 'src-tauri/src'
+  return [
+    readFileSync(`${base}/updater.rs`, 'utf8'),
+    ...readdirSync(base)
+      .filter((f) => f.startsWith('updater_') && f.endsWith('.rs'))
+      .map((f) => readFileSync(`${base}/${f}`, 'utf8')),
+  ].join('\n')
+}
 
 function info(over: Partial<UpdateInfo> = {}): UpdateInfo {
   return {
@@ -53,7 +57,7 @@ test('a UI pede o download pelo NOME do asset, nunca por URL/hash', () => {
 })
 
 test('o comando Rust update_download não aceita url nem digest da UI', () => {
-  const updater = ler('src-tauri/src/updater.rs')
+  const updater = lerUpdater()
   const assinatura = /pub async fn update_download\(([\s\S]*?)\) -> Result<String, String>/.exec(
     updater,
   )
@@ -67,7 +71,7 @@ test('o comando Rust update_download não aceita url nem digest da UI', () => {
 })
 
 test('update_apply revalida hash, pasta e symlink antes de executar', () => {
-  const updater = ler('src-tauri/src/updater.rs')
+  const updater = lerUpdater()
   assert.match(updater, /fn update_apply\(app: tauri::AppHandle/)
   assert.match(updater, /verify_before_apply\(&app, &path\)\?/)
   assert.match(updater, /is_symlink\(\)/)
@@ -76,7 +80,7 @@ test('update_apply revalida hash, pasta e symlink antes de executar', () => {
 })
 
 test('existe UM único ponto de execução do instalador, e é depois da verificação', () => {
-  const updater = ler('src-tauri/src/updater.rs')
+  const updater = lerUpdater()
   const posVerificacao = updater.indexOf('verify_before_apply(&app, &path)?')
   const posExec = updater.indexOf('std::process::Command::new(&p)')
   assert.ok(posVerificacao > 0, 'a verificação existe')
@@ -86,14 +90,14 @@ test('existe UM único ponto de execução do instalador, e é depois da verific
 })
 
 test('o atualizador recusa downgrade e epoch abaixo do piso', () => {
-  const updater = ler('src-tauri/src/updater.rs')
+  const updater = lerUpdater()
   assert.match(updater, /ReleaseStatus::Obsoleto/)
   assert.match(updater, /downgrade recusado/)
   assert.match(updater, /pending\.security_epoch < trust\.epoch_floor\(\)/)
 })
 
 test('URL do instalador vem do manifesto verificado, não do GitHub nem da UI', () => {
-  const updater = ler('src-tauri/src/updater.rs')
+  const updater = lerUpdater()
   // O download usa `asset.url` (do manifesto aceito)...
   assert.match(updater, /client\s*\.get\(&asset\.url\)/)
   // ...e o asset é procurado DENTRO do manifesto verificado.
@@ -103,12 +107,8 @@ test('URL do instalador vem do manifesto verificado, não do GitHub nem da UI', 
 
 test('a raiz de confiança embutida só tem chave PÚBLICA, nunca privada', () => {
   const trustKeys = ler('distorrent-core/src/release/trust_keys.rs')
-  // A constante está preenchida (cerimônia executada) e o formato é
-  // `epoch|threshold|key_id:pubkey,...` — nada de segredo.
   assert.match(trustKeys, /pub const TRUST_SET_BOOTSTRAP: &str = "1\|2\|/)
   assert.doesNotMatch(trustKeys, /SigningKey|private key/i)
-  // Nenhum literal de 64 hex que NÃO esteja precedido por `key_id:` — que é
-  // exatamente a forma de uma semente ed25519 colada por engano.
   const linha = /pub const TRUST_SET_BOOTSTRAP: &str = "([^"]*)"/.exec(trustKeys)?.[1] ?? ''
   for (const item of linha.split('|')[2]?.split(',') ?? []) {
     assert.match(item, /^[0-9a-f]{16}:[0-9a-f]{64}$/, `item fora do formato: ${item}`)
@@ -119,8 +119,6 @@ test('não existe override da raiz de confiança em runtime', () => {
   const trust = ler('distorrent-core/src/release/trust.rs')
   const bloco = /pub fn bootstrap_trust_set\(\)[\s\S]*?\n}/.exec(trust)?.[0] ?? ''
   assert.ok(bloco.length > 0, 'achou bootstrap_trust_set')
-  // A raiz de confiança vem SÓ da constante compilada: nenhuma variável de
-  // ambiente, arquivo ou argumento pode trocá-la em runtime.
   assert.doesNotMatch(bloco, /env::var|std::fs::read|read_to_string|from_env/)
   assert.match(bloco, /TRUST_SET_BOOTSTRAP/)
 })

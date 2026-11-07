@@ -162,7 +162,6 @@ test('com stream único, a chave do áudio acompanha o tile que toca', () => {
 })
 
 test('com streams separados, a voz fica no tile da pessoa e a tela não duplica', () => {
-  // Seção 1: cam
   const cam = fakeStream()
   const screen = fakeStream()
   const tiles = buildCallTiles({
@@ -323,9 +322,6 @@ test('tela cheia é overlay: a lista de quadrados não perde ninguém', () => {
 })
 
 test('sinal diz cameraOn:false mas a trilha esta viva: o video APARECE', () => {
-  // Cenário real: a pessoa compartilhou a tela (sinal cameraOn:false), parou
-  // e ligou a câmera. Ninguém reenvia o booleano, então antes o vídeo ficava
-  // suprimido para sempre — prévia local ok, remoto sem imagem.
   const stream = fakeStream({ video: true, live: true })
   const tiles = buildCallTiles({
     myFp: ME,

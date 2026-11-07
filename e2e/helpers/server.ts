@@ -40,8 +40,6 @@ export async function createServerViaWizard(page: Page, name: string, openIt = t
   await expect(wizard).toBeHidden({ timeout: 10000 })
 
   if (openIt) {
-    // `.first()`: o rail pode ter o mesmo servidor em mais de um estado
-    // (ativo + lista). Sem isto o Playwright recusa o clique ambíguo.
     await page.locator(`.rail-btn[title="${name}"]`).first().click()
     await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 })
   }

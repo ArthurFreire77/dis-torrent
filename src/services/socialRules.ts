@@ -107,10 +107,7 @@ export function introState(input: {
   }
 }
 
-/**
- * Rótulo do contato na lista. Diz a verdade sobre o relacionamento em vez de
- * chamar todo mundo de "contato" ou de "amigo".
- */
+/** Rótulo do contato na lista. Diz a verdade sobre o relacionamento em vez de chamar todo mundo de "contato" ou de "amigo". */
 export function contactBadge(input: {
   relation: SocialRelation
   sharedGroup?: boolean

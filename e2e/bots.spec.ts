@@ -11,8 +11,6 @@ async function createAccount(page: Page, name: string) {
 
 async function openServerSettingsBots(page: Page): Promise<void> {
   await page.locator('.server-head').click();
-  // `exact: true`: existe também "Bots em janela" (abre a janela própria), que
-  // contém a palavra "Bots" e tornaria o seletor ambíguo.
   await page.getByRole('button', { name: 'Bots', exact: true }).click();
 }
 
@@ -55,8 +53,6 @@ test('bot recém-criado não aparece como "config inválida"', async ({ page }) 
   await openServerSettingsBots(page);
   await createBot(page, 'NovoBot');
 
-  // Config vazia é o padrão do core; marcar isso como inválido acusava todo
-  // bot novo e mandava o dono caçar um problema que não existe.
   await expect(page.getByText('config inválida')).toHaveCount(0);
   await expect(page.getByText('0 comando(s)')).toBeVisible();
 });

@@ -56,9 +56,6 @@ test('connecting: ice-failed → reconnecting (senão o watchdog de CGNAT é no-
 })
 
 test('connecting: reconnect-timeout → failed (senão o watchdog desiste e a tela fica em "Conectando…")', () => {
-  // O watchdog de conexão dispara `reconnect-timeout` quando não há rota. Se a
-  // fase `connecting` engole o evento, o aviso ao usuário é inútil e a tela
-  // nunca sai de "Conectando…".
   assert.equal(nextCallPhase('connecting', 'reconnect-timeout'), 'failed')
   assert.equal(isCallPhaseActive(nextCallPhase('connecting', 'reconnect-timeout')), false)
 })

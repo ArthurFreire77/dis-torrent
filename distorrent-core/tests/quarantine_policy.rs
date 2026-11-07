@@ -65,8 +65,6 @@ fn peer_antigo_sem_proto_v_5_nao_e_desafiado_e_conta_como_nao_verificado() {
 
 #[test]
 fn sem_chaves_no_receptor_ninguem_e_bloqueado_em_massa() {
-    // Build sem cerimônia: não há como provar nada, então bloquear seria punir
-    // todo mundo por uma limitação do próprio cliente.
     for proto in [0u32, 4, 5] {
         assert!(!quarantined(
             None,

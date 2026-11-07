@@ -186,4 +186,3 @@ export function EventPanel({ communityId, channels, onClose, onToast }: {
     </Modal>
   )
 }
-// Seção 1: fim

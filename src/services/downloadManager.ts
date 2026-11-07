@@ -79,9 +79,6 @@ class DownloadManager {
       if (existing.status === 'cancelled' || existing.status === 'failed') {
         this.resetToQueued(existing)
       }
-      // Se o status diz "baixando" mas não há laço vivo (travou, app voltou do
-      // background, exceção engolida), o clique em "Baixar" era um no-op. Aqui
-      // ele religa o download de verdade.
       if (this.wantsTransfer(existing.status) && !this.running.has(meta.file_id)) {
         this.pausedFps.delete(meta.file_id)
         this.cancelled.delete(meta.file_id)
@@ -150,8 +147,6 @@ class DownloadManager {
       this.setStatus(it, 'retry')
       this.pausedFps.delete(fileId)
       this.cancelled.delete(fileId)
-      // RetryHonesto: limpa tentativas/ciclos/peers ruins. Sem isso, "tentar de
-      // novo" reencontrava o estado esgotado e não pedia mais nada.
       fileSwarm.resetForRetry(fileId)
       fileSwarm.resumeFile(fileId)
       this.kick(fileId)
@@ -191,7 +186,6 @@ class DownloadManager {
   }
 
   activeCount(): number {
-    // Seção 1: n
     let n = 0
     for (const it of this.items.values()) {
       if (it.status === 'queued' || it.status === 'downloading' || it.status === 'verifying' || it.status === 'saving') n++
@@ -284,8 +278,6 @@ class DownloadManager {
           lastHave = have
           lastProgressAt = now()
           noSeederSince = null
-          // Progresso imediato: esperar a janela de 2 s deixava o card em
-          // "Baixar"/0% mesmo com blocos chegando.
           const itNow = this.items.get(fileId)
           if (itNow && itNow.status === 'downloading') {
             itNow.have = have
@@ -295,9 +287,6 @@ class DownloadManager {
           }
         }
 
-        // Travado não é "baixando": se o swarm esgotou as tentativas de alguns
-        // blocos, isso TEM de virar erro visível. Antes o item ficava em 0%
-        // com status `downloading` para sempre (relato "nunca termina").
         if (sf.failedChunks && sf.failedChunks.size > 0 && now() - lastProgressAt > STALL_FAIL_MS) {
           const st = this.items.get(fileId)
           if (st && (st.status === 'downloading' || st.status === 'queued')) {
@@ -361,9 +350,6 @@ class DownloadManager {
       const blob = fileSwarm.assembleAndDownload(sf)
       const bytes = new Uint8Array(await blob.arrayBuffer())
       if (!verifyFileIntegrity(bytes, sf.hash)) {
-        // Sem descartar os blocos, o retry reencontrava `have.size === chunks`,
-        // finalizava de novo com os MESMOS bytes e falhava para sempre. A
-        // mensagem antiga ("o swarm rebaixa") era falsa: ninguém rebaixava.
         fileSwarm.invalidateChunks(fileId)
         this.setStatus(
           it,
@@ -414,7 +400,6 @@ class DownloadManager {
   }
 }
 
-// Seção 2: downloadManager
 export const downloadManager = new DownloadManager()
 try {
   if (typeof window !== 'undefined') {

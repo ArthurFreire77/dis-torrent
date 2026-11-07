@@ -113,8 +113,6 @@ fn fluxo_completo_2_de_3_e_wire_sobrevive_ao_transporte() {
 
 #[test]
 fn reinstalar_uma_release_antiga_legitima_e_recusado_por_epoch() {
-    // Cenário de rollback: atacante reapresenta manifesto REAL da 1.0.0
-    // (assinaturas válidas) depois que a 2.0.0 já foi aceita.
     let keys: Vec<Keypair> = (0..3).map(|_| Keypair::generate()).collect();
     let trust = trust_set(&keys, 1);
     let velho = sign(&keys, body("1.0.0", 10), &[0, 1]);
@@ -274,8 +272,6 @@ fn manifesto_de_outro_projeto_ou_repo_nao_e_aceito() {
 
     let mut b = body("2.0.0", 10);
     b.assets[0].url = "https://github.com/outro/repo/releases/download/v2.0.0/x.apk".into();
-    // O manifesto pode citar outra URL? A validação de forma não olha o host
-    // (o updater olha). O que NÃO pode é a assinatura cobrir outra coisa.
     let signed = sign(&keys, b.clone(), &[0, 1]);
     let v = verify_manifest(&trust, &signed, 0).unwrap();
     assert!(v.is_verified(), "assinatura cobre a URL declarada");
@@ -361,8 +357,6 @@ fn cache_nao_deixa_manifesto_invalido_entrar() {
 
 #[test]
 fn bytes_canonicos_sao_estaveis_para_o_tooling_node() {
-    // Vetor fixo: se o formato mudar, o tooling Node (e o teste dele) precisa
-    // mudar junto. Esse hash é o contrato entre os dois lados.
     let b = body("1.2.3", 7);
     let bytes = b.canonical_bytes().unwrap();
     let hash = b.hash_hex().unwrap();

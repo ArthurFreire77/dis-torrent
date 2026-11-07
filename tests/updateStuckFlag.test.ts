@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import {
   runUpdateFlow,
   falhaExpirada,
@@ -142,7 +142,12 @@ test('quem pulou de propósito continua respeitado (não força)', async () => {
 })
 
 test('o instalador do Windows NÃO pode receber /NORESTART', () => {
-  const rust = readFileSync('src-tauri/src/updater.rs', 'utf8')
+  const rust = [
+    readFileSync('src-tauri/src/updater.rs', 'utf8'),
+    ...readdirSync('src-tauri/src')
+      .filter((f) => f.startsWith('updater_') && f.endsWith('.rs'))
+      .map((f) => readFileSync(`src-tauri/src/${f}`, 'utf8')),
+  ].join('\n')
   const ini = rust.indexOf('"/SILENT"')
   assert.ok(ini > 0, 'achou a lista de argumentos do instalador')
   const bloco = rust.slice(ini, ini + 300)

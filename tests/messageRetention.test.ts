@@ -1,9 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 
-const storage = readFileSync('distorrent-core/src/storage.rs', 'utf8')
-const lib = readFileSync('src-tauri/src/lib.rs', 'utf8')
+const storage = [
+  readFileSync('distorrent-core/src/storage.rs', 'utf8'),
+  ...readdirSync('distorrent-core/src')
+    .filter((f) => f.startsWith('storage_') && f.endsWith('.rs') && !f.includes('test'))
+    .map((f) => readFileSync(`distorrent-core/src/${f}`, 'utf8')),
+].join('\n')
+const lib = [
+  readFileSync('src-tauri/src/lib.rs', 'utf8'),
+  ...readdirSync('src-tauri/src')
+    .filter((f) => f.startsWith('commands_') && f.endsWith('.rs'))
+    .map((f) => readFileSync(`src-tauri/src/${f}`, 'utf8')),
+].join('\n')
 const ui = readFileSync('src/components/prefs/MessageRetentionSettings.tsx', 'utf8')
 const tauri = readFileSync('src/services/tauri.ts', 'utf8')
 

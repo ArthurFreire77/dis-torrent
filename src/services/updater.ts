@@ -73,14 +73,9 @@ export function nativeUpdateDeps(): UpdateDeps | null {
   if (!s.updateCheck || !s.updateDownload || !s.updateApply) return null
   return {
     check: () => s.updateCheck!(),
-    // O nome do asset é o único campo que vem da UI; URL, hash e tamanho saem
-    // do manifesto verificado no Rust. Um nome trocado é recusado lá.
     download: (info) => s.updateDownload!(info.asset_name),
     apply: async (path) => {
       if (/android/i.test(navigator.userAgent ?? '')) {
-        // No Android o Rust já validou hash+manifesto e devolveu o sinal de
-        // "instalar"; o plugin nativo confere a assinatura do APK e abre o
-        // instalador do sistema (consentimento do usuário é obrigatório).
         const { invoke } = await import('@tauri-apps/api/core')
         try {
           await invoke('update_apply', { path })

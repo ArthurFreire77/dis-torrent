@@ -170,4 +170,3 @@ fn anti_flapping_nao_troca_duas_vezes_no_cooldown() {
         assert_eq!(e.privacy_mode(), "encrypted", "cooldown anti-flapping");
     });
 }
-// Seção 1: fim

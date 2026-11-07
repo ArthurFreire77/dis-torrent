@@ -205,7 +205,6 @@ export default function CallSettingsPanel({
         <Row label="APARELHO" hint={videoDevices.length === 0 ? 'nenhuma câmera detectada (ou permissão ainda não concedida)' : `${videoDevices.length} câmera(s) encontrada(s)`}>
           <select
             style={selectStyle}
-            // Seção 1: value
             value={local.videoInputId}
             disabled={busy || !ouvinteDisponivel}
             onChange={(e) => void aplicar({ videoInputId: e.target.value })}

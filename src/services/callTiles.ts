@@ -65,10 +65,6 @@ export function screenTileLabel(nickname: string, isLocal: boolean): string {
 export function streamHasLiveVideo(stream: MediaStream | null | undefined): boolean {
   try {
     if (!stream || typeof stream.getVideoTracks !== 'function') return false
-    // `muted` é o que o WebRTC marca quando a fonte parou de mandar RTP:
-    // `replaceTrack(null)` no outro lado deixa a track viva e muda, e sem esta
-    // checagem o card ficava mostrando o último quadro da tela/câmera para
-    // sempre (o "vídeo congelado" depois de parar de compartilhar).
     return stream.getVideoTracks().some(
       (t) => t.readyState === 'live' && (t as MediaStreamTrack & { muted?: boolean }).muted !== true,
     )
@@ -131,9 +127,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
     const remoteHasLiveVideo = streamHasLiveVideo(!isLocal ? p.stream ?? null : null)
     const cameraOn = isLocal
       ? pickBoolean(local?.cameraOn, p.cameraOn)
-      // Para o remoto, trilha viva é a evidência; o sinal só complementa. Antes
-      // o selo "CÂMERA" nunca aparecia em peer remoto e o aviso "câmera
-      // desligada" era desenhado por cima de vídeo ao vivo.
       : (pickBoolean(p.cameraOn) || remoteHasLiveVideo)
     const sharing = isLocal
       ? pickBoolean(local?.sharing, p.sharing)
@@ -157,12 +150,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
 
     const cameraConsumedByScreen = !isLocal && !!fallbackScreen && !remoteScreenStream
     const audioOwnerIsScreen = !isLocal && cameraConsumedByScreen
-    // O `<video>` remoto é decidido pela TRILHA, nunca por um booleano de sinal.
-    // `p.cameraOn === false` já era suprimido para sempre: quem compartilhava
-    // tela mandava `cameraOn:false`, e esse estado nunca voltava para `true`
-    // quando a pessoa desligava a tela e ligava a câmera. Resultado: prévia
-    // local ok e o outro lado sem imagem, sem erro. `cameraOn` agora só
-    // alimenta o selo.
     const participantStream = isLocal
       ? (cameraOn && streamHasLiveVideo(localCameraStream) ? localCameraStream ?? undefined : undefined)
       : (cameraConsumedByScreen || !streamHasLiveVideo(remoteCameraStream) ? undefined : cameraStream ?? undefined)
@@ -224,7 +211,6 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
   return tiles
 }
 
-// Seção 1: resolveTileId
 export function resolveTileId(id: string | null | undefined, tiles: CallTile[]): string | null {
   if (!id) return null
   return tiles.some((t) => t.id === id) ? id : null

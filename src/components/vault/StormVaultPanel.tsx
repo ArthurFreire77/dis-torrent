@@ -182,7 +182,6 @@ export function StormVaultPanel() {
       <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
         <input
           type="password"
-          // Seção 1: value
           value={expPass}
           onChange={(e) => setExpPass(e.target.value)}
           placeholder="crie uma senha (mín. 8 caracteres)"
@@ -340,4 +339,3 @@ function importSummary(r: VaultImportReport): string {
   const extra = r.messages_truncated ? '\nAtenção: o cofre tinha mais mensagens que o limite exportado.' : ''
   return `${what}: ${parts.join(', ')}.${extra} Use a senha do cofre para entrar.`
 }
-// Seção 2: fim

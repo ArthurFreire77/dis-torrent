@@ -258,7 +258,6 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   )
 }
 
-// Seção 1: STATUS_ICONS
 const STATUS_ICONS: { id: string; icon: IconName; label: string }[] = [
   { id: 'game', icon: 'grid', label: 'Jogando' },
   { id: 'code', icon: 'terminal', label: 'Codando' },

@@ -346,7 +346,6 @@ export default function MobileServerPanel({
   const [novoNome, setNovoNome] = useState('')
   const [novoTipo, setNovoTipo] = useState<'text' | 'voice' | 'video'>('text')
   const [criando, setCriando] = useState(false)
-  // Seção 1: const
   const [menuCanal, setMenuCanal] = useState<ChannelMeta | null>(null)
   const [roles, setRoles] = useState<RoleView[]>([])
 
@@ -642,4 +641,3 @@ export default function MobileServerPanel({
     </div>
   )
 }
-// Seção 2: fim

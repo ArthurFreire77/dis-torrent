@@ -243,14 +243,54 @@ function scan(text, fileName) {
 
 // ---------- remoção ----------
 
-// instruções para ferramenta (lint/tipos/bundler): removê-las muda o build
+// instruções para ferramenta (lint/tipos/bundler) e avisos de segurança:
+// removê-las muda o build ou apaga a justificativa de um `unsafe`.
 const KEEP =
-  /eslint-disable|eslint-enable|eslint-env|@ts-ignore|@ts-expect-error|@ts-nocheck|prettier-ignore|biome-ignore|istanbul ignore|c8 ignore|oxlint-disable|deno-lint-ignore|@vite-ignore|webpackIgnore|sourceMappingURL|<reference\s/;
+  /eslint-disable|eslint-enable|eslint-env|@ts-ignore|@ts-expect-error|@ts-nocheck|prettier-ignore|biome-ignore|istanbul ignore|c8 ignore|oxlint-disable|deno-lint-ignore|@vite-ignore|webpackIgnore|sourceMappingURL|<reference\s|SAFETY:|allow\(dead_code\)/;
+
+// Política: documentação de API (`///`, `//!`) fica. Sai o que denuncia código
+// gerado: banner de separador, bloco `/** */` de 3+ linhas (prosa/história) e
+// sequência de 2+ `//` (parágrafo). Comentário `//` isolado e curto fica.
+const BANNER = /^(?:\/\/|\/\*|\*)[\s\-=*#─━_~]{3,}$/;
+const MAX_COMMENT = 140;
+
+function removableComments(text, spans, sorted) {
+  const lineOf = (pos) => lineIndexAt(spans, pos);
+  const isWholeLine = ([cs, ce]) => {
+    const sp = spans[lineOf(cs)];
+    return text.slice(sp.start, cs).trim() === '' && text.slice(ce, sp.end).trim() === '';
+  };
+  const drop = [];
+  let i = 0;
+  while (i < sorted.length) {
+    let j = i;
+    while (j + 1 < sorted.length && lineOf(sorted[j + 1][0]) <= lineOf(sorted[j][1]) + 1) j++;
+    const run = sorted.slice(i, j + 1);
+    i = j + 1;
+    if (run.some(([cs, ce]) => KEEP.test(text.slice(cs, ce)))) continue;
+    const body = run.map(([cs, ce]) => text.slice(cs, ce)).join(' ');
+    if (/^\s*\/\/[/!]/.test(body)) continue;
+    const compact = body.replace(/\s+/g, ' ').trim();
+    const whole = run.every(isWholeLine);
+    const docBlock = /^\s*\/\*\*/.test(compact);
+    if (BANNER.test(compact)) {
+      drop.push(...run);
+      continue;
+    }
+    if (!whole) continue;
+    if (docBlock && run.length >= 3) {
+      drop.push(...run);
+      continue;
+    }
+    if (!docBlock && (run.length >= 2 || compact.length > MAX_COMMENT)) drop.push(...run);
+  }
+  return drop;
+}
 
 function stripComments(text, scanRes) {
   const { lines, eol, trailing } = splitLines(text);
   const spans = offsets(lines, eol);
-  const sorted = scanRes.comments.slice().sort((a, b) => a[0] - b[0]);
+  const sorted = removableComments(text, spans, scanRes.comments.slice().sort((a, b) => a[0] - b[0]));
 
   const out = [];
   let ci = 0;
@@ -319,80 +359,6 @@ function tidy(out, spans, stringRanges) {
   return res.map((l) => l.text);
 }
 
-// ---------- inserção ----------
-
-const ANCHORS =
-  /^(export|import|const|let|var|function|class|interface|type|enum|declare|async|fun|val|object|data|internal|private|protected|public|pub|fn|impl|struct|trait|use|mod|static|macro_rules|describe|test\(|it\(|selector|@media|@keyframes|#\[)/;
-
-function symbolOf(line) {
-  const kw =
-    line.match(
-      /(?:function|fn|fun|class|struct|enum|trait|interface|type|const|let|var|static|mod|object|impl|data|describe|selector)\s+([A-Za-z_$][\w$]*)/,
-    ) || line.match(/default\s+([A-Za-z_$][\w$]*)/);
-  if (kw) return kw[1];
-  const first = line.match(/([A-Za-z_$][\w$]*)/);
-  return first ? first[1] : 'bloco';
-}
-
-function insertComments(cleaned, fileName, every = 150) {
-  const { lines, eol, trailing } = splitLines(cleaned);
-  const spans = offsets(lines, eol);
-  const scanRes = scan(cleaned, fileName);  const unsafe = new Set();
-  for (const [s, e] of scanRes.strings) {
-    const a = lineIndexAt(spans, s);
-    const b = lineIndexAt(spans, Math.max(s, e - 1));
-    for (let i = a; i <= b; i++) unsafe.add(i);
-  }
-
-  const out = [];
-  let code = 0;
-  let section = 0;
-  let pending = false;
-
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li];
-    const isCode = line.trim().length > 0;
-    // indenta o marcador no mesmo nível da âncora, para não quebrar bloco Rust/TS
-    if (pending && isCode && !unsafe.has(li) && ANCHORS.test(line.trim())) {
-      const indent = line.match(/^[ \t]*/)[0];
-      section++;
-      out.push(`${indent}// Seção ${section}: ${symbolOf(line.trim())}`);
-      pending = false;
-      code = 0;
-    }
-    if (isCode) {
-      code++;
-      if (code >= every) pending = true;
-    }
-    out.push(line);
-  }
-
-  // arquivo grande que terminou sem âncora elegível: fecha a cota no fim
-  while (code >= every) {
-    section++;
-    out.push(`// Seção ${section}: fim`);
-    code -= every;
-  }
-
-  const text = out.join(eol) + (trailing ? eol : '');
-
-  // guarda-corpo: marcador dentro de string/literal muda o que o código faz
-  // (SQL, CSS, texto de UI) — nesse caso o arquivo NÃO é gravado.
-  const verify = scan(text, fileName);
-  const markerRe = /\/\/ Se[çc][ãa]o \d+:/g;
-  let mm;
-  while ((mm = markerRe.exec(text))) {
-    const hit = verify.strings.find(([s, e]) => mm.index > s && mm.index < e);
-    if (hit) {
-      throw new Error(
-        `marcador cairia dentro de literal em ${fileName}: ${JSON.stringify(text.slice(hit[0], hit[0] + 70))}`,
-      );
-    }
-  }
-
-  return { text, sections: section };
-}
-
 // ---------- main ----------
 
 const files = execSync('git ls-files', { cwd: ROOT, encoding: 'utf8' })
@@ -420,14 +386,7 @@ for (const rel of targets) {
     continue;
   }
   const stripped = stripComments(text, scanRes);
-  let inserted;
-  try {
-    inserted = insertComments(stripped.lines.join(stripped.eol), rel);
-  } catch (e) {
-    report.push({ rel, error: e.message });
-    continue;
-  }
-  let finalText = inserted.text;
+  let finalText = stripped.lines.join(stripped.eol);
   if (stripped.trailing && !finalText.endsWith(stripped.eol)) finalText += stripped.eol;
   if (!stripped.trailing && finalText.endsWith(stripped.eol)) finalText = finalText.slice(0, -stripped.eol.length);
   if (bom) finalText = '\uFEFF' + finalText;
@@ -437,12 +396,12 @@ for (const rel of targets) {
     continue;
   }
   if (WRITE) fs.writeFileSync(abs, finalText, 'utf8');
-  report.push({ rel, changed: true, removed: stripped.removed, lines: stripped.removedLines, sections: inserted.sections });
+  report.push({ rel, changed: true, removed: stripped.removed, lines: stripped.removedLines });
 }
 
 for (const r of report) {
   if (r.error) console.log(`ERROR ${r.rel}: ${r.error}`);
-  else if (r.changed) console.log(`${r.rel}: ${r.lines} linhas removidas, ${r.sections} seções`);
+  else if (r.changed) console.log(`${r.rel}: ${r.lines} linhas removidas`);
 }
 const changed = report.filter((r) => r.changed).length;
 console.log(`\n${changed}/${report.length} arquivos ${WRITE ? 'gravados' : 'seriam alterados'}`);

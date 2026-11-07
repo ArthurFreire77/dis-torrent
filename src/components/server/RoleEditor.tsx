@@ -196,7 +196,6 @@ export function RoleEditor({
       {}
       <TextField
         label="Nome do cargo"
-        // Seção 1: value
         value={nome}
         onChange={(v) => {
           setNome(v)
@@ -382,7 +381,6 @@ function CheckRow({
   )
 }
 
-// Seção 2: LABEL
 const LABEL: React.CSSProperties = {
   display: 'block',
   fontSize: 11,

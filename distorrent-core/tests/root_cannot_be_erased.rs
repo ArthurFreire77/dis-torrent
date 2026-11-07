@@ -24,8 +24,6 @@ fn sem_raiz_embutida_a_verificacao_fica_indisponivel_e_nada_e_aceito() {
 
 #[test]
 fn a_raiz_de_confianca_nao_pode_ser_trocada_por_variavel_de_ambiente() {
-    // `bootstrap_trust_set` lê SÓ a constante compilada. Setar a variável que
-    // existia antes (DISTORRENT_TRUST_SET) não muda nada.
     let antes = bootstrap_trust_set().expect("raiz embutida");
     std::env::set_var(
         "DISTORRENT_TRUST_SET",

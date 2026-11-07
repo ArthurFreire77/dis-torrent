@@ -5,8 +5,6 @@ async function createAccountMobile(page: Page, name: string) {
   await expect(page.getByRole('button', { name: 'Criar conta' })).toBeVisible({ timeout: 15000 });
   await page.getByPlaceholder('Seu nome').fill(name);
   await page.getByRole('button', { name: 'Criar conta' }).click();
-  // O texto "AMIGOS ONLINE" saiu da tela inicial do mobile; a âncora estável é
-  // a barra de abas (Amigos / Servidores).
   await expect(page.getByRole('button', { name: 'Amigos', exact: true })).toBeVisible({ timeout: 15000 });
 }
 
@@ -40,8 +38,6 @@ test('mobile: anexar arquivo envia mensagem com Baixar', async ({ browser }) => 
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
 
   await a.getByRole('button', { name: 'Todos' }).click();
-  // O mobile usa a MESMA classe `.friend-row` do desktop (o `.m-row` é só a
-  // lista de conversas).
   await a.locator('.friend-row', { hasText: 'BobM' }).first().click();
   await a.locator('input[type="file"]').setInputFiles({
     name: 'foto.txt',

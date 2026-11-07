@@ -347,9 +347,6 @@ export function permAllows(botPerms: number, action: string): boolean {
   if (!def) return false
   if (def.perm === 0) return true
   if ((botPerms & def.perm) !== 0) return true
-  // Mesma exceção herdada de `perm_satisfied` no core: quem já tinha
-  // "gerenciar membros" continua podendo estrutura e purga. Sem espelhar isto
-  // o painel dizia "não pode" e a ponte executava a ação.
   const legado = BOT_PERMS.STRUCTURE | BOT_PERMS.PURGE | BOT_PERMS.MANAGE
   return (def.perm & legado) !== 0 && (botPerms & BOT_PERMS.MANAGE) !== 0
 }
@@ -401,9 +398,6 @@ function isHttpUrl(url: string): boolean {
 }
 
 function hostOf(url: string): string | null {
-  // `new URL` normaliza como o parser do Rust: `http://2130706433/`,
-  // `http://127.1/` e `http://a@127.0.0.1/` viram `127.0.0.1`. Comparar o host
-  // como texto deixava os três passarem e o bot alcançava a LAN.
   try {
     const u = new URL(url.trim())
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
@@ -458,9 +452,6 @@ export function isPrivateHost(host: string): boolean {
     return false
   }
   const h = host.replace(/^\[|\]$/g, '').toLowerCase()
-  // IPv4 mapeado em IPv6 aparece em DUAS formas: `::ffff:127.0.0.1` (texto) e
-  // `::ffff:7f00:1` (o que o parser URL devolve). As duas precisam cair na
-  // checagem IPv4, senão o loopback entra por uma delas.
   if (h.startsWith('::ffff:')) {
     const tail = h.slice(7)
     if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return isPrivateHost(tail)
@@ -646,13 +637,8 @@ export function parseBotConfig(raw: unknown): BotConfig | null {
         .filter((k: unknown): k is BotChannelKind => typeof k === 'string' && validKinds.has(k as BotChannelKind))
         .slice(0, 4)
     : []
-  // v1/v2 não tinham `schema`: ausência é migração, não erro. O modo é
-  // explícito no v3 porque inferir `plugin` de um `run` presente abriria
-  // processo sem o dono ter pedido.
   const schema = typeof obj.schema === 'number' ? Math.trunc(obj.schema) : 2
   if (schema < 1 || schema > 3) return null
-  // Modo desconhecido é ERRO, não "vira declarativo": aceitar em silêncio
-  // esconderia um typo do criador que achou que o plugin ia rodar.
   if (obj.mode !== undefined && !BOT_MODES.some((m) => m.id === obj.mode)) return null
   const mode: BotMode = (obj.mode as BotMode | undefined) ?? 'declarative'
   let runtime: BotRuntime = 'none'
@@ -736,8 +722,6 @@ export function serializeBotConfig(cfg: BotConfig): string {
     retention: { hours: cfg.retentionHours ?? 24 },
   }
   if (cfg.webhookSecret) {
-    // Só o marcador: o segredo real não volta para a config exportada nem para
-    // o JSON do editor (`bot.json` de um bot compartilhado não pode levá-lo).
     integrations.webhook = { signed: true }
   }
   return JSON.stringify({
@@ -907,8 +891,6 @@ export function renderBotReply(
   const tpl = cmd.template ?? (value !== null ? '{{value}}' : '{{json}}')
   const out = renderTemplate(tpl, { args, value: value ?? undefined, json: jsonParsed })
     .replace(/\{\{\s*json\s*\}\}/g, () => (jsonParsed !== undefined ? bodyText : ''))
-  // O texto vem de uma API de terceiro: bidi/zero-width aqui forjaria o que a
-  // mensagem diz.
   const trimmed = sanitizeText(out, BOT_MAX_REPLY)
   if (!trimmed) return null
   return trimmed

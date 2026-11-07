@@ -17,8 +17,6 @@ async function boot(page: Page) {
 async function openConversation(page: Page) {
   await page.getByRole('button', { name: 'Servidores', exact: true }).click();
   await page.getByRole('button', { name: /Servidor Cabecalho/ }).click();
-  // O canal do mobile é um botão rotulado ("Abrir canal de texto"), não
-  // `.chan-row` (essa classe só existe no desktop).
   const canal = page.getByRole('button', { name: /Abrir canal de texto/ }).first();
   await expect(canal).toBeVisible({ timeout: 15000 });
   await canal.click();

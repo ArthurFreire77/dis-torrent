@@ -1,14 +1,15 @@
-// A janela de bots é fácil de "quebrar em silêncio": janela declarada mas não
-// registrada, rota sem lazy, comando fora do `generate_handler!` ou caminho do
-// mobile devolvendo Ok. Nenhum desses erros aparece no typecheck. Estes testes
-// travam o contrato que faz a janela abrir de verdade.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 
 const ler = (p: string) => readFileSync(p, 'utf8')
 const conf = JSON.parse(ler('src-tauri/tauri.conf.json'))
-const lib = ler('src-tauri/src/lib.rs')
+const lib = [
+  ler('src-tauri/src/lib.rs'),
+  ...readdirSync('src-tauri/src')
+    .filter((f) => f.startsWith('commands_') && f.endsWith('.rs'))
+    .map((f) => ler(`src-tauri/src/${f}`)),
+].join('\n')
 const app = ler('src/App.tsx')
 const tela = ler('src/routes/BotsApp.tsx')
 const modelos = ler('src/services/models.ts')
@@ -30,8 +31,6 @@ test('a janela principal continua intacta e a de bots é a segunda', () => {
 test('a janela de bots é sob demanda, escondida e carrega a marca ?bots=1', () => {
   assert.equal(bots.create, false, 'create:false evita um webview extra no boot')
   assert.equal(bots.visible, false, 'mostrar depois de construir evita flash branco')
-  // `index.html?bots=1` é o sinal que o App.tsx lê; trocar por "#/bots" aqui
-  // sem trocar lá deixaria a janela na interface inteira.
   assert.match(String(bots.url), /index\.html\?bots=1/, 'a URL é o contrato com App.tsx')
   assert.ok(Number(bots.minWidth) >= 600, 'a tela de bots precisa de largura útil')
 })

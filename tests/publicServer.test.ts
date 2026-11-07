@@ -1,15 +1,30 @@
 // Servidor público × privado: o que entra no core e o que a UI promete.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 
-const core = readFileSync('distorrent-core/src/net/engine.rs', 'utf8')
-const storage = readFileSync('distorrent-core/src/storage.rs', 'utf8')
+const core = [
+  readFileSync('distorrent-core/src/net/engine.rs', 'utf8'),
+  ...readdirSync('distorrent-core/src/net/engine')
+    .filter((f) => f.endsWith('.rs') && !f.includes('test'))
+    .map((f) => readFileSync(`distorrent-core/src/net/engine/${f}`, 'utf8')),
+].join('\n')
+const storage = [
+  readFileSync('distorrent-core/src/storage.rs', 'utf8'),
+  ...readdirSync('distorrent-core/src')
+    .filter((f) => f.startsWith('storage_') && f.endsWith('.rs') && !f.includes('test'))
+    .map((f) => readFileSync(`distorrent-core/src/${f}`, 'utf8')),
+].join('\n')
 const limit = readFileSync('distorrent-core/src/net/netlimit.rs', 'utf8')
 const wizard = readFileSync('src/components/server/wizardSteps.tsx', 'utf8')
 const overview = readFileSync('src/components/server/OverviewSection.tsx', 'utf8')
 const manager = readFileSync('src/components/CreateServerWizard.tsx', 'utf8')
-const tauri = readFileSync('src-tauri/src/lib.rs', 'utf8')
+const tauri = [
+  readFileSync('src-tauri/src/lib.rs', 'utf8'),
+  ...readdirSync('src-tauri/src')
+    .filter((f) => f.startsWith('commands_') && f.endsWith('.rs'))
+    .map((f) => readFileSync(`src-tauri/src/${f}`, 'utf8')),
+].join('\n')
 const services = readFileSync('src/services/models.ts', 'utf8')
 
 test('o servidor guarda público/privado no banco', () => {
@@ -40,8 +55,6 @@ test('público entra SEM convite e sem aprovação; privado exige convite', () =
     /este servidor é privado — peça um convite/,
     'privado recusa com mensagem honesta em vez de aceitar calado',
   )
-  // E o privado NÃO tem caminho de aprovação automática: quem não é dono nem
-  // membro cai no erro de "seed não autorizado".
   assert.match(core, /membro não autorizado como seed deste servidor/)
 })
 

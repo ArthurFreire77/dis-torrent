@@ -48,4 +48,3 @@ export const botRuntime = new BotEngine(
     return cachedFingerprint ? { fingerprint: cachedFingerprint } : null
   },
 )
-// Seção 1: fim

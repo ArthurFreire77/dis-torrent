@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import {
   JANELA_COMPAT,
   distanciaEntreVersoes,
@@ -10,7 +10,12 @@ import {
   RECURSO_MIN_VERSAO,
 } from '../src/services/versionCompat.ts'
 
-const engine = readFileSync('distorrent-core/src/net/engine.rs', 'utf8')
+const engine = [
+  readFileSync('distorrent-core/src/net/engine.rs', 'utf8'),
+  ...readdirSync('distorrent-core/src/net/engine')
+    .filter((f) => f.endsWith('.rs') && !f.includes('test'))
+    .map((f) => readFileSync(`distorrent-core/src/net/engine/${f}`, 'utf8')),
+].join('\n')
 const protocol = readFileSync('distorrent-core/src/protocol.rs', 'utf8')
 
 test('a janela é de 5 releases', () => {

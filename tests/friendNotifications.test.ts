@@ -2,9 +2,6 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { notificationIdFor } from '../src/services/notificationRules.ts'
 
-// A regra de amizade usa o mesmo `notificationIdFor` das mensagens. Testamos o
-// contrato que importa: ids estáveis por chave e distintos entre tipos, para
-// um pedido não sobrescrever o aviso de mensagem da mesma pessoa.
 test('id de aviso é estável e distinto por tipo de evento', () => {
   const pedido = notificationIdFor('friend:request:abcd1234')
   assert.equal(pedido, notificationIdFor('friend:request:abcd1234'))

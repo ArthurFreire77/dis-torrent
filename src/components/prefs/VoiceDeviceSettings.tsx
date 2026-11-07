@@ -203,4 +203,3 @@ export function VoiceDeviceSettings({ T, inputBg, borderColor, text, muted }: {
     </div>
   )
 }
-// Seção 1: fim

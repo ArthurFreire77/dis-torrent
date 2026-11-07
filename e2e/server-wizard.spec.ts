@@ -22,8 +22,6 @@ test('wizard completo: 4 passos criam servidor com convite', async ({ page }) =>
   await wizard.getByLabel('Nome do servidor').fill('Guilda do Teste');
   await wizard.getByLabel('Descrição do servidor').fill('servidor do teste v6');
 
-  // O wizard ganhou o passo de bots (virou 5 passos). Em vez de contar passos
-  // (o teste quebrava a cada passo novo), avança até aparecer "Criar servidor".
   const criar = wizard.getByRole('button', { name: 'Criar servidor', exact: true });
   for (let passo = 0; passo < 8; passo++) {
     if (await criar.isVisible().catch(() => false)) break;

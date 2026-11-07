@@ -169,7 +169,6 @@ fn cursor_de_leitura_gera_nao_lidas() {
     assert_eq!(s.read_all().unwrap().len(), 1);
 }
 
-// Seção 1: test
 #[test]
 fn presenca_extendida_e_perfil() {
     let s = Store::open_in_memory().unwrap();
@@ -341,7 +340,6 @@ fn emojis_do_servidor() {
     assert!(s.emoji_list("com1").unwrap().is_empty());
 }
 
-// Seção 2: test
 #[test]
 fn marcadores_e_purga_de_conversa() {
     let s = Store::open_in_memory().unwrap();
@@ -508,7 +506,6 @@ async fn rede_social_reacoes_entre_dois_nos() {
     .await
     .expect("aceite de amizade não sincronizou nos dois peers");
 
-    // Seção 3: conv
     let conv = Store::dm_conversation_id(&fp_a, &fp_b);
     a.store.ensure_dm_conversation(&fp_a, &fp_b, "Bob").unwrap();
     let m = a.send_dm(&conv, "oi bob").unwrap();

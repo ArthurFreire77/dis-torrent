@@ -255,8 +255,6 @@ fn resolve_canal_e_membro_por_nome() {
 
 #[test]
 fn config_de_bot_existente_nao_e_perdida_na_migracao() {
-    // Config no formato antigo (só HTTP) precisa continuar válida e o `perms`
-    // novo entra como 0.
     let cfg = r#"{"prefix":"!","commands":[{"name":"clima","url":"https://api.x/y","template":"{{json}}"}]}"#;
     let parsed = distorrent_core::bots::parse_config(cfg).expect("config antiga válida");
     assert_eq!(parsed.commands.len(), 1);
@@ -452,8 +450,6 @@ fn acoes_de_conteudo_reagem_fixam_e_apagam() {
         .expect("desafixar");
     assert!(e.store.pins_list(&canal).unwrap().is_empty());
 
-    // Apagar uma mensagem pelo id (antes: permissão existia, ação não).
-    // A exclusão é lógica (`msg_meta.deleted`), como no resto do app.
     e.bot_admin(&cid, &bot.id, "delete_msg", &msg.id, "", None)
         .expect("apagar");
     assert!(
@@ -548,9 +544,6 @@ fn acao_de_canal_usa_o_canal_de_contexto() {
 
 #[test]
 fn bot_nao_distribui_cargo_com_permissao_que_ele_nao_tem() {
-    // Escalada lateral: `role_assign` so exige PERM_MANAGE (ou o `manage`
-    // herdado), entao sem esta barreira um bot pegava um cargo criado pelo dono
-    // com PERM_BAN e entregava moderacao real a qualquer membro.
     use distorrent_core::moderation::{PERM_BAN, PERM_MANAGE};
     let (e, _d) = engine("Dono");
     let cid = e
@@ -599,9 +592,6 @@ fn bot_nao_distribui_cargo_com_permissao_que_ele_nao_tem() {
 
 #[test]
 fn segredo_do_webhook_fica_fora_do_json_de_config() {
-    // A config do bot e enviada no estado da comunidade para TODOS os membros.
-    // Um segredo de assinatura ali vazaria para qualquer um e, pior, sumiria
-    // quando o bot regravasse o JSON pela ponte.
     use distorrent_core::storage::BotPatch;
     let (e, _d) = engine("Dono");
     let cid = e
@@ -730,9 +720,6 @@ fn migracao_cria_a_coluna_do_segredo_e_bots_antigos_continuam() {
 
 #[test]
 fn limite_de_config_e_o_mesmo_no_parser_e_no_banco() {
-    // O doc prometia 64 KB e `bot_update_patch` cortava em 16 KB: config entre
-    // os dois passava no editor e falhava ao salvar, com um limite que a UI nao
-    // mostrava. Os dois lados tem de usar `BOT_CONFIG_MAX`.
     use distorrent_core::bots::BOT_CONFIG_MAX;
     let (e, _d) = engine("Dono");
     let cid = e
@@ -781,9 +768,6 @@ fn limite_de_config_e_o_mesmo_no_parser_e_no_banco() {
 
 #[test]
 fn audio_do_bot_toca_local_e_nao_finge_transmitir() {
-    // O som sai no alto-falante do PC do dono (AudioHub). Nao vai para a call:
-    // esse caminho e o track de saida por peer, alimentado pelo microfone.
-    // A API tem de dizer isso, nao deixar o criador acreditar que transmitiu.
     let (e, _d) = engine("Dono");
     let cid = e
         .create_community("Servidor", &["geral".to_string()])

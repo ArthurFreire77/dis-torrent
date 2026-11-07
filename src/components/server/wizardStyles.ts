@@ -266,7 +266,6 @@ export const layout = {
   cap: {
     fontSize: 11,
     fontWeight: 800,
-    // Seção 1: letterSpacing
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     color: ui.muted,
@@ -525,4 +524,3 @@ export const css = `
   .csw-seg-t{ display:none }
 }
 `
-// Seção 2: fim

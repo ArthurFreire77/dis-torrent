@@ -170,7 +170,6 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
       </label>
       <select
         id="presence-bg"
-        // Seção 1: value
         value={prefs.presenceInBackground}
         onChange={(e) => setPrefs({ presenceInBackground: e.target.value as PresencaEmSegundoPlano })}
         style={{ width: '100%', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '10px 12px', color: text, fontSize: 12, marginBottom: 8 }}

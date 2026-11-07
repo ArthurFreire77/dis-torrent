@@ -295,7 +295,6 @@ export default function MobileCallChannel({
           ) : (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
               {participants.map((p) => {
-                // Seção 1: eu
                 const eu = p.fp === myFp
                 const mudo = !!(p.muted || p.deafened)
                 return (

@@ -1,6 +1,3 @@
-// A janela nasce escondida (para não "piscar" no boot do autostart) e só o
-// `app_ui_ready` a mostra. Se alguém tirar um dos dois lados, o app abre
-// invisível — o pior desfecho. Este teste trava o contrato.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -17,8 +14,6 @@ test('a janela nasce invisível para não piscar no boot', () => {
 test('o comando que mostra a janela existe, está registrado e tem rede de segurança', () => {
   assert.match(bg, /pub fn app_ui_ready/, 'o backend precisa saber quando a UI montou')
   assert.match(lib, /app_ui_ready,/, 'comando fora do generate_handler falha em silêncio')
-  // Se veio do login E a pessoa pediu bandeja, fica escondido; qualquer outro
-  // caso mostra — nunca deixa a janela fantasma.
   const i = bg.indexOf('pub fn app_ui_ready')
   const corpo = bg.slice(i, i + 1800)
   assert.match(corpo, /tray_available/, 'sem bandeja não pode ficar escondido')

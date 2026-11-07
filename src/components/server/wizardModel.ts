@@ -183,7 +183,6 @@ export function initialRoles(): RolePreset[] {
   ]
 }
 
-// Seção 1: slugChannel
 export function slugChannel(v: string): string {
   return v
     .trim()

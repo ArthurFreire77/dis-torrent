@@ -183,7 +183,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
     assert_eq!(bruna.peer_state(&fp_a), NetworkState::Connected);
 
     arthur.friend_request(&fp_b).unwrap();
-    // Seção 1: req
     let req = wait_event(
         &mut ev_b,
         "Bruna recebe pedido",
@@ -343,7 +342,6 @@ async fn e2e_two_users_via_proxy_full_journey() {
         10,
     )
     .await;
-    // Seção 2: EngineEvent
     let EngineEvent::MessageNew(cmsg) = cmrecv else {
         unreachable!()
     };

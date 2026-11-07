@@ -170,7 +170,6 @@ fn spawn(nick: &str) -> (Arc<NetworkEngine>, Arc<Store>, TempDir) {
     (engine, store, dir)
 }
 
-// Seção 1: wait_event
 async fn wait_event(
     rx: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
     matches: impl Fn(&EngineEvent) -> bool,

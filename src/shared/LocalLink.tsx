@@ -195,7 +195,6 @@ export function LocalLink({
   )
 }
 
-// Seção 1: LinkRow
 function LinkRow({
   href,
   display,

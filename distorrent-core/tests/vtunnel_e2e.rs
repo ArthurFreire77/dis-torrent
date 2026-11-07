@@ -180,7 +180,6 @@ async fn tunel_dm_e_chamada_via_tunnel() {
         a.is_peer_via_relay(&fp_b),
         "sessão A→B é relay (carrier do túnel)"
     );
-    // Seção 1: before_rx
     let before_rx = b.peer_diag(&fp_a).tunnel_rx_frames;
     let before_tx = a.peer_diag(&fp_b).tunnel_tx_frames;
 

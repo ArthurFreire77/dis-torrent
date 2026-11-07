@@ -183,7 +183,6 @@ async fn direct_localhost_rtt() {
     );
 
     let dm = a.open_dm(&fp_b, "BenchDirectB").unwrap();
-    // Seção 1: N
     const N: usize = 10;
     let mut samples = Vec::with_capacity(N);
     for i in 0..N {

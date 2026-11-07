@@ -242,7 +242,6 @@ const NAME_TABLE: [string, string[]][] = [
   ['🧂', ['sal', 'salt']],
 ]
 
-// Seção 1: EMOJI_NAME_INDEX
 export const EMOJI_NAME_INDEX: Map<string, string> = (() => {
   const m = new Map<string, string>()
   for (const [ch, names] of NAME_TABLE) for (const n of names) if (!m.has(n)) m.set(n, ch)

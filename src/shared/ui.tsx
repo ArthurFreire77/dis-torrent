@@ -163,7 +163,6 @@ export function TextArea({
     <div style={{ marginBottom: ui.lg }}>
       {label && <label style={labelStyle}>{label}</label>}
       <textarea
-        // Seção 1: value
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -318,7 +317,6 @@ export function Button({
   )
 }
 
-// Seção 2: IconButton
 export function IconButton({
   icon,
   onClick,
@@ -474,7 +472,6 @@ export function DataRow({ label, children }: { label: string; children: ReactNod
   )
 }
 
-// Seção 3: EmptyState
 export function EmptyState({
   icon,
   title,

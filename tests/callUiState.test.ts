@@ -15,8 +15,6 @@ const stage = readFileSync('src/components/calls/VoiceStage.tsx', 'utf8')
 const manager = readFileSync('src/services/callManager.ts', 'utf8')
 
 test('chamada encerrada NÃO bloqueia o próximo "Entrar"', () => {
-  // Regressão do relato "saí da chamada e o botão Entrar não responde mais":
-  // o state continua com `phase: 'ended'` até o cleanup.
   for (const fase of ['idle', 'ended', 'rejected', 'failed', 'missed']) {
     assert.equal(callIsActive({ phase: fase }), false, `fase ${fase} não está viva`)
     assert.equal(

@@ -428,8 +428,6 @@ export class BotEngine {
         const { body, headers } = buildWebhook(
           eventId,
           payloadFull,
-          // O segredo vem da coluna LOCAL do banco (nunca da config
-          // sincronizada); `webhook_secret` só existe no `bots_list` do dono.
           bot.webhook_secret || undefined,
           delivery,
           Math.floor(this.now() / 1000),
@@ -446,8 +444,6 @@ export class BotEngine {
               !config.blockPrivate,
             )
             lastStatus = res.status
-            // 2xx é entrega; 4xx é erro do criador (a URL está errada) e não
-            // adianta repetir; 5xx/timeout merece uma segunda tentativa.
             if (res.status < 400) break
             if (res.status < 500) break
           } catch (e: unknown) {
@@ -524,8 +520,6 @@ export class BotEngine {
         return
       }
       case 'script': {
-        // O script recebe o evento da mensagem: `{{event.message_id}}` e
-        // `{{event.channel}}` permitem reagir/apagar sem adivinhar id.
         const evt = {
           channel: channelId,
           author,

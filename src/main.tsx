@@ -112,8 +112,6 @@ class BootBoundary extends React.Component<
   }
 }
 
-// Erro fora do React (promise rejeitada, listener, extensão): sem isto o
-// console fica com a única cópia e a janela continua branca.
 function mostrarFatal(texto: string) {
   try {
     let alvo = document.getElementById('boot-fatal')
@@ -159,8 +157,6 @@ ReactDOM.createRoot(rootEl).render(
   </React.StrictMode>
 )
 
-// Só depois do primeiro frame: mostrar a janela antes de haver pixel pinta o
-// fundo vazio e parece a tal tela branca.
 requestAnimationFrame(() => {
   requestAnimationFrame(avisarUiPronta)
 })

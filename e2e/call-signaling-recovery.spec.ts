@@ -207,10 +207,6 @@ test.describe('recuperação de sinalização e tela entre dois pares', () => {
           const mudouDirecao = setCallVideoSending(senderTr, true)
           probe.cameraKeptSameTrack = remote.getVideoTracks()[0]?.id === idAntes && !mudouDirecao
 
-          // ---- parar a tela encerra o vídeo remoto (sem quadro congelado) ----
-          // replaceTrack(null) sozinho NÃO muda a direção: a track remota
-          // continua viva no último quadro. O app faz o certo em
-          // restoreCameraAfterScreen: setCallVideoSending(false) + renegocia.
           await senderTr.sender.replaceTrack(null)
           if (setCallVideoSending(senderTr, false)) {
             await sender.setLocalDescription(await sender.createOffer())

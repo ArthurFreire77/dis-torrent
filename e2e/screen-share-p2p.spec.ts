@@ -247,7 +247,6 @@ test.describe('screen share P2P (captura real + WebRTC real)', () => {
 
     await page.waitForFunction(() => window.__distorrentScreenProbe !== undefined, { timeout: 20000 })
     await page.waitForFunction(() => {
-      // Seção 1: p
       const p = window.__distorrentScreenProbe
       return !!p && (p.ok === true || !!p.why)
     }, { timeout: 45000 })

@@ -30,8 +30,6 @@ export function downloadButtonLabel(
   if (prog?.status === 'failed') return 'Tentar de novo'
   if (prog?.status === 'downloading' || prog?.status === 'verifying' || prog?.status === 'saving') {
     const pct = prog.pct ?? 0
-    // Durante o download o rótulo NUNCA pode ser "Baixar": com 0% o card
-    // parecia parado antes de começar (relato "não inicia").
     if (prog.status === 'verifying') return 'Conferindo integridade…'
     if (prog.status === 'saving') return 'Salvando…'
     return pct > 0 ? `Baixando ${pct}%` : 'Conectando…'

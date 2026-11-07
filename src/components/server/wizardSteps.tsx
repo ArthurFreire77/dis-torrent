@@ -240,4 +240,3 @@ export function StepIdentity({
     </>
   )
 }
-// Seção 1: fim

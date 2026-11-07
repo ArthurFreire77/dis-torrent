@@ -52,8 +52,6 @@ export function nextCallPhase(phase: CallPhase, ev: CallEvent): CallPhase {
       if (ev === 'remote-ended' || ev === 'hangup') return 'ended'
       if (ev === 'remote-reject') return 'rejected'
       if (ev === 'ice-failed') return 'reconnecting'
-      // Sem isto o watchdog de conexão disparava `reconnect-timeout` e a fase
-      // ficava presa em "Conectando…": o evento era engolido aqui.
       if (ev === 'reconnect-timeout') return 'failed'
       return phase
     case 'connected':

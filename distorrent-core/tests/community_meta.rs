@@ -169,7 +169,6 @@ fn bot_post_message_assina_como_host_e_marca_bot_id() {
     assert_eq!(m.body, "25°C em São Paulo");
     assert_eq!(m.status, "sent");
 
-    // Seção 1: store_m
     let store_m = st.message_by_id(&m.id).ok().flatten();
     assert!(store_m.is_some());
     assert_eq!(store_m.unwrap().bot_id, bot.id);

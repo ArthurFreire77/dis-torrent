@@ -173,4 +173,3 @@ function ScreenShareDebug({ compact }: { compact: boolean }) {
     </div>
   )
 }
-// Seção 1: fim

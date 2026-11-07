@@ -165,7 +165,6 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
     })()
   }, [enabled, run])
 
-  // Seção 1: apply
   const apply = React.useCallback(() => {
     const deps = depsRef.current
     if (!deps) return
@@ -379,7 +378,6 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
   )
 }
 
-// Seção 2: ghostBtn
 const ghostBtn: React.CSSProperties = {
   padding: '10px 12px',
   borderRadius: 9,

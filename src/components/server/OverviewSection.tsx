@@ -239,5 +239,4 @@ export function OverviewSection({
       </Card>
     </div>
   )
-}
-// Seção 1: fim
+}

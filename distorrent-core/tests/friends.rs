@@ -171,7 +171,6 @@ async fn friend_request_reject_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Seção 1: friend_request_queued_when_offline_and_flushed_on_connect
 async fn friend_request_queued_when_offline_and_flushed_on_connect() {
     let (a, _ka, _da) = spawn_engine("Alice");
     let kp_b = distorrent_core::identity::Keypair::generate();
@@ -347,4 +346,3 @@ async fn friend_resync_apos_aceite_perdido() {
         "B não pode ser rebaixado para pending_in"
     );
 }
-// Seção 2: fim

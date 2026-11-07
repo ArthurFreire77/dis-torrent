@@ -159,7 +159,6 @@ function isChannelMessageId(convId: string): boolean {
 function handleIncomingBroadcast(ev: EngineEvent) {
   if ((ev as any).type === 'friend_request_in') {
     const { fp, nickname } = ev as any
-    // Seção 1: me
     const me = store.load()
     if (!me || !fp || fp === me.fingerprint) return
     const pendingIn = getFriends('pending_in')
@@ -324,7 +323,6 @@ export function stopHeartbeat() {
   window.removeEventListener('beforeunload', onBeforeUnload)
 }
 
-// Seção 2: onlineCount
 function onlineCount(): number {
   const me = store.load()
   const map = getPresenceMap()
@@ -532,7 +530,6 @@ export const browserServices: DisTorrentServices = {
   },
 
   friendRequest: (peerFp) => {
-    // Seção 3: fp
     const fp = peerFp.trim().toLowerCase()
     if (!fp) return Promise.reject(new Error('fingerprint vazio'))
     if (fp.length < 6) return Promise.reject(new Error('fingerprint muito curto'))
@@ -720,7 +717,6 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve(out)
   },
   joinCommunity: (rawToken) => {
-    // Seção 4: token
     let token = rawToken.trim()
     try {
       if (token.includes('://') || token.startsWith('/')) {
@@ -813,9 +809,6 @@ export const browserServices: DisTorrentServices = {
     const blocked = getFriends('blocked')
     if (targetFp && blocked.some(f => f.fp === targetFp)) return Promise.reject(new Error('peer bloqueado'))
 
-    // Mesma regra do core: sem amizade aceita, até 3 mensagens iniciais por
-    // direção. O contador fica no armazenamento local para apagar/reabrir a
-    // conversa não devolver crédito.
     const ehAmigo = !!targetFp && getFriends('accepted').some(f => f.fp === targetFp)
     if (!ehAmigo) {
       const key = `distorrent:intro:${convId}`
@@ -909,7 +902,6 @@ export const browserServices: DisTorrentServices = {
   botDelete: (cid, botId) => { LX.deleteLocalBot(cid, botId); return Promise.resolve() },
   botsList: (cid) => Promise.resolve(LX.botsList(cid)),
   botPostMessage: (_cid, channelId, botId, body) => {
-    // Seção 5: trimmed
     const trimmed = body.trim()
     if (!trimmed) return Promise.reject(new Error('mensagem vazia'))
     const bot = LX.botsList(_cid).find(b => b.id === botId)
@@ -930,8 +922,6 @@ export const browserServices: DisTorrentServices = {
     if (!tok) return Promise.reject(new Error('bot não encontrado'))
     return Promise.resolve(tok)
   },
-  // O modo navegador não tem core nem banco: admin/log/variável são recusados
-  // com mensagem honesta em vez de fingir sucesso.
   botAdmin: () =>
     Promise.reject(
       new Error('comandos administrativos de bot só existem no app nativo (precisam do core)'),
@@ -1135,7 +1125,6 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
   groupRename: (cid, title) => {
-    // Seção 6: nome
     const nome = title.trim()
     if (!nome) return Promise.reject(new Error('título vazio'))
     writeConvos(readConvos().map((c) => (c.id === cid ? { ...c, title: nome } : c)))
@@ -1323,7 +1312,6 @@ export const browserServices: DisTorrentServices = {
     } catch {  }
     return Promise.resolve({
       community_id: cid, spam_level: 'medium', banned_words: [], blocked_domains: [],
-      // Seção 7: moderators
       moderators: [], shadow_banned: [], updated_at: Date.now(),
     })
   },
@@ -1501,7 +1489,6 @@ export const browserServices: DisTorrentServices = {
   voiceMicName: () => Promise.resolve(''),
 
   react: async (convId, msgId, emoji) => {
-    // Seção 8: all
     const all = loadAll<ReactionSummary[]>(RX_BASE)
     let list = all[msgId] ?? []
     const mineIdx = list.findIndex(r => r.emoji === emoji && r.reactors.includes(meFp()))
@@ -1630,10 +1617,6 @@ export const browserServices: DisTorrentServices = {
     const conv = readConvos().find(c => c.id === convId)
     const friends = getFriends('accepted')
     const isFriend = !!conv && friends.some(f => f.fp === conv.peer_fp)
-    // Mesmo limite do core (3) — o modo navegador não tem motor, mas também
-    // não pode prometer envio ilimitado que o app real recusaria. O contador
-    // fica no armazenamento local (não nas mensagens) para apagar/reabrir não
-    // devolver crédito.
     const limit = 3
     const key = `distorrent:intro:${convId}`
     const usados = Math.max(0, Number(readString(key) ?? 0))
@@ -1691,7 +1674,6 @@ export const browserServices: DisTorrentServices = {
     return presence
   }),
   presenceGet: async (fp) => {
-    // Seção 9: presence
     const presence = loadAll<PresenceView>(PRESENCE_BASE)[fp]
     if (!presence) return {
       fp, status: 'offline' as PresenceStatus, custom: '', custom_emoji: '', updated_at: 0,
@@ -1854,7 +1836,6 @@ export const browserServices: DisTorrentServices = {
   },
   pollTally: async (pollId) => {
     const chosen: number[] = loadAll<number[]>('social:votes')[pollId] ?? []
-    // Seção 10: poll
     const poll = loadAll<PollView>(POLLS_BASE)[pollId]
     const nOpts = poll?.options?.length ?? 0
     const counts = new Array<number>(nOpts).fill(0)

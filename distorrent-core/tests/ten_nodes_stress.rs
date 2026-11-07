@@ -160,7 +160,6 @@ async fn ten_nodes_mesh_stress() {
         );
     }
 
-    // Seção 1: mut
     let mut latencias: Vec<u128> = Vec::new();
     let mut entregues = 0u32;
     let mut falhas = 0u32;

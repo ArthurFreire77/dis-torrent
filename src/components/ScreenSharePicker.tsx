@@ -205,7 +205,6 @@ export default function ScreenSharePicker({
       <Row label="Áudio">
         {AUDIO_CHOICES.map((a) => {
           const windowBlocksSystem = a.needsSystem && opts.source === 'window'
-          // Seção 1: disabled
           const disabled = (a.needsSystem && !env.systemAudio) || windowBlocksSystem
           const why = windowBlocksSystem
             ? 'áudio do sistema exige compartilhar um monitor inteiro, não uma janela'

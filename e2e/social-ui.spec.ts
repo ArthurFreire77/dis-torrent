@@ -10,8 +10,6 @@ async function createAccount(page: Page, name: string) {
 }
 
 async function createServer(page: Page, name: string): Promise<void> {
-  // `createServerViaWizard` já abre o servidor. Clicar no rail de novo era
-  // redundante e, com o rail podendo ter dois botões, o Playwright recusava.
   await createServerViaWizard(page, name);
   await expect(page.locator('.chan-row').first()).toBeVisible({ timeout: 10000 });
 }
@@ -60,8 +58,6 @@ test.describe('camada social', () => {
     await createAccount(page, 'Bia');
     await send(page, 'mensagem para reagir');
 
-    // O botão da barra de ferramentas tem `title="Reagir"`; escolher o emoji
-    // abre o picker e é o picker que grava a reação.
     await page.locator('[data-mid]').first().hover();
     await page.getByTitle('Reagir', { exact: true }).first().click();
     await page.getByRole('button', { name: /👍/ }).first().click();

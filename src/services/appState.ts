@@ -152,11 +152,6 @@ export function initAppState() {
   if (services.kind === 'native' && !isAndroid()) {    void services.backgroundPrefs()
       .then((p) => {
         backgroundSupported = p.tray
-        // O SQLite é a fonte de verdade do "iniciar minimizado": o boot no
-        // login acontece antes do webview, então quem decide é o core. Adotar
-        // o valor nativo aqui (em vez de empurrar o localStorage por cima)
-        // evita a opção "ligar e voltar a desligar" quando o perfil da WebView
-        // é recriado — o localStorage zera, o banco não.
         const cur = getPrefs()
         if (cur.startMinimized !== p.start_minimized || cur.closeToTray !== p.close_to_tray) {
           setPrefs({ startMinimized: p.start_minimized, closeToTray: p.close_to_tray })
@@ -194,7 +189,6 @@ export function initAppState() {
   syncPresence()
 }
 
-// Seção 1: shutdownAppState
 export function shutdownAppState() {
   unsubEngine?.()
   unsubEngine = null

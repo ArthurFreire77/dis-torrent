@@ -159,7 +159,6 @@ async fn relay_lossy_friend_and_dm_with_ack() {
             "t+{:?}: round {round} sem pedido — re-solicita (frame perdido na rede lossy)",
             t0.elapsed()
         );
-        // Seção 1: _
         let _ = a.friend_request(&fp_b);
     }
     let req_fp = req_fp.expect("B deveria receber o pedido apesar de 20% loss (5 rounds)");

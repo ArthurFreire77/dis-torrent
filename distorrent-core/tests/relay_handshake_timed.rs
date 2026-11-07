@@ -164,7 +164,6 @@ async fn wait_event<F: Fn(&EngineEvent) -> bool>(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Seção 1: relay_handshake_phases_timed
 async fn relay_handshake_phases_timed() {
     std::env::set_var("DISTORRENT_NO_ANNOUNCE", "1");
     let hub = MemRelay::new();

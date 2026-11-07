@@ -162,7 +162,6 @@ export function usePresence() {
     const un = services.subscribe((ev) => {
       if (ev.type === 'presence_changed') {
         setMap((prev) => {
-          // Seção 1: next
           const next = new Map(prev)
           next.set(ev.fp, { fp: ev.fp, status: ev.status as PresenceStatus, custom: ev.custom, custom_emoji: ev.custom_emoji, updated_at: Date.now() })
           return next

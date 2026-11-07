@@ -9,9 +9,6 @@ export interface CollectiveRoomInput {
 export function isCollectiveRoom(input: CollectiveRoomInput | null | undefined): boolean {
   if (!input) return false
   if (typeof input.callId === 'string' && input.callId.startsWith('voice-')) return true
-  // Grupo de DUAS pessoas tem um participante no roster e caía na regra de
-  // "1:1": quem saía encerrava a chamada paro o outro. Em grupo (e servidor) a
-  // sala continua até o último sair, como nos canais.
   if (input.group === true) return true
   const noRoster = new Set(
     (Array.isArray(input.participants) ? input.participants : []).filter(

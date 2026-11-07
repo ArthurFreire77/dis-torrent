@@ -1,5 +1,3 @@
-// Testes de integridade do banco social: relações órfãs, contadores e
-// migrações. Rodam no crate de testes de integração do core.
 use distorrent_core::identity::Keypair;
 use distorrent_core::protocol::MessageEnvelope;
 use distorrent_core::storage::Store;
@@ -73,8 +71,6 @@ fn migracao_preserva_amizades_e_cria_as_tabelas_novas() {
         let s = Store::open(&path).unwrap();
         s.set_friend("c1c2c3c4c5c6", "Amigo", "accepted").unwrap();
     }
-    // Reabrir roda `migrate` e `social::migrate` de novo: não pode apagar
-    // amizade nem duplicar tabela.
     let s2 = Store::open(&path).unwrap();
     assert_eq!(
         s2.get_friend("c1c2c3c4c5c6").unwrap().map(|(_, st)| st),

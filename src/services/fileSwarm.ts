@@ -175,7 +175,6 @@ export class FileSwarm {
 
   onAnnounce(file_id: string, name: string, size: number, chunks: number, hash: string, from_fp: string, chunkHashes?: string[]): boolean {
     this.lastError = null
-    // Seção 1: verr
     const verr = validateAnnounce(size, chunks)
     if (verr) {
       this.lastError = verr
@@ -334,7 +333,6 @@ export class FileSwarm {
     if (missing.length === 0) { this.clearRetry(file_id); return }
 
     this.pruneSeeders(sf)
-    // Seção 2: seeders
     const seeders = [...sf.seeders]
     if (seeders.length === 0) {
       this.lastError = 'sem peers com o arquivo no swarm — aguardando um seeder ficar online'
@@ -346,9 +344,6 @@ export class FileSwarm {
     if (eligible.length === 0) {
       const ciclos = (this.retryAttempts.get(sf.file_id) ?? 0)
       if (ciclos >= MAX_RETRY_CYCLES) {
-        // Antes isto era um `return` mudo: nenhum pedido novo, nenhum erro na
-        // UI, item preso em "Baixando 0%" para sempre. Agora o arquivo diz
-        // QUAIS blocos falharam e o manager consegue marcar `failed`.
         const presos = missing.filter((i) => (this.attempts.get(this.key(file_id, i)) ?? 0) >= MAX_CHUNK_ATTEMPTS)
         sf.failedChunks = new Set(presos)
         this.lastError = `sem progresso após ${MAX_RETRY_CYCLES} ciclos — ${presos.length} bloco(s) sem resposta. Verifique se quem tem o arquivo está online.`
@@ -527,7 +522,6 @@ export class FileSwarm {
     if (!data) {
       void this.ensureDataLoaded(sf)
         .then(() => {
-          // Seção 3: d
           const d = sf.data.get(index)
           if (d) services.fileSendChunk(from_fp, file_id, index, b64(d)).catch(() => {  })
         })
@@ -709,7 +703,6 @@ export class FileSwarm {
     return this.download(sf)
   }
 
-  // Seção 4: async
   async download(sf: SwarmFile): Promise<string | null> {
     if (sf.have.size !== sf.chunks) throw new Error(`ainda faltam ${sf.chunks - sf.have.size} chunks — não dá para salvar`)
     if (this.saving.has(sf.file_id)) throw new Error('salvamento já em andamento para este arquivo')
@@ -728,8 +721,6 @@ export class FileSwarm {
             const ultimo = i === sf.chunks - 1
             savedPath = await tauriInvoke<string>('save_file_stream', {
               jobId, name: safeName, dataB64: b64(c), flush: ultimo, totalBytes: sf.size,
-              // O hash vai no lote final: o Rust confere antes de renomear, então
-              // arquivo corrompido nunca aparece como concluído.
               expectBlake3: ultimo ? sf.hash : null,
             })
           }

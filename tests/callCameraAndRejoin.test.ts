@@ -1,6 +1,3 @@
-// Dois bugs relatados em uso real, travados por contrato de código:
-//   1. trocar de câmera no Windows dava "em uso por outro app";
-//   2. sair da chamada do servidor e clicar em entrar não fazia nada.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -14,8 +11,6 @@ function blocoDe(nome: string, tamanho = 2200): string {
 }
 
 test('trocar de câmera SOLTA a antiga antes de abrir a nova', () => {
-  // A troca ficou num caminho único (`trocarFeedDeCamera`), usado pelo botão
-  // de inverter, pelo seletor de aparelho e pelo `applyMediaPrefs`.
   const bloco = blocoDe('private async trocarFeedDeCamera')
   const solta = bloco.indexOf('antigo?.stop()')
   const abre = bloco.indexOf('getLocalMedia({ video: constraints })')

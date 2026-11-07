@@ -92,8 +92,6 @@ export function useConversations(open: boolean) {
 
   const refresh = useCallback(async () => {
     try {
-      // Visão com contadores: prévia, horário e não lidas por membro. O
-      // `conversationsList` continua existindo para quem só quer os metadados.
       const list = await services.conversationsOverview()
       setConversations((prev) => {
         if (
@@ -183,7 +181,6 @@ export function useMessages(convId: string | null) {
     loadingOlder.current = true
     const my = ++seq.current
     try {
-      // Seção 1: oldest
       let oldest: number | null = null
       for (const m of messagesRef.current) {
         if (m.id.startsWith('pending-')) continue

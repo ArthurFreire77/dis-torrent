@@ -161,7 +161,6 @@ export function ChannelEditor({
 
       <TextArea
         label="Tópico (opcional)"
-        // Seção 1: value
         value={topico}
         onChange={setTopico}
         rows={2}
@@ -340,7 +339,6 @@ export function ChannelList({
                   style={{
                     fontSize: 10,
                     fontWeight: 800,
-                    // Seção 2: letterSpacing
                     letterSpacing: 0.4,
                     color: ui.muted,
                     background: ui.surfaceHover,
@@ -506,7 +504,6 @@ export function CategoryManager({
                           <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ fontSize: 11, color: ui.muted }}>Mover para</span>
                             <select
-                              // Seção 3: value
                               value={c.category}
                               onChange={(e) => onMoveChannels(c.id, e.target.value)}
                               aria-label={`Mover canal ${c.name}`}

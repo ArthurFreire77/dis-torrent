@@ -9,8 +9,6 @@ test.use({
       '--mute-audio',
       '--autoplay-policy=no-user-gesture-required',
       '--disable-features=WebRtcHideLocalIpsWithMdns',
-      // Sem isto o `getDisplayMedia` abre o picker do sistema e o teste trava:
-      // o Chromium escolhe a primeira fonte automaticamente.
       '--auto-select-desktop-capture-source=Tela inteira',
       '--auto-select-desktop-capture-source=Entire screen',
     ],
@@ -75,11 +73,6 @@ function assertNoWebRTCrash(allErrors: string[]) {
   expect(joined).not.toContain('ReferenceError');
 }
 
-// O trecho final (tela chegando no tile remoto) exige `getDisplayMedia` com uma
-// fonte real. Em Chromium headless no Windows o `--auto-select-desktop-capture-source`
-// não produz um track de tela capturável, então o vídeo nunca aparece. O resto do
-// teste (áudio por peer, volume, mute) passa. Fica skip explícito em vez de
-// falhar sempre; o E2E dedicado disso é `screen-share-p2p.spec.ts`.
 test.skip('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo app', async ({
   browser,
 }) => {
@@ -209,8 +202,6 @@ test.skip('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo 
   await expect(a.getByText(/participante|Em chamada/)).toBeVisible({ timeout: 15000 });
   await expect(b.getByText(/está ligando/)).toBeHidden({ timeout: 15000 });
 
-  // `data-call-audio-fp` recebe a CHAVE do tile (`p:<fp>`), não o fingerprint
-  // cru — é ela que separa a voz (`p:`) da tela (`s:`) da mesma pessoa.
   const fpB2 = await fpOf(b);
   const remoteAudio = a.locator(`audio[data-call-audio-fp="p:${fpB2}"]`);
   await expect(remoteAudio).toHaveCount(1, { timeout: 15000 });
@@ -220,7 +211,6 @@ test.skip('chamada A->B: áudio local por peer e tela chega ao tile remoto pelo 
   const remoteVolume = remoteTile.getByRole('slider');
   await expect(remoteVolume).toBeVisible();
   await remoteVolume.evaluate((element) => {
-    // Seção 1: input
     const input = element as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '37');
     input.dispatchEvent(new Event('input', { bubbles: true }));

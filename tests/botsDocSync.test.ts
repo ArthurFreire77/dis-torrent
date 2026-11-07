@@ -21,9 +21,6 @@ import {
  */
 
 function docHumano(): string {
-  // O checkout pode converter LF→CRLF (autocrlf no Windows). O conteúdo é o
-  // mesmo; normalizar aqui evita um teste que passa numa máquina e falha na
-  // outra por causa do fim de linha do working tree, não do documento.
   return readFileSync(new URL('../docs/bots.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 }
 
@@ -102,8 +99,6 @@ test('a config de exemplo do doc humano passa no parser de verdade', () => {
   assert.ok(blocos.length > 0, 'docs/bots.md precisa ter exemplos em JSON')
   for (const bloco of blocos) {
     const cfg = parseBotConfig(bloco)
-    // Blocos de exemplo de bot.json têm envelope (`name`, `config`): só os que
-    // são config direta precisam passar. Detecta pela presença de `commands`.
     let alvo = bloco
     if (!bloco.includes('"commands"') && bloco.includes('"config"')) {
       const env = JSON.parse(bloco)
@@ -136,8 +131,6 @@ test('o .md do painel continua sem token e sem CRLF depois do v3', () => {
 })
 
 test('as seções do .md do painel estão em ordem numérica', () => {
-  // A 9.1 já apareceu depois da 10 porque foi inserida no meio de outro bloco.
-  // Documento fora de ordem faz o leitor procurar a seção no lugar errado.
   const md = botDocsMarkdown()
   const numeros: number[] = []
   for (const m of md.matchAll(/^## (\d+(?:\.\d+)?)\./gm)) numeros.push(Number(m[1]))

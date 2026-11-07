@@ -24,8 +24,6 @@ async function befriend(a: Page, b: Page) {
   await b.getByRole('button', { name: 'Pendentes' }).click();
   await expect(b.getByText('Solicitação de amizade recebida')).toBeVisible({ timeout: 15000 });
   await b.getByRole('button', { name: 'Aceitar' }).first().click();
-  // `b` estava na aba "Pendentes": sem voltar para "Todos" a lista de amigos
-  // (`.friend-row`) nem existe, e o teste de arquivo não acha o amigo.
   await b.getByRole('button', { name: 'Todos' }).click();
   await a.getByRole('button', { name: 'Todos' }).click();
   await expect(a.getByText(fpB.slice(0, 12)).first()).toBeVisible({ timeout: 15000 });
@@ -63,8 +61,6 @@ test('arquivo enviado vira mensagem com Baixar nas duas abas; download funciona'
 test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   await createAccount(page, 'Carol');
 
-  // Acima do limite REAL (`MAX_FILE_SIZE` = 50 GB por padrão). O teste usava
-  // 8 GB de quando o teto era outro e passava a "não barrar" nada.
   const acimaDoTeto = 51200 * 1024 * 1024 + 1;
   await page.evaluate((size) =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
@@ -75,8 +71,6 @@ test('limites de arquivo são barrados com erro visível', async ({ page }) => {
   );
   await expect(page.getByText(/arquivo muito grande \(limite/)).toBeVisible({ timeout: 10000 });
 
-  // Precisa violar o teto de CHUNKS (204.801) sem violar o de tamanho (50 GB).
-  // Antes usava 40.000, que passou a ser válido e o teste não barrava nada.
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent('distorrent:bus', { detail: {
       type: 'file_announce', file_id: 'evil-chunks', name: 'x.bin',

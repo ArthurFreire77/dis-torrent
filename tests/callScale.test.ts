@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import {
   colunasQueCabem,
   linhasNecessarias,
@@ -18,7 +18,12 @@ const manager = readFileSync('src/services/callManager.ts', 'utf8')
 const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
 const mobile = readFileSync('src/mobile/MobileShell.tsx', 'utf8')
 const grid = readFileSync('src/components/calls/CallTilesGrid.tsx', 'utf8')
-const storage = readFileSync('distorrent-core/src/storage.rs', 'utf8')
+const storage = [
+  readFileSync('distorrent-core/src/storage.rs', 'utf8'),
+  ...readdirSync('distorrent-core/src')
+    .filter((f) => f.startsWith('storage_') && f.endsWith('.rs') && !f.includes('test'))
+    .map((f) => readFileSync(`distorrent-core/src/${f}`, 'utf8')),
+].join('\n')
 
 test('uma pessoa ocupa a tela sozinha', () => {
   assert.equal(colunasQueCabem(1, 1600), 1)

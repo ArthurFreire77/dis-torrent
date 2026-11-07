@@ -24,8 +24,6 @@ async function openOutside(url: string): Promise<void> {
     await services.openExternal(url)
     return
   } catch (e) {
-    // O SO recusou (sem navegador padrão, esquema não registrado, sandbox).
-    // Tentar a janela do próprio WebView evita o "cliquei e não aconteceu nada".
     try {
       const w = window.open(url, '_blank', 'noopener,noreferrer')
       if (w) return

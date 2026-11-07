@@ -21,8 +21,6 @@ export function SearchPanel({ convId, convLabel, profiles, onClose, onJump }: {
   async function run() {
     setBusy(true)
     try {
-      // Busca com escopo na conversa aberta. Antes mandava `conv: ''` e o
-      // painel "Buscar em X" trazia resultados de OUTRAS conversas.
       const r = await services.searchMessages({ text: q, from, conv: convId, has, before: 0, limit: 50 })
       setHits(r)
     } catch { setHits([]) } finally { setBusy(false) }
@@ -189,7 +187,6 @@ export function ThreadList({ communityId, parentChannel, channels, onOpen }: {
   )
 }
 
-// Seção 1: ThreadViewModal
 export function ThreadViewModal({ communityId, thread, onClose, authorName }: {
   communityId: string
   thread: ThreadView

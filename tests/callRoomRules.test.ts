@@ -37,8 +37,6 @@ test('entrada inválida nunca derruba a chamada', () => {
 })
 
 test('grupo de DUAS pessoas continua até o último sair (não é 1:1)', () => {
-  // Antes, um grupo com dois membros tinha um participante no roster e caía na
-  // regra de chamada 1:1: quem saía encerrava a chamada para o outro.
   assert.equal(
     isCollectiveRoom({ callId: 'call-g', participants: ['eu'], invited: ['amigo'], group: true }),
     true,

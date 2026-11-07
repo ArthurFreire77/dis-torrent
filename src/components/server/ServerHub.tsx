@@ -157,7 +157,6 @@ export function ServerList({
   )
 }
 
-// Seção 1: MemberPairingList
 export function MemberPairingList({
   members,
   emptyHint,
@@ -372,7 +371,6 @@ export function InvitePanel({
   )
 }
 
-// Seção 2: JoinServerForm
 export function JoinServerForm({
   onJoined,
   autoToken,
@@ -710,7 +708,6 @@ export function ServerDetails({
   )
 }
 
-// Seção 3: ServerHubModal
 export function ServerHubModal({
   open,
   onClose,

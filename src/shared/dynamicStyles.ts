@@ -30,8 +30,6 @@ export function useDynamicStyles(css: string): void {
     publicadas.add(css)
 
     if (!folha) {
-      // Navegador sem CSSStyleSheet construtível: a tag funciona lá, porque o
-      // bloqueio só existe quando há nonce no CSP (o Tauri injeta).
       const tag = document.createElement('style')
       tag.textContent = css
       document.head.appendChild(tag)

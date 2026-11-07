@@ -21,12 +21,8 @@ export function resolveBootPhase(input: {
   unlocked: unknown | null
 }): BootPhase {
   if (input.identity) return 'app'
-  // Sem resposta de cofre não dá para afirmar nada: pede para criar é o único
-  // caminho que não inventa um estado (nem "destrave" nem "entrou").
   if (!input.vault) return 'create'
   if (!input.vault.has_identity) return 'create'
   if (input.vault.has_vault) return input.unlocked ? 'app' : 'lock'
-  // Tem identidade mas nenhum cofre: a chave está no armazenamento local, então
-  // reler a identidade é o caminho certo — nunca abrir o app sem ela.
   return input.identity ? 'app' : 'create'
 }

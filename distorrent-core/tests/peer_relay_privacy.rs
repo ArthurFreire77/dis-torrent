@@ -188,7 +188,6 @@ async fn kill_switch_desliga_e_religa_peer_relay() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// Seção 1: ativar_peer_relay_nao_cria_amizade_nem_evento
 async fn ativar_peer_relay_nao_cria_amizade_nem_evento() {
     let (a, _da) = spawn_engine("PrivQuietA");
     let (b, _db) = spawn_engine("PrivQuietB");

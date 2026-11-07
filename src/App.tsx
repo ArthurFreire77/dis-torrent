@@ -6,9 +6,6 @@ import { initNotifications } from './services/notifications'
 import { offerInvite, tokenFromInviteUrl } from './services/deepLink'
 import { installExternalLinkHandler, OPEN_EXTERNAL_FAILED_EVENT, type OpenExternalFailure } from './shared/installExternalLinks'
 
-// As duas interfaces são carregadas SOB DEMANDA: juntas davam um único chunk de
-// ~1 MB, que travava o boot em PC fraco (e agravava a "tela branca"). Agora o
-// shell que a tela vai usar baixa sozinho, com a splash ainda visível.
 const ThemeShell = React.lazy(() => import('./designs/ThemeShell'))
 const MobileShell = React.lazy(() => import('./mobile/MobileShell'))
 const BotsApp = React.lazy(() => import('./routes/BotsApp'))
@@ -80,8 +77,6 @@ function InviteRoute({ token }: { token: string }){
 }
 
 function AppRoutes(){
-  // A janela de bots não pode inicializar presença/notificações: seria um
-  // segundo "app" anunciando presença e reagindo a eventos globais.
   React.useEffect(() => {
     if (MODO_JANELA_BOTS) return
     initAppState()

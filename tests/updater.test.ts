@@ -169,7 +169,6 @@ test('falha de rede na checagem é erro, não "tem update"', async () => {
       throw new Error('sem conexão')
     },
   })
-  // Seção 1: out
   const out = await runUpdateFlow(deps, { autoApply: true })
   assert.equal(out.kind, 'error')
   assert.match((out as { message: string }).message, /sem conexão/)

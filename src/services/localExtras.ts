@@ -166,7 +166,6 @@ export function createLocalBot(communityId: string, data: { name: string; avatar
   return id
 }
 export function updateLocalBot(communityId: string, botId: string, patch: Partial<Pick<BotView, 'name' | 'avatar' | 'roleId' | 'online' | 'config'>>) {
-  // Seção 1: list
   const list = botsList(communityId)
   const idx = list.findIndex(b => b.id === botId)
   if (idx >= 0) {

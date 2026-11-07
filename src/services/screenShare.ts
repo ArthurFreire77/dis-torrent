@@ -177,7 +177,6 @@ export function detectScreenEnvironment(nativeAvailable = false): ScreenEnvironm
   const md = (typeof navigator !== 'undefined' ? (navigator as unknown as { mediaDevices?: Record<string, unknown> }).mediaDevices : null) ?? null
   const androidNoCapture = platform === 'android' && !nativeAvailable
   const hasDisplayMedia = !androidNoCapture && typeof md?.getDisplayMedia === 'function'
-  // Seção 1: secureContext
   let secureContext: boolean
   try { secureContext = typeof isSecureContext === 'undefined' ? true : !!isSecureContext } catch { secureContext = true }
 
@@ -354,7 +353,6 @@ export function buildSenderTuning(opts: ScreenShareOptions): ScreenSenderTuning 
   }
 }
 
-// Seção 2: CameraTuning
 export interface CameraTuning {
   maxBitrate: number
   minBitrate: number
@@ -520,7 +518,6 @@ export interface ScreenShareMetrics {
   qualityLimitationReason: string | null
 }
 
-// Seção 3: emptyScreenMetrics
 export function emptyScreenMetrics(): ScreenShareMetrics {
   return {
     capturedFps: null, sentFps: null, receivedFps: null,
@@ -686,7 +683,6 @@ export function isScreenSampleBad(m: ScreenShareMetrics): boolean {
   return false
 }
 
-// Seção 4: ceilingOf
 export function ceilingOf(q: ScreenQualityKey): ScreenQualityKey {
   if (q === 'auto') return SCREEN_QUALITY_STEPS[SCREEN_QUALITY_STEPS.length - 1].key
   return q

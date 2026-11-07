@@ -101,9 +101,6 @@ export default function MobileCallStage({
     />
   )
 
-  // Modo tira: dentro da conversa os vídeos ficam numa faixa e as mensagens
-  // continuam visíveis embaixo. Antes o palco pedia a altura toda e o
-  // histórico desaparecia.
   if (strip) {
     return (
       <div
@@ -215,4 +212,3 @@ export default function MobileCallStage({
     </div>
   )
 }
-// Seção 1: fim

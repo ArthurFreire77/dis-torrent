@@ -172,7 +172,6 @@ fn vault_file_attacks_rejected() {
     };
     assert!(stormvault::open_with_password(&tampered, "correta-123").is_err());
     let (c, _) = mk_account("carol");
-    // Seção 1: data_c
     let data_c = stormvault::collect(&c, None, None).unwrap();
     let sealed_c = stormvault::seal_with_password(&data_c, "outra-123").unwrap();
     let hc = stormvault::read_header(&sealed_c).unwrap();

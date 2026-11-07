@@ -271,7 +271,6 @@ export function BotManager({
   )
 }
 
-// Seção 1: BotRow
 function BotRow({
   bot,
   cargo,
@@ -460,7 +459,6 @@ function BotRow({
         {isEditing ? (
           <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
             <select
-              // Seção 2: value
               value={roleId}
               onChange={(e) => setRoleId(e.target.value)}
               aria-label="Cargo do bot"
@@ -619,7 +617,6 @@ function BotCreateModal({
 
       <Select
         label="Cargo"
-        // Seção 3: value
         value={roleId}
         onChange={setRoleId}
         options={[

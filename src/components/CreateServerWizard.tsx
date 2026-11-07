@@ -168,7 +168,6 @@ export default function CreateServerWizard({
     setRoles((prev) => prev.map((r) => (r.key === key ? { ...r, name: nome } : r)))
   }
 
-  // Seção 1: togglePerm
   function togglePerm(key: string, bit: number) {
     setRoles((prev) =>
       prev.map((r) => {
@@ -364,7 +363,6 @@ export default function CreateServerWizard({
     )
   })()
 
-  // Seção 2: subtitulo
   const subtitulo = concluido
     ? 'Pronto. O convite está abaixo.'
     : 'Seu servidor é onde você e seus amigos se reúnem. Crie o seu e comece a interagir.'

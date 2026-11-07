@@ -85,8 +85,6 @@ export function buildWebhook(
     event,
     delivery,
     timestamp: nowSeconds,
-    // O corpo do evento já vem sanitizado do runtime; a limpeza aqui é a
-    // última barreira contra bidi/zero-width que forjaria o que ele diz.
     data: sanitizeObject(data),
   })
   const headers: Record<string, string> = {

@@ -15,9 +15,6 @@ test('modo comum (normal): STUN de reserva presente e NENHUM TURN morto anunciad
   setCallPrivacyForIce('normal')
   const urls = allUrls(getIceServers())
   assert.ok(urls.includes('stun:'), 'modo normal precisa de STUN de reserva (4G/CGNAT depende disto)')
-  // openrelay.metered.ca resolve para 192.0.2.1 e não responde UDP: anunciá-lo
-  // prendia a chamada em "Conectando..." até esgotar o TURN. Sem TURN de
-  // terceiro, quem tem servidor próprio configura em Ajustes.
   assert.ok(!urls.includes('turn:'), 'TURN público quebrado não pode voltar para a lista')
   assert.ok(!urls.includes('openrelay'), 'openrelay saiu: o domínio não serve mais relay')
 })

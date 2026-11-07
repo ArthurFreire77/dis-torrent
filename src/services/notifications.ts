@@ -170,7 +170,6 @@ function show(a: ShowArgs): boolean {
 
 function buscarAvatarDoAviso(convId: string | undefined): string {
   if (!convId) return ''
-  // Seção 1: fp
   const fp = peerFpDaConversa(convId)
   if (!fp) {
     void services.profileList()
@@ -233,8 +232,6 @@ export function notifyFriend(n: FriendNotice): boolean {
   const nome = (n.nome || '').trim() || 'alguém'
   if (!getPrefs().notifySystem) return false
   if (typeof document !== 'undefined' && document.hasFocus() && n.kind !== 'request') {
-    // Aceite/remoção com o app em primeiro plano não precisa de popup do SO:
-    // a lista já muda na tela.
     return false
   }
   const body =
@@ -319,9 +316,6 @@ export function initNotifications() {
   startWired = true
   if (services.kind !== 'native') return
 
-  // Batida de vida do webview: o Rust usa isto para decidir se ele mesmo
-  // mostra o aviso de mensagem. Sem o batimento, os dois lados avisavam e o
-  // usuário recebia duas notificações idênticas.
   const beat = () => { void services.notifyUiAlive?.().catch(() => {}) }
   beat()
   setInterval(beat, 30_000)
@@ -386,7 +380,6 @@ export async function requestNotificationPermission(): Promise<string> {
   try { return await services.notificationRequestPermission() } catch { return 'denied' }
 }
 
-// Seção 2: testNotificationSound
 export function testNotificationSound(): void {
   void show({
     id: notificationIdFor(`test:${Date.now()}`),

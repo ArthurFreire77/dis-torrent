@@ -307,4 +307,3 @@ export default function ConnectionDiagnostics({ onClose }: { onClose?: () => voi
     </div>
   )
 }
-// Seção 1: fim

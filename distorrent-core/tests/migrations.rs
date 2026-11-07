@@ -163,7 +163,6 @@ fn reabrir_preserva_bot_id_e_thread_id_do_historico() {
         store
             .insert_message_in_thread(&env, "t-1", "in", "ok")
             .unwrap();
-        // Seção 1: conn
         let conn = Connection::open(&db).unwrap();
         conn.execute(
             "UPDATE messages SET bot_id='bot-9' WHERE id=?1",

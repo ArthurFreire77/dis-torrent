@@ -18,8 +18,6 @@ export interface CallLike {
 /** `state` só conta como chamada viva enquanto a fase está ativa. */
 export function callIsActive(state: CallLike | null | undefined): boolean {
   if (!state) return false
-  // A máquina de fases é a única fonte: `ended`/`rejected`/`failed`/`missed`
-  // continuam no state até o cleanup e não podem bloquear o próximo "Entrar".
   const phase = String(state.phase ?? '')
   if (!phase) return false
   return isCallPhaseActive(phase as CallPhase)

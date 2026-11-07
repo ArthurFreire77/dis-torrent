@@ -105,13 +105,9 @@ test('painel de bot não duplica canais ao abrir e salvar', async ({ page }) => 
   await expect(modal).toBeHidden({ timeout: 15000 })
 
   await dialog.getByRole('button', { name: /^Configurar BotDup$/ }).click()
-  // O painel agora ocupa a área das configurações do servidor em vez de abrir
-  // um segundo modal: `role="region"`, não `dialog`.
   const painel = page.getByRole('region', { name: /Configurar BotDup/ })
   await expect(painel).toBeVisible({ timeout: 10000 })
 
-  // O escopo de canais mora na aba "Comandos" (a antiga "Escopos" foi
-  // incorporada a ela quando o seletor de tipos de canal entrou).
   await painel.getByRole('tab', { name: /Comandos/ }).click()
   const nomes = await painel.evaluate((root: HTMLElement) => {
     const out: string[] = []

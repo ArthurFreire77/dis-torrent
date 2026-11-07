@@ -288,4 +288,3 @@ export default function DownloadsPanel({ open, onClose, onDoneToast }: {
     </div>
   )
 }
-// Seção 1: fim

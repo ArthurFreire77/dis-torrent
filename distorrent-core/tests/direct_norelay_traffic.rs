@@ -168,4 +168,3 @@ async fn direct_no_relay_traffic() {
     assert_eq!(dpb, 0, "nenhum post no relay (B) durante DMs diretas");
     assert_eq!(dhb, 0, "nenhum poll-hit no relay (B) durante DMs diretas");
 }
-// Seção 1: fim

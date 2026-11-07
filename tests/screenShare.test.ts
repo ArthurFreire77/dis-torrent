@@ -206,7 +206,6 @@ test('toda causa tem mensagem legível (nunca string vazia)', () => {
 })
 
 test('ambiente: sem getDisplayMedia a nota explica o porquê', () => {
-  // Seção 1: env
   const env = detectScreenEnvironment()
   assert.ok(Array.isArray(env.notes))
   if (!env.hasDisplayMedia) assert.ok(env.notes.some(n => /getDisplayMedia/.test(n)))
@@ -372,7 +371,6 @@ test('monitores: fora do app nativo devolve lista vazia em vez de inventar', asy
 })
 
 test('Android: webview que expõe getDisplayMedia (mas lança TypeError) não promete captura', async () => {
-  // Seção 2: const
   const {
     detectScreenEnvironment,
     isAndroidRuntime,

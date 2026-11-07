@@ -73,8 +73,6 @@ export const tauriServices: DisTorrentServices = {
   webrtcReport: (info: string) => invoke('webrtc_report', { info }),
 
   updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check'),
-  // Só o NOME do asset: URL, hash e tamanho vêm do manifesto verificado no
-  // Rust. Aceitar URL/hash da UI permitiria trocar o instalador.
   updateDownload: (name) => invoke<string>('update_download', { name }),
   updateApply: (path) => invoke<void>('update_apply', { path }),
   updateVerifyReady: (path: string) =>
@@ -322,8 +320,6 @@ export const tauriServices: DisTorrentServices = {
       headers: Object.entries(headers ?? {}),
       body: body ?? null,
       timeoutMs,
-      // Sem isto o backend recusa rede privada: o opt-in do dono
-      // (`blockPrivate:false`) tem de chegar até a guarda do Rust.
       allowPrivate: allowPrivate === true,
     }).then((r) => {
       let out: string
@@ -486,7 +482,6 @@ export const tauriServices: DisTorrentServices = {
     if (!isAndroidRuntime()) return false
     try {
       const { invoke } = await import('@tauri-apps/api/core')
-      // Seção 2: r
       const r = await invoke<{ rodando?: boolean }>(
         on ? 'plugin:bgservice|start' : 'plugin:bgservice|stop',
       )

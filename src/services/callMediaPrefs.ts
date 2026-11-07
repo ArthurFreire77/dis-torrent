@@ -84,8 +84,6 @@ export function parseCallMediaPrefs(raw: unknown): CallMediaPrefs {
   if (audio !== null) base.audioInputId = audio
   const video = str(o.videoInputId)
   if (video !== null) base.videoInputId = video
-  // Pseudo-id nunca vira `deviceId: {exact}`: device inexistente faz o
-  // getUserMedia falhar para sempre e a preferência fica envenenada.
   if (base.videoInputId.startsWith('__')) {
     base.facingMode = base.videoInputId === '__user' ? 'user' : 'environment'
     base.videoInputId = ''

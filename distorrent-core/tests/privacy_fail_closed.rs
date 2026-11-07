@@ -168,7 +168,6 @@ async fn discovery_udp_silencioso_em_modo_anonimo() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let spy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    // Seção 1: spy_port
     let spy_port = spy.local_addr().unwrap().port();
     std::env::set_var(
         "DISTORRENT_DISCOVERY_BROADCASTS",

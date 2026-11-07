@@ -8,9 +8,6 @@ import { DynamicStyles } from '../shared/dynamicStyles'
 import { Button, EmptyState, Notice, Select, helpStyle, ui } from '../shared/ui'
 import { Ic } from '../shared/icons'
 
-/* Só o que `style=` inline não cobre: a barra de rolagem da área de conteúdo e
-   o foco do seletor de servidor. Tag de estilo solta NÃO serve aqui — o Tauri
-   injeta nonce no CSP e anula o inline; ver `shared/dynamicStyles.ts`. */
 const css = `
 .bots-scroll::-webkit-scrollbar{ width:10px }
 .bots-scroll::-webkit-scrollbar-thumb{ background:${ui.borderStrong}; border-radius:5px }
@@ -40,8 +37,6 @@ export default function BotsApp() {
   const android = isAndroidRuntime()
   const nativo = isTauriRuntime()
   const temPonte = typeof services.botBridgeStart === 'function'
-  // No Android o comando existe mas sempre recusa: melhor desabilitar do que
-  // oferecer um botão que só devolve erro.
   const podeAbrirJanela = nativo && !android && typeof services.openBotsWindow === 'function'
 
   useEffect(() => {

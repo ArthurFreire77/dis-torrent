@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const manager = readFileSync('src/services/callManager.ts', 'utf8')
+const mediaGate = readFileSync('src/services/callMediaGate.ts', 'utf8')
 const grid = readFileSync('src/components/calls/CallTilesGrid.tsx', 'utf8')
 const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
 
@@ -43,8 +44,8 @@ test('roster que chega durante o prompt do microfone não é descartado', () => 
 })
 
 test('captura de mídia é serializada (AbortError ao abrir câmera/mic)', () => {
-  assert.match(manager, /function comFilaDeCaptura/, 'existe a fila global de captura')
-  assert.match(manager, /let capturaFila: Promise<unknown> = Promise\.resolve\(\)/)
+  assert.match(mediaGate, /export function comFilaDeCaptura/, 'existe a fila global de captura')
+  assert.match(mediaGate, /let capturaFila: Promise<unknown> = Promise\.resolve\(\)/)
   const get = manager.slice(manager.indexOf('async function getLocalMedia('))
   assert.match(get.slice(0, 400), /comFilaDeCaptura\(/, 'getLocalMedia passa pela fila')
 })

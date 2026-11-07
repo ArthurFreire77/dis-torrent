@@ -124,9 +124,6 @@ export default function CallTilesGrid({
             style={{
               flex: `1 1 ${compact ? 220 : 300}px`,
               maxWidth: tiles.length === 1 ? 560 : undefined,
-              // Altura livre: quem manda na proporção é o aspect-ratio do card.
-              // Antes era `height: maxTileHeight` (420px) e um card de 300px de
-              // largura virava 300x420 — a "câmera achatada" do painel lateral.
               height: 'auto',
               maxHeight: maxTileHeight,
               minWidth: 0,
@@ -166,9 +163,6 @@ export default function CallTilesGrid({
         gridTemplateColumns: `repeat(${spec.columns}, minmax(0, 1fr))`,
         gap,
         width: '100%',
-        // Altura SEMPRE 100%: com 'auto' a grade ficava do tamanho do conteúdo
-        // e o `overflowY:'auto'` nunca podia rolar — o conteúdo extra era
-        // cortado no topo e no rodapé (o "vídeo quebrado" em área pequena).
         height: '100%',
         justifyItems: 'center',
         alignItems: 'center',
@@ -195,7 +189,6 @@ export default function CallTilesGrid({
     </div>
   )
 
-  // Seção 1: destaque
   const destaque = fixado ? (
     <div
       style={{
@@ -256,8 +249,6 @@ export default function CallTilesGrid({
         minHeight: 0,
         display: 'flex',
         flexDirection: spot && spot.strip === 'bottom' ? 'column' : 'row',
-        // Com rolagem, o eixo precisa ser stretch: centralizar um filho maior
-        // que a caixa corta topo e rodapé em partes iguais.
         alignItems: spec.scroll || (spot ? spot.scroll : false) ? 'stretch' : 'center',
         justifyContent: 'center',
         gap,

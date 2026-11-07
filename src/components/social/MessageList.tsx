@@ -182,7 +182,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
 
   useEffect(() => {
     if (!convId) return
-    // Seção 1: un
     const un = services.subscribe((ev: any) => {
       try {
         if (ev?.type !== 'reaction_changed' || ev?.conv_id !== convId) return
@@ -445,7 +444,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 {
 }
                 {polls.map((p, pi) => {
-                  // Seção 2: n
                   const n = polls.length
                   const anchor = n <= visible.length ? visible.length - 1 - (n - 1 - pi) : visible.length - 1
                   if (idx !== anchor) return null

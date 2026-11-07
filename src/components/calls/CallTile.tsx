@@ -111,13 +111,9 @@ export function CallTile({
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [aspect, setAspect] = useState<string | null>(null)
   const isScreen = tile.kind === 'screen'
-  // Re-renderiza quando a trilha (des)muta: sem isso o `showVideo` acima fica
-  // com a decisão antiga e o card não troca entre vídeo e avatar/“aguardando”.
   const muteTick = useUnmuteTick(tile.stream)
   void muteTick
 
-  // Solta a mídia ao desmontar: `attachStream` pode ter deixado listeners de
-  // gesto e um retry de play() apontando para o elemento que saiu da tela.
   useEffect(() => () => {
     detachStream(videoRef.current)
     detachStream(audioRef.current)
@@ -172,11 +168,6 @@ export function CallTile({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        // Card com proporção NÃO leva `minHeight`: `min-height` vence o
-        // `aspect-ratio`, então qualquer célula mais estreita que
-        // `minHeight*16/9` saía achatada. A forma vem do aspect-ratio e quem
-        // garante o tamanho é a grade. O card de TELA (sem proporção) mantém o
-        // piso, senão some quando a área é pequena.
         ...(isScreen ? { minHeight: expanded ? 0 : thumbnail ? 72 : minHeight } : { minHeight: 0 }),
         ...(isScreen && aspect
           ? expanded
@@ -196,10 +187,6 @@ export function CallTile({
         ...(isScreen || expanded || thumbnail
           ? null
           : {
-              // Proporção é do CARD. Antes vinha junto de width:100% E
-              // height:100%; com os dois lados definidos o navegador ignora o
-              // aspect-ratio e o card assume a forma do pai (vídeo "achatado"
-              // quando o painel lateral encolhia a área).
               aspectRatio: PARTICIPANT_ASPECT,
               width: '100%',
               height: 'auto',
@@ -410,7 +397,6 @@ export function CallTile({
         <audio
           autoPlay
           playsInline
-          // Seção 1: data
           data-call-audio-fp={audioKey}
           aria-hidden
           style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none', left: -9999 }}

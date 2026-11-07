@@ -26,8 +26,6 @@ import {
   WEBHOOK_TOLERANCE_SECONDS,
 } from '../src/services/botWebhook.ts'
 
-// Seção 1: schema v3 e migração
-
 test('schema v3: config nova sai com schema, modo e runtime explícitos', () => {
   const cfg = defaultBotConfig()
   assert.equal(cfg.schema, 3)
@@ -87,8 +85,6 @@ test('schema v3: primitivas desligadas sobrevivem ao round-trip', () => {
 })
 
 test('schema v3: comando de resposta some se a primitiva de texto está desligada', () => {
-  // Primitiva desligada = rota negada. Deixar o comando vivo para responder
-  // nada seria pior que não existir: o usuário chama e nada acontece.
   const cfg = parseBotConfig(
     JSON.stringify({
       schema: 3,
@@ -117,12 +113,8 @@ test('schema v3: segredo do webhook nunca volta na config serializada', () => {
   const json = serializeBotConfig(cfg)
   assert.ok(!json.includes('segredo-super-longo-1234'), 'vazou o segredo no JSON exportado')
   const parsed = JSON.parse(json)
-  // O valor vive na coluna local do banco; aqui só vai o marcador de que há
-  // assinatura — o resto do JSON é sincronizado para todos os membros.
   assert.equal(parsed.integrations.webhook.signed, true, 'só o marcador vai')
 })
-
-// Seção 2: guarda de URL canônica (SSRF)
 
 test('urlProblem: literais IPv4 não canônicos não furam mais a guarda', () => {
   // Estes três passavam antes porque o host era comparado como texto.
@@ -173,11 +165,7 @@ test('hostAllowed: lista vazia libera; lista restringe por domínio e subdomíni
   assert.equal(hostAllowed('https://api.exemplo.com/x', ['*.exemplo.com']), true)
 })
 
-// Seção 3: permissões espelhadas entre painel e core
-
 test('permAllows espelha a exceção herdada do core (manage libera estrutura e purga)', () => {
-  // O core faz isto em `perm_satisfied`. Antes o painel dizia "não pode" e a
-  // ponte executava — o dono não sabia o que tinha concedido.
   assert.equal(permAllows(BOT_PERMS.MANAGE, 'channel_create'), true)
   assert.equal(permAllows(BOT_PERMS.MANAGE, 'clear'), true)
   assert.equal(permAllows(BOT_PERMS.MANAGE, 'server_public'), true)
@@ -199,8 +187,6 @@ test('permAllows: os sete bits continuam cobrindo todas as ações do registro',
     assert.equal(permAllows(BOT_PERM_ALL, a.action), true)
   }
 })
-
-// Seção 4: assinatura do webhook
 
 test('webhook: assinatura é HMAC-SHA256 determinística e cobre o timestamp', () => {
   const a = signWebhook('segredo', 1_700_000_000, '{"event":"x"}')

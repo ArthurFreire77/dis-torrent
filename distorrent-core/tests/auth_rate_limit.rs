@@ -175,7 +175,6 @@ fn limiter_novo_e_o_unico_contorno() {
     );
 }
 
-// Seção 1: test
 #[test]
 fn requisicoes_simultaneas_nao_furam_o_limite() {
     let u = Arc::new(UnlockSim::new("fp-heidi"));
@@ -345,4 +344,3 @@ fn orcamento_e_tres_nao_mais_nem_menos() {
         "a 4ª está bloqueada"
     );
 }
-// Seção 2: fim

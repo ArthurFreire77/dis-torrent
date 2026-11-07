@@ -71,9 +71,6 @@ test('canal vazio espera para sempre (sem teto de postergações)', () => {
 })
 
 test('canal de voz COM gente e sem conexão desiste (era o Conectando… infinito)', () => {
-  // Esperar para sempre só faz sentido no canal vazio. Com outra pessoa na
-  // call e nenhum PC aberto, o watchdog reagendava para sempre e a tela ficava
-  // presa em "Conectando…" — o usuário nunca sabia que a conexão não abriu.
   const bloco = manager.slice(manager.indexOf('private onConnectWatchdogFire'))
   const trecho = bloco.slice(0, 3000)
   assert.match(trecho, /participants/, 'olha quem está na call antes de reagendar')

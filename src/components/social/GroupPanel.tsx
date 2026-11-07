@@ -230,7 +230,6 @@ export function GroupPanel({
         <div style={{ display: 'flex', gap: ui.sm, alignItems: 'flex-end', marginTop: ui.sm }}>
           <div style={{ flex: 1 }}>
             <TextField
-              // Seção 1: value
               value={addFp}
               onChange={setAddFp}
               placeholder="fingerprint de quem não é amigo"

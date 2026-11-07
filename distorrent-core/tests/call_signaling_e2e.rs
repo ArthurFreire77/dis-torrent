@@ -179,7 +179,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         },
     )
     .unwrap();
-    // Seção 1: answer_ba
     let answer_ba = wait_event(
         &mut ev_a,
         "A recebe CallAnswerEv B->A via relay",
@@ -347,7 +346,6 @@ async fn call_signaling_offer_answer_ice_via_relay() {
         },
     )
     .unwrap();
-    // Seção 2: ice_ab2
     let ice_ab2 = wait_event(
         &mut ev_b,
         "B recebe 2o CallIceEv A->B (mid audio)",

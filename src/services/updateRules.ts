@@ -204,7 +204,6 @@ export async function runUpdateFlow(
   try {
     await deps.apply(path)
   } catch (e) {
-    // Seção 1: msg
     const msg = String((e as Error)?.message ?? e)
     if (msg.includes(REINICIAR_SINAL)) {
       await deps.quit().catch(() => {})

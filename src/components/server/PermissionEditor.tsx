@@ -188,7 +188,6 @@ export function PermissionEditor({
                   {g.description}
                 </div>
                 {g.perms.map((p) => {
-                  // Seção 1: on
                   const on = (value & p.bit) !== 0
                   const lock = isLocked(p.bit)
                   return (

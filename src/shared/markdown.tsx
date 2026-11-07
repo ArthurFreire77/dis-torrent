@@ -199,7 +199,6 @@ function parseInline(src: string, ctx: InlineCtx | null, depth: number): Token[]
       }
       if (src.startsWith('/spoiler', i)) {
         const end = src.indexOf('\n', i + 8)
-        // Seção 1: stop
         const stop = end === -1 ? src.length : end
         const inner = src.slice(i + 8, stop).replace(/^\s+/, '')
         flush()
@@ -371,7 +370,6 @@ export const DEFAULT_MARKDOWN_THEME: MarkdownTheme = {
   mono: '"JetBrains Mono", ui-monospace, monospace',
 }
 
-// Seção 2: renderTokens
 function renderTokens(
   toks: Token[],
   ctx: InlineCtx,
@@ -447,9 +445,6 @@ function renderTokens(
             rel="noopener noreferrer nofollow"
             style={{ color: th.link, textDecoration: 'none', cursor: 'pointer' }}
             onClick={(e) => {
-              // `target="_blank"` não abre nada no WebView do Tauri (não há
-              // aba). O handler global captura, mas aqui é o ponto que garante
-              // abertura do navegador mesmo se o handler não estiver montado.
               e.stopPropagation()
               e.preventDefault()
               openUrlOutside(tk.href)
@@ -541,7 +536,6 @@ function CodeBlock({ lang, code, th }: { lang: string; code: string; th: Markdow
           type="button"
           onClick={(e) => {
             e.stopPropagation()
-            // Seção 3: done
             const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1400) }
             try {
               const w = navigator.clipboard
@@ -708,7 +702,6 @@ export function Markdown(props: MarkdownProps) {
     onRevealSpoiler: props.onRevealSpoiler ?? (() => {}),
     spoilerSeq: { n: 0 },
   }
-  // Seção 4: blocks
   const blocks = classifyBlocks(props.body)
   return (
     <div
