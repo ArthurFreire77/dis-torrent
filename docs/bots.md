@@ -973,11 +973,9 @@ Botões da lista (`BotManager.tsx`): **Criar bot**, **Adicionar bot existente**
 ligar/desligar, copiar token, remover.
 
 **O que o painel NÃO tem hoje:** exportar `bot.json`, importar arquivo (só
-pasta) e "testar comando" no painel atual. O componente antigo
-`src/components/BotConfigPanel.tsx` tem um botão *Testar*, mas **não está montado
-em nenhuma rota** — é código sem uso. A validação sem gravar existe como comando
-de casca (`bot_config_validate`, exposto em `services.botConfigValidate`), mas
-nenhuma tela o chama hoje.
+pasta) e "testar comando" no painel atual. A validação sem gravar existe como
+comando de casca (`bot_config_validate`, exposto em `services.botConfigValidate`),
+mas nenhuma tela o chama hoje.
 
 `BotsApp`/`/bots` tem o botão **Abrir em janela**, que invoca `open_bots_window`
 (registrado em `generate_handler!`, janela `bots` declarada em `tauri.conf.json`

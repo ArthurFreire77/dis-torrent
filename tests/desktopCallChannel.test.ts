@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const shell = readFileSync('src/designs/ThemeShell.tsx', 'utf8')
-const stage = readFileSync('src/components/calls/CallChannelStage.tsx', 'utf8')
+const stage = readFileSync('src/components/calls/VoiceStage.tsx', 'utf8')
 
 test('desktop troca a tela de mensagens pela tela da chamada', () => {
   assert.match(shell, /selCallChannel &&/, 'existe o ramo que detecta canal de chamada')
@@ -23,9 +23,10 @@ test('cabeçalho do canal de voz usa ícone e texto de chamada, não "#"', () =>
 })
 
 test('tela da chamada é honesta: sem entrar, mostra quem está e o motivo', () => {
-  assert.match(stage, /useChannelVoicePeers/, 'participantes vêm do motor')
+  const channelPeers = readFileSync('src/components/calls/ChannelVoicePeers.tsx', 'utf8')
+  assert.match(channelPeers, /useChannelVoicePeers/, 'participantes vêm do motor')
   assert.match(stage, /unavailable/, 'mostra por que não dá para entrar')
-  assert.match(stage, /Canal de chamada não tem mensagens/, 'diz que não há texto')
+  assert.match(channelPeers, /na chamada|na sala/, 'mostra quem está na chamada')
 })
 
 test('entrar/sair usa o MESMO joinVoice/leaveVoice do canal de voz', () => {
