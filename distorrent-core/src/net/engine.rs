@@ -814,6 +814,7 @@ pub fn native_voice_capable() -> bool {
     native_voice_platform_ok() && native_voice_env_ok()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn native_voice_env_ok() -> bool {
     !matches!(
         std::env::var("DISTORRENT_NO_NATIVE_VOICE")

@@ -1,6 +1,7 @@
 // Updater checks: parte de updater.rs.
 // Irmao do updater.rs; usa os tipos la declarados via super::*.
 
+use super::updater_version::{escolher, releases_all};
 use super::*;
 
 pub fn current_version(app: &tauri::AppHandle) -> String {

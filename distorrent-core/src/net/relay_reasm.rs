@@ -1,7 +1,6 @@
 // Relay reasm: parte de net/relay.rs.
 // Irmao do relay.rs; usa os tipos la declarados via super::*.
 
-use super::relay_socks::forward_via_socks;
 use super::*;
 
 pub fn chunk_frame(from: &str, to: &str, msg_id: &str, frame: &[u8]) -> Vec<String> {

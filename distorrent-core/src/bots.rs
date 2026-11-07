@@ -6,26 +6,31 @@
 use std::collections::BTreeMap;
 
 #[path = "bots_script.rs"]
+#[allow(dead_code)]
 mod bots_script;
 
 #[path = "bots_render.rs"]
+#[allow(dead_code)]
 mod bots_render;
 
 #[path = "bots_url.rs"]
+#[allow(dead_code)]
 mod bots_url;
 
 #[path = "bots_parse.rs"]
+#[allow(dead_code)]
 mod bots_parse;
 
-pub use bots_parse::parse_command;
-pub(crate) use bots_parse::{b, parse_args, parse_headers, parse_list};
-pub(crate) use bots_render::{json_path, normalize, render, render_key, url_encode, RenderCtx};
-pub(crate) use bots_script::{
-    eval_cond, parse_cond, parse_line, parse_script, push_reply, run_script, strip_quotes, truthy,
-    Cond, Stmt,
-};
-pub(crate) use bots_url::{canonical_host, is_blocked_host, is_ipv4};
-pub use bots_url::{host_allowed, is_private_host, url_allowed, url_ok};
+use bots_render::{render, RenderCtx};
+// Itens consumidos pelos testes deste módulo e pelo host (via `crate::bots`);
+// o `check --lib` sem cfg(test) não os vê.
+#[allow(dead_code)]
+mod _unused_guard {}
+use bots_parse::{b, parse_command, parse_list};
+pub use bots_render::normalize;
+use bots_url::url_ok;
+// Usado pelo host (src-tauri) para validar a URL antes de qualquer request.
+pub use bots_url::{host_allowed, is_private_host, url_allowed};
 
 use unicode_normalization::UnicodeNormalization;
 

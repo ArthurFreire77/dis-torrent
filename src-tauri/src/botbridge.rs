@@ -207,6 +207,8 @@ pub fn start(
 ) -> Result<Bridge, String> {
     let server = Server::http(("127.0.0.1", port))
         .map_err(|e| format!("não foi possível abrir 127.0.0.1:{port}: {e}"))?;
+    // O braco _ e defesa para versoes do tiny_http sem ListenAddr::IP.
+    #[allow(unreachable_patterns)]
     let real_port = match server.server_addr() {
         tiny_http::ListenAddr::IP(addr) => addr.port(),
         _ => return Err("a ponte só escuta em TCP loopback".to_string()),

@@ -9,13 +9,9 @@ pub mod updater_checks;
 pub mod updater_download;
 #[path = "updater_version.rs"]
 pub mod updater_version;
-pub use updater_version::{compare_version_strings, escolher, fetch_manifest, releases_all, REPO};
 
-pub use updater_download::{download_client, pick_manifest_asset, update_download};
-
-pub use updater_checks::{completar, current_version, update_check};
-
-pub use updater_apply::{pre_update_snapshot, update_apply, verify_before_apply};
+use updater_apply::verify_before_apply;
+use updater_download::pick_manifest_asset;
 
 use serde::{Deserialize, Serialize};
 use tauri::Emitter as _;
@@ -143,7 +139,7 @@ fn accepted_ext(platform: &str) -> &'static [&'static str] {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct GhAsset {
+pub(crate) struct GhAsset {
     name: String,
     size: u64,
     #[serde(default)]
@@ -153,7 +149,7 @@ struct GhAsset {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct GhRelease {
+pub(crate) struct GhRelease {
     tag_name: String,
     #[serde(default)]
     name: String,
@@ -235,7 +231,7 @@ fn release_notes(release: &GhRelease) -> String {
 }
 
 /// Resultado interno da checagem, antes de virar `UpdateInfo`.
-struct Escolha {
+pub(crate) struct Escolha {
     release: GhRelease,
     verified: VerifiedManifest,
     asset: ManifestAsset,
@@ -517,7 +513,6 @@ fn substituir_e_reiniciar(
 }
 
 /// Windows: instalação por usuário vs. pasta do sistema.
-#[cfg(target_os = "windows")]
 fn instalação_por_usuario() -> Result<bool, String> {
     let exe = std::env::current_exe().map_err(|e| format!("executável atual: {e}"))?;
     let alvo = std::fs::canonicalize(&exe).unwrap_or(exe);

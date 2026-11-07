@@ -1,7 +1,6 @@
 // Relay socks: parte de net/relay.rs.
 // Irmao do relay.rs; usa os tipos la declarados via super::*.
 
-use super::relay_diag::short_err;
 use super::*;
 
 pub fn move_spawn_tunnel(

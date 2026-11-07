@@ -1,7 +1,7 @@
 // Relay diag: parte de net/relay.rs.
 // Irmao do relay.rs; usa os tipos la declarados via super::*.
 
-use super::relay_mqtt::{mqtt_connack, sanitize_client_part};
+use super::relay_mqtt::mqtt_connack;
 use super::*;
 
 pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {

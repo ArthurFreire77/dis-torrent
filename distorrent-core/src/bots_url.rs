@@ -1,7 +1,5 @@
 // Validação de URL/allowlist de bot. Separado de bots.rs para nenhum arquivo passar de 1.000 linhas.
 
-use super::*;
-
 pub fn url_ok(url: &str) -> bool {
     let u = url.trim();
     if u.len() > 2048 {

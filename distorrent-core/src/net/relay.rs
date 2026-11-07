@@ -9,7 +9,6 @@ use std::time::Duration;
 #[path = "relay_mqtt.rs"]
 mod relay_mqtt;
 pub use relay_diag::{check_relay_legs, check_relay_legs_via, proxy_online_test};
-pub use relay_mqtt::mqtt_pump;
 use relay_mqtt::sanitize_client_part;
 pub use relay_reasm::{chunk_frame, chunk_frame_opaque};
 pub use relay_socks::{forward_via_socks, move_spawn_tunnel};

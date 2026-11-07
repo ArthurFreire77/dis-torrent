@@ -4,7 +4,7 @@
 use super::relay_diag::short_err;
 use super::*;
 
-pub async fn mqtt_pump(
+pub(crate) async fn mqtt_pump(
     mut eventloop: rumqttc::EventLoop,
     shared: Arc<StdMutex<MqttState>>,
     host: &str,

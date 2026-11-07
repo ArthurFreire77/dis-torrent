@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[allow(unreachable_code)] // em build sem as variantes cfg-gated o match é exaustivo
 pub(super) async fn handle_frame(
     engine: &Arc<NetworkEngine>,
     peer_fp: &str,
@@ -178,7 +179,6 @@ pub(super) async fn handle_frame(
         | SecureFrame::TunnelData { .. } => {
             return f_tunnel::handle_tunnel(engine, peer_fp, peer_pubkey, peer_nick, frame).await;
         }
-        _ => {}
     }
     Ok(())
 }

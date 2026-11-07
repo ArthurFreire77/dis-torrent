@@ -6,7 +6,7 @@ use super::*;
 pub(super) async fn handle_community(
     engine: &Arc<NetworkEngine>,
     peer_fp: &str,
-    peer_pubkey: &str,
+    _peer_pubkey: &str,
     peer_nick: &str,
     frame: SecureFrame,
 ) -> Result<()> {

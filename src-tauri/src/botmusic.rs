@@ -85,12 +85,6 @@ impl MusicHandle {
         #[cfg(target_os = "linux")]
         self.sink.clear();
     }
-
-    /// Silencia e libera o canal. O `MusicSink` remove o inbox do misturador no
-    /// `Drop`; sem isto ele seria iterado a cada 20 ms para sempre.
-    pub fn close(&self) {
-        self.clear();
-    }
 }
 
 pub struct Music {
@@ -145,13 +139,5 @@ impl Music {
         } else {
             false
         }
-    }
-
-    pub fn close_all(&self) {
-        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        for (_, h) in m.iter() {
-            h.clear();
-        }
-        m.clear();
     }
 }
