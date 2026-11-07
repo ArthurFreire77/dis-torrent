@@ -1,5 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Avatar as ViewAvatar, PeerDot as ViewPeerDot } from '../shared/avatarView'
+import { BootScreen, CreateAccount, LockScreen } from '../designs/auth/AuthScreens'
+import { avatarColor } from '../shared/theme'
 import { services } from '../services'
+import { usePrivacySettings } from '../services/usePrivacySettings'
 import { Icon, Icons } from '../shared/icons'
 import { Section } from '../shared/Section'
 import { useConversations, useEngineEvents, useMessages, useNetwork } from '../app/hooks'
@@ -41,7 +45,7 @@ import {
   type ServerSummary,
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
-import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import MobileMessage from './MobileMessage'
 import { EmojiPicker } from '../shared/EmojiPicker'
@@ -67,13 +71,11 @@ import {
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import { MessageRetentionSettings } from '../components/prefs/MessageRetentionSettings'
 import type { BotView, PresenceStatus, SearchHit, ProfileView } from '../services/models'
-import type { Conversation, Identity, NetworkState, CommunityView, PrivacyMode, StoredMessage, MemberPairing, ChannelMeta } from '../services/models'
+import type { Conversation, Identity, NetworkState, CommunityView, StoredMessage, MemberPairing, ChannelMeta } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 
 const MONO = "'JetBrains Mono', monospace"
 
-// Fingerprint (12 hex) OU chave pública completa (64 hex): a tela de perfil
-// oferece "copiar identidade" nos dois formatos, então os dois precisam entrar.
 const FP_RE = /^(?:[0-9a-f]{12}|[0-9a-f]{64})$/
 
 interface AutoItemMobile {
@@ -102,28 +104,17 @@ const stateLabel: Record<NetworkState, string> = {
   CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
 }
 
-type Tab = 'home' | 'servers' | 'chats' | 'friends' | 'profile'
-
-function avatarColor(fp: string): string {
-  const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
-  let h = 0
-  for (let i = 0; i < fp.length; i++) h = (h * 31 + fp.charCodeAt(i)) >>> 0
-  return palette[h % palette.length]
+const authPalette = {
+  main: '#14161a', sidebar: '#1a1d23', input: '#23262f', border: '#242830',
+  heading: '#ffffff', text: '#f2f3f5', muted: '#8e929b', accent: '#5865f2', red: '#f23f42',
 }
 
-const Avatar = memo(function Avatar({ name, fp, size, avatarB64, accent }: { name: string; fp: string; size: number; avatarB64?: string; accent?: string }) {
-  const initial = (name || '?').trim().charAt(0).toUpperCase()
-  return (
-    <span style={{ width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, overflow: 'hidden', boxShadow: accent ? `0 0 0 2px ${accent}55` : undefined }}>
-      {avatarB64
-        ? <img src={`data:image/jpeg;base64,${avatarB64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-        : initial}
-    </span>
-  )
-})
+type Tab = 'home' | 'servers' | 'chats' | 'friends' | 'profile'
+
+const Avatar = memo(ViewAvatar)
 
 const PeerDot = memo(function PeerDot({ on, ring }: { on: boolean; ring?: string }) {
-  return <span style={{ position: 'absolute', right: -2, bottom: -2, width: 12, height: 12, borderRadius: '50%', background: on ? t.green : '#80848e', border: `3px solid ${ring ?? t.main}` }} />
+  return <ViewPeerDot s={on ? 'CONNECTED' : 'DISCONNECTED'} ring={ring} />
 })
 
 const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete, room, onJoinRoom }: {
@@ -167,7 +158,6 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
   )
 })
 
-// Seção 1: ServerRow
 const ServerRow = memo(function ServerRow({ c, active, onSelect }: {
   c: CommunityView
   active: boolean
@@ -255,191 +245,6 @@ function EmptyBlock({ msg, sub }: { msg: string; sub?: any }) {
   )
 }
 
-function AuthCard({ children }: { children: any }) {
-  const perks = [
-    { icon: Icons.lock, title: 'Cifrado', desc: 'fim-a-fim' },
-    { icon: Icons.users, title: 'Sem servidor', desc: 'P2P direto' },
-    { icon: Icons.key, title: 'Sua chave', desc: 'sem conta' },
-  ]
-  return (
-    <div style={{ minHeight: '100dvh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}>
-      <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 24, width: '100%', maxWidth: 380, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
-        <div style={{ textAlign: 'center', marginBottom: 12 }}>
-          <span style={{ fontSize: 24, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
-          <div style={{ fontSize: 12, color: t.muted, marginTop: 4 }}>chat, voz e arquivos P2P — sem cadastro</div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-          {perks.map(p => (
-            <div key={p.title} style={{ flex: 1, background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '8px 4px', textAlign: 'center' }}>
-              <span style={{ color: t.accent, display: 'inline-flex' }}><Icon d={p.icon} size={16} /></span>
-              <div style={{ fontSize: 11, fontWeight: 800, color: t.heading, marginTop: 4 }}>{p.title}</div>
-              <div style={{ fontSize: 10, color: t.muted }}>{p.desc}</div>
-            </div>
-          ))}
-        </div>
-        {children}
-      </div>
-    </div>
-  )
-}
-
-const inputStyle: any = { width: '100%', background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '12px 12px', color: t.text, fontSize: 16, outline: 'none', boxSizing: 'border-box' }
-const btnStyle: any = { width: '100%', background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 15 }
-
-function CreateAccount({ onDone }: { onDone: (id: Identity) => void }) {
-  const [nick, setNick] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const fileRef = useRef<HTMLInputElement | null>(null)
-
-  async function submit() {
-    setErr(null)
-    if (!nick.trim()) return setErr('escolha seu nome')
-    setBusy(true)
-    try {
-      const id = await services.identityCreate(nick.trim(), null)
-      onDone(id)
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const [vaultFileName, setVaultFileName] = useState<string | null>(null)
-  const [vaultB64, setVaultB64] = useState('')
-  const [vaultPass, setVaultPass] = useState('')
-
-  async function pickVaultFile() {
-    if (services.kind !== 'native') {
-      setErr('importar cofre precisa do app instalado')
-      return
-    }
-    if (!fileRef.current) return
-    fileRef.current.onchange = () => {
-      const f = fileRef.current!.files?.[0]
-      if (!f) return
-      setVaultFileName(f.name)
-      f.arrayBuffer()
-        .then((ab) => {
-          const buf = new Uint8Array(ab)
-          let bin = ''
-          const CH = 0x8000
-          for (let i = 0; i < buf.length; i += CH) bin += String.fromCharCode(...buf.subarray(i, i + CH))
-          setVaultB64(btoa(bin))
-        })
-        .catch(() => setErr('falha ao ler o arquivo — tente de novo'))
-    }
-    fileRef.current.click()
-  }
-
-  // Seção 2: doImportVault
-  async function doImportVault() {
-    if (!vaultB64 || vaultPass.length < 8) {
-      setErr('a senha do cofre precisa de pelo menos 8 caracteres')
-      return
-    }
-    setBusy(true); setErr(null)
-    try {
-      const r = await services.stormvaultImportFile(vaultB64, vaultPass)
-      if (r.identity_installed) {
-        window.location.reload()
-        return
-      }
-      setErr('o cofre foi mesclado, mas este aparelho já tem outra conta — abra o cofre em Configurações.')
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <AuthCard>
-      <div style={{ fontWeight: 800, color: t.heading, fontSize: 16, marginBottom: 4 }}>Criar conta</div>
-      <div style={{ fontSize: 12, color: t.muted, marginBottom: 14, lineHeight: 1.5 }}>Escolha seu nome. Sua chave é gerada neste dispositivo — <b>sem senha</b>, login direto pela chave.</div>
-      <input style={inputStyle} placeholder="Seu nome" value={nick} onChange={e => setNick(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()} autoCapitalize="none" spellCheck={false} />
-      {err && <div style={{ fontSize: 12, color: '#ff9c9c', background: '#2a1518', border: `1px solid ${t.red}55`, borderRadius: 6, padding: '6px 10px', marginTop: 10 }}>{err}</div>}
-      <button style={{ ...btnStyle, marginTop: 14 }} disabled={busy || !nick.trim()} onClick={submit}>{busy ? 'criando…' : 'Criar conta'}</button>
-      <input ref={fileRef} type="file" accept=".stormvault" style={{ display: 'none' }} aria-label="Escolher cofre para importar" />
-      <button onClick={pickVaultFile} disabled={busy} style={{ width: '100%', background: 'transparent', color: t.muted, border: 'none', padding: 12, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12, marginTop: 10 }}>
-        {vaultFileName ? `Cofre: ${vaultFileName}` : 'Já tenho conta em outro aparelho — importar cofre'}
-      </button>
-      {vaultB64 && (
-        <div style={{ marginTop: 8 }}>
-          <input style={inputStyle} type="password" placeholder="senha do cofre" aria-label="Senha do cofre"
-            value={vaultPass} onChange={e => setVaultPass(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') void doImportVault() }} />
-          <button onClick={() => void doImportVault()} disabled={busy || vaultPass.length < 8} style={{ ...btnStyle, marginTop: 10 }}>
-            {busy ? 'importando…' : 'Importar e entrar'}
-          </button>
-        </div>
-      )}
-      <div style={{ fontSize: 11, color: t.muted, marginTop: 2, textAlign: 'center' }}>Sem senha — o app verifica se você tem a chave local.</div>
-    </AuthCard>
-  )
-}
-
-function LockScreen({ nickname, onUnlock }: { nickname: string; onUnlock: (id: Identity) => void }) {
-  const [pass, setPass] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  async function submit() {
-    setErr(null); setBusy(true)
-    try {
-      const id = await services.vaultUnlock(pass)
-      onUnlock(id)
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <AuthCard>
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
-        <Avatar name={nickname} fp="0000" size={64} />
-      </div>
-      <div style={{ textAlign: 'center', fontWeight: 800, color: t.heading, fontSize: 16 }}>Bem-vindo de volta, {nickname}</div>
-      <div style={{ textAlign: 'center', fontSize: 12, color: t.muted, marginTop: 4, marginBottom: 14 }}>Digite sua senha para desbloquear</div>
-      <input style={inputStyle} autoFocus type="password" placeholder="Sua senha" value={pass}
-        onChange={e => setPass(e.target.value)}
-        onKeyDown={e => e.key === 'Enter' && pass && submit()} />
-      {err && <div style={{ fontSize: 12, color: '#ff9c9c', background: '#2a1518', border: `1px solid ${t.red}55`, borderRadius: 6, padding: '6px 10px', marginTop: 10 }}>{err}</div>}
-      <button style={{ ...btnStyle, marginTop: 14 }} disabled={busy || !pass} onClick={submit}>{busy ? 'entrando…' : 'Entrar'}</button>
-    </AuthCard>
-  )
-}
-
-function BootScreen({ native }: { native: boolean }){
-  const [slow, setSlow] = useState(false)
-  useEffect(() => {
-    const tm = setTimeout(() => setSlow(true), 5000)
-    return () => clearTimeout(tm)
-  }, [])
-  return (
-    <div className="boot">
-      <div className="boot-logo">DisTorrent</div>
-      <div className="boot-bar"><i /></div>
-      <div className="boot-sub">
-        {slow
-          ? 'ainda iniciando o nó P2P — se demorar muito, confirme se o app nativo está rodando (não só o navegador).'
-          : 'abrindo sua identidade e o nó P2P…'}
-        {!native && <><br />modo navegador: a rede P2P só conecta abas desta máquina.</>}
-      </div>
-      {slow && (
-        // Sem botão, um boot travado ficava girando para sempre e parecia
-        // janela morta — a tela não tinha como o usuário agir.
-        <button
-          type="button"
-          onClick={() => window.location.reload()}
-          style={{ marginTop: 4, background: 'transparent', color: '#b7c0cd', border: '1px solid #2f3742', borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
-        >
-          Recarregar
-        </button>
-      )}
-    </div>
-  )
-}
-
 export default function MobileShell() {
   const prefs = usePrefs()
   const [phase, setPhase] = useState<'loading' | 'create' | 'lock' | 'app'>('loading')
@@ -496,14 +301,11 @@ export default function MobileShell() {
   const [showThread, setShowThread] = useState(false)
   const [threadMsgs, setThreadMsgs] = useState<StoredMessage[]>([])
   const [threadInput, setThreadInput] = useState('')
-  // Antes era `useState('online')` fixo: o modo "não perturbe"/invisível
-  // escolhido nas preferências nunca valia no mobile (nem para silenciar som).
   const myPresence: PresenceStatus = prefs.myPresence
   const [composerEmoji, setComposerEmoji] = useState(false)
   const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const [flash, setFlash] = useState<string | null>(null)
-  // Seção 3: const
   const [pinnedMsgs, setPinnedMsgs] = useState<{ id: string; body: string; author: string }[]>([])
   const readRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement | null>(null)
@@ -511,18 +313,24 @@ export default function MobileShell() {
   const [showPrivacy, setShowPrivacy] = useState(false)
   const [showScreenPicker, setShowScreenPicker] = useState(false)
   const [showDiagnostics, setShowDiagnostics] = useState(false)
-  const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
-  const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
-  useEffect(() => {
-    setCallPrivacyForIce(privacyMode)
-    services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
-  }, [privacyMode])
-  const [proxyAddr, setProxyAddr] = useState('')
-  const [proxyIsDefault, setProxyIsDefault] = useState(true)
-  const [proxyTesting, setProxyTesting] = useState(false)
-  const [proxyTestOk, setProxyTestOk] = useState<number | null>(null)
-  const [proxyTestErr, setProxyTestErr] = useState<string | null>(null)
-  const [proxyPendingMode, setProxyPendingMode] = useState<PrivacyMode | null>(null)
+  const privacy = usePrivacySettings(setError)
+  const {
+    mode: privacyMode,
+    proxyEffective: privacyProxyEffective,
+    proxyAddr,
+    proxyIsDefault,
+    testing: proxyTesting,
+    testOk: proxyTestOk,
+    testErr: proxyTestErr,
+    pendingMode: proxyPendingMode,
+    setMode: setPrivacyMode,
+    setProxyAddr,
+    resetTransient,
+    refreshExtras: refreshPrivacyExtras,
+    runTest: runProxyTest,
+    saveAndActivate: saveProxyAndActivate,
+    pickMode: pickPrivacyMode,
+  } = privacy
   const lastTypingSent = useRef(0)
   const bootAtMobile = useRef(Date.now())
   const appStartedAt = useRef(resolveSessionStart(bootAtMobile.current, typeof sessionStorage !== 'undefined' ? sessionStorage : null))
@@ -537,62 +345,9 @@ export default function MobileShell() {
     } catch {  }
   }
 
-  async function refreshPrivacyExtras(mode?: PrivacyMode) {
-    try {
-      const pc = await services.proxyAddrGet(mode)
-      setProxyAddr(pc.addr)
-      setProxyIsDefault(pc.is_default)
-    } catch {
-      setProxyAddr(mode === 'full' ? '127.0.0.1:9050' : '127.0.0.1:1080')
-      setProxyIsDefault(true)
-    }
-  }
-
-  async function runProxyTest() {
-    setProxyTesting(true); setProxyTestOk(null); setProxyTestErr(null)
-    try {
-      const ms = await services.proxyTest(proxyAddr.trim())
-      setProxyTestOk(ms)
-    } catch (e: any) {
-      setProxyTestErr(String(e?.message ?? e))
-    } finally {
-      setProxyTesting(false)
-    }
-  }
-
-  async function saveProxyAndActivate(mode: PrivacyMode) {
-    try {
-      await services.proxyAddrSet(proxyAddr.trim(), mode)
-      const r = await services.privacySet(mode)
-      setPrivacyMode(r.mode)
-      setPrivacyProxyEffective(!!r.proxy_effective)
-      setProxyPendingMode(null)
-      setProxyTestOk(null)
-      setProxyTestErr(null)
-      setError(null)
-    } catch (e: any) { setError(String(e?.message ?? e)) }
-  }
-
-  function pickPrivacyMode(pm: PrivacyMode) {
-    if (pm === 'proxy' || pm === 'full') {
-      setProxyPendingMode(pm)
-      setProxyTestOk(null); setProxyTestErr(null)
-      void refreshPrivacyExtras(pm)
-      return
-    }
-    setProxyPendingMode(null)
-    services.privacySet(pm).then(r => {
-      setPrivacyMode(r.mode)
-      setPrivacyProxyEffective(!!r.proxy_effective)
-      setError(null)
-    }).catch((e: any) => setError(String(e?.message ?? e)))
-  }
-
   function closePrivacy() {
     setShowPrivacy(false)
-    setProxyPendingMode(null)
-    setProxyTestOk(null)
-    setProxyTestErr(null)
+    resetTransient()
   }
   const [version, setVersion] = useState('')
   const [fileList, setFileList] = useState<any[]>([])
@@ -634,8 +389,6 @@ export default function MobileShell() {
   useEffect(() => {
     services.version().then(setVersion).catch(() => {})
     services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {})
-    // Mesma escada de decisão do desktop (`bootPhase.ts`): antes os dois lados
-    // divergiam e o desktop abria o app sem identidade — tela vazia.
     const decidir = async () => {
       let id: Identity | null = null
       try {
@@ -691,7 +444,6 @@ export default function MobileShell() {
   useEffect(() => {
     setMemberPairing([])
     if (!selCommunity) { setChannelListCache([]); return }
-    // Seção 4: alive
     let alive = true
     const load = () => {
       services
@@ -846,7 +598,6 @@ export default function MobileShell() {
     identity?.fingerprint,
   ])
 
-  // Seção 5: mediaLiveMobile
   const mediaLiveMobile = useMemo(() => (activeCall ? callMediaLive({
     participants: (activeCall.participants ?? []) as any[],
     localStream: (activeCall as any).localStream ?? null,
@@ -880,14 +631,7 @@ export default function MobileShell() {
 
   const camerasMobile = useCallCameras(!!activeCall)
   const cameraSwitchLabelMobile = cameraCycleLabel(camerasMobile, callMediaPrefsState.videoInputId)
-  // No Android o aparelho pode ter 2 câmeras e o navegador devolver os dois
-  // `videoinput` com o MESMO deviceId enquanto a permissão não foi dada. Com
-  // um único id não há o que alternar, mas o botão não pode simplesmente
-  // sumir: cai no "inverter" e o switchCamera resolve na hora do toque.
   const [cameraCount, setCameraCount] = useState(0)
-  // Detecta as câmeras mesmo FORA da chamada: no Android os `videoinput`
-  // aparecem sem label antes da permissão, então contar dispositivos é o
-  // único sinal honesto de "existe frontal e traseira".
   useEffect(() => {
     let vivo = true
     const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
@@ -923,8 +667,6 @@ export default function MobileShell() {
   const mostrarTrocaCameraMobile = shouldShowCameraFlip({
     devices: camerasMobile,
     rawCount: cameraCount,
-    // No Android/iOS frontal+traseira existem por definição: o botão não pode
-    // depender do `enumerateDevices`, que antes da permissão devolve um só.
     mobile: isAndroidRuntime() || isIOSRuntime(),
   })
   const trocarCameraMobile = async () => {
@@ -1051,7 +793,6 @@ export default function MobileShell() {
       const fp = (ev as unknown as { fp?: string }).fp
       if (!cid || !fp || fp === identity?.fingerprint) return
       if (cid !== selConv) return
-      // Seção 6: nick
       const nick = (ev as unknown as { nickname?: string }).nickname ?? fp.slice(0, 8)
       setTypingPeers(prev => ({ ...prev, [fp]: { nick, at: Date.now() } }))
       if (typingTimeouts.current[fp]) clearTimeout(typingTimeouts.current[fp])
@@ -1218,7 +959,6 @@ export default function MobileShell() {
       setError(String(e?.message ?? e))
     }
   }, [activeCall])
-  // Seção 7: const
   const [leaveTarget, setLeaveTarget] = useState<{ id: string; title: string; owner: boolean } | null>(null)
   const [showQuitConfirm, setShowQuitConfirm] = useState(false)
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => {
@@ -1378,7 +1118,6 @@ export default function MobileShell() {
     setInput('')
     setError(null)
     try {
-      // Seção 8: m
       const m = communityId ? await services.sendChannelMessage(communityId, convId, body) : await services.messageSend(convId, body)
       replaceOptimistic(tempId, m)
       if (replyToMsg) {
@@ -1551,7 +1290,6 @@ export default function MobileShell() {
       un()
     }
   }, [selCommunity, selConv])
-  // Seção 9: selCallChannel
   const selCallChannel = useMemo(() => {
     if (!isChannel || !selConv) return null
     const meta = channelListCache.find((c) => c.id === selConv)
@@ -1737,7 +1475,6 @@ export default function MobileShell() {
     for (const [fp, p] of Object.entries(profilesByFp)) if (p?.avatar_b64) out[fp] = p.avatar_b64
     return out
   }, [profilesByFp])
-  // Seção 10: readState
   const readState = useReadState(selConv, myFp)
   const unreadMarkTs = readState.lastRead
 
@@ -1897,7 +1634,6 @@ export default function MobileShell() {
     }
   }, [selConv, messages])
 
-  // Seção 11: const
   const [searchHits, setSearchHits] = useState<SearchHit[]>([])
   const [searchBusy, setSearchBusy] = useState(false)
   const [sheetSearchQ, setSheetSearchQ] = useState('')
@@ -2098,7 +1834,6 @@ export default function MobileShell() {
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
-                // Seção 12: value
                 value={threadInput}
                 onChange={(e) => setThreadInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') void sendThread() }}
@@ -2159,9 +1894,9 @@ export default function MobileShell() {
 
   const updateGate = useUpdateGate(true)
 
-  if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen native={services.kind === 'native'} />} /><UpdateOverlay api={updateGate} /></>)
-  if (phase === 'create') return <CreateAccount onDone={id => { setIdentity(id); setPhase('app') }} />
-  if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
+  if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen />} /><UpdateOverlay api={updateGate} /></>)
+  if (phase === 'create') return <CreateAccount palette={authPalette} mobile onDone={id => { setIdentity(id); setPhase('app') }} />
+  if (phase === 'lock') return <LockScreen palette={authPalette} mobile nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 
   const renderCallTilesMobile = (_compact: boolean, strip = false) => {
     if (callTilesMobile.length === 0) return null
@@ -2340,7 +2075,6 @@ export default function MobileShell() {
 
         {}
         {showMembers && isChannel && (() => {
-          // Seção 13: janela
           const janela = windowMembers(
             activeComm?.members ?? [],
             LIMITE_MEMBROS,
@@ -2621,7 +2355,6 @@ export default function MobileShell() {
             <button aria-label="Anexar" title="Anexar arquivo (todos semeiam)" onClick={() => fileInputRef.current?.click()} style={{ width: 28, height: 28, borderRadius: '50%', background: t.accent, color: '#fff', border: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><Icon d={Icons.plus} size={16} /></button>
             <textarea
               ref={composerRef}
-              // Seção 14: value
               value={input}
               rows={1}
               onChange={e => {
@@ -2781,7 +2514,6 @@ export default function MobileShell() {
           </div>
 
           {(() => {
-            // Seção 15: amigos
             const amigos = new Set(friendsAccepted.map(f => f.fp))
             const vinculados = peers.filter(p => p.state === 'CONNECTED' && p.fp !== identity?.fingerprint)
             return (
@@ -2985,7 +2717,6 @@ export default function MobileShell() {
                   ref={friendInputRef}
                   className="m-input mono"
                   style={{ flex: 1, minWidth: 0, borderColor: friendErr ? t.red : undefined }}
-                  // Seção 16: value
                   value={friendFpInput}
                   inputMode="text"
                   autoComplete="off"
@@ -3099,7 +2830,7 @@ export default function MobileShell() {
               Editar perfil
               <span style={{ marginLeft: 'auto', fontSize: 11, color: t.muted }}>nome • foto • sobre</span>
             </button>
-            <button className="nav-row" onClick={() => { services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {}); setProxyPendingMode(null); void refreshPrivacyExtras(privacyMode); setShowPrivacy(true) }}>
+            <button className="nav-row" onClick={() => { services.privacyGet().then(s => setPrivacyMode(s.mode)).catch(() => {}); privacy.resetTransient(); void refreshPrivacyExtras(privacyMode); setShowPrivacy(true) }}>
               <span style={{ display: 'flex', flexShrink: 0 }}><Icon d={Icons.settings} size={17} /></span>
               Privacidade
               <span style={{ marginLeft: 'auto', fontSize: 11, color: t.muted }}>{privacyLabel}</span>
@@ -3196,7 +2927,6 @@ export default function MobileShell() {
             <div style={{ fontSize: 12, color: t.muted, marginBottom: 12, lineHeight: 1.5 }}>Escolha como suas mensagens trafegam. Aplicado no motor em tempo real.</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
               {PRIVACY_MODES.map(pm => {
-                // Seção 17: active
                 const active = privacyMode === pm.mode
                 return (
                   <label key={pm.mode} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: active ? `${t.accent}14` : t.input, border: `1px solid ${active ? t.accent : t.border}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}
@@ -3239,7 +2969,7 @@ export default function MobileShell() {
                 <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                   <input
                     value={proxyAddr}
-                    onChange={e => { setProxyAddr(e.target.value); setProxyTestOk(null); setProxyTestErr(null) }}
+                    onChange={e => { setProxyAddr(e.target.value); privacy.resetTransient() }}
                     placeholder={proxyPendingMode === 'full' ? '127.0.0.1:9050' : 'ex.: 127.0.0.1:1080'}
                     spellCheck={false}
                     autoCapitalize="none"
@@ -3262,7 +2992,7 @@ export default function MobileShell() {
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => { setProxyPendingMode(null); setProxyTestOk(null); setProxyTestErr(null) }}>Cancelar</button>
+                  <button className="m-btn ghost" style={{ flex: 1 }} onClick={() => privacy.resetTransient()}>Cancelar</button>
                   <button onClick={() => saveProxyAndActivate(proxyPendingMode)} disabled={!proxyAddr.trim()}
                     style={{ flex: 1, background: proxyTestOk != null ? t.green : '#3a3a3c', color: '#fff', border: 'none', padding: 10, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 12 }}>
                     {proxyTestOk != null ? 'Ativar proxy' : 'Ativar sem teste'}
@@ -3361,7 +3091,6 @@ export default function MobileShell() {
           { id: 'friends', label: 'Amigos', icon: Icons.users, badge: friendRequests.length },
           { id: 'profile', label: 'Você', icon: Icons.settings },
         ] as { id: Tab, label: string, icon: string, badge?: number }[]).map(it => {
-          // Seção 18: active
           const active = tab === it.id
           const badge = it.badge ?? 0
           return (

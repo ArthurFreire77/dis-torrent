@@ -5,9 +5,7 @@ import {
   BOT_ADMIN_ACTIONS,
   BOT_CHANNEL_KINDS,
   BOT_EVENTS,
-  BOT_PERM_DEFS,
   BOT_PERM_ALL,
-  BOT_PERMS,
   BOT_PRIMITIVES,
   BOT_MODES,
   parseBotConfig,
@@ -24,69 +22,12 @@ import {
 import { copyBestEffort } from '../../shared/clipboard'
 import { baixarTexto } from './botDocsDownload'
 import { DynamicStyles } from '../../shared/dynamicStyles'
+import { BotPermissionsTab } from './BotPermissionsTab'
 import { Button, Card, EmptyState, Modal, Notice, Select, TextArea, TextField, helpStyle, ui } from '../../shared/ui'
 import { Ic, type IconName } from '../../shared/icons'
 
-/* Layout NÃO mora aqui: vai em `style=` (ver `shared/dynamicStyles.ts` — o Tauri
-   injeta nonce no CSP e anula o `unsafe-inline`, então tag <style> não aplica).
-   Esta folha só cobre o que inline não expressa: hover/focus, estados e media. */
-const css = `
-.botp-navbtn:hover{ background:${ui.surfaceHover}; color:${ui.text} }
-.botp-navbtn:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.botp-row:hover{ background:${ui.surfaceHover}; border-color:${ui.borderStrong} }
-.botp-row:focus-visible{ outline:2px solid ${ui.link}; outline-offset:2px }
-.botp-console::-webkit-scrollbar{ width:8px }
-.botp-console::-webkit-scrollbar-thumb{ background:${ui.borderStrong}; border-radius:4px }
-@media (max-width: 720px){
-  .botp-head{ flex-wrap:wrap }
-}
-`
-
-type Tab = 'credenciais' | 'comandos' | 'permissoes' | 'primitivas' | 'eventos' | 'runtime' | 'console'
-
-const CHIP_TONE: Record<string, { color: string; background: string; borderColor: string }> = {
-  ok: { color: '#a5e5bd', background: 'rgba(35,165,89,.14)', borderColor: 'rgba(35,165,89,.5)' },
-  bad: { color: '#ffb3b3', background: 'rgba(242,63,66,.14)', borderColor: 'rgba(242,63,66,.5)' },
-  warn: { color: '#ffe0a3', background: 'rgba(240,178,50,.14)', borderColor: 'rgba(240,178,50,.5)' },
-}
-
-const chip = (tone?: 'ok' | 'bad' | 'warn'): React.CSSProperties => ({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 4,
-  padding: '2px 7px',
-  borderRadius: 99,
-  border: `1px solid ${tone ? CHIP_TONE[tone].borderColor : ui.border}`,
-  background: tone ? CHIP_TONE[tone].background : ui.input,
-  color: tone ? CHIP_TONE[tone].color : ui.muted,
-  fontSize: 9.5,
-  fontWeight: 800,
-  letterSpacing: 0.4,
-  textTransform: 'uppercase',
-  whiteSpace: 'nowrap',
-})
-
-const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, ui-monospace, monospace' }
-
-const consoleStyle: React.CSSProperties = {
-  ...mono,
-  fontSize: 11.5,
-  background: '#15171b',
-  border: `1px solid ${ui.border}`,
-  borderRadius: 8,
-  padding: '9px 10px',
-  maxHeight: 260,
-  overflowY: 'auto',
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
-}
-
-const lineStyle = (level?: string): React.CSSProperties => ({
-  display: 'flex',
-  gap: 7,
-  padding: '1px 0',
-  color: level === 'error' ? '#ff9c9c' : level === 'warn' ? '#ffe0a3' : undefined,
-})
+import { css, chip, mono, consoleStyle, lineStyle, type Tab } from './botPanelStyles'
+export type { Tab }
 
 export function BotPanel({
   communityId,
@@ -106,8 +47,6 @@ export function BotPanel({
 }) {
   const initial = useMemo(() => {
     const cfg = parseBotConfig(bot.config ?? null) ?? defaultBotConfig()
-    // O segredo mora na coluna local do banco, não no JSON sincronizado.
-    // Ler dele aqui evita que abrir e salvar o painel APAGUE a assinatura.
     return { ...cfg, webhookSecret: bot.webhook_secret || undefined }
   }, [bot.config, bot.webhook_secret])
   const [tab, setTab] = useState<Tab>('credenciais')
@@ -203,9 +142,6 @@ export function BotPanel({
   }
 
   function addCommand() {
-    // Nome provisório único: `comando-1`, `comando-2`… sem repetir um nome que
-    // já existe. Antes o id aberto era `cmd-<nome>` e o render usava o índice,
-    // então o comando novo nascia fechado.
     const usados = new Set(cfg.commands.map((c) => c.name))
     let n = cfg.commands.length + 1
     while (usados.has(`comando-${n}`)) n += 1
@@ -243,8 +179,6 @@ export function BotPanel({
         perms,
         roleId: roleId || null,
         online,
-        // O segredo vai por campo próprio (coluna local); nunca entra no JSON
-        // de config, que é sincronizado para todos os membros do servidor.
         webhookSecret: cfg.webhookSecret,
       })
       setSavedAt(Date.now())
@@ -976,58 +910,7 @@ export function BotPanel({
       )}
 
       {tab === 'permissoes' && (
-        <Card title="Permissões administrativas" subtitle="O bot nunca tem mais poder do que isto. O dono do servidor nunca é alvo." icon="gear">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: ui.sm }}>
-            {BOT_PERM_DEFS.map((d) => {
-              const on = (perms & d.bit) !== 0
-              return (
-                <label key={d.bit} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '9px 10px', background: on ? ui.surfaceHover : ui.surface, border: `1px solid ${on ? ui.accent : ui.border}`, borderRadius: 8, cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    style={{ marginTop: 2 }}
-                    onChange={() => setPerms((p) => (on ? p & ~d.bit : p | d.bit))}
-                  />
-                  <span style={{ minWidth: 0 }}>
-                    <span style={{ display: 'block', fontSize: 13, fontWeight: 700, color: ui.heading }}>{d.label}</span>
-                    <span style={{ display: 'block', fontSize: 11.5, color: ui.muted }}>{d.hint}</span>
-                    <span style={{ display: 'block', fontSize: 11, color: ui.muted, marginTop: 2, fontFamily: 'JetBrains Mono,monospace' }}>
-                      {d.commands.map((c) => `/${c}`).join('  ')}
-                    </span>
-                  </span>
-                </label>
-              )
-            })}
-          </div>
-          <div style={{ marginTop: ui.md, display: 'flex', gap: ui.sm, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={chip(perms === 0 ? undefined : 'ok')}>
-              {perms === 0 ? 'sem poder administrativo' : `${BOT_PERM_DEFS.filter((d) => (perms & d.bit) !== 0).length} de ${BOT_PERM_DEFS.length} concedidas`}
-            </span>
-            <Button variant="ghost" icon="minus" onClick={() => setPerms(0)}>
-              Remover todas
-            </Button>
-            <Button variant="ghost" icon="shield" onClick={() => setPerms(BOT_PERM_ALL)}>
-              Conceder todas
-            </Button>
-          </div>
-          <Notice tone="warning" icon="info">
-            Conceder banir/silenciar permite que o bot remova membros de verdade. A validação é feita no
-            core a cada ação — a interface não é a barreira.
-          </Notice>
-          {perms === BOT_PERM_ALL && (
-            <Notice tone="danger" icon="warn">
-              Tudo concedido inclui montar o servidor, limpar canais e abrir entrada pública. Um bot
-              comprometido pode apagar canais inteiros. Prefira conceder só o que ele usa.
-            </Notice>
-          )}
-          {(perms & BOT_PERMS.MANAGE) !== 0 && (perms & (BOT_PERMS.STRUCTURE | BOT_PERMS.PURGE)) === 0 && (
-            <Notice tone="info" icon="info">
-              "Gerenciar membros" é herdado da versão antiga: por compatibilidade ele também libera
-              criar/purgar canais e abrir a entrada pública. Marque os outros dois bits para ver o
-              alcance explícito, ou remova "Gerenciar" se o bot só precisa expulsar membros.
-            </Notice>
-          )}
-        </Card>
+        <BotPermissionsTab perms={perms} setPerms={setPerms} />
       )}
 
       {tab === 'primitivas' && (
@@ -1397,8 +1280,6 @@ export function BotPanel({
               icon="download"
               title="Baixa um bot.json com a config e as permissões — sem token"
               onClick={() => {
-                // Exportação leva config + perms e NUNCA o token nem o segredo
-                // do webhook (serializeBotConfig já omite o segredo).
                 const pacote = {
                   schema: 3,
                   name: bot.name,
@@ -1452,8 +1333,6 @@ export function BotPanel({
 /** Resumo de uma linha por bot (usado pela lista do gerenciador). */
 export function botSummary(bot: BotView): { commands: number; events: number; perms: number; broken: boolean } {
   const perms = bot.perms ?? 0
-  // Bot recém-criado tem config vazia (ou nenhuma): isso é "sem comandos",
-  // não "config quebrada". Só o JSON gravado e ilegível conta como inválido.
   const raw = bot.config ?? ''
   if (!raw.trim()) return { commands: 0, events: 0, perms, broken: false }
   const cfg = parseBotConfig(raw)

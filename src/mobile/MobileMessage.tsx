@@ -10,6 +10,7 @@ import {
   buildReceipts, groupStatus, receiptsHeadline, statusGlyph, statusTitle, statusTitleFor,
 } from '../components/social/messageStatus'
 import { useConversationRoster, useMessageReceipts } from '../components/social/socialHooks'
+import { Avatar } from '../shared/avatarView'
 
 const T = {
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
@@ -30,36 +31,6 @@ function Tick({ status, peerOnline, titulo }: { status: string; peerOnline?: boo
       style={{ fontSize: 11, color: cor, fontFamily: MONO, fontWeight: 700, letterSpacing: -2, flexShrink: 0 }}
     >
       {g}
-    </span>
-  )
-}
-
-export function avatarColor(fp: string): string {
-  const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
-  let h = 0
-  for (let i = 0; i < fp.length; i++) h = (h * 31 + fp.charCodeAt(i)) >>> 0
-  return palette[h % palette.length]
-}
-
-function Avatar({ name, fp, size = 36, avatarB64, accent }: {
-  name: string
-  fp: string
-  size?: number
-  avatarB64?: string
-  accent?: string
-}) {
-  const [err, setErr] = useState(false)
-  const initial = (name || '?').trim().charAt(0).toUpperCase()
-  const ring = accent ? `2px solid ${accent}` : undefined
-  if (avatarB64 && !err) {
-    return (
-      <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
-        style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring }} />
-    )
-  }
-  return (
-    <span style={{ width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, border: ring }}>
-      {initial}
     </span>
   )
 }
@@ -243,7 +214,6 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
           <div style={{ margin: '4px 0' }}>
             <textarea
               ref={textareaRef}
-              // Seção 1: value
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               rows={Math.min(8, Math.max(2, draft.split('\n').length))}
@@ -433,5 +403,4 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   )
 })
 
-// Seção 2: MobileMessage
 export default MobileMessage

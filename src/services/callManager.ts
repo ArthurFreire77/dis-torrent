@@ -1,7 +1,7 @@
 import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
 import { isWindowsRuntime, isIOSRuntime } from '../shared/runtime'
-import { setCallVideoSending, applyOfferInStable as applyOfferToSession } from './callMedia'
+import { setCallVideoSending } from './callMedia'
 import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
 import { shouldInitiatePair } from './callRepair'
@@ -50,67 +50,28 @@ export interface IncomingCall {
   nickname?: string
 }
 
-export type CallQuality = '480p' | '720p' | '1080p' | '4K'
-
-export const CALL_QUALITY_KEY = 'distorrent:call_quality'
-export const QUALITY_ORDER: CallQuality[] = ['480p', '720p', '1080p', '4K']
-
-export const QUALITY_CONSTRAINTS: Record<CallQuality, MediaTrackConstraints> = {
-  '480p': { width: { min: 640, ideal: 640, max: 1280 }, height: { min: 480, ideal: 480, max: 720 }, frameRate: { min: 15, ideal: 60, max: 120 } },
-  '720p': { width: { min: 640, ideal: 1280, max: 1920 }, height: { min: 480, ideal: 720, max: 1080 }, frameRate: { min: 15, ideal: 60, max: 120 } },
-  '1080p': { width: { min: 640, ideal: 1920, max: 1920 }, height: { min: 480, ideal: 1080, max: 1080 }, frameRate: { min: 15, ideal: 60, max: 120 } },
-  '4K': { width: { min: 640, ideal: 3840, max: 3840 }, height: { min: 480, ideal: 2160, max: 2160 }, frameRate: { min: 15, ideal: 60, max: 120 } },
-}
-
-export const CAMERA_CONSTRAINTS: MediaTrackConstraints = {
-  width: { min: 640, ideal: 1280, max: 1920 },
-  height: { min: 480, ideal: 720, max: 1080 },
-  frameRate: { min: 15, ideal: 60, max: 120 },
-}
-
-export interface VideoDeviceLimits {
-  maxWidth: number | null
-  maxHeight: number | null
-  maxFrameRate: number | null
-  curWidth: number | null
-  curHeight: number | null
-  curFrameRate: number | null
-}
-export function probeVideoLimits(track?: MediaStreamTrack | null): VideoDeviceLimits | null {
-  try {
-    if (!track || track.kind !== 'video' || track.readyState !== 'live') return null
-    const caps: any = typeof (track as any).getCapabilities === 'function' ? (track as any).getCapabilities() : null
-    const st: any = typeof track.getSettings === 'function' ? track.getSettings() : {}
-    const num = (v: any): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
-    return {
-      maxWidth: num(caps?.width?.max) ?? null,
-      maxHeight: num(caps?.height?.max) ?? null,
-      maxFrameRate: num(caps?.frameRate?.max) ?? null,
-      curWidth: num(st?.width) ?? null,
-      curHeight: num(st?.height) ?? null,
-      curFrameRate: num(st?.frameRate) ?? null,
-    }
-  } catch { return null }
-}
-export function formatVideoLimits(l: VideoDeviceLimits | null): string | null {
-  try {
-    if (!l) return null
-    const w = l.curWidth ?? l.maxWidth
-    const h = l.curHeight ?? l.maxHeight
-    const f = l.curFrameRate ?? l.maxFrameRate
-    if (!w || !h) return null
-    return `até ${w}x${h}${f ? `@${Math.round(f)}` : ''}`
-  } catch { return null }
-}
-
-export function getStoredQuality(): CallQuality {
-  try {
-    const v = typeof localStorage !== 'undefined' ? localStorage.getItem(CALL_QUALITY_KEY) : null
-    if (v === '480p' || v === '720p' || v === '1080p' || v === '4K') return v
-  } catch {  }
-  return '720p'
-}
-
+export {
+  CALL_QUALITY_KEY,
+  QUALITY_ORDER,
+  QUALITY_CONSTRAINTS,
+  CAMERA_CONSTRAINTS,
+  probeVideoLimits,
+  formatVideoLimits,
+  getStoredQuality,
+  lowerQuality,
+  isBadStatsSample,
+  type VideoDeviceLimits,
+} from './callQuality'
+import {
+  CALL_QUALITY_KEY,
+  CAMERA_CONSTRAINTS,
+  QUALITY_CONSTRAINTS,
+  getStoredQuality,
+  lowerQuality,
+  isBadStatsSample,
+  type CallQuality,
+} from './callQuality'
+export type { CallQuality }
 export {
   TURN_URL_KEY,
   isValidTurnUrl,
@@ -121,14 +82,6 @@ export {
 } from './callIce'
 import { getIceServers, bytesToBase64 } from './callIce'
 export { bytesToBase64 } from './callIce'
-export function lowerQuality(q: CallQuality): CallQuality | null {
-  const i = QUALITY_ORDER.indexOf(q)
-  return i > 0 ? QUALITY_ORDER[i - 1] : null
-}
-
-export function isBadStatsSample(packetsLostDelta: number, jitter: number): boolean {
-  return packetsLostDelta > 20 || jitter > 0.1
-}
 
 export interface CallState {
   callId: string
@@ -160,7 +113,6 @@ export {
   isIcePublicFallbackSuppressed,
   type CallPrivacyMode,
 } from './callIcePrivacy'
-// Seção 1: import
 import {
   CALL_MEDIA_PREFS_KEY,
   DEFAULT_CALL_MEDIA_PREFS,
@@ -190,87 +142,17 @@ export function setCallMediaPrefs(patch: Partial<CallMediaPrefs>): CallMediaPref
   return { ...mediaPrefs }
 }
 
-export const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
-  echoCancellation: true,
-  noiseSuppression: true,
-  autoGainControl: true,
-  channelCount: 1,
-}
-
-export function tuneOpusSdp(sdp: string): string {
-  try {
-    if (!sdp || sdp.toLowerCase().indexOf('opus') < 0) return sdp
-    const m = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000/i)
-    if (!m) return sdp
-    const pt = m[1]
-    const params: [string, string][] = [
-      ['minptime', '10'],
-      ['useinbandfec', '1'],
-      ['usedtx', '1'],
-      ['stereo', '0'],
-      ['sprop-stereo', '0'],
-      ['maxplaybackrate', '48000'],
-      ['maxaveragebitrate', '32000'],
-    ]
-    const lines = sdp.split(/\r\n|\n/)
-    const fmtpPrefix = `a=fmtp:${pt}`
-    let idx = lines.findIndex(l => l.startsWith(fmtpPrefix))
-    const existing: Record<string, string> = {}
-    if (idx >= 0) {
-      lines[idx].slice(fmtpPrefix.length).trim().split(';').forEach(kv => {
-        const [k, v] = kv.split('=')
-        if (k && k.trim()) existing[k.trim()] = (v ?? '').trim()
-      })
-    } else {
-      const rpm = lines.findIndex(l => l.toLowerCase().startsWith(`a=rtpmap:${pt} `))
-      if (rpm < 0) return sdp
-      idx = rpm + 1
-      lines.splice(idx, 0, fmtpPrefix)
-    }
-    for (const [k, v] of params) existing[k] = v
-    lines[idx] = `${fmtpPrefix} ` + Object.entries(existing).map(([k, v]) => (v ? `${k}=${v}` : k)).join(';')
-    if (!lines.some(l => l.trim() === 'a=ptime:20')) {
-      const mi = lines.findIndex(l => l.startsWith('m=audio'))
-      if (mi >= 0) lines.splice(mi + 1, 0, 'a=ptime:20')
-    }
-    return lines.join('\r\n')
-  } catch { return sdp }
-}
-
-function newPeerConnection(): RTCPeerConnection {
-  return new RTCPeerConnection({
-    iceServers: getIceServers() as any,
-    iceTransportPolicy: 'all',
-    bundlePolicy: 'max-bundle',
-    rtcpMuxPolicy: 'require',
-    iceCandidatePoolSize: 4,
-  } as RTCConfiguration)
-}
-
-export async function createTunedOffer(
-  pc: RTCPeerConnection,
-  opts?: { iceRestart?: boolean },
-): Promise<RTCSessionDescriptionInit> {
-  const offer = await pc.createOffer(opts?.iceRestart ? { iceRestart: true } : undefined)
-  offer.sdp = tuneOpusSdp(offer.sdp ?? '')
-  return offer
-}
-
-export async function applyOfferInStable(
-  pc: RTCPeerConnection,
-  opts?: { iceRestart?: boolean },
-): Promise<RTCSessionDescriptionInit | null> {
-  return applyOfferToSession<RTCSessionDescriptionInit>(pc, {
-    ...opts,
-    tuneSdp: tuneOpusSdp,
-  })
-}
-
-export async function createTunedAnswer(pc: RTCPeerConnection): Promise<RTCSessionDescriptionInit> {
-  const answer = await pc.createAnswer()
-  answer.sdp = tuneOpusSdp(answer.sdp ?? '')
-  return answer
-}
+export {
+  newPeerConnection,
+  tuneOpusSdp,
+  createTunedOffer,
+  createTunedAnswer,
+} from './callPeer'
+export { AUDIO_CONSTRAINTS } from './callMediaGate'
+export { applyOfferInStable } from './callSdpTuning'
+import { applyOfferInStable } from './callSdpTuning'
+import { AUDIO_CONSTRAINTS } from './callMediaGate'
+import { newPeerConnection, createTunedOffer, createTunedAnswer } from './callPeer'
 
 export const CALLS_UNAVAILABLE_MSG = 'chamadas de voz/vídeo indisponíveis neste aparelho'
 export const SCREEN_UNAVAILABLE_MSG = 'este aparelho não expõe captura de tela (o Android só libera em WebViews recentes — atualize o Android System WebView; no iPhone/iPad não existe mesmo)';
@@ -338,10 +220,6 @@ function attachRemoteTrack(
     }
     const temVideo = hasLiveVideoTrack(stream)
     const telaAtual = (p as any).screenStream as MediaStream | null | undefined
-    // Câmera e tela dividem a MESMA m-line de vídeo (`seedScreenPeers` usa
-    // `replaceTrack`), então o `mid` não as distingue. Quem distingue é o
-    // sinal `sharing` já recebido: sem ele, vídeo novo é câmera. Tratar todo
-    // "segundo stream" como tela fazia a câmera religada virar card de tela.
     const ehTela = !!p.sharing && temVideo && !!p.stream && p.stream.id !== stream.id
     if (ehTela) {
       if (!telaAtual || telaAtual.id !== stream.id) {
@@ -379,7 +257,6 @@ function attachRemoteTrack(
   } catch {  }
 }
 
-// Seção 2: CallsDiagnosis
 export interface CallsDiagnosis {
   hasRTC: boolean
   hasMediaDevices: boolean
@@ -473,21 +350,8 @@ let localMediaNotice: ((msg: string) => void) | null = null
 export function setLocalMediaNotice(cb: ((msg: string) => void) | null) {
   localMediaNotice = cb
 }
-function describeMediaError(e: unknown): string | null {
-  const name = (e as { name?: string })?.name ?? ''
-  if (name === 'NotAllowedError') return 'microfone/câmera bloqueados — libere a permissão do sistema e tente de novo'
-  if (name === 'NotFoundError') return 'nenhum microfone/câmera encontrado neste aparelho'
-  if (name === 'NotReadableError') return 'microfone/câmera em uso por outro app — feche e tente de novo'
-  if (name === 'OverconstrainedError') return 'câmera/microfone não atende aos requisitos — tente só voz'
-  if (name === 'SecurityError') return 'permissão de mídia bloqueada pelo contexto (HTTPS/app nativo exigido)'
-  return null
-}
-let capturaFila: Promise<unknown> = Promise.resolve()
-function comFilaDeCaptura<T>(fn: () => Promise<T>): Promise<T> {
-  const vez = capturaFila.catch(() => undefined).then(fn)
-  capturaFila = vez.catch(() => undefined)
-  return vez
-}
+export { describeMediaError, comFilaDeCaptura }
+import { describeMediaError, comFilaDeCaptura } from './callMediaGate'
 
 async function getLocalMedia(constraints: MediaStreamConstraints): Promise<MediaStream | null> {
   return comFilaDeCaptura(() => getLocalMediaInner(constraints))
@@ -516,9 +380,6 @@ async function getLocalMediaInner(constraints: MediaStreamConstraints): Promise<
     } catch (e) {
       const nome = (e as Error)?.name ?? ''
       const usaDeviceExato = !!mediaPrefs.videoInputId || !!mediaPrefs.audioInputId
-      // NotReadableError também entra: device salvo que não existe mais ou que
-      // está preso pelo sistema cai para o padrão em vez de deixar o usuário
-      // sem câmera até limpar a preferência na mão.
       if (
         usaDeviceExato &&
         (nome === 'OverconstrainedError' || nome === 'NotFoundError' || nome === 'NotReadableError')
@@ -563,7 +424,6 @@ async function getLocalMediaInner(constraints: MediaStreamConstraints): Promise<
         for (const espera of [300, 700, 1200, 2000]) {
           await new Promise((r) => setTimeout(r, espera))
           try {
-            // Seção 3: s
             const s = await md.getUserMedia(merged)
             try { setLocalMediaNotice(null) } catch {  }
             return s
@@ -596,189 +456,25 @@ async function getLocalMediaInner(constraints: MediaStreamConstraints): Promise<
   } catch { return null }
 }
 
-export type IceFailureState = 'failed' | 'disconnected'
-export interface IceFailureInfo { fp: string; callId: string; state: IceFailureState }
-export const ICE_DISCONNECTED_GRACE_MS = 12000
-
-export type MediaRung = 'direto-host' | 'direto-srflx' | 'relay' | 'conectando' | 'falhou' | 'sem-rota'
-export const RUNG_LABEL: Record<MediaRung, string> = {
-  'direto-host': 'direta (rede local)',
-  'direto-srflx': 'direta (NAT furado)',
-  'relay': 'via relay configurado',
-  'conectando': 'conectando…',
-  'falhou': 'sem rota',
-  'sem-rota': 'sem rota',
-}
-export interface IceMediaReport {
-  iceState: string
-  localType: string | null
-  remoteType: string | null
-  rttMs: number | null
-  bytesOut: number
-}
-export interface DistorrentNatEndpoint { addr: string; source: string }
-
-export interface CallDiagnostics {
-  fp: string
-  connectionState: string
-  iceConnectionState: string
-  signalingState: string
-  localType: string | null
-  remoteType: string | null
-  selectedPair: string | null
-  rttMs: number | null
-  audioBitrateKbps: number | null
-  videoBitrateKbps: number | null
-  resolution: string | null
-  fps: number | null
-  framesReceived: number | null
-  framesLost: number | null
-  packetsLost: number | null
-  packetLossPct: number | null
-  codec: string | null
-  jitterMs: number | null
-  camera: string
-  microphone: string
-}
-
-export function buildPeerDiagnostics(
-  fp: string,
-  pc: RTCPeerConnection,
-  stats: RTCStatsReport | null,
-  rep: IceMediaReport | null,
-  st: CallState | null,
-): CallDiagnostics {
-  const safe = (v: unknown): string => {
-    try { return String((v as any) ?? '?') } catch { return '?' }
-  }
-  let rttMs: number | null = rep?.rttMs ?? null
-  let localType: string | null = rep?.localType ?? null
-  let remoteType: string | null = rep?.remoteType ?? null
-  let selectedPair: string | null = null
-  const audioBitrateKbps: number | null = null
-  const videoBitrateKbps: number | null = null
-  let resolution: string | null = null
-  let fps: number | null = null
-  let framesReceived: number | null = null
-  let framesLost: number | null = null
-  let packetsLost: number | null = null
-  let packetLossPct: number | null = null
-  let codec: string | null = null
-  let jitterMs: number | null = null
-  try {
-    if (stats) {
-      const byId = new Map<string, any>()
-      try { stats.forEach((r: any) => { if (r && r.id) byId.set(String(r.id), r) }) } catch {  }
-      let pair: any = null
-      try {
-        stats.forEach((r: any) => {
-          if (r && r.type === 'candidate-pair' && (r.nominated || r.selected)) pair = r
-        })
-        if (!pair) stats.forEach((r: any) => {
-          if (!pair && r && r.type === 'candidate-pair' && r.state === 'succeeded') pair = r
-        })
-      } catch {  }
-      if (pair) {
-        const local = byId.get(String(pair.localCandidateId ?? ''))
-        const remote = byId.get(String(pair.remoteCandidateId ?? ''))
-        if (local?.candidateType && !localType) localType = String(local.candidateType)
-        if (remote?.candidateType && !remoteType) remoteType = String(remote.candidateType)
-        if (typeof pair.currentRoundTripTime === 'number') rttMs = Math.round(pair.currentRoundTripTime * 1000)
-        try {
-          const lt = local ? `${local.candidateType ?? '?'}:${local.protocol ?? 'udp'}` : '?'
-          const rt = remote ? `${remote.candidateType ?? '?'}` : '?'
-          selectedPair = `${lt} ↔ ${rt}`
-        } catch {  }
-      }
-      let aBytes = 0; let vBytes = 0; let aPkts = 0; let aLost = 0
-      stats.forEach((r: any) => {
-        try {
-          if (!r) return
-          if (r.type === 'inbound-rtp') {
-            if (typeof r.jitter === 'number' && (jitterMs === null || r.jitter * 1000 > 0)) {
-              const jm = Math.round(r.jitter * 1000)
-              if (jitterMs === null) jitterMs = jm
-            }
-            if (typeof r.packetsLost === 'number') {
-              packetsLost = (packetsLost ?? 0) + r.packetsLost
-              if (r.kind === 'audio' || String(r.mediaType ?? '') === 'audio') { aLost += r.packetsLost }
-            }
-            if (typeof r.packetsReceived === 'number' && (r.kind === 'audio' || String(r.mediaType ?? '') === 'audio')) {
-              aPkts += r.packetsReceived
-            }
-            if ((r.kind === 'video' || String(r.mediaType ?? '') === 'video')) {
-              if (typeof r.framesReceived === 'number') framesReceived = (framesReceived ?? 0) + r.framesReceived
-              if (typeof r.framesDropped === 'number' || typeof r.framesLost === 'number') {
-                framesLost = (framesLost ?? 0) + Number(r.framesDropped ?? r.framesLost ?? 0)
-              }
-              if (typeof r.frameWidth === 'number' && typeof r.frameHeight === 'number') {
-                resolution = `${r.frameWidth}x${r.frameHeight}`
-              }
-              if (typeof r.framesPerSecond === 'number') fps = Math.round(r.framesPerSecond)
-            }
-            if (typeof r.mimeType === 'string' && !codec) codec = r.mimeType.replace('video/', '').replace('audio/', '')
-            if (typeof r.codecId === 'string' && byId.has(r.codecId)) {
-              // Seção 4: c
-              const c = byId.get(r.codecId)
-              if (c?.mimeType && !codec) codec = String(c.mimeType).replace('video/', '').replace('audio/', '')
-            }
-          }
-          if (r.type === 'outbound-rtp') {
-            if (typeof r.bytesSent === 'number') {
-              if (r.kind === 'audio' || String(r.mediaType ?? '') === 'audio') aBytes += r.bytesSent
-              else vBytes += r.bytesSent
-            }
-            if ((r.kind === 'video' || String(r.mediaType ?? '') === 'video')) {
-              if (typeof r.frameWidth === 'number' && typeof r.frameHeight === 'number' && !resolution) {
-                resolution = `${r.frameWidth}x${r.frameHeight}`
-              }
-              if (typeof r.framesPerSecond === 'number' && fps === null) fps = Math.round(r.framesPerSecond)
-            }
-          }
-        } catch {  }
-      })
-      void aBytes; void vBytes
-      if (aPkts + aLost > 0) packetLossPct = Math.round((aLost / (aPkts + aLost)) * 1000) / 10
-      else if (typeof packetsLost === 'number' && packetsLost > 0) packetLossPct = null
-    }
-  } catch {  }
-  let camera = 'desligada'
-  let microphone = 'desligado'
-  try {
-    const mine = fp === (st as any)?.participants?.[0]?.fp
-    void mine
-    const local = (st as any)
-    void local
-  } catch {  }
-  try {
-    const p: any = (st?.participants as any[])?.find((x: any) => x.fp === fp)
-    const stream: MediaStream | undefined = p?.stream
-    if (stream) {
-      try {
-        const vt = stream.getVideoTracks()[0]
-        camera = vt ? (vt.readyState === 'live' ? (vt.enabled ? `ativa (${vt.label || 'câmera'})` : 'mutada') : 'encerrada') : 'sem vídeo'
-      } catch { camera = 'desconhecida' }
-      try {
-        const at = stream.getAudioTracks()[0]
-        microphone = at ? (at.readyState === 'live' ? (at.enabled ? 'ativo' : 'mutado') : 'encerrado') : 'sem áudio'
-      } catch { microphone = 'desconhecido' }
-    } else {
-      camera = 'sem track remota'
-      microphone = 'sem track remota'
-    }
-  } catch {  }
-  return {
-    fp,
-    connectionState: safe((pc as any).connectionState),
-    iceConnectionState: safe((pc as any).iceConnectionState),
-    signalingState: safe((pc as any).signalingState),
-    localType, remoteType, selectedPair, rttMs,
-    audioBitrateKbps, videoBitrateKbps,
-    resolution, fps, framesReceived, framesLost,
-    packetsLost, packetLossPct, codec, jitterMs,
-    camera, microphone,
-  }
-}
+export {
+  ICE_DISCONNECTED_GRACE_MS,
+  RUNG_LABEL,
+  buildPeerDiagnostics,
+  type IceFailureState,
+  type IceFailureInfo,
+  type IceMediaReport,
+  type DistorrentNatEndpoint,
+  type MediaRung,
+  type CallDiagnostics,
+} from './callDiagnostics'
+import {
+  ICE_DISCONNECTED_GRACE_MS,
+  buildPeerDiagnostics,
+  type DistorrentNatEndpoint,
+  type CallDiagnostics,
+  type IceFailureInfo,
+  type IceMediaReport,
+} from './callDiagnostics'
 
 type IceFailureListener = (info: IceFailureInfo) => void
 const iceFailureListeners = new Set<IceFailureListener>()
@@ -800,85 +496,33 @@ export function subscribeIceRecovered(cb: IceRecoveredListener): () => void {
 function emitIceRecovered(info: IceRecoveredInfo) {
   iceRecoveredListeners.forEach(cb => { try { cb(info) } catch {  } })
 }
-export const RELAY_TIMESLICE_MS = 500
-export const RELAY_ICE_FAIL_MS = 5000
-export const RELAY_MAX_DELAY_MS = 2000
-export const RELAY_MID = 'audio-relay'
-export const RELAY_VIA_LABEL = 'via relay (latência alta)'
-export const RELAY_BC_NAME = 'distorrent-call-relay-v1'
-export const RELAY_WINDOW_EVENT = 'distorrent:call-relay'
-export interface RelayChunkPayload {
-  kind: 'audio-chunk'
-  seq: number
-  data: string
-  ts: number
-  mime: string
-}
-export function isRelayChunkPayload(v: any): v is RelayChunkPayload {
-  return !!v && typeof v === 'object' && (v as any).kind === 'audio-chunk'
-    && typeof (v as any).seq === 'number' && typeof (v as any).data === 'string'
-}
-function pickRelayMime(): string | undefined {
-  try {
-    const MR: any = typeof MediaRecorder !== 'undefined' ? MediaRecorder : null
-    if (!MR) return undefined
-    const cands = [
-      'audio/webm;codecs=opus', 'audio/webm',
-      'audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/aac',
-      'audio/ogg;codecs=opus',
-    ]
-    for (const m of cands) {
-      try { if (typeof MR.isTypeSupported === 'function' && MR.isTypeSupported(m)) return m } catch {  }
-    }
-  } catch {  }
-  return undefined
-}
-
-function buildRelayRecorder(MR: any, stream: MediaStream): { rec: any; mime: string } {
-  const tried: string[] = []
-  const candidates: string[] = []
-  const preferred = pickRelayMime()
-  if (preferred) candidates.push(preferred)
-  for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg;codecs=opus']) {
-    if (m !== preferred) candidates.push(m)
-  }
-  for (const m of candidates) {
-    try {
-      if (typeof MR.isTypeSupported === 'function' && !MR.isTypeSupported(m)) continue
-      return { rec: new MR(stream, { mimeType: m }), mime: m }
-    } catch {
-      tried.push(m)
-    }
-  }
-  try { return { rec: new MR(stream), mime: preferred ?? 'audio/webm' } } catch {  }
-  throw new Error(
-    `neste aparelho o áudio não pode ser gravado (MediaRecorder sem codec suportado; tentados: ${tried.join(', ') || 'nenhum'})`,
-  )
-}
-function b64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64)
-  const u = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
-  return u
-}
-export function supportsRelayPlayback(): boolean {
-  try {
-    if (typeof AudioContext !== 'undefined' && AudioContext) return true
-    const w: any = typeof window !== 'undefined' ? (window as any) : null
-    if (w && w.webkitAudioContext) return true
-    return false
-  } catch { return false }
-}
-export function supportsRelayFallback(): boolean {
-  try {
-    if (typeof MediaRecorder === 'undefined' || !MediaRecorder) return false
-    if (!supportsRelayPlayback()) return false
-    if (typeof navigator === 'undefined' || !(navigator as any).mediaDevices?.getUserMedia) return false
-    return true
-  } catch { return false }
-}
+export {
+  RELAY_TIMESLICE_MS,
+  RELAY_ICE_FAIL_MS,
+  RELAY_MAX_DELAY_MS,
+  RELAY_MID,
+  RELAY_VIA_LABEL,
+  RELAY_BC_NAME,
+  RELAY_WINDOW_EVENT,
+  isRelayChunkPayload,
+  supportsRelayPlayback,
+  supportsRelayFallback,
+  type RelayChunkPayload,
+} from './callRelayCodec'
+import {
+  RELAY_TIMESLICE_MS,
+  RELAY_MAX_DELAY_MS,
+  RELAY_MID,
+  RELAY_BC_NAME,
+  RELAY_WINDOW_EVENT,
+  isRelayChunkPayload,
+  buildRelayRecorder,
+  b64ToBytes,
+  supportsRelayPlayback,
+  supportsRelayFallback,
+  type RelayChunkPayload,
+} from './callRelayCodec'
 export type CallsSupportLevel = 'full' | 'none'
-// Seção 5: nativeVoiceAvailable
 let nativeVoiceAvailable: boolean | null = null
 let nativeRoute: string | null = null
 
@@ -1039,7 +683,6 @@ export class CallManager {
   public onScreenDebug: ((m: ScreenShareMetrics & { options: ScreenShareOptions; env: ScreenEnvironment; error: { code: ScreenShareErrorCode; message: string } | null }) => void) | null = null
   public onRoomsChanged: (() => void) | null = null
   private onUpdate: (s: CallState | null) => void = () => {}
-  // Seção 6: private
   private state: CallState | null = null
   private myFp = ''
   private lastPhase: CallPhase = 'idle'
@@ -1232,7 +875,6 @@ export class CallManager {
         } catch {  }
       }
       if (ev.type === 'call_ended') {
-        // Seção 7: st
         const st = this.state
         if (st && st.callId === ev.call_id) {
           const wasIncoming = st.phase === 'incoming'
@@ -1286,10 +928,6 @@ export class CallManager {
           )
           this.applyPhase('ice-failed')
           if (st.phase === 'reconnecting') this.startReconnectWatchdog()
-          // Sem rota WebRTC, a sinalização JÁ está aberta (o core entregou o
-          // ICE até aqui): usa ela para mandar o áudio. Sem isto o caminho de
-          // reserva existia mas nunca era ligado e a chamada ficava em
-          // "Conectando..." até estourar — era o "conectando infinito".
           if (shouldFallbackToRelay({
             relayActive: this.relayActive,
             relaySupported: this.supportsRelay(),
@@ -1413,7 +1051,6 @@ export class CallManager {
     } catch { this.ringTimer = null }
   }
 
-  // Seção 8: private
   private stopRingRetry() {
     try { if (this.ringTimer) clearInterval(this.ringTimer) } catch {  }
     this.ringTimer = null
@@ -1499,10 +1136,6 @@ export class CallManager {
       }
       if (anyAlive) return
       if (this.pcs.size === 0 && st.callId.startsWith('voice-')) {
-        // "Esperar para sempre" só vale quando o canal está VAZIO (ninguém para
-        // conectar). Com outra pessoa na call e nenhum PC aberto, isso era
-        // "Conectando…" infinito: a criação do PC falha em silêncio e o
-        // watchdog reagendava sem nunca desistir.
         const sozinho = !(st.participants ?? []).some(
           (p: { fp?: string }) => !!p.fp && p.fp !== this.myFp,
         )
@@ -1543,9 +1176,6 @@ export class CallManager {
       }
       try { this.onCallNotice?.('sem rota de mídia direta — reiniciando ICE') } catch {  }
       this.setFailureCause('sem rota de mídia em 20s (ICE preso em checking/gathering sem par selecionado; NAT/CGNAT ou TURN inalcançável — ver painel)')
-      // Antes de reiniciar o ICE, tenta a rota que não depende de NAT: o áudio
-      // pela sinalização. Sem isto o botão ficava em "Conectando..." para
-      // sempre em CGNAT (celular no 4G), que é o caso mais comum.
       if (shouldFallbackToRelay({
         relayActive: this.relayActive,
         relaySupported: this.supportsRelay(),
@@ -1585,9 +1215,6 @@ export class CallManager {
             this.applyPhase('media-reconnected')
             return
           }
-          // Antes de desistir, tenta a rota de áudio pela sinalização: numa
-          // rede com CGNAT/bloqueio de UDP o ICE nunca fecha, mas o canal de
-          // mensagens está de pé. Desistir aqui era o "conectando para sempre".
           if (shouldFallbackToRelay({
             relayActive: this.relayActive,
             relaySupported: this.supportsRelay(),
@@ -1625,7 +1252,6 @@ export class CallManager {
     this.iceRestartTimers.clear()
   }
 
-  // Seção 9: private
   private onPeerGone(fp: string) {
     try {
       const st = this.state
@@ -1678,10 +1304,6 @@ export class CallManager {
       const st = this.state
       if (!st || st.callId !== callId) return
       if (!fp || fp === this.myFp) return
-      // `call_participant_added` é AVISO DE ROSTER ("X entrou"), não convite.
-      // Mas o anfitrião de grupo pré-semeava os convidados com este frame, o
-      // que fazia quem nunca aceitou aparecer na chamada. Só entra quem já
-      // provou presença por mídia (`markJoined`) ou já está no roster.
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) {
         if (this.pcs.has(fp)) this.markJoined(fp)
@@ -1791,8 +1413,6 @@ export class CallManager {
         if (!on) {
           try { delete (p as any).videoUrl } catch {  }
           try { (p as any).videoSeq = -1 } catch {  }
-          // A tela acabou: soltar o stream próprio, senão um vídeo novo (a
-          // câmera religada) seria confundido com "mais uma tela".
           try { (p as any).screenStream = null } catch {  }
         }
         this.onUpdate({ ...st })
@@ -1800,7 +1420,6 @@ export class CallManager {
     } catch {  }
   }
 
-  // Seção 10: private
   private broadcastScreenSignal(on: boolean, cameraOn?: boolean) {
     try {
       const st = this.state
@@ -1929,9 +1548,6 @@ export class CallManager {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar num canal de voz')
     }
     const alvo = `voice-${communityId}-${channelId}`
-    // Reentrar no MESMO canal já ativo era um "entrar" que recriava o estado e
-    // abria PCs novos sem fechar os antigos: áudio duplicado e botão instável
-    // no duplo clique. Entrar de novo é no-op.
     if (
       this.state
       && this.state.callId === alvo
@@ -1983,7 +1599,6 @@ export class CallManager {
         nativeMedia: true,
       } as unknown as CallState
       try {
-        // Seção 11: states
         const states = await services.voiceStates(communityId, channelId)
         for (const [fp, muted, deafened] of states) {
           if (!fp || fp === me.fingerprint) continue
@@ -2119,9 +1734,6 @@ export class CallManager {
     try {
       if (on) {
         if (!canUseRelayCalls()) return false
-        // Quem decide se a rota de reserva é a definitiva é `reason`: só a
-        // escolha do usuário é "manual". Marcar manual sempre prendia a chamada
-        // no relay mesmo depois de o ICE voltar (áudio duplicado e atrasado).
         this.relayManual = reason === 'manual'
         await this.startRelay(reason ?? 'manual')
         this.syncRelayToState()
@@ -2144,7 +1756,6 @@ export class CallManager {
         const t = r.remoteType || r.localType || 'host'
         return t === 'relay' ? 'TURN' : t === 'srflx' ? 'STUN' : t === 'prflx' ? 'P2P' : 'LAN'
       })
-      // Seção 12: uniq
       const uniq = [...new Set(routes)]
       return uniq.join('+') || 'n/d'
     } catch { return 'n/d' }
@@ -2316,7 +1927,6 @@ export class CallManager {
     return this.state
   }
 
-  // Seção 13: private
   private syncRelayToState() {
     if (!this.state) return
     try {
@@ -2471,7 +2081,6 @@ export class CallManager {
     this.relayHeaderBytes = null
     rec.ondataavailable = (e: BlobEvent) => {
       try {
-        // Seção 14: blob
         const blob = e.data
         if (!blob || blob.size === 0) return
         if (this.state?.muted) return
@@ -2624,7 +2233,6 @@ export class CallManager {
 
   async applyMediaPrefs(patch: Partial<CallMediaPrefs>): Promise<CallMediaPrefs> {
     const antes = getCallMediaPrefs()
-    // Seção 15: depois
     const depois = setCallMediaPrefs(patch)
     const trocouMic = !!antes.audioInputId !== !!depois.audioInputId || antes.audioInputId !== depois.audioInputId
     const trocouCam = antes.videoInputId !== depois.videoInputId
@@ -2659,8 +2267,6 @@ export class CallManager {
     }
 
     const camTrack = this.localStream?.getVideoTracks()[0] ?? null
-    // `facingMode` também troca o aparelho: sem isso o seletor do painel de
-    // ajustes só valia na próxima transmissão.
     const trocouFacing = antes.facingMode !== depois.facingMode
     if ((trocouCam || trocouFacing) && camTrack && camTrack.readyState === 'live') {
       try {
@@ -2691,10 +2297,6 @@ export class CallManager {
     }
     if (this.cameraBusy) throw new Error('a câmera está trocando — aguarde um instante')
     const lista = cameraDevices(await md.enumerateDevices())
-    // Android devolve os dois `videoinput` com o mesmo deviceId vazio até a
-    // permissão ser dada. Nesse caso não há id alternável e a troca é feita
-    // por `facingMode`. O pseudo-id NUNCA entra na preferência: `deviceId`
-    // exato de um device inexistente faz o getUserMedia falhar sempre.
     if (lista.length < 2) {
       const brutos = (await md.enumerateDevices()).filter((d) => d.kind === 'videoinput')
       const mobile = isAndroidRuntime() || isIOSRuntime()
@@ -2705,8 +2307,6 @@ export class CallManager {
       const alvo: 'user' | 'environment' = antes.facingMode === 'user' ? 'environment' : 'user'
       const reverter = () => setCallMediaPrefs({ facingMode: antes.facingMode })
       setCallMediaPrefs({ videoInputId: '', facingMode: alvo })
-      // Câmera ligada: troca AGORA, no meio da chamada. Antes só a preferência
-      // mudava e a imagem continuava a antiga até a próxima transmissão.
       if (this.hasLiveCamera()) {
         const settingsAntes = this.localStream?.getVideoTracks()[0]?.getSettings?.() ?? null
         this.cameraBusy = true
@@ -2804,7 +2404,6 @@ export class CallManager {
     } catch { this.statsTimer = null }
   }
 
-  // Seção 16: private
   private stopQualityMonitor() {
     try { if (this.statsTimer) clearInterval(this.statsTimer) } catch {  }
     this.statsTimer = null
@@ -2995,7 +2594,6 @@ export class CallManager {
     return null
   }
 
-  // Seção 17: private
   private scheduleMicRecovery(callId: string) {
     if (this.micRecoveryTimer || this.micRecoveryAttempts >= 4) return
     const atraso = [1500, 4000, 8000, 15000][this.micRecoveryAttempts] ?? 15000
@@ -3191,7 +2789,6 @@ export class CallManager {
     }
   }
 
-  // Seção 18: private
   private resetScreenRuntime(): void {
     this.stopScreenStatsTimer()
     try { if (this.screenRecoveryTimer) clearTimeout(this.screenRecoveryTimer) } catch {  }
@@ -3349,7 +2946,6 @@ export class CallManager {
     this.stopMeshRepair()
     try {
       this.repairTimer = setInterval(() => {
-        // Seção 19: st
         const st = this.state
         if (!st || st.callId !== callId) { this.stopMeshRepair(); return }
         if (!isCallPhaseActive(st.phase)) return
@@ -3414,10 +3010,6 @@ export class CallManager {
         const tr = this.findVideoTransceiver(pc)
         let precisaOffer = false
         if (tr) {
-          // `setCallVideoSending` só devolve true quando a DIREÇÃO muda. Se a
-          // transceiver já estava em `sendrecv` mas o outro lado nunca recebeu
-          // a track (offer perdida), nada era reenviado — e a câmera só
-          // aparecia depois de desligar e ligar de novo.
           const anterior = tr.sender?.track?.id ?? null
           precisaOffer = setCallVideoSending(tr, true)
           await tr.sender.replaceTrack(track)
@@ -3462,17 +3054,11 @@ export class CallManager {
     const st = this.state
     if (!st) return false
     const antigo = this.localStream?.getVideoTracks()[0] ?? null
-    // No Windows a webcam é exclusiva: abrir a nova com a velha viva dá
-    // NotReadableError, então a velha sai primeiro. No celular são devices
-    // diferentes: abrir a nova antes evita o quadro preto no meio.
     if (opts.soltarAntes) {
       try { antigo?.stop() } catch {  }
       if (antigo && this.localStream) try { this.localStream.removeTrack(antigo) } catch {  }
       await new Promise<void>((r) => setTimeout(r, 60))
     }
-    // `{}` deixa `getLocalMedia` mesclar a preferência inteira (aparelho,
-    // `facingMode`, qualidade e fps). Passar só as constraints de qualidade
-    // abria SEMPRE a câmera padrão e desfazia o "inverter".
     const constraints: MediaTrackConstraints = {}
     let novo: MediaStream | null = null
     try {
@@ -3496,8 +3082,6 @@ export class CallManager {
     } catch (e) {
       try { novo?.getTracks().forEach((t) => { try { t.stop() } catch {  } }) } catch {  }
       if (antigo) {
-        // A preferência precisa VOLTAR antes de reabrir, senão o retry pediria
-        // de novo a câmera que acabou de falhar e o usuário ficava sem vídeo.
         try { opts.reverter?.() } catch {  }
         try {
           const volta = await getLocalMedia({ video: constraints })
@@ -3602,16 +3186,12 @@ export class CallManager {
     return next
   }
 
-  // Seção 20: async
   async startScreenShare(opts?: Partial<ScreenShareOptions>): Promise<void> {
     return this.enqueueScreenOp(() => this.startScreenShareNow(opts))
   }
 
   private async startScreenShareNow(opts?: Partial<ScreenShareOptions>): Promise<void> {
     if (!this.state) {
-      // Clicou em compartilhar sem chamada: o picker fica aberto e o usuário
-      // escolhe "Compartilhar agora" — antes isso retornava em silêncio e o
-      // botão parecia morto.
       throw new ScreenShareError('no-source', 'entre na chamada antes de compartilhar a tela', false)
     }
     const gen = ++this.screenGen
@@ -3665,13 +3245,8 @@ export class CallManager {
     try { this.stopScreenStreamOnly() } catch {  }
     this.screenStream = stream
     this.state.sharing = true
-    // O quadro da tela aparece NA HORA (antes do primeiro frame e mesmo se a
-    // negociação falhar em um dos pares): compartilhar sem nenhum card era o
-    // "cliquei e nada aconteceu".
     this.onUpdate({ ...this.state })
     this.screenError = null
-    // Se o sistema exigiu compartilhar sem áudio, avise: silêncio aqui era o
-    // "compartilhei a tela e ninguém ouve o jogo".
     try {
       const queriaAudio = this.screenOptions.audio === 'system' || this.screenOptions.audio === 'system+mic'
       if (queriaAudio && stream.getAudioTracks().length === 0) {
@@ -3732,10 +3307,6 @@ export class CallManager {
           return await md.getDisplayMedia(derived) as MediaStream
         } catch { /* cai para o último degrau */ }
       }
-      // Último degrau NUNCA repete o áudio do sistema. O WebView2 costuma
-      // recusar `audio:true` na captura de tela, e repetir a mesma exigência
-      // fazia o compartilhamento falhar sempre, com erro genérico. Melhor
-      // compartilhar sem áudio e avisar do que não compartilhar.
       try {
         return await md.getDisplayMedia({ video: true, audio: false } as never) as MediaStream
       } catch {
@@ -3791,7 +3362,6 @@ export class CallManager {
   private async applyScreenSenderTuning(): Promise<void> {
     for (const pc of this.pcs.values()) {
       try {
-        // Seção 21: sender
         const sender = this.findVideoSender(pc)
         if (!sender) continue
         await applySenderTuning(sender, this.screenOptions)
@@ -3847,8 +3417,6 @@ export class CallManager {
         const transceiver = this.findVideoTransceiver(pc)
         let needsOffer = false
         if (transceiver) {
-          // Igual à câmera: direção já em `sendrecv` não pode significar "nada
-          // a anunciar" — se a track mudou, o outro lado precisa da nova offer.
           const anterior = transceiver.sender?.track?.id ?? null
           needsOffer = setCallVideoSending(transceiver, true)
           await transceiver.sender.replaceTrack(track)
@@ -3872,13 +3440,8 @@ export class CallManager {
         }
         if (needsOffer) {
           if (!this.state) throw new Error('chamada encerrada durante o compartilhamento')
-          // Retry, não uma tentativa só: a fila de offer pode estar ocupada por
-          // um ICE restart e a tela nunca chegava (o "só volta se parar e
-          // compartilhar de novo").
           const saiu = await this.enviarOfferComRetry(fp, this.state.callId)
           if (!saiu) {
-            // Mesmo caso da câmera: sem enfileirar, a tela só chegava no outro
-            // lado depois de parar e compartilhar de novo.
             this.marcarRenegociacaoPendente(fp)
             throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
           }
@@ -3972,7 +3535,6 @@ export class CallManager {
     this.onUpdate({ ...this.state })
   }
 
-  // Seção 22: private
   private stopScreenStreamOnly(): void {
     const tracks = this.screenStream?.getTracks() ?? []
     for (const t of tracks) {
@@ -3998,8 +3560,6 @@ export class CallManager {
           const anterior = transceiver.sender?.track?.id ?? null
           needsOffer = setCallVideoSending(transceiver, !!cam)
           await transceiver.sender.replaceTrack(cam)
-          // Voltando da tela para a câmera: a direção não muda, mas a track
-          // sim. Sem reoferecer, o peer ficava no último quadro da tela.
           if (!needsOffer && (cam?.id ?? null) !== anterior) needsOffer = true
         } else if (cam && this.localStream) {
           pc.addTrack(cam, this.localStream)
@@ -4138,7 +3698,6 @@ export class CallManager {
     this.startShareBarWatch()
   }
 
-  // Seção 23: private
   private startShareBarWatch(): void {
     if (!isWindowsRuntime()) return
     try {
@@ -4309,14 +3868,9 @@ export class CallManager {
       for (const s of streams) {
         for (const t of s.getTracks()) {
           try {
-            // Seção 24: already
             const already = pc.getSenders().some(x => x.track === t)
             if (already) continue
             if (t.kind === 'video') {
-              // Reusa a m-line de vídeo que já existe (a que recebe a câmera
-              // do outro) em vez de abrir uma SEGUNDA seção de vídeo. No canal
-              // de servidor, com o outro já transmitindo, a segunda m-line
-              // ficava sem oferta válida e a minha câmera não chegava.
               const tr = this.findVideoTransceiver(pc)
               if (tr && !tr.sender.track) {
                 try { setCallVideoSending(tr, true) } catch {  }
@@ -4372,10 +3926,6 @@ export class CallManager {
     logIceState(pc, fp, callId)
     pc.ontrack = (e) => {
       try {
-        // PC velho não pode sobrescrever o novo: `createPC` fecha o anterior e
-        // põe outro em `this.pcs`, mas o handler antigo continua vivo. Um
-        // `ontrack` atrasado dele entregava um stream de trilhas já `ended` e
-        // apagava a imagem boa (preto permanente). Mesma guarda de `handleIce`.
         if (this.pcs.get(fp) !== pc) return
         const st = (e.streams && e.streams[0]) ?? (e.track ? new MediaStream([(e.track as MediaStreamTrack)]) : null)
         if (!st) return
@@ -4387,10 +3937,6 @@ export class CallManager {
       try {
         const st2 = this.state
         if (st2 && st2.callId === callId) {
-          // ICE conectado NÃO é mídia: falta DTLS/SRTP. Declarar "conectado" no
-          // ICE deixava a UI verde com vídeo preto (o quadro nunca chegava).
-          // só `connectionState === 'connected'` prova o transporte de mídia;
-          // antes disso, o máximo honesto é "sinalizando".
           const connOk = (pc as any).connectionState === 'connected'
           if (connOk) this.applyPhase('media-connected')
           else this.promoteOnSignal(callId)
@@ -4408,10 +3954,6 @@ export class CallManager {
       pc.addEventListener('iceconnectionstatechange', () => {
         try {
           if (pc.iceConnectionState === 'failed') void this.tryIceRestart(fp, pc, callId)
-          // ICE conectado não é mídia: NÃO promove para `media-connected` aqui.
-          // Sem DTLS/SRTP o quadro não chega, e era isso que deixava a chamada
-          // "verde" com vídeo preto. A promoção fica no `connectionstatechange`
-          // (`connected`) e no primeiro RTP recebido.
           if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
             try {
               const st = this.state
@@ -4545,7 +4087,6 @@ export class CallManager {
     this.nativeVoiceTimer = t
   }
 
-  // Seção 25: private
   private stopNativeVoiceMonitor() {
     if (this.nativeVoiceTimer) { clearInterval(this.nativeVoiceTimer); this.nativeVoiceTimer = null }
     this.stopNativeVideoMonitor()
@@ -4644,9 +4185,6 @@ export class CallManager {
         if (!offer) return false
         if ((this.state && this.state.callId !== callId) || this.pcs.get(fp) !== pc) return false
         await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
-        // A answer pode ter chegado antes desta offer (fila de sinalização
-        // adiantada ou retry). Ela fica guardada e é aplicada agora, em vez de
-        // forçar o usuário a desligar/ligar para a negociação recomeçar.
         await this.flushPendingAnswer(fp, pc, callId)
         return true
       })
@@ -4700,16 +4238,11 @@ export class CallManager {
   private marcarRenegociacaoPendente(fp: string, mode: 'resend' | 'new' = 'new'): void {
     const atual = this.renegociacaoPendente.get(fp)
     if (atual && atual.tentativas >= CallManager.MAX_RENEGOCIACOES) return
-    // `resend` é mais barato e não gera glare: se já dá para reenviar, não
-    // troque por uma offer nova.
     if (!atual) {
       this.renegociacaoPendente.set(fp, { since: Date.now(), mode, tentativas: 0 })
     } else if (atual.mode === 'new' && mode === 'resend') {
       this.renegociacaoPendente.set(fp, { ...atual, mode, since: Date.now() })
     }
-    // O reparo de pares roda a cada 15 s; esperar esse tick faria a tela
-    // demorar uma eternidade para aparecer no outro lado. Agenda um retry
-    // curto além dele (idempotente: se já resolveu, o mapa está vazio).
     if (this.renegociacaoTimer) return
     try {
       this.renegociacaoTimer = setTimeout(() => {
@@ -4738,12 +4271,8 @@ export class CallManager {
           this.renegociacaoPendente.delete(fp)
           continue
         }
-        // Dá espaço entre as tentativas: duas offers simultâneas viram glare
-        // e pioram justamente o que se quer consertar.
         if (Date.now() - pend.since < 2_000) continue
 
-        // Caso travado do glare: eu tenho offer local que ele nunca recebeu.
-        // Reenviar a MESMA offer é idempotente e não abre nova negociação.
         if (pc.signalingState === 'have-local-offer') {
           if (pend.mode !== 'resend') {
             this.renegociacaoPendente.delete(fp)
@@ -4755,8 +4284,6 @@ export class CallManager {
             continue
           }
           await services.callOffer(fp, st.callId, JSON.stringify({ type: 'offer', sdp: local.sdp })).catch(() => {})
-          // Se o outro lado já tinha a offer e só a answer se perdeu, este
-          // reenvio não basta: a próxima volta cria offer nova.
           const feitas = pend.tentativas + 1
           if (feitas >= CallManager.MAX_RENEGOCIACOES) this.renegociacaoPendente.delete(fp)
           else this.renegociacaoPendente.set(fp, { since: Date.now(), mode: 'new', tentativas: feitas })
@@ -4786,10 +4313,6 @@ export class CallManager {
   private async repairHalfOpenPairs(): Promise<void> {
     const st = this.state
     if (!st || !isCallPhaseActive(st.phase) || !this.myFp) return
-    // A tela e a câmera só existem no outro lado depois que a renegociação
-    // completa. Se a oferta se perdeu, NADA no ciclo antigo tentava de novo:
-    // o usuário via "compartilhando" e o peer sem card até parar/recomeçar
-    // manualmente (o "desliga e liga para voltar").
     await this.repairMidiaDivergente(st)
     for (const p of st.participants) {
       const fp = p.fp
@@ -4841,7 +4364,6 @@ export class CallManager {
     }
   }
 
-  // Seção 26: private
   private restorePeerMedia(fp: string, callId: string): void {
     void this.createPC(fp, callId, true)
       .then(async () => {
@@ -4901,9 +4423,6 @@ export class CallManager {
       if (this.state?.callId !== callId) return
       const local = pc.localDescription
       if (!local?.sdp || local.type !== 'answer') return
-      // A answer só serve para ESTA offer. Se o PC já aplicou outra (nova
-      // renegociação no meio), reenviar a antiga faria o outro lado falhar em
-      // silêncio e voltaríamos ao "desliga e liga para destravar".
       const remote = pc.remoteDescription
       if (!remote?.sdp || remote.sdp !== offerSdp) return
       await services.callAnswer(fp, callId, JSON.stringify({ type: 'answer', sdp: local.sdp })).catch(() => {})
@@ -4954,11 +4473,6 @@ export class CallManager {
       this.attachLocalStreamToPC(pc)
     }
 
-    // Oferta repetida com o PC em `stable`: já respondi, mas a minha answer
-    // pode ter se perdido. Antes eu descartava em silêncio (`return`) e quem
-    // ficou sem answer travava até desligar e ligar a chamada — exatamente o
-    // "meio bugado, tem que sair e entrar de novo". Reenviar a answer é
-    // idempotente e destrava o outro lado.
     if (pc.signalingState === 'stable' && this.lastRemoteOffer.get(fromFp) === sdpStr) {
       void this.reenviarAnswerLocal(fromFp, callId, pc, sdpStr)
       return
@@ -4972,11 +4486,6 @@ export class CallManager {
     }
     if (pc.signalingState === 'have-local-offer') {
       if (!polite) {
-        // Glare: ignoro a offer dele (a minha vence), MAS se a minha offer se
-        // perdeu no caminho ninguém destrava — ele fica esperando answer e eu
-        // esperando uma offer nova. Antes isso só se resolvia desligando e
-        // ligando de novo. Marcar a renegociação pendente faz o reparo
-        // reenviar a minha offer em segundos.
         console.debug(`[call] GLARE ${callId}: impolite ignora offer de ${fromFp.slice(0, 8)}`)
         this.marcarRenegociacaoPendente(fromFp, 'resend')
         return
@@ -5004,9 +4513,6 @@ export class CallManager {
     if (!fromFp || fromFp === this.myFp || this.state?.callId !== callId) return
     const pc = this.pcs.get(fromFp)
     if (!pc) {
-      // A answer chegou antes do PC existir (offer nossa ainda em voo ou PC
-      // recriado pelo reparo). Descartar aqui era o "só funciona se mexer de
-      // novo": guardamos e aplicamos quando o PC estiver em have-local-offer.
       this.pendingAnswers.set(fromFp, { callId, sdp: sdpStr })
       return
     }
@@ -5015,9 +4521,6 @@ export class CallManager {
     this.markJoined(fromFp)
     try {
       if (pc.signalingState !== 'have-local-offer') {
-        // `stable` = já aplicamos (duplicata); qualquer outro estado = a
-        // negociação mudou debaixo (glare/ICE restart). A answer antiga não
-        // serve, mas a nova oferta que estamos devendo resolve.
         if (pc.signalingState !== 'stable') this.marcarRenegociacaoPendente(fromFp)
         return
       }
@@ -5069,7 +4572,6 @@ export class CallManager {
     const cand = parseWireCandidate(candidateStr, mid)
     if (!cand) return
     if (!pc || !pc.remoteDescription) {
-      // Seção 27: byCall
       let byCall = this.pendingIce.get(fromFp)
       if (!byCall) {
         byCall = new Map()
@@ -5259,9 +4761,6 @@ export class CallManager {
     this.startQualityMonitor()
     this.ensureRelayTransport()
     for (const fp of new Set([...alvos, ...fps.filter((f) => f && f !== me.fingerprint)])) {
-      // Quem ENTRA também oferece: a offer do host pode se perder e a sala
-      // ficaria muda esperando para sempre. O glare é resolvido por
-      // polite/impolite (`callRepair.ts`).
       await this.createPC(fp, callId, true).catch(() => {  })
     }
     try {

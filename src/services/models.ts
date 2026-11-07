@@ -233,7 +233,6 @@ export type EngineEvent =
   | { type: 'muted'; context: string; reason: string; until_ms: number }
   | { type: 'error'; context: string }
 
-// Seção 1: FriendView
 export interface FriendView {
   fp: string
   nickname: string
@@ -489,7 +488,6 @@ export interface ProfileView {
   content_hash?: string
 }
 
-// Seção 2: ProfilePatch
 export interface ProfilePatch {
   display_name: string
   about: string
@@ -790,7 +788,6 @@ export interface DisTorrentServices {
   auditList(communityId: string, limit?: number): Promise<AuditEntry[]>
   reputationGet(fp: string): Promise<ReputationView>
   safetyNumber(peerFp: string): Promise<string>
-  // Seção 3: moderate
   moderate(communityId: string, action: ModerationAction, target: string, reason?: string): Promise<void>
   reportUser(targetFp: string, communityId?: string, reason?: string): Promise<void>
   validateName(kind: NameKind, raw: string, existing?: string[]): Promise<NameCheckView>
@@ -965,7 +962,6 @@ export interface WipeReport {
   leftovers: string[]
 }
 
-// Seção 4: VaultBackupInfo
 export interface VaultBackupInfo {
   file: string
   created_ms: number

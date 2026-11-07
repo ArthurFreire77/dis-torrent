@@ -7,7 +7,7 @@ import { EmojiPicker } from '../shared/EmojiPicker'
 import MessageList, { type MessageListHandle } from '../components/social/MessageList'
 import { BookmarksPanel, ChannelSettingsModal, CommandPalette, EventPanel, InboxPanel, ModerationPanel, PinsPanel, ProfileModal, SearchPanel, ThreadViewModal, useShortcuts, type Command, type InboxTab } from '../components/social/Social'
 import { services } from '../services'
-import type { Identity, NetworkState, PeerView, CommunityView, PrivacyMode, RoleView, BotView, ChannelMeta, StoredMessage, MemberPairing } from '../services/models'
+import type { Identity, NetworkState, PeerView, CommunityView, RoleView, BotView, ChannelMeta, StoredMessage, MemberPairing } from '../services/models'
 import { PRIVACY_MODES } from '../services/models'
 import {
   useConversations,
@@ -67,7 +67,7 @@ import { startDownload } from '../services/downloadAction'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
-import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, setCallPrivacyForIce, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
+import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
 import CallSettingsPanel from '../components/calls/CallSettingsPanel'
 import { fileSwarm, encodeFileBody, parseFileBody } from '../services/fileSwarm'
 import { isMediaName } from '../services/fileRules'
@@ -84,6 +84,15 @@ import {
 import { setDesiredPresence } from '../services/appState'
 import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import { MessageRetentionSettings } from '../components/prefs/MessageRetentionSettings'
+import { usePrivacySettings } from '../services/usePrivacySettings'
+import { Avatar, PeerDot } from '../shared/avatarView'
+import { avatarColor } from '../shared/theme'
+import { BootScreen, CreateAccount, LockScreen } from './auth/AuthScreens'
+
+const authPalette = {
+  main: '#313338', sidebar: '#2b2d31', input: '#1e1f22', border: '#26272b',
+  heading: '#f2f3f5', text: '#dbdee1', muted: '#949ba4', accent: '#5865f2', red: '#f23f42',
+}
 
 const t = {
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
@@ -96,373 +105,29 @@ const t = {
   lmuted: '#5c5e66', lborder: '#e3e5e8', linput: '#ebedef',
 }
 
-const stateColor: Record<NetworkState, string> = {
-  CONNECTED: t.green, CONNECTING: t.yellow, RECONNECTING: t.yellow, DISCONNECTED: '#80848e',
-}
 const stateLabel: Record<NetworkState, string> = {
   CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
 }
 
-function avatarColor(fp: string): string {
-  const palette = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#00a8fc']
-  let h = 0
-  for (let i = 0; i < fp.length; i++) h = (h * 31 + fp.charCodeAt(i)) >>> 0
-  return palette[h % palette.length]
-}
+export { BootScreen, CreateAccount, LockScreen } from './auth/AuthScreens'
 
-function Avatar({ name, fp, size, avatarB64, accent }: { name: string; fp: string; size: number; avatarB64?: string; accent?: string }) {
-  const initial = (name || '?').trim().charAt(0).toUpperCase()
-  return (
-    <span style={{ width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp), color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, overflow: 'hidden', boxShadow: accent ? `0 0 0 2px ${accent}55` : undefined }}>
-      {avatarB64
-        ? <img src={`data:image/jpeg;base64,${avatarB64}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-        : initial}
-    </span>
-  )
-}
-
-function PeerDot({ s }: { s: NetworkState }) {
-  const c = stateColor[s]
-  return <span style={{ position: 'absolute', right: -2, bottom: -2, width: 12, height: 12, background: c, border: '3px solid var(--sidebar)', borderRadius: '50%' }} />
-}
-
-function BootScreen(){
-  const [slow, setSlow] = useState(false)
-  useEffect(() => {
-    const tm = setTimeout(() => setSlow(true), 5000)
-    return () => clearTimeout(tm)
-  }, [])
-  return (
-    <div className="boot">
-      <div className="boot-logo">DisTorrent</div>
-      <div className="boot-bar"><i /></div>
-      <div className="boot-sub">
-        {slow
-          ? 'ainda iniciando o nó P2P — se demorar muito, confirme se o app nativo está rodando (não só o navegador).'
-          : 'abrindo sua identidade e o nó P2P…'}
-      </div>
-      {slow && (
-        // Sem saída nenhuma, o boot travado era indistinguível de uma janela
-        // morta: a splash ficava girando para sempre sem oferecer ação.
-        <button
-          type="button"
-          onClick={() => window.location.reload()}
-          style={{ marginTop: 4, background: 'transparent', color: '#b7c0cd', border: '1px solid #2f3742', borderRadius: 8, padding: '8px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
-        >
-          Recarregar
-        </button>
-      )}
-    </div>
-  )
-}
-
-function AuthCard({ children }: { children: any }) {
-  const perks = [
-    { icon: Icons.lock, title: 'Cifrado fim-a-fim', desc: 'só os aparelhos leem' },
-    { icon: Icons.users, title: 'Sem servidor', desc: 'direto entre peers' },
-    { icon: Icons.key, title: 'Sua chave', desc: 'sem conta online' },
-  ]
-  return (
-    <div style={{ minHeight: '100vh', background: t.main, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: "Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}>
-      <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 12, padding: 28, width: 440, boxShadow: '0 8px 32px rgba(0,0,0,.45)' }}>
-        <div style={{ textAlign: 'center', marginBottom: 14 }}>
-          <span style={{ fontSize: 26, fontWeight: 900, color: t.heading, letterSpacing: 1 }}>DisTorrent</span>
-          <div style={{ fontSize: 12, color: t.muted, marginTop: 4 }}>chat, voz e arquivos P2P — sem servidor, sem cadastro</div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
-          {perks.map(p => (
-            <div key={p.title} style={{ flex: 1, background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '9px 6px', textAlign: 'center' }}>
-              <span style={{ color: t.accent, display: 'inline-flex' }}><Icon d={p.icon} size={17} /></span>
-              <div style={{ fontSize: 11, fontWeight: 800, color: t.heading, marginTop: 5 }}>{p.title}</div>
-              <div style={{ fontSize: 10, color: t.muted, marginTop: 2 }}>{p.desc}</div>
-            </div>
-          ))}
-        </div>
-        {children}
-      </div>
-    </div>
-  )
-}
-
-const inputStyle: any = { width: '100%', background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '11px 12px', color: t.text, fontSize: 14, outline: 'none', boxSizing: 'border-box' }
-const btnStyle: any = { width: '100%', background: t.accent, color: '#fff', border: 'none', padding: 12, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 14 }
-
-// Seção 1: CreateAccount
-function CreateAccount({ onDone }: { onDone: (identity: Identity) => void }) {
-  const [nick, setNick] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const fileRef = useRef<HTMLInputElement | null>(null)
-
-  async function submit() {
-    setErr(null)
-    if (!nick.trim()) return setErr('escolha seu nome')
-    setBusy(true)
-    try {
-      const id = await services.identityCreate(nick.trim(), null)
-      onDone(id)
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function importVault() {
-    if (services.kind !== 'native') {
-      setErr('importar cofre precisa do app instalado (nativo)')
-      return
-    }
-    const f = await new Promise<File | null>((resolve) => {
-      if (!fileRef.current) return resolve(null)
-      fileRef.current.onchange = () => resolve(fileRef.current!.files?.[0] ?? null)
-      fileRef.current.click()
-    })
-    if (!f) return
-    const pass = prompt(`Senha do cofre ${f.name}:`)
-    if (pass == null) return
-    setBusy(true); setErr(null)
-    try {
-      const buf = new Uint8Array(await f.arrayBuffer())
-      let bin = ''
-      const CH = 0x8000
-      for (let i = 0; i < buf.length; i += CH) bin += String.fromCharCode(...buf.subarray(i, i + CH))
-      const r = await services.stormvaultImportFile(btoa(bin), pass)
-      if (r.identity_installed) {
-        window.location.reload()
-        return
-      }
-      setErr('o cofre foi mesclado, mas este aparelho já tem outra conta — use "Importar cofre" na tela de entrada.')
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally { setBusy(false) }
-  }
-
-  return (
-    <AuthCard>
-      <div style={{ fontWeight: 800, color: t.heading, fontSize: 16, marginBottom: 4 }}>Criar conta</div>
-      <div style={{ fontSize: 12, color: t.muted, marginBottom: 14 }}>Escolha seu nome. Sua chave é gerada neste computador — <b>sem senha</b>, login direto pela chave.</div>
-      <input style={inputStyle} placeholder="Seu nome" value={nick} onChange={e => setNick(e.target.value)} onKeyDown={e => e.key === 'Enter' && submit()} />
-      {err && <div style={{ fontSize: 12, color: '#ff9c9c', background: '#2a1518', border: `1px solid ${t.red}55`, borderRadius: 6, padding: '6px 10px', marginTop: 10 }}>{err}</div>}
-      <button style={{ ...btnStyle, marginTop: 14 }} disabled={busy || !nick.trim()} onClick={submit}>{busy ? 'criando…' : 'Criar conta'}</button>
-      <input ref={fileRef} type="file" accept=".stormvault" style={{ display: 'none' }} aria-label="Escolher cofre para importar" />
-      <button onClick={importVault} disabled={busy} style={{ width: '100%', background: 'transparent', color: t.muted, border: 'none', padding: 10, borderRadius: 6, fontWeight: 700, cursor: 'pointer', fontSize: 12, marginTop: 10 }}>
-        Já tenho conta em outro aparelho — importar cofre
-      </button>
-      <div style={{ fontSize: 11, color: t.muted, marginTop: 2, textAlign: 'center', lineHeight: 1.5 }}>
-        Sem senha — o app verifica se você tem a chave local.
-      </div>
-    </AuthCard>
-  )
-}
-
-function LockScreen({ nickname, onUnlock }: { nickname: string; onUnlock: (identity: Identity) => void }) {
-  const [pass, setPass] = useState('')
-  const [err, setErr] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [savedAccounts, setSavedAccounts] = useState<{nickname:string,fingerprint:string}[]>([])
-  const [selectedFp, setSelectedFp] = useState<string | null>(null)
-
-  useEffect(() => {
-    services.accountsList().then(setSavedAccounts).catch(() => {})
-  }, [])
-
-  const currentNick = savedAccounts.find(a => a.fingerprint === selectedFp)?.nickname ?? nickname
-
-  async function submit() {
-    setErr(null); setBusy(true)
-    try {
-      if (selectedFp) {
-        await services.accountSwitch(selectedFp)
-      }
-      const id = await services.vaultUnlock(pass)
-      onUnlock(id)
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally { setBusy(false) }
-  }
-
-  async function handleImport() {
-    if (services.kind === 'native') {
-      const f = await new Promise<File | null>((resolve) => {
-        if (!vaultFileRef.current) return resolve(null)
-        vaultFileRef.current.onchange = () => resolve(vaultFileRef.current!.files?.[0] ?? null)
-        vaultFileRef.current.click()
-      })
-      if (!f) return
-      setVaultFileName(f.name)
-      setVaultB64('')
-      setErr(null)
-      return
-    }
-    const payload = prompt('Cole o código de identidade exportado:')
-    if (payload?.trim()) {
-      try {
-        const data = JSON.parse(payload)
-        const id = await services.vaultImport(JSON.stringify(data.identity), data.vault_blob)
-        await services.accountsList().then(setSavedAccounts)
-        setSelectedFp(id.fingerprint)
-        alert('Conta importada! Digite a senha dela para destravar.')
-      } catch (e: any) { setErr(String(e?.message ?? e)) }
-    }
-  }
-
-  const vaultFileRef = useRef<HTMLInputElement | null>(null)
-  const [vaultFileName, setVaultFileName] = useState<string | null>(null)
-  const [vaultB64, setVaultB64] = useState('')
-  const [vaultPass, setVaultPass] = useState('')
-
-  async function doImportVault() {
-    if (!vaultB64 || vaultPass.length < 8) {
-      setErr('a senha do cofre precisa de pelo menos 8 caracteres')
-      return
-    }
-    setBusy(true); setErr(null)
-    try {
-      const r = await services.stormvaultImportFile(vaultB64, vaultPass)
-      setVaultPass(''); setVaultB64(''); setVaultFileName(null)
-      if (vaultFileRef.current) vaultFileRef.current.value = ''
-      if (r.identity_installed) {
-        window.location.reload()
-        return
-      }
-      await services.accountsList().then(setSavedAccounts)
-      setErr(null)
-    } catch (e: any) {
-      setErr(String(e?.message ?? e).replace(/"/g, ''))
-    } finally { setBusy(false) }
-  }
-
-  async function fileToBase64(f: File): Promise<string> {
-    const buf = new Uint8Array(await f.arrayBuffer())
-    let bin = ''
-    const CH = 0x8000
-    for (let i = 0; i < buf.length; i += CH) bin += String.fromCharCode(...buf.subarray(i, i + CH))
-    return btoa(bin)
-  }
-
-  async function onVaultPicked(f: File) {
-    try {
-      setVaultB64(await fileToBase64(f))
-    } catch {
-      setErr('falha ao ler o arquivo — tente de novo')
-    }
-  }
-
-  return (
-    <AuthCard>
-      <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
-        <Avatar name={currentNick} fp={selectedFp ?? '0000'} size={72} />
-      </div>
-      <div style={{ textAlign: 'center', fontWeight: 800, color: t.heading, fontSize: 16 }}>Bem-vindo de volta, {currentNick}</div>
-      <div style={{ textAlign: 'center', fontSize: 12, color: t.muted, marginTop: 4, marginBottom: 14 }}>Digite sua senha para desbloquear</div>
-
-      {savedAccounts.length > 1 && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted, marginBottom: 6 }}>CONTAS SALVAS</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {savedAccounts.map(a => (
-              <button key={a.fingerprint} onClick={() => setSelectedFp(a.fingerprint)} style={{
-                display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 10px',
-                borderRadius: 8, background: selectedFp === a.fingerprint ? `${t.accent}22` : 'transparent',
-                border: `1px solid ${selectedFp === a.fingerprint ? t.accent : 'transparent'}`,
-                cursor: 'pointer', textAlign: 'left'
-              }}>
-                <Avatar name={a.nickname} fp={a.fingerprint} size={24} />
-                <span style={{ fontSize: 13, fontWeight: 600, color: t.heading, flex: 1 }}>{a.nickname}</span>
-                <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono', color: '#949ba4' }}>{a.fingerprint.slice(0, 12)}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <input style={inputStyle} autoFocus type="password" placeholder="Sua senha" value={pass}
-        onChange={e => setPass(e.target.value)}
-        onKeyDown={e => e.key === 'Enter' && pass && submit()} />
-      {err && <div style={{ fontSize: 12, color: '#ff9c9c', background: '#2a1518', border: `1px solid ${t.red}55`, borderRadius: 6, padding: '6px 10px', marginTop: 10 }}>{err}</div>}
-      <button style={{ ...btnStyle, marginTop: 14 }} disabled={busy || !pass} onClick={submit}>{busy ? 'desbloqueando…' : 'Entrar'}</button>
-      <input ref={vaultFileRef} type="file" accept=".stormvault" style={{ display: 'none' }} aria-label="Escolher cofre para importar"
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) { setVaultFileName(f.name); void onVaultPicked(f) } }} />
-      <button onClick={handleImport} style={{ width: '100%', background: 'transparent', color: t.muted, border: 'none', padding: 8, borderRadius: 6, fontWeight: 700, cursor: 'pointer', fontSize: 12, marginTop: 8 }}>
-        {vaultFileName ? `Cofre: ${vaultFileName}` : 'Importar cofre de outro aparelho'}
-      </button>
-      {vaultB64 && (
-        <div style={{ marginTop: 8 }}>
-          <input
-            type="password"
-            placeholder="senha do cofre"
-            aria-label="Senha do cofre"
-            // Seção 2: value
-            value={vaultPass}
-            onChange={(e) => setVaultPass(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') void doImportVault() }}
-            style={inputStyle}
-          />
-          <button onClick={() => void doImportVault()} disabled={busy || vaultPass.length < 8} style={{ ...btnStyle, marginTop: 10 }}>
-            {busy ? 'importando…' : 'Importar e entrar'}
-          </button>
-        </div>
-      )}
-      <div style={{ fontSize: 10.5, color: t.muted, textAlign: 'center', lineHeight: 1.5, marginTop: 4 }}>
-        Traz sua conta inteira (chave, amigos, conversas) de um arquivo <b>.stormvault</b> criptografado.
-      </div>
-    </AuthCard>
-  )
-}
-
-type FormatMode = 'bold' | 'italic' | 'under' | 'strike' | 'code' | 'spoiler' | 'quote'
-
-interface AutoItem {
-  key: string
-  kind: 'mention' | 'emoji' | 'slash'
-  label: string
-  hint?: string
-  color?: string
-  glyph?: string
-  insert: string
-  fp?: string
-}
-
-const FORMAT_BUTTONS: { id: FormatMode; glyph: string; title: string }[] = [
-  { id: 'bold', glyph: 'B', title: 'Negrito (Ctrl+B)' },
-  { id: 'italic', glyph: '*I*', title: 'Itálico (Ctrl+I)' },
-  { id: 'under', glyph: 'U̲', title: 'Sublinhado (Ctrl+U)' },
-  { id: 'strike', glyph: 'S̶', title: 'Tachado' },
-  { id: 'code', glyph: '</>', title: 'Código' },
-  { id: 'spoiler', glyph: '||', title: 'Spoiler' },
-  { id: 'quote', glyph: '❝', title: 'Citação' },
-]
-
-const composerMenuStyle: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
-  background: 'transparent', border: 'none', color: '#dbdee1', cursor: 'pointer',
-  padding: '7px 8px', borderRadius: 6, fontSize: 12.5,
-}
-
-const SLASH_BASE = [
-  { name: 'ajuda' }, { name: 'ping' }, { name: 'hora' }, { name: 'uptime' },
-  { name: 'meu-fp' }, { name: 'meu-status' }, { name: 'membros' }, { name: 'canais' },
-  { name: 'dado' },
-]
-
-function fmtShortDuration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ${s % 60}s`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ${m % 60}m`
-  return `${Math.floor(h / 24)}d ${h % 24}h`
-}
-
-const SECTION_IDA: Record<string, 'visao-geral' | 'canais' | 'cargos' | 'membros' | 'bots'> = {
-  geral: 'visao-geral',
-  canais: 'canais',
-  cargos: 'cargos',
-  membros: 'membros',
-  bots: 'bots',
-}
+export type { FormatMode, AutoItem } from './shellComposerData'
+export {
+  FORMAT_BUTTONS,
+  composerMenuStyle,
+  SLASH_BASE,
+  fmtShortDuration,
+  SECTION_IDA,
+} from './shellComposerData'
+import {
+  FORMAT_BUTTONS,
+  composerMenuStyle,
+  SLASH_BASE,
+  fmtShortDuration,
+  SECTION_IDA,
+  type FormatMode,
+  type AutoItem,
+} from './shellComposerData'
 
 export default function ThemeShell({ designId }: {designId:string}){
   void designId
@@ -553,72 +218,30 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showDiagnostics, setShowDiagnostics] = useState(false)
   const [showPrivacyModal, setShowPrivacyModal] = useState(false)
   const [addrInput, setAddrInput] = useState('')
-  const [proxyAddr, setProxyAddr] = useState('')
-  const [proxyIsDefault, setProxyIsDefault] = useState(true)
-  const [proxyTesting, setProxyTesting] = useState(false)
-  const [proxyTestOk, setProxyTestOk] = useState<number | null>(null)
-  // Seção 3: const
-  const [proxyTestErr, setProxyTestErr] = useState<string | null>(null)
-  const [proxyPendingMode, setProxyPendingMode] = useState<PrivacyMode | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const privacy = usePrivacySettings(setError)
+  const {
+    mode: privacyMode,
+    proxyEffective: privacyProxyEffective,
+    proxyAddr,
+    proxyIsDefault,
+    testing: proxyTesting,
+    testOk: proxyTestOk,
+    testErr: proxyTestErr,
+    pendingMode: proxyPendingMode,
+    setMode: setPrivacyMode,
+    setProxyAddr,
+    resetTransient,
+    refreshExtras: refreshPrivacyExtras,
+    runTest: runProxyTest,
+    saveAndActivate: saveProxyAndActivate,
+    pickMode: pickPrivacyMode,
+  } = privacy
   function closePrivacyModal() {
     setShowPrivacyModal(false)
-    setProxyPendingMode(null)
-    setProxyTestOk(null)
-    setProxyTestErr(null)
+    resetTransient()
   }
-  async function refreshPrivacyExtras(mode?: PrivacyMode) {
-    try {
-      const pc = await services.proxyAddrGet(mode)
-      setProxyAddr(pc.addr)
-      setProxyIsDefault(pc.is_default)
-    } catch {
-      setProxyAddr(mode === 'full' ? '127.0.0.1:9050' : '127.0.0.1:1080')
-      setProxyIsDefault(true)
-    }
-  }
-
-  async function runProxyTest() {
-    setProxyTesting(true); setProxyTestOk(null); setProxyTestErr(null)
-    try {
-      const ms = await services.proxyTest(proxyAddr.trim())
-      setProxyTestOk(ms)
-    } catch (e: any) {
-      setProxyTestErr(String(e?.message ?? e))
-    } finally {
-      setProxyTesting(false)
-    }
-  }
-
-  async function saveProxyAndActivate(mode: PrivacyMode) {
-    try {
-      await services.proxyAddrSet(proxyAddr.trim(), mode)
-      const r = await services.privacySet(mode)
-      setPrivacyMode(r.mode)
-      setPrivacyProxyEffective(!!r.proxy_effective)
-      setProxyPendingMode(null)
-      setProxyTestOk(null)
-      setProxyTestErr(null)
-      setError(null)
-    } catch (e: any) { setError(String(e?.message ?? e)) }
-  }
-
-  function pickPrivacyMode(pm: PrivacyMode) {
-    if (pm === 'proxy' || pm === 'full') {
-      setProxyPendingMode(pm)
-      setProxyTestOk(null); setProxyTestErr(null)
-      void refreshPrivacyExtras(pm)
-      return
-    }
-    setProxyPendingMode(null)
-    services.privacySet(pm).then(r => {
-      setPrivacyMode(r.mode)
-      setPrivacyProxyEffective(!!r.proxy_effective)
-      setError(null)
-    }).catch((e: any) => setError(String(e?.message ?? e)))
-  }
-
   const [friendFpInput, setFriendFpInput] = useState('')
-  const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [version, setVersion] = useState('')
   const [communities, setCommunities] = useState<CommunityView[]>([])
@@ -716,13 +339,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [friendsBlocked, setFriendsBlocked] = useState<{fp:string,nickname:string}[]>([])
   const [pendingOut, setPendingOut] = useState<{fp:string,nickname:string}[]>([])
   const [showProfile, setShowProfile] = useState(false)
-  const [privacyMode, setPrivacyMode] = useState<PrivacyMode>('encrypted')
-  const [privacyProxyEffective, setPrivacyProxyEffective] = useState(false)
-  // Seção 4: useEffect
-  useEffect(() => {
-    setCallPrivacyForIce(privacyMode)
-    services.privacyGet().then(s => setPrivacyProxyEffective(!!s.proxy_effective)).catch(() => {})
-  }, [privacyMode])
   const [extraChannels, setExtraChannels] = useState<ChannelMeta[]>([])
   const [roles, setRoles] = useState<RoleView[]>([])
   const [bots, setBots] = useState<BotView[]>([])
@@ -809,8 +425,6 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   useEffect(() => {
     services.version().then(setVersion).catch(() => {})
-    // Um único caminho de decisão (o mesmo do celular): antes o catch do
-    // `identityGet` levava para `app` sem identidade, e a interface abria vazia.
     const decidir = async () => {
       let id: Identity | null = null
       try {
@@ -890,7 +504,6 @@ export default function ThemeShell({ designId }: {designId:string}){
       setMemberRolesCache(map)
     } catch {  }
   }
-  // Seção 5: useEffect
   useEffect(() => { refreshExtras(selCommunity) }, [selCommunity, communities.length])
   useEffect(() => {
     if (!selCommunity) return
@@ -1038,8 +651,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     const el = mainColRef.current
     const pai = el?.parentElement ?? null
     if (!el || !pai) return
-    // Mede o chrome REAL: `pai - coluna`. Medir a coluna criaria laço, porque
-    // ela já inclui a margem que este cálculo vai aplicar.
     const medir = () => {
       const w = Math.max(0, pai.clientWidth - el.clientWidth)
       setChromeWidth((cur) => (Math.abs(cur - w) < 2 ? cur : w))
@@ -1083,7 +694,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const trocarCamera = async () => {
     try {
       setError(null)
-      // Seção 6: r
       const r = await callManager.switchCamera()
       setCallMediaPrefsState(getCallMediaPrefs())
       if (r.available < 2) setError('só há uma câmera disponível neste aparelho')
@@ -1240,7 +850,6 @@ export default function ThemeShell({ designId }: {designId:string}){
       if (typingTimeouts.current[fp]) clearTimeout(typingTimeouts.current[fp])
       typingTimeouts.current[fp] = setTimeout(() => {
         setTypingPeers(prev => {
-          // Seção 7: next
           const next = { ...prev }
           delete next[fp]
           return next
@@ -1250,8 +859,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (ev.type === 'friend_request_in' || ev.type === 'friend_accepted' || ev.type === 'friend_removed') {
       refreshFriends()
       refreshConvos()
-      // Sem som/aviso, um pedido de amizade podia ficar dias sem ser visto:
-      // a única pista era o badge. `notifyFriend` respeita as preferências.
       const nome = (ev as unknown as { nickname?: string }).nickname || String((ev as unknown as { fp?: string }).fp ?? '').slice(0, 8)
       if (ev.type === 'friend_request_in') notifyFriend({ kind: 'request', nome })
       else if (ev.type === 'friend_accepted') notifyFriend({ kind: 'accepted', nome })
@@ -1348,8 +955,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const peerTitle = selConvObj?.title || selPeer?.nickname || selPeer?.fp || ''
   const ehGrupo = selConvObj?.kind === 'group'
 
-  // Relação real com o peer da conversa aberta. O limite de 3 mensagens é do
-  // Rust; aqui só traduzimos para a faixa do compositor.
   const selPeerState = selPeerFp
     ? selPeerFp === identity?.fingerprint
       ? null
@@ -1416,9 +1021,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     return isCallableChannel(meta.kind) ? meta : null
   })()
   const inThisCall = !!activeCall && !!selCallChannel && activeCall.convId === selCallChannel.id
-  // `activeCall` continua preenchido com fase `ended`/`failed` até o cleanup.
-  // Usar o objeto cru mantinha "Já existe uma chamada" e o painel lateral
-  // presos depois de sair — a UI agora pergunta se a chamada está VIVA.
   const callViva = callIsActive(activeCall)
   const canalDaChamada = useMemo(
     () => parseVoiceCallId(activeCall?.callId, activeCall?.convId),
@@ -1431,9 +1033,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     widthPx: viewportWidth,
   })
   const inCallHere = inThisCall
-  // O painel da chamada não pode esmagar a conversa: a largura é resolvida em
-  // px e nunca come a coluna abaixo do mínimo legível (era o composer com uma
-  // letra por linha). Quando não cabe ao lado, ele sobrepõe.
   const callDock = resolveCallDock({
     hasActiveCall: callViva,
     inThisCall: inCallHere,
@@ -1443,17 +1042,12 @@ export default function ThemeShell({ designId }: {designId:string}){
   })
   const painelLateralVisivel = callDock.panelVisible
   const painelChamadaVisivel = painelLateralVisivel && !callPanelHidden
-  // Esconder o painel não pode ser um beco sem saída: com a chamada viva e o
-  // painel oculto, a barra do canal oferece "chamada" para reabrir.
   const reabrirChamada = callViva && !inThisCall && !painelChamadaVisivel
   useEffect(() => {
-    // Sem chamada ativa o painel volta a aparecer na próxima; o "esconder" é
-    // só da sessão atual e não pode virar preferência escondida.
     if (!painelLateralVisivel) setCallPanelHidden(false)
   }, [painelLateralVisivel])
   const onlineFps = new Set(onlinePeers.map(p => p.fp))
   const groupMemberFps = useMemo<Set<string>>(() => {
-    // Seção 8: s
     const s = new Set<string>()
     for (const c of conversations) {
       if (c.kind !== 'group') continue
@@ -1487,8 +1081,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     setError(null)
     try {
       const conv = await services.dmOpen(p.fp.trim(), (p.nickname || p.fp).trim())
-      // Sem trocar de contexto, o composer acha que ainda está num canal e
-      // o envio vai por `sendChannelMessage` com o id da DM — falha silenciosa.
       setSelCommunity(null)
       setSelPeerFp(p.fp.trim())
       setSelConv(conv.id)
@@ -1620,7 +1212,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     e.preventDefault()
     if (!selConv) { setError('abra uma conversa antes de colar uma imagem'); return }
     for (const img of imagens) {
-      // Seção 9: original
       const original = dt.files && dt.files[img.fileIndex] ? dt.files[img.fileIndex] : null
       if (!original) continue
       const file = original.name === img.name && original.type === img.type
@@ -1785,7 +1376,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (!selConv) return
-      // Seção 10: mod
       const mod = e.ctrlKey || e.metaKey
       if (!mod) return
       const k = e.key.toLowerCase()
@@ -1903,9 +1493,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (!friendFpInput.trim()) return
     setError(null); setFriendSuccess(null)
     try {
-      // Aceita 12 hex (fingerprint) e TAMBÉM a chave pública de 64 hex, que é o
-      // que aparece em "copiar identidade". Recusar o formato longo fazia o
-      // usuário colar certo e receber "fingerprint deve ter 12 hex chars".
       const res: any = await services.friendRequest(friendFpInput.trim())
       setFriendFpInput('')
       if (res === 'sent' || res === undefined) setFriendSuccess('Solicitação enviada! Aguardando aceitação.')
@@ -1955,7 +1542,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch (e: any) { setError(String(e?.message ?? e)) }
   }
 
-  // Seção 11: closeServerModal
   function closeServerModal() {
     setShowCreateServer(false)
     setServerFlow('choose')
@@ -2119,7 +1705,6 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   const [showShortcuts, setShowShortcuts] = useState(false)
 
-  // Seção 12: useShortcuts
   useShortcuts({
     cmdk: () => setShowCmdK(true),
     search: () => setShowSearch(s => !s),
@@ -2165,8 +1750,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const updateGate = useUpdateGate(true)
 
   if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen />} /><UpdateOverlay api={updateGate} /></>)
-  if (phase === 'create') return <CreateAccount onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
-  if (phase === 'lock') return <LockScreen nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
+  if (phase === 'create') return <CreateAccount palette={authPalette} onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
+  if (phase === 'lock') return <LockScreen palette={authPalette} nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
 
   const railStyle: any = {
     width: 72, background: railBg, borderRight: `1px solid ${borderColor}`,
@@ -2196,8 +1781,6 @@ export default function ThemeShell({ designId }: {designId:string}){
       )
     }
     const hasPeers = count > 0
-    // `DISCONNECTED` com peers conhecidos NÃO é online: é exatamente o caso de
-    // rota morta que a pílula verde escondia. Só `CONNECTED` pinta de verde.
     const online = hasPeers && state === 'CONNECTED'
     const color = online ? t.green : state === 'DISCONNECTED' ? '#80848e' : t.yellow
     const label = online ? 'ONLINE' : stateLabel[state as NetworkState]
@@ -2285,7 +1868,6 @@ export default function ThemeShell({ designId }: {designId:string}){
           </button>
         </div>
         {railMenu && (() => {
-          // Seção 13: sid
           const sid = railMenu.serverId
           const srv = communities.find(c => c.id === sid)
           const cur = folderOf(sid)
@@ -2392,9 +1974,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                               title="Abre a tela de bots em janela própria (só no desktop)"
                               onClick={() => {
                                 setServerMenuOpen(false)
-                                // Desktop abre janela separada; se a plataforma
-                                // não tiver (Android/navegador), cai na rota
-                                // `/bots` desta mesma janela.
                                 if (services.openBotsWindow) {
                                   services.openBotsWindow().catch(() => {
                                     window.location.assign('/bots')
@@ -2466,7 +2045,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                                       if (callActionBusy) return
                                       if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
                                       setCallActionBusy(true)
-                                      // Seção 14: estouNesteCanal
                                       const estouNesteCanal = canalDaChamada?.channelId === ch.id
                                       if (estouNesteCanal) {
                                         try {
@@ -2565,10 +2143,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                       <Section variant="desktop" title={`ONLINE — ${vinculados.length}`} maxVisible={8}>
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
-                          // Elegível = amigo, mesmo grupo OU mesmo servidor.
-                          // O Rust aceita introdução de qualquer peer; a UI
-                          // não pode esconder o caminho para um membro do seu
-                          // próprio servidor.
                           const mesmoGrupo = groupMemberFps.has(p.fp)
                           const mesmoServidor = (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
                           const podeConversar = ehAmigo || mesmoGrupo || mesmoServidor
@@ -2913,7 +2487,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <div style={{ marginTop: 16 }}>
                       <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: muted, marginBottom: 8 }}>ENVIADAS ({pendingOut.length}) — aguardando aceitação</div>
                       {pendingOut.map(r => {
-                        // Seção 15: isQueued
                         const isQueued = !onlineFps.has(r.fp)
                         return (
                           <div key={r.fp} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, marginBottom: 6 }}>
@@ -3090,7 +2663,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <CallSettingsPanel
                   prefs={callMediaPrefsState}
                   onApply={async (patch) => {
-                    // Seção 16: aplicado
                     const aplicado = await callManager.applyMediaPrefs(patch)
                     setCallMediaPrefsState(aplicado)
                     return aplicado
@@ -3356,7 +2928,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                 )}
                 <textarea
                   ref={composerRef}
-                  // Seção 17: value
                   value={input}
                   onChange={e => { onComposerChange(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${Math.min(e.currentTarget.scrollHeight, 220)}px` }}
                   onKeyDown={handleComposerKeyDown}
@@ -3521,7 +3092,6 @@ export default function ThemeShell({ designId }: {designId:string}){
           await refreshCommunities()
           setSelCommunity(id)
           setView('servidores')
-          // Seção 18: list
           const list = await services.communitiesList().catch(() => [] as CommunityView[])
           const c = (list ?? []).find((x) => x.id === id)
           setSelConv(c?.channels[0]?.[0] ?? null)
@@ -3691,9 +3261,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                     name: info.name,
                     avatar: info.avatar,
                   })
-                  // `perms` do bot.json é um PEDIDO, não uma concessão: sem
-                  // querer o dono não dá poder de moderação ao importar. O
-                  // painel mostra o que o bot pediu na aba Permissões.
                   await services.botUpdate(selCommunity, id, { config: info.config })
                   refreshExtras(selCommunity)
                   return info.name
@@ -3808,7 +3375,6 @@ export default function ThemeShell({ designId }: {designId:string}){
             <CallSettingsPanel
               prefs={callMediaPrefsState}
               onApply={async (patch) => {
-                // Seção 19: aplicado
                 const aplicado = await callManager.applyMediaPrefs(patch)
                 setCallMediaPrefsState(aplicado)
                 return aplicado
@@ -4161,7 +3727,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={async () => {
                     try {
-                      // Seção 20: data
                       const data = await services.vaultExport()
                       const payload = JSON.stringify({ identity: data.identity, vault_blob: data.vault_blob })
                       await navigator.clipboard?.writeText?.(payload).catch(() => {})
@@ -4315,7 +3880,7 @@ export default function ThemeShell({ designId }: {designId:string}){
             </details>
 
             <label style={{ display: 'block', fontSize: 11, fontWeight: 700, letterSpacing: 1, marginTop: 16, color: muted }}>PRIVACIDADE</label>
-            <div onClick={() => { services.privacyGet().then(r => setPrivacyMode(r.mode)).catch(() => {}); setProxyPendingMode(null); void refreshPrivacyExtras(privacyMode); setShowPrivacyModal(true) }}
+            <div onClick={() => { services.privacyGet().then(r => setPrivacyMode(r.mode)).catch(() => {}); privacy.resetTransient(); void refreshPrivacyExtras(privacyMode); setShowPrivacyModal(true) }}
               style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 10, padding: '12px 14px', cursor: 'pointer' }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 13, color: text }}>Modo: {PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode} • {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'Proxy: Ativado' : 'Proxy: OFFLINE') : 'Proxy: Desativado'}</div>
@@ -4358,7 +3923,6 @@ export default function ThemeShell({ designId }: {designId:string}){
             <div style={{ fontSize: 12, color: muted, marginBottom: 12, lineHeight: 1.5 }}>Escolha como suas mensagens trafegam. Aplicado no motor em tempo real.</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
               {PRIVACY_MODES.map(pm => {
-                // Seção 21: active
                 const active = privacyMode === pm.mode
                 return (
                   <label key={pm.mode} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: active ? `${t.accent}14` : t.rail, border: `1px solid ${active ? t.accent : t.border}`, borderRadius: 10, padding: '10px 12px', cursor: 'pointer' }}
@@ -4401,7 +3965,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
                   <input
                     value={proxyAddr}
-                    onChange={e => { setProxyAddr(e.target.value); setProxyTestOk(null); setProxyTestErr(null) }}
+                    onChange={e => { setProxyAddr(e.target.value); privacy.resetTransient() }}
                     placeholder={proxyPendingMode === 'full' ? '127.0.0.1:9050' : 'ex.: 127.0.0.1:1080'}
                     spellCheck={false}
                     autoCapitalize="none"
@@ -4424,7 +3988,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={() => { setProxyPendingMode(null); setProxyTestOk(null); setProxyTestErr(null) }} style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, color: muted, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>Cancelar</button>
+                  <button onClick={() => privacy.resetTransient()} style={{ flex: 1, background: inputBg, border: `1px solid ${borderColor}`, color: muted, padding: 10, borderRadius: 8, fontWeight: 700, cursor: 'pointer', fontSize: 12 }}>Cancelar</button>
                   <button onClick={() => saveProxyAndActivate(proxyPendingMode)} disabled={!proxyAddr.trim()}
                     style={{ flex: 1, background: proxyTestOk != null ? t.green : '#3a3a3c', color: '#fff', border: 'none', padding: 10, borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 12 }}>
                     {proxyTestOk != null ? 'Ativar proxy' : 'Ativar sem teste'}
@@ -4523,5 +4087,4 @@ export default function ThemeShell({ designId }: {designId:string}){
       )}
     </div>
   )
-}
-// Seção 22: fim
+}
