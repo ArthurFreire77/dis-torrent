@@ -1,5 +1,81 @@
 # CHANGELOG
 
+## [1.1.63-pre-alpha] - 2026-11-06
+
+### Chamadas: renegociação que se recupera sozinha, tela de verdade e botão de entrar honesto
+
+**O problema.** O relato era "tem que desligar e ligar de novo para voltar ao
+normal" — e ao investigar apareceram **quatro** causas independentes, todas no
+mesmo lugar: o estado local mudava e o outro lado nunca ficava sabendo.
+
+**Causas e correções.**
+
+- **Direção já em `sendrecv` não gerava oferta.** `setCallVideoSending()` só
+  devolve `true` quando a direção muda; com a transceiver já enviando e
+  recebendo (o caso normal de quem já tem vídeo), `precisaOffer` ficava `false`
+  e nenhuma oferta saía, mesmo com track nova. Câmera e tela agora ofertam
+  também quando a track muda.
+- **Oferta perdida não tinha retry.** O retorno de `enviarOfferComRetry` era
+  ignorado em dois pontos. Entra a fila `renegociacaoPendente`, com espera
+  curta, teto de tentativas e cobertura do **glare** (o lado impolite reenvia a
+  própria offer em vez de só descartar a do peer).
+- **Answer adiantada era descartada.** Se ela chegava antes de o PC existir,
+  `handleAnswer` fazia `return`. Agora fica em `pendingAnswers` e é aplicada
+  quando a offer local é criada; a resposta duplicada reenvia a answer local,
+  com guarda de que é a **mesma** offer.
+- **Dedupe engolia a reoferta.** Se a answer se perdeu, quem esperava travava
+  para sempre. O dedupe agora reenvia a answer em vez de retornar seco.
+
+**Compartilhamento de tela.**
+
+- `startScreenShareNow` retornava em silêncio sem chamada: o botão parecia
+  morto. Agora devolve erro explícito.
+- O card da tela só aparecia depois de negociar com **todos** os pares; uma
+  falha escondia o compartilhamento inteiro. O `sharing` é emitido na hora.
+- Câmera e tela dividem a mesma m-line de vídeo, então o `mid` não as
+  distingue: quem distingue é o sinal `sharing`. Tratar todo segundo stream
+  como tela fazia a **câmera religada** virar card de tela.
+- Parar a tela agora solta o stream próprio, e a troca de fonte (tela↔câmera)
+  preserva a m-line e o card.
+- Vídeo remoto com trilha `muted` não renderiza mais o último quadro congelado.
+
+**Interface.**
+
+- Uma regra pura (`callUiState`) decide "posso entrar?". Antes **cinco**
+  lugares decidiam sozinhos olhando `activeCall` cru — que continua preenchido
+  com fase `ended` até o cleanup e travava o botão em "Já existe uma chamada".
+- Estado de carregamento real (`aria-busy`, "Entrando…"): duplo clique não
+  dispara duas entradas.
+- Reentrar no mesmo canal de voz é no-op (antes recriava PCs e duplicava áudio).
+- Lobby em coluna: os controles ficam ancorados fora da área que rola. Em
+  janela baixa eles saíam da tela junto com o conteúdo.
+- A pílula de controles ganhou `maxWidth`; o cabeçalho da conversa ganhou
+  `minWidth: 0` e rolagem horizontal, sem espremer o título.
+- O selo "Conectado sem mídia" passa a considerar a tela como mídia viva.
+- Painel lateral escondido ganhou botão "chamada" na barra para reabrir (antes
+  era um beco sem saída).
+
+**Celular.**
+
+- `MobileCallChannel` não tinha botão de compartilhar tela.
+- O `ScreenSharePicker` só era montado no `return` final do shell, mas a vista
+  de canal faz `return` antecipado: o clique só mudava estado e nada abria.
+
+**Testes.**
+
+- `tests/callUiState.test.ts` (22 casos) trava as regras acima.
+- `e2e/call-signaling-recovery.spec.ts` prova em WebRTC real: answer
+  adiantada aplicada, renegociação no meio sem travar, tela em stream próprio
+  com frames decodificados e tempo avançando, troca de fonte preservando a
+  m-line e parada da tela encerrando o vídeo remoto.
+- `e2e/call-layout-join.spec.ts` mede os controles em cinco resoluções (1600 a
+  820 px) e falha se algo sair da janela ou sobrepor o cabeçalho.
+
+**Limite honesto.** O caso de glare não é simulado no navegador: depois de
+`rollback`, o Chromium sem STUN fica em `gathering` com zero candidatos no lado
+polite — isso mede o engine, não o app. Esse caminho fica travado por contrato
+de código, não por e2e.
+
 ## [1.1.62-pre-alpha] - 2026-11-06
 
 ### Autenticidade de release: manifesto assinado 2-de-3, verificação entre peers e atualizador fail-closed
