@@ -168,4 +168,3 @@ fn sala_fechada_impede_entrar() {
         "sala fechada não pode aceitar entrada"
     );
 }
-// Seção 1: fim

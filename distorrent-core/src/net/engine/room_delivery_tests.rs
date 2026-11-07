@@ -3,7 +3,7 @@ use crate::protocol::SecureFrame;
 use crate::storage::Store;
 use std::sync::Arc;
 
-fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
+pub(super) fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = Keypair::generate();
@@ -11,7 +11,7 @@ fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     (e, dir)
 }
 
-fn grupo_com(a: &Arc<NetworkEngine>, b: &Arc<NetworkEngine>) -> String {
+pub(super) fn grupo_com(a: &Arc<NetworkEngine>, b: &Arc<NetworkEngine>) -> String {
     a.store
         .set_friend(&b.identity.fingerprint, "B", "accepted")
         .unwrap();
@@ -109,8 +109,6 @@ fn convidado_sair_nao_encerra_a_chamada_do_grupo() {
 
 #[test]
 fn convidado_sair_tira_ele_do_proprio_snapshot() {
-    // Relato de campo: "saio da chamada e o Entrar continua aparecendo".
-    // `leave_room` só agia para o host; quem entrou ficava na própria lista.
     let (host, _dh) = mk_engine("sala-snap-host");
     let (guest, _dg) = mk_engine("sala-snap-guest");
     let conv = grupo_com(&host, &guest);
@@ -235,7 +233,6 @@ fn membro_de_fora_nao_consegue_anunciar_na_conversa() {
     );
 }
 
-// Seção 1: test
 #[test]
 fn dm_anuncia_para_o_par_certo() {
     let (a, _da) = mk_engine("sala-dm-a");

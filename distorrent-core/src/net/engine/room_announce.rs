@@ -53,10 +53,6 @@ impl NetworkEngine {
 
     pub fn leave_room(&self, conv_id: &str) {
         let me = self.identity.fingerprint.clone();
-        // Sai da sala mesmo quando NÃO sou o host. Antes o early-return em
-        // `host_fp != me` deixava a minha entrada na lista (e o meu próprio
-        // registro local) viva para sempre — era o "sai da chamada e o botão
-        // Entrar continua aparecendo".
         let Some(room) = ({
             let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
             rooms.remove_member(conv_id, &me)
@@ -85,9 +81,6 @@ impl NetworkEngine {
             );
             return;
         }
-        // Ainda tem gente na chamada: a lista sem mim vai para todos e, se eu
-        // era o host, `remove_member` já passou o comando para quem ficou —
-        // senão a sala morreria no TTL de 35 s sem ninguém renovar.
         let atual = self
             .call_rooms
             .lock()
@@ -147,7 +140,6 @@ impl NetworkEngine {
             self.native_pair_begin(&room.call_id, fp);
         }
         for fp in &alvos {
-            // Seção 1: _
             let _ = self.store.join_call(&room.call_id, fp);
             self.queue_or_send_call_frame(
                 fp,
@@ -314,7 +306,6 @@ impl NetworkEngine {
         if conv_id.is_empty() {
             return;
         }
-        // Seção 2: membro
         let membro = self
             .store
             .list_group_members(conv_id)
@@ -340,10 +331,6 @@ impl NetworkEngine {
                 rooms.get(conv_id).is_some()
             };
             if existe {
-                // Aceita o fechamento de quem é host OU de quem está na sala:
-                // os dois lados podem ter aberto a MESMA sala (cada um se
-                // achando host), e recusar o "closed" do outro deixava o
-                // "Entrar" na conversa para sempre.
                 let pode_fechar = {
                     let rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
                     rooms

@@ -3,7 +3,7 @@ use crate::protocol::SecureFrame;
 use crate::storage::Store;
 use std::sync::Arc;
 
-fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
+pub(super) fn mk_engine(nick: &str) -> (Arc<NetworkEngine>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&dir.path().join("distorrent.db")).unwrap());
     let kp = Keypair::generate();

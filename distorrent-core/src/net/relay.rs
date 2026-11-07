@@ -6,6 +6,23 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+#[path = "relay_mqtt.rs"]
+mod relay_mqtt;
+pub use relay_diag::{check_relay_legs, check_relay_legs_via, proxy_online_test};
+pub use relay_mqtt::mqtt_pump;
+use relay_mqtt::sanitize_client_part;
+pub use relay_reasm::{chunk_frame, chunk_frame_opaque};
+pub use relay_socks::{forward_via_socks, move_spawn_tunnel};
+
+#[path = "relay_diag.rs"]
+mod relay_diag;
+
+#[path = "relay_socks.rs"]
+mod relay_socks;
+
+#[path = "relay_reasm.rs"]
+mod relay_reasm;
+
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -90,61 +107,6 @@ pub struct SocksTunnel {
     pub local_addr: std::net::SocketAddr,
 }
 
-impl SocksTunnel {
-    pub fn spawn(proxy: String, target_host: String, target_port: u16) -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback túnel");
-        let local_addr = listener.local_addr().expect("local_addr túnel");
-        let target = crate::net::socks5::SocksTarget::Host(target_host, target_port);
-        move_spawn_tunnel(listener, proxy, target);
-        Self { local_addr }
-    }
-}
-
-fn move_spawn_tunnel(
-    listener: std::net::TcpListener,
-    proxy: String,
-    target: crate::net::socks5::SocksTarget,
-) {
-    std::thread::spawn(move || loop {
-        match listener.accept() {
-            Ok((down, _)) => {
-                let (proxy, target) = (proxy.clone(), target.clone());
-                std::thread::spawn(move || {
-                    forward_via_socks(down, &proxy, &target).ok();
-                });
-            }
-            Err(_) => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    });
-}
-
-fn forward_via_socks(
-    down: std::net::TcpStream,
-    proxy: &str,
-    target: &crate::net::socks5::SocksTarget,
-) -> std::io::Result<()> {
-    let up = crate::net::socks5::socks5_connect_sync(proxy, target).map_err(|e| {
-        tracing::debug!(%proxy, "túnel socks: circuito não abriu ({e})");
-        std::io::Error::other(e.to_string())
-    })?;
-    down.set_nodelay(true).ok();
-    up.set_nodelay(true).ok();
-    let mut down_c = down.try_clone()?;
-    let mut up_c = up.try_clone()?;
-    let uplink = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut down_c, &mut up_c);
-    });
-    let mut down = down;
-    let mut up = up;
-    let _ = std::io::copy(&mut up, &mut down);
-    let _ = up.shutdown(std::net::Shutdown::Both);
-    let _ = down.shutdown(std::net::Shutdown::Both);
-    uplink.join().ok();
-    Ok(())
-}
-
 pub struct MqttRelay {
     host: String,
     port: u16,
@@ -163,144 +125,6 @@ struct MqttState {
     last_err: Option<String>,
     consec_errs: u32,
     wake: Arc<tokio::sync::Notify>,
-}
-
-fn sanitize_client_part(s: &str) -> String {
-    let mut out: String = s
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    while out.contains("--") {
-        out = out.replace("--", "-");
-    }
-    out.trim_matches('-').to_string()
-}
-
-// Seção 1: MqttRelay
-impl MqttRelay {
-    pub fn new(host: &str, port: u16) -> Self {
-        let stable = sanitize_client_part(host);
-        let short = stable.chars().take(24).collect::<String>();
-        Self::new_with_client_id(host, port, &format!("distorrent-{short}"))
-    }
-
-    pub fn new_with_client_id(host: &str, port: u16, client_id: &str) -> Self {
-        Self {
-            host: host.to_string(),
-            port,
-            client_id: client_id.to_string(),
-            shared: Arc::new(StdMutex::new(MqttState {
-                client: None,
-                eventloop: None,
-                pump: false,
-                subscribed: HashSet::new(),
-                inbox: HashMap::new(),
-                last_err: None,
-                consec_errs: 0,
-                wake: Arc::new(tokio::sync::Notify::new()),
-            })),
-            posts: Arc::new(AtomicU64::new(0)),
-            poll_hits: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    pub fn new_with_fp(host: &str, port: u16, fp: &str) -> Self {
-        let fp12: String = fp.chars().take(12).collect();
-        let short = sanitize_client_part(host)
-            .chars()
-            .take(16)
-            .collect::<String>();
-        Self::new_with_client_id(host, port, &format!("distorrent-{fp12}-{short}"))
-    }
-
-    fn ensure(&self) -> Option<rumqttc::AsyncClient> {
-        let mut st = self.shared.lock().unwrap_or_else(|e| e.into_inner());
-        if st.client.is_none() {
-            let mut opts =
-                rumqttc::MqttOptions::new(self.client_id.clone(), self.host.clone(), self.port);
-            opts.set_keep_alive(Duration::from_secs(10));
-            opts.set_clean_session(false);
-            let (client, eventloop) = rumqttc::AsyncClient::new(opts, 64);
-            st.client = Some(client);
-            st.eventloop = Some(eventloop);
-        }
-        let client = st.client.clone()?;
-        if !st.pump {
-            st.pump = true;
-            let shared = self.shared.clone();
-            let host = self.host.clone();
-            if let Some(eventloop) = st.eventloop.take() {
-                tokio::spawn(async move {
-                    mqtt_pump(eventloop, shared, &host).await;
-                });
-            }
-        }
-        Some(client)
-    }
-}
-
-async fn mqtt_pump(
-    mut eventloop: rumqttc::EventLoop,
-    shared: Arc<StdMutex<MqttState>>,
-    host: &str,
-) {
-    loop {
-        match eventloop.poll().await {
-            Ok(rumqttc::Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
-                let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
-                st.subscribed.clear();
-                st.consec_errs = 0;
-                st.last_err = None;
-            }
-            Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
-                if let Ok(text) = String::from_utf8(p.payload.to_vec()) {
-                    let wake = {
-                        let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
-                        let topic = p.topic.clone();
-                        let entry = st.inbox.entry(topic).or_default();
-                        if entry.len() < 512 {
-                            entry.push(text);
-                        } else if st.inbox.len() > 256 {
-                            if let Some((k, _)) = st
-                                .inbox
-                                .iter()
-                                .max_by_key(|(_, v)| v.len())
-                                .map(|(k, v)| (k.clone(), v.len()))
-                            {
-                                st.inbox.remove(&k);
-                            }
-                        }
-                        st.wake.clone()
-                    };
-                    wake.notify_one();
-                }
-            }
-            Ok(_) => {
-                shared.lock().unwrap_or_else(|e| e.into_inner()).consec_errs = 0;
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                tracing::debug!("relay mqtt ({host}) evento/reconexão: {msg}");
-                let base_ms: u64 = if msg.contains("NotAuthorized")
-                    || msg.contains("ServiceUnavailable")
-                    || msg.contains("BadUserNamePassword")
-                {
-                    5000
-                } else {
-                    500
-                };
-                let wait = {
-                    let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
-                    st.consec_errs = st.consec_errs.saturating_add(1);
-                    st.last_err = Some(short_err(&msg));
-                    let shift = st.consec_errs.min(6);
-                    (base_ms << shift).min(30_000)
-                };
-                tokio::time::sleep(Duration::from_millis(wait)).await;
-            }
-        }
-    }
 }
 
 impl RelayBackend for MqttRelay {
@@ -335,7 +159,6 @@ impl RelayBackend for MqttRelay {
             )
             .await
             .map_err(|_| {
-                // Seção 2: extra
                 let extra = leg_err();
                 DistorrentError::Protocol(if extra.is_empty() {
                     "relay mqtt publish timeout".into()
@@ -503,7 +326,6 @@ impl MultiRelay {
         })
     }
 
-    // Seção 3: proxied_routes_with_fp
     pub fn proxied_routes_with_fp(proxy: &str, fp: &str) -> Result<Self> {
         let (_, _) = crate::net::socks5::split_host_port(proxy)?;
         let mk = |host: &'static str, port: u16| {
@@ -665,7 +487,6 @@ impl PeerRelayBackend {
             .remove(&req_id);
         match tx {
             Some(tx) => {
-                // Seção 4: _
                 let _ = tx.send(bodies);
                 self.wake.notify_waiters();
                 true
@@ -796,189 +617,6 @@ pub struct RelayLegStatus {
     pub last_error: Option<String>,
 }
 
-pub async fn check_relay_legs() -> Vec<RelayLegStatus> {
-    check_relay_legs_via(None).await
-}
-
-pub async fn check_relay_legs_via(proxy: Option<&str>) -> Vec<RelayLegStatus> {
-    use std::time::{Duration, Instant};
-
-    let via = proxy.map(|p| format!(" via {p}")).unwrap_or_default();
-    let is_proxied = proxy.is_some();
-    let connect_timeout = if is_proxied {
-        Duration::from_secs(12)
-    } else {
-        Duration::from_secs(8)
-    };
-    let mqtt_hosts = [
-        ("mqtt broker.emqx.io:1883", "broker.emqx.io", 1883u16),
-        (
-            "mqtt test.mosquitto.org:1883",
-            "test.mosquitto.org",
-            1883u16,
-        ),
-        (
-            "mqtt broker.mqttdashboard.com:1883",
-            "broker.mqttdashboard.com",
-            1883u16,
-        ),
-        ("mqtt broker.hivemq.com:1883", "broker.hivemq.com", 1883u16),
-    ];
-    let mut out = Vec::new();
-    for (name, host, port) in mqtt_hosts {
-        let t0 = Instant::now();
-        let res = tokio::time::timeout(connect_timeout, async {
-            let stream = match proxy {
-                Some(p) => crate::net::socks5::socks5_connect(
-                    p,
-                    &crate::net::socks5::SocksTarget::Host(host.to_string(), port),
-                )
-                .await
-                .map_err(|e| e.to_string())?,
-                None => tokio::net::TcpStream::connect((host, port))
-                    .await
-                    .map_err(|e| e.to_string())?,
-            };
-            mqtt_connack(stream, host).await
-        })
-        .await;
-        match res {
-            Ok(Ok(())) => out.push(RelayLegStatus {
-                name: format!("{name}{via}"),
-                ok: true,
-                latency_ms: Some(t0.elapsed().as_millis() as u64),
-                last_error: None,
-            }),
-            Ok(Err(e)) => out.push(RelayLegStatus {
-                name: format!("{name}{via}"),
-                ok: false,
-                latency_ms: None,
-                last_error: Some(short_err(&e)),
-            }),
-            Err(_) => out.push(RelayLegStatus {
-                name: format!("{name}{via}"),
-                ok: false,
-                latency_ms: None,
-                last_error: Some(format!(
-                    "sem resposta em {}s{}",
-                    connect_timeout.as_secs(),
-                    if is_proxied {
-                        " (proxy/Tor inacessível, lento, ou broker sem CONNACK)"
-                    } else {
-                        " (porta TCP bloqueada no 4G/NAT, ou broker sem CONNACK)"
-                    }
-                )),
-            }),
-        }
-    }
-    out
-}
-
-// Seção 5: short_err
-fn short_err(s: &str) -> String {
-    let mut t = s.trim().replace('\n', " ");
-    if t.len() > 160 {
-        t.truncate(160);
-    }
-    t
-}
-
-async fn mqtt_connack<S>(mut stream: S, client_id_host: &str) -> std::result::Result<(), String>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let client_id = format!(
-        "distorrent-probe-{}-{}",
-        crate::identity::now_ms(),
-        client_id_host.replace('.', "-")
-    );
-    let host = client_id_host.as_bytes();
-    let cid = client_id.as_bytes();
-
-    let mut body = Vec::with_capacity(64 + cid.len());
-    body.extend_from_slice(&[0x00, 0x04, b'M', b'Q', b'T', b'T']);
-    body.push(0x04);
-    body.push(0x02);
-    body.extend_from_slice(&[0x00, 0x1e]);
-    body.extend_from_slice(&[(cid.len() >> 8) as u8, (cid.len() & 0xff) as u8]);
-    body.extend_from_slice(cid);
-    let _ = host;
-
-    let mut packet = vec![0x10u8];
-    let mut n = body.len();
-    loop {
-        let mut d = (n % 128) as u8;
-        n /= 128;
-        if n > 0 {
-            d |= 0x80;
-        }
-        packet.push(d);
-        if n == 0 {
-            break;
-        }
-    }
-    packet.extend_from_slice(&body);
-
-    stream
-        .write_all(&packet)
-        .await
-        .map_err(|e| format!("escrita CONNECT: {e}"))?;
-
-    let mut head = [0u8; 2];
-    stream
-        .read_exact(&mut head)
-        .await
-        .map_err(|e| format!("sem CONNACK: {e}"))?;
-    if head[0] != 0x20 {
-        return Err(format!("resposta inesperada do broker (0x{:02x})", head[0]));
-    }
-    let mut payload = vec![0u8; head[1] as usize];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .map_err(|e| format!("CONNACK incompleto: {e}"))?;
-    let rc = payload.get(1).copied().unwrap_or(0xff);
-    if rc != 0 {
-        return Err(format!("broker recusou a conexão (CONNACK rc={rc})"));
-    }
-    Ok(())
-}
-
-pub async fn proxy_online_test(proxy: &str) -> std::result::Result<u64, String> {
-    use std::time::Instant;
-    let t0 = Instant::now();
-    let brokers = [
-        ("broker.emqx.io", 1883u16),
-        ("test.mosquitto.org", 1883),
-        ("broker.hivemq.com", 1883),
-    ];
-    let (tx, mut rx) = mpsc::unbounded_channel::<std::result::Result<(), String>>();
-    for (host, port) in brokers {
-        let (tx, proxy) = (tx.clone(), proxy.to_string());
-        tokio::spawn(async move {
-            let r = crate::net::socks5::socks5_connect(
-                &proxy,
-                &crate::net::socks5::SocksTarget::Host(host.to_string(), port),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-            let _ = tx.send(r);
-        });
-    }
-    drop(tx);
-    let mut first_err = "proxy não respondeu".to_string();
-    while let Some(r) = rx.recv().await {
-        match r {
-            Ok(()) => return Ok(t0.elapsed().as_millis() as u64),
-            Err(e) => first_err = e,
-        }
-    }
-    Err(short_err(&first_err))
-}
-
 #[derive(Clone, Default)]
 pub struct MemRelay {
     hub: Arc<StdMutex<HashMap<String, Vec<String>>>>,
@@ -1045,212 +683,8 @@ impl RelayBackend for MemRelay {
     }
 }
 
-// Seção 6: chunk_frame
-pub fn chunk_frame(from: &str, to: &str, msg_id: &str, frame: &[u8]) -> Vec<String> {
-    if frame.is_empty() {
-        return Vec::new();
-    }
-    let b64 = B64.encode(frame);
-    if b64.len() <= RELAY_CHUNK_B64 {
-        let s = serde_json::to_string(&RelayEnvelope {
-            v: 1,
-            from: from.to_string(),
-            to: to.to_string(),
-            msg_id: msg_id.to_string(),
-            idx: 0,
-            total: 1,
-            data: b64,
-        })
-        .unwrap_or_default();
-        if s.is_empty() {
-            return Vec::new();
-        }
-        return vec![s];
-    }
-    let parts: Vec<&str> = b64
-        .as_bytes()
-        .chunks(RELAY_CHUNK_B64)
-        .map(|c| std::str::from_utf8(c).unwrap_or(""))
-        .collect();
-    let total = parts.len().max(1) as u32;
-    if parts.is_empty() {
-        return Vec::new();
-    }
-    parts
-        .into_iter()
-        .enumerate()
-        .map(|(i, data)| {
-            serde_json::to_string(&RelayEnvelope {
-                v: 1,
-                from: from.to_string(),
-                to: to.to_string(),
-                msg_id: msg_id.to_string(),
-                idx: i as u32,
-                total,
-                data: data.to_string(),
-            })
-            .unwrap_or_default()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-pub fn chunk_frame_opaque(frame: &[u8]) -> Vec<String> {
-    if frame.is_empty() {
-        return Vec::new();
-    }
-    let b64 = B64.encode(frame);
-    let rid = hex::encode(rand::random::<[u8; 16]>());
-    if b64.len() <= RELAY_CHUNK_B64 {
-        let s = serde_json::to_string(&OpaqueRelayEnvelope {
-            v: 1,
-            rid,
-            idx: 0,
-            total: 1,
-            data: b64,
-        })
-        .unwrap_or_default();
-        if s.is_empty() {
-            return Vec::new();
-        }
-        return vec![s];
-    }
-    let parts: Vec<&str> = b64
-        .as_bytes()
-        .chunks(RELAY_CHUNK_B64)
-        .map(|c| std::str::from_utf8(c).unwrap_or(""))
-        .collect();
-    let total = parts.len().max(1) as u32;
-    if parts.is_empty() {
-        return Vec::new();
-    }
-    parts
-        .into_iter()
-        .enumerate()
-        .map(|(i, data)| {
-            serde_json::to_string(&OpaqueRelayEnvelope {
-                v: 1,
-                rid: rid.clone(),
-                idx: i as u32,
-                total,
-                data: data.to_string(),
-            })
-            .unwrap_or_default()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 pub struct Reassembler {
     pending: HashMap<String, Vec<Option<String>>>,
-}
-
-impl Reassembler {
-    pub fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-        }
-    }
-
-    pub fn feed(&mut self, my_fp: &str, raw: &str) -> Option<(String, Vec<u8>)> {
-        if let Ok(env) = serde_json::from_str::<RelayEnvelope>(raw) {
-            return self.feed_classic(my_fp, env);
-        }
-        let env: OpaqueRelayEnvelope = serde_json::from_str(raw).ok()?;
-        self.feed_opaque(env)
-    }
-
-    fn feed_classic(&mut self, my_fp: &str, env: RelayEnvelope) -> Option<(String, Vec<u8>)> {
-        if env.v != 1 || env.to != my_fp {
-            return None;
-        }
-        if env.from.len() > 64 || env.msg_id.len() > 64 || env.total == 0 || env.total > 512 {
-            return None;
-        }
-        if env.idx >= env.total || env.data.len() > RELAY_CHUNK_B64 + 64 {
-            return None;
-        }
-        if env.total == 1 {
-            if env.idx != 0 {
-                return None;
-            }
-            let bytes = B64.decode(env.data.as_bytes()).ok()?;
-            if bytes.len() > RELAY_MAX_FRAME || bytes.len() < 4 {
-                return None;
-            }
-            return Some((env.from, bytes));
-        }
-        if self.pending.len() > 256 {
-            self.pending.clear();
-        }
-        let key = format!("{}:{}", env.from, env.msg_id);
-        let slot = self
-            .pending
-            .entry(key)
-            .or_insert_with(|| vec![None; env.total as usize]);
-        if slot.len() != env.total as usize {
-            return None;
-        }
-        slot[env.idx as usize] = Some(env.data.clone());
-        if slot.iter().all(|p| p.is_some()) {
-            let b64: String = slot.iter().flatten().cloned().collect();
-            self.pending.remove(&format!("{}:{}", env.from, env.msg_id));
-            let bytes = B64.decode(b64.as_bytes()).ok()?;
-            if bytes.len() > RELAY_MAX_FRAME || bytes.len() < 4 {
-                return None;
-            }
-            return Some((env.from, bytes));
-        }
-        None
-    }
-
-    // Seção 7: feed_opaque
-    fn feed_opaque(&mut self, env: OpaqueRelayEnvelope) -> Option<(String, Vec<u8>)> {
-        if env.v != 1 || env.rid.len() > 64 || env.total == 0 || env.total > 512 {
-            return None;
-        }
-        if env.idx >= env.total || env.data.len() > RELAY_CHUNK_B64 + 64 {
-            return None;
-        }
-        if env.total == 1 {
-            if env.idx != 0 {
-                return None;
-            }
-            let bytes = B64.decode(env.data.as_bytes()).ok()?;
-            if bytes.len() > RELAY_MAX_FRAME || bytes.len() < 4 {
-                return None;
-            }
-            return Some((String::new(), bytes));
-        }
-        if self.pending.len() > 256 {
-            self.pending.clear();
-        }
-        let key = format!("o:{}", env.rid);
-        let slot = self
-            .pending
-            .entry(key)
-            .or_insert_with(|| vec![None; env.total as usize]);
-        if slot.len() != env.total as usize {
-            return None;
-        }
-        slot[env.idx as usize] = Some(env.data.clone());
-        if slot.iter().all(|p| p.is_some()) {
-            let b64: String = slot.iter().flatten().cloned().collect();
-            self.pending.remove(&format!("o:{}", env.rid));
-            let bytes = B64.decode(b64.as_bytes()).ok()?;
-            if bytes.len() > RELAY_MAX_FRAME || bytes.len() < 4 {
-                return None;
-            }
-            return Some((String::new(), bytes));
-        }
-        None
-    }
-}
-
-impl Default for Reassembler {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 pub struct RelayStream {
@@ -1259,46 +693,6 @@ pub struct RelayStream {
     read_buf: Vec<u8>,
     read_pos: usize,
     write_buf: Vec<u8>,
-}
-
-impl RelayStream {
-    pub fn new(
-        inbound: mpsc::UnboundedReceiver<Vec<u8>>,
-        outbound: mpsc::UnboundedSender<Vec<u8>>,
-    ) -> Self {
-        Self {
-            inbound,
-            outbound,
-            read_buf: Vec::new(),
-            read_pos: 0,
-            write_buf: Vec::new(),
-        }
-    }
-
-    fn flush_frames(&mut self) -> std::io::Result<()> {
-        loop {
-            if self.write_buf.len() < 4 {
-                break;
-            }
-            let len = u32::from_be_bytes([
-                self.write_buf[0],
-                self.write_buf[1],
-                self.write_buf[2],
-                self.write_buf[3],
-            ]) as usize;
-            if len > (1 << 20) {
-                return Err(std::io::Error::other("frame gigante no relay"));
-            }
-            if self.write_buf.len() < 4 + len {
-                break;
-            }
-            let frame: Vec<u8> = self.write_buf.drain(..4 + len).collect();
-            self.outbound
-                .send(frame)
-                .map_err(|_| std::io::Error::other("relay fechado"))?;
-        }
-        Ok(())
-    }
 }
 
 impl AsyncRead for RelayStream {
@@ -1382,7 +776,6 @@ pub async fn relay_post_loop(
     }
 }
 
-// Seção 8: cfg
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1555,7 +948,6 @@ mod tests {
         assert_eq!(bytes, prefixed);
     }
 
-    // Seção 9: tokio
     #[tokio::test]
     async fn mqtt_poll_isola_topicos() {
         let r = MqttRelay::new("127.0.0.1", 1883);
@@ -1622,7 +1014,7 @@ mod tests {
             }
         });
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let r = super::mqtt_connack(stream, "127.0.0.1").await;
+        let r = relay_mqtt::mqtt_connack(stream, "127.0.0.1").await;
         assert!(r.is_err(), "lixo na resposta não pode passar como perna OK");
         let _ = srv.await;
     }
@@ -1670,7 +1062,7 @@ mod tests {
             }
         });
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let err = super::mqtt_connack(stream, "127.0.0.1")
+        let err = relay_mqtt::mqtt_connack(stream, "127.0.0.1")
             .await
             .expect_err("rc=5 deve ser recusa");
         assert!(err.contains("rc=5"), "erro deve citar o código: {err}");
@@ -1691,7 +1083,7 @@ mod tests {
             }
         });
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        super::mqtt_connack(stream, "127.0.0.1")
+        relay_mqtt::mqtt_connack(stream, "127.0.0.1")
             .await
             .expect("rc=0 é conexão aceita");
         let _ = srv.await;

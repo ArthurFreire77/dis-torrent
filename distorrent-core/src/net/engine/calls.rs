@@ -1,0 +1,164 @@
+// Metodos de NetworkEngine: calls.
+// Arquivo irmao de engine.rs; o impl e o mesmo tipo, entao campos privados
+// continuam acessiveis. Declarado por #[path] para herdar o mesmo modulo.
+
+use super::*;
+
+impl NetworkEngine {
+    pub fn call_invite(self: &Arc<Self>, target_fp: &str, kind: &str) -> Result<String> {
+        let short = self
+            .identity
+            .fingerprint
+            .get(..6)
+            .unwrap_or(&self.identity.fingerprint)
+            .to_string();
+        let call_id = format!("call-{short}-{}", crate::identity::now_ms());
+        self.store
+            .create_call(&call_id, kind, target_fp, &self.identity.fingerprint)?;
+        let _ = self.store.join_call(&call_id, &self.identity.fingerprint);
+        self.queue_or_send_call_frame(
+            target_fp,
+            SecureFrame::CallInvite {
+                call_id: call_id.clone(),
+                kind: kind.into(),
+                target_fp: target_fp.into(),
+            },
+        );
+        #[cfg(target_os = "linux")]
+        {
+            self.voice_rearm();
+            self.voice_retry_mic();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(sdp) = self.voice_begin_offer(&call_id, target_fp)? {
+            self.call_signal(
+                target_fp,
+                SecureFrame::CallOffer {
+                    call_id: call_id.clone(),
+                    sdp,
+                },
+            )?;
+        }
+        Ok(call_id)
+    }
+
+    pub fn call_ring_retry(&self, call_id: &str, target_fp: &str, kind: &str) -> Result<()> {
+        if call_id.trim().is_empty() || target_fp.trim().is_empty() {
+            return Err(DistorrentError::Protocol("call_id/alvo vazios".into()));
+        }
+        self.queue_or_send_call_frame(
+            target_fp,
+            SecureFrame::CallInvite {
+                call_id: call_id.into(),
+                kind: kind.into(),
+                target_fp: target_fp.into(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn call_accept(self: &Arc<Self>, call_id: &str, from_fp: &str) -> Result<()> {
+        self.store.join_call(call_id, &self.identity.fingerprint)?;
+        self.store.join_call(call_id, from_fp)?;
+        #[cfg(target_os = "linux")]
+        self.voice_register(call_id, from_fp);
+        self.queue_or_send_call_frame(
+            from_fp,
+            SecureFrame::CallAccept {
+                call_id: call_id.into(),
+            },
+        );
+        #[cfg(target_os = "linux")]
+        {
+            self.voice_rearm();
+            self.voice_retry_mic();
+        }
+        #[cfg(target_os = "linux")]
+        let _ = self.events.send(EngineEvent::CallAcceptedEv {
+            call_id: call_id.into(),
+            from_fp: self.identity.fingerprint.clone(),
+        });
+        Ok(())
+    }
+
+    pub fn call_reject(&self, call_id: &str, from_fp: &str, reason: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.forget_held_call(call_id);
+        self.queue_or_send_call_frame(
+            from_fp,
+            SecureFrame::CallReject {
+                call_id: call_id.into(),
+                reason: reason.into(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn call_end(&self, call_id: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        self.forget_held_call(call_id);
+        let participants = self.store.call_participants(call_id).unwrap_or_default();
+        for fp in participants {
+            if fp == self.identity.fingerprint {
+                continue;
+            }
+            self.queue_or_send_call_frame(
+                &fp,
+                SecureFrame::CallEnd {
+                    call_id: call_id.into(),
+                },
+            );
+        }
+        self.store.end_call(call_id)?;
+        #[cfg(target_os = "linux")]
+        self.voice_hangup(call_id);
+        let _ = self.events.send(EngineEvent::CallEnded {
+            call_id: call_id.into(),
+            from_fp: self.identity.fingerprint.clone(),
+        });
+        Ok(())
+    }
+
+    pub fn call_signal(&self, target_fp: &str, frame: SecureFrame) -> Result<()> {
+        self.queue_or_send_call_frame(target_fp, frame);
+        Ok(())
+    }
+
+    pub fn call_add_participant(
+        self: &Arc<Self>,
+        target_fp: &str,
+        call_id: &str,
+        fp: &str,
+        kind: &str,
+    ) -> Result<()> {
+        let call_id = call_id.trim();
+        let fp = fp.trim();
+        if call_id.is_empty() || fp.is_empty() {
+            return Err(DistorrentError::Protocol("call_id/fp vazios".into()));
+        }
+        let kind = crate::names::sanitize_text(kind.trim(), 16);
+        let _ = self.store.join_call(call_id, fp);
+        let _ = self.store.join_call(call_id, target_fp);
+        #[cfg(target_os = "linux")]
+        if self.voice_register(call_id, target_fp) && self.voice_register(call_id, fp) {
+            if let Some(sdp) = self.voice_begin_offer(call_id, target_fp)? {
+                self.call_signal(
+                    target_fp,
+                    SecureFrame::CallOffer {
+                        call_id: call_id.into(),
+                        sdp,
+                    },
+                )?;
+            }
+        }
+        self.queue_or_send_call_frame(
+            target_fp,
+            SecureFrame::CallAddParticipant {
+                call_id: call_id.into(),
+                fp: fp.into(),
+                kind,
+            },
+        );
+        Ok(())
+    }
+}
