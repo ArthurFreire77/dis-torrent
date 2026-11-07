@@ -168,7 +168,6 @@ impl Metrics {
 }
 
 #[cfg(test)]
-// Seção 1: tests
 mod tests {
     use super::*;
 

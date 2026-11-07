@@ -159,7 +159,6 @@ impl MdnsDiscovery {
             }
         };
 
-        // Seção 1: own_fp
         let own_fp = fp.clone();
         let allowed_b = allowed.clone();
         if let Err(e) = std::thread::Builder::new()

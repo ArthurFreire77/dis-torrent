@@ -512,4 +512,3 @@ mod tests {
         assert!(!r.is_shadow_banned("fpY"));
     }
 }
-// Seção 1: fim

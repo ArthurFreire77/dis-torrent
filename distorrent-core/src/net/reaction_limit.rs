@@ -163,7 +163,6 @@ impl ReactionLimiter {
         Ok(())
     }
 
-    // Seção 1: prune
     fn prune(&mut self, now: Instant) {
         if now.saturating_duration_since(self.last_prune) < PRUNE_INTERVAL {
             return;

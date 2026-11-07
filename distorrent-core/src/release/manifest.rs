@@ -89,8 +89,6 @@ impl ManifestAsset {
         if !valid_https_url(&self.url) {
             return Err(err("URL do asset precisa ser https"));
         }
-        // Tamanho zero não é release válida e 4 GiB é teto de sanidade para
-        // qualquer instalador deste projeto; acima disso é manifesto forjado.
         if self.size == 0 || self.size > 4 * 1024 * 1024 * 1024 {
             return Err(err("tamanho de asset fora da faixa"));
         }
@@ -162,8 +160,6 @@ impl ManifestBody {
         for a in &self.assets {
             a.validate()?;
         }
-        // Listas ordenadas e sem repetição são parte da forma canônica: duas
-        // codificações do mesmo conteúdo assinariam hashes diferentes.
         for list in [&self.revoked_versions, &self.revoked_key_ids] {
             if !is_sorted_unique(list) {
                 return Err(err("lista de revogação fora de ordem"));
@@ -215,8 +211,6 @@ impl ManifestBody {
         }
         let body = Dec::new(bytes).body()?;
         body.validate()?;
-        // Fecha a porta para qualquer divergência entre "o que leu" e "o que
-        // assinou": só a forma canônica exata é aceita.
         if body.canonical_bytes()? != bytes {
             return Err(err("manifesto não está na forma canônica"));
         }
@@ -278,8 +272,6 @@ impl SignedManifest {
     /// sendo exatamente o encoding canônico que foi assinado.
     pub fn to_wire(&self) -> Result<Vec<u8>> {
         let body = self.body.canonical_bytes()?;
-        // Zero assinatura não é release: um manifesto não assinado não pode
-        // nem circular (o receptor recusaria de qualquer forma).
         if self.signatures.is_empty() || self.signatures.len() > MAX_SIGNATURES {
             return Err(err("quantidade de assinaturas fora da faixa"));
         }
@@ -325,10 +317,6 @@ impl SignedManifest {
 fn err(msg: &str) -> DistorrentError {
     DistorrentError::Protocol(format!("release: {msg}"))
 }
-
-// ---------------------------------------------------------------------------
-// Encoding primitivo
-// ---------------------------------------------------------------------------
 
 struct Enc {
     out: Vec<u8>,
@@ -523,8 +511,6 @@ mod tests {
         let mut b = body();
         b.assets.reverse();
         assert!(b.canonical_bytes().is_err());
-        // O `validate` sozinho não ordena, mas `canonical_bytes` rejeita; a
-        // forma canônica é o que a assinatura cobre.
         assert!(b.validate().is_err());
     }
 

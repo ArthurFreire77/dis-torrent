@@ -24,9 +24,6 @@ pub const RELAY_HANDSHAKE_TOTAL_TIMEOUT: Duration = Duration::from_secs(80);
 const RELAY_EARLY_STASH_CAP: usize = 4 << 20;
 
 pub const SESSION_REORDER_WINDOW: u64 = 256;
-// Espera por um nonce que falta. 4 s congelavam o read loop inteiro (todas as
-// classes de frame) a cada perda/duplicata no relay; 800 ms é o bastante para
-// reordenação real e devolve o link em menos de um segundo.
 pub const SESSION_GAP_TIMEOUT: Duration = Duration::from_millis(800);
 
 async fn write_frame(w: &mut (dyn AsyncWrite + Unpin + Send), bytes: &[u8]) -> Result<()> {
@@ -174,7 +171,6 @@ pub struct SessionReader {
     gap_since: Option<Instant>,
 }
 
-// Seção 1: Session
 impl Session {
     fn new(
         read: Box<dyn AsyncRead + Unpin + Send>,
@@ -331,7 +327,6 @@ impl SessionReader {
                         self.counter += 1;
                         self.gap_since = None;
                         let size = pt.len();
-                        // Seção 2: v
                         let v = serde_json::from_slice(&pt).map_err(|e| {
                             DistorrentError::Protocol(format!("json inválido: {e}"))
                         })?;
@@ -511,7 +506,6 @@ where
                 }),
             )
             .await?;
-            // Seção 3: key
             let key = session_key(&eph, &ack.eph_pub, &nonce, &ack.nonce)?;
             let th = transcript_hex(&transcript);
             Ok((ack, key, th))
@@ -682,7 +676,6 @@ where
                             return Err(e);
                         }
                         if my_fp.as_str() > peer_hello.fp.as_str() {
-                            // Seção 4: transcript
                             let transcript = handshake_transcript(
                                 &peer_hello.fp,
                                 &peer_hello.eph_pub,
@@ -836,7 +829,6 @@ where
         send_json(&mut write, &HandshakeFrame::HelloAck(ack.clone())).await?;
         let deadline = tokio::time::Instant::now() + RELAY_HANDSHAKE_TOTAL_TIMEOUT;
         loop {
-            // Seção 5: now
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 return Err(DistorrentError::Protocol(

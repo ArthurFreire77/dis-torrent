@@ -170,7 +170,6 @@ class CallNotificationPlugin(private val activity: android.app.Activity) : Plugi
     ).build()
   }
 
-  // Seção 1: applicationInfoCompatIcon
   private fun applicationInfoCompatIcon(): Int = activity.applicationInfo.icon
 
   companion object {

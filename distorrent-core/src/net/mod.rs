@@ -1,8 +1,6 @@
-pub mod call_room;
-// Música do bot depende do `AudioHub`, que só existe na mídia nativa Linux.
-// No Windows/Android o áudio da chamada é da WebView, não do core.
 #[cfg(target_os = "linux")]
 pub mod bot_audio;
+pub mod call_room;
 pub mod dht;
 pub mod discovery;
 pub mod engine;

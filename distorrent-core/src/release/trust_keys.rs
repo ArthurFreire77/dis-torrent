@@ -36,8 +36,6 @@ mod tests {
 
     #[test]
     fn a_constante_nao_contem_segredo() {
-        // 32 bytes de segredo em hex = 64 caracteres hex contínuos; a linha da
-        // cerimônia tem pubkeys (64 hex) mas sempre precedidas de `key_id:`.
         assert!(!TRUST_SET_BOOTSTRAP.contains("PRIVATE"));
         // Nenhuma palavra-chave de segredo.
         let low = TRUST_SET_BOOTSTRAP.to_ascii_lowercase();

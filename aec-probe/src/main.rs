@@ -170,7 +170,6 @@ fn main() {
     println!("### 6. CUSTO DE CPU POR QUADRO (20 ms de audio a 48 kHz)\n");
     let casos: [(bool, &str); 2] = [(false, "sem AEC (pass-through)"), (true, "com AEC (filtro 200 ms)")];
     for (rot, rotulo) in casos.into_iter().collect::<Vec<_>>() {
-        // Seção 1: ring
         let ring = Arc::new(RefRing::new());
         let mut ec = EchoCanceller::new_opts(ring.clone(), rot, rot);
         let mut mic = vec![3000i16; FRAME_SAMPLES];

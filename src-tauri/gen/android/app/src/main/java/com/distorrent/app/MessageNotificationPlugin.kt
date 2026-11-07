@@ -166,4 +166,3 @@ class MessageNotificationPlugin(private val activity: android.app.Activity) : Pl
     }
   }
 }
-// Seção 1: fim

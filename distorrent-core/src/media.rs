@@ -156,7 +156,6 @@ pub fn strip_jpeg_metadata(jpeg: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-// Seção 1: strip_png_metadata
 pub fn strip_png_metadata(png: &[u8]) -> Result<Vec<u8>> {
     let magic: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
     if !png.starts_with(magic) || png.len() < magic.len() + 8 {
@@ -318,7 +317,6 @@ mod tests {
         }
     }
 
-    // Seção 2: test
     #[test]
     fn jar_e_script_sao_executaveis() {
         assert!(SniffedMime::JavaArchive.is_executable());

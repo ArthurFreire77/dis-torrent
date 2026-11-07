@@ -160,7 +160,6 @@ pub fn socks5_connect_sync(
         }
     }
     stream.write_all(&req).map_err(io)?;
-    // Seção 1: mut
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).map_err(io)?;
     if head[0] != VER {
@@ -324,7 +323,6 @@ pub(crate) mod mock_server {
         addr
     }
 
-    // Seção 2: serve
     async fn serve(mut client: TcpStream) -> std::io::Result<()> {
         let mut hdr = [0u8; 2];
         client.read_exact(&mut hdr).await?;

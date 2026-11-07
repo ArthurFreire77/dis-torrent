@@ -167,7 +167,6 @@ pub fn fit_relay_data(mut bodies: Vec<String>) -> Vec<String> {
     bodies
 }
 
-// Seção 1: GLOBAL
 static GLOBAL: OnceLock<PeerRelayBroker> = OnceLock::new();
 
 pub fn broker() -> &'static PeerRelayBroker {
@@ -331,7 +330,6 @@ mod tests {
 
     #[test]
     fn fit_relay_data_descarta_excedente() {
-        // Seção 2: b
         let b = PeerRelayBroker::new();
         let t = "distorrent_r_dono";
         for _ in 0..80 {

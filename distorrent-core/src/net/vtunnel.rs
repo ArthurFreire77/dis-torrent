@@ -169,7 +169,6 @@ impl TunnelSession {
         now_ms.saturating_sub(tx) > dead_ms
     }
 
-    // Seção 1: mark_rx
     fn mark_rx(&self, now_ms: i64) {
         self.last_rx_ms.store(now_ms, Ordering::SeqCst);
     }
@@ -332,7 +331,6 @@ impl TunnelReassembler {
         now_ms: i64,
     ) -> Option<Vec<u8>> {
         self.gc(now_ms);
-        // Seção 2: key
         let key = (fp.to_string(), id);
         if !self.entries.contains_key(&key) {
             if self.entries.len() >= 16 {
@@ -502,7 +500,6 @@ mod tests {
         assert!(!vivo.is_dead(crate::identity::now_ms() + DEAD * 5, GRACE, DEAD));
     }
 
-    // Seção 3: test
     #[test]
     fn tunel_ocioso_nao_e_derrubado_mas_mudo_e() {
         const GRACE: i64 = 8_000;

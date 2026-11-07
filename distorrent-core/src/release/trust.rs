@@ -478,8 +478,6 @@ pub fn verify_manifest(
             "versão revogada no manifesto",
         ));
     }
-    // Chave que assinou e está revogada pelo próprio manifesto: a assinatura
-    // não conta (o autor da release disse que aquela chave não vale mais).
     let effective_sigs: Vec<ManifestSignature> = signed
         .signatures
         .iter()
@@ -497,8 +495,6 @@ pub fn verify_manifest(
             "assinaturas válidas abaixo do limiar",
         ));
     }
-    // Piso de segurança: o maior entre o que este cliente já viu (rollback) e
-    // o declarado pela autoridade no manifesto (`min_security_epoch`).
     let piso = min_epoch_floor.max(body.min_security_epoch);
     if body.security_epoch < piso {
         return Ok(base(
@@ -731,8 +727,6 @@ pub(crate) mod tests {
 
     #[test]
     fn min_security_epoch_do_manifesto_bloqueia_versao_antiga() {
-        // Autoridade declara "nada abaixo da epoch 6 é aceito"; a release está
-        // na epoch 7, então passa.
         let f = fixture();
         let mut b = body();
         b.security_epoch = 7;
@@ -741,8 +735,6 @@ pub(crate) mod tests {
             .unwrap()
             .is_verified());
 
-        // Uma release antiga (epoch 5) legítima chega DEPOIS: cai pelo piso
-        // efetivo (6, vindo do manifesto anterior), mesmo com 2 assinaturas.
         let mut velho = body();
         velho.security_epoch = 5;
         velho.min_security_epoch = 1;
@@ -753,8 +745,6 @@ pub(crate) mod tests {
 
     #[test]
     fn chave_revogada_no_manifesto_nao_contribui_para_o_limiar() {
-        // Manifesto revoga a chave que assinou (0) e é assinado por 0+1:
-        // sobra só a assinatura da chave 1, abaixo do limiar.
         let f = fixture();
         let mut b = body();
         let revoked_id = TrustedKey::from_pubkey_hex(&f.keys[0].public_hex())

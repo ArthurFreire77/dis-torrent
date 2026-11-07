@@ -147,8 +147,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&dir.path().join("t.db")).unwrap());
         let rt = load(&store);
-        // Com a cerimônia executada, a verificação está disponível mesmo sem
-        // manifesto em cache. O que NÃO existe é veredito de release.
         assert!(rt.verification_available());
         assert!(rt.latest_verified().is_none());
         assert_eq!(rt.epoch_floor(), 0);

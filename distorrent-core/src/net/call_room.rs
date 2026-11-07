@@ -146,9 +146,6 @@ mod tests {
 
     #[test]
     fn convidado_sair_tira_ele_da_lista_sem_fechar_a_sala() {
-        // Relato de campo: sair da chamada e o botão "Entrar" continuava
-        // aparecendo. `leave_room` saía cedo quando quem saía não era host,
-        // então a lista continuava com ele para sempre.
         let mut r = Rooms::default();
         r.open(
             "call-1",
@@ -169,8 +166,6 @@ mod tests {
 
     #[test]
     fn sair_o_host_passa_o_comando_para_quem_ficou() {
-        // Sem a troca de host ninguém renova o anúncio e a sala morre no TTL
-        // com gente ainda dentro.
         let mut r = Rooms::default();
         r.open(
             "call-1",

@@ -101,8 +101,6 @@ impl ReleaseTrust {
             }
             cache.insert(hash.to_string(), v);
             if let Some(t) = &trust {
-                // Re-verifica no carregamento: cache adulterado no disco não
-                // vira confiança só porque está gravado.
                 if let Ok(vm) = verify_manifest(t, &signed, epoch_floor) {
                     if vm.is_verified()
                         && latest.as_ref().map_or(true, |l| {
@@ -195,10 +193,6 @@ impl ReleaseTrust {
             self.epoch_floor = vm.manifest.body.security_epoch;
             let _ = kv.set(KV_FLOOR, &self.epoch_floor.to_string());
         }
-        // O manifesto pode exigir um piso MAIOR que a própria epoch? Não —
-        // `min_security_epoch <= security_epoch` é validado. Mas ele pode
-        // elevar o piso de um cliente que estava atrás, e isso vale para
-        // releases futuras.
         if vm.manifest.body.min_security_epoch > self.epoch_floor {
             self.epoch_floor = vm.manifest.body.min_security_epoch;
             let _ = kv.set(KV_FLOOR, &self.epoch_floor.to_string());

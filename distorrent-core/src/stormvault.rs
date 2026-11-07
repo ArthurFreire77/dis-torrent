@@ -164,7 +164,6 @@ pub fn seal_with_password(data: &StormVaultData, password: &str) -> Result<Vec<u
 }
 
 pub fn seal_with_key(data: &StormVaultData, key: &[u8; 32]) -> Result<Vec<u8>> {
-    // Seção 1: mut
     let mut salt = [0u8; SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
     let derived = hkdf_expand(key, &salt);
@@ -331,7 +330,6 @@ fn open_payload(
         .map_err(|e| DistorrentError::Protocol(format!("conteúdo do cofre inválido: {e}")))
 }
 
-// Seção 2: verify_container_shape
 fn verify_container_shape(header: &StormVaultHeader, payload: &[u8]) -> Result<()> {
     if header.payload_len != payload.len() as u64 {
         return Err(DistorrentError::Protocol(
@@ -493,7 +491,6 @@ pub fn prune_backup_files(
 
 #[cfg(test)]
 mod tests {
-    // Seção 3: use
     use super::*;
     use crate::storage::Store;
 
@@ -660,7 +657,6 @@ mod tests {
         assert!(import_merge_only(&b, &data).is_err());
     }
 
-    // Seção 4: test
     #[test]
     fn export_sem_chave_nao_instala_em_device_limpo() {
         let a = seeded_store();

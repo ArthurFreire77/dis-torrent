@@ -1,19 +1,3 @@
-// Música do bot: PCM linear injetado no misturador local.
-//
-// ESCOPO, e o porquê: o `AudioHub` mistura os `inbox` no ALTO-FALANTE do PC do
-// dono (media_voice.rs, `fill` → `buf[pos + k] +=`). Isso entrega "o bot toca
-// som" de verdade, hoje, sem tocar na camada RTP.
-//
-// O que este módulo NÃO faz: mandar o som para os OUTROS participantes. Para
-// isso o PCM teria de entrar no `spawn_send_loop` (o track de saída de cada
-// peer), e esse caminho é o microfone — colocar música ali faria o bot soar
-// como se o dono estivesse tocando, e o AEC trataria a música como eco. Fica
-// declarado como não suportado em vez de fingir.
-//
-// Formato: PCM i16 mono a 48 kHz (o mesmo `SAMPLE_RATE` do hub). Qualquer
-// decodificação (MP3, Opus, stream) é do criador — o DisTorrent não embute
-// codec de mídia para bot.
-
 use std::sync::Arc;
 
 use super::media_voice::audio::{hub, PcmFrame, FRAME_SAMPLES};
@@ -59,8 +43,6 @@ impl MusicSink {
         let mut accepted = 0usize;
         let mut dropped = 0usize;
         for chunk in pcm.chunks(FRAME_SAMPLES) {
-            // Fila cheia: joga o MAIS VELHO fora. Descartar o mais novo faria a
-            // música travar no início e nunca alcançar o presente.
             while q.len() >= MAX_QUEUE_FRAMES {
                 q.pop_front();
                 dropped += 1;
@@ -87,8 +69,6 @@ impl MusicSink {
 
 impl Drop for MusicSink {
     fn drop(&mut self) {
-        // Sem isto o inbox fica no hub para sempre e o misturador continua
-        // iterando sobre uma fila morta a cada frame de 20 ms.
         hub().unregister_inbox(self.inbox_id);
     }
 }
@@ -139,8 +119,6 @@ mod tests {
 
     #[test]
     fn fila_tem_teto_e_descarta_o_mais_velho() {
-        // 250 frames de 20 ms = 5 s. Empurrar 300 frames tem de manter 250 e
-        // reportar 50 descartados; sem teto a memória cresce sem limite.
         let mut sink = open();
         let total = FRAME_SAMPLES * (MAX_QUEUE_FRAMES + 50);
         let (accepted, dropped) = sink.push_pcm(&vec![100i16; total]);

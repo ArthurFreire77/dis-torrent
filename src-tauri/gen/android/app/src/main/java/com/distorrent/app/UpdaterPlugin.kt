@@ -86,9 +86,6 @@ class UpdaterPlugin(private val activity: android.app.Activity) : Plugin(activit
         return
       }
 
-      // Continuidade de assinatura: um APK com outra chave é recusado AQUI,
-      // antes de qualquer intent. O Android também recusaria, mas o usuário
-      // veria "app não instalado" sem saber por quê.
       val atual = assinaturaInstalada()
       val novo = assinaturaDoApk(file)
       if (atual == null || novo == null || atual != novo) {
@@ -119,9 +116,6 @@ class UpdaterPlugin(private val activity: android.app.Activity) : Plugin(activit
       val uri = try {
         FileProvider.getUriForFile(activity, authority, file)
       } catch (e: Throwable) {
-        // Caminho fora dos roots do FileProvider: o installApk recebia um
-        // arquivo que o provider não conhece e a atualização morria com
-        // IllegalArgumentException sem dizer nada de útil.
         invoke.reject(
           "o APK foi baixado em $path, fora da pasta que o instalador pode ler — " +
             "baixe de novo pelo cartão de atualização (${e.message ?: e.javaClass.simpleName})",
@@ -139,8 +133,6 @@ class UpdaterPlugin(private val activity: android.app.Activity) : Plugin(activit
       out.put("aberto", true)
       invoke.resolve(out)
     } catch (e: Throwable) {
-      // Sem app que trate ACTION_VIEW o usuário não vê nada acontecer. O
-      // PackageInstaller é o caminho nativo do sistema e sempre existe.
       try {
         val packageUri = Uri.fromFile(File(path))
         val instalar = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {

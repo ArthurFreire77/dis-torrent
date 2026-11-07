@@ -189,7 +189,6 @@ pub enum SecureFrame {
         name: String,
         owner_fp: String,
         channels: Vec<crate::storage::ChannelMetaRow>,
-        // Seção 1: serde
         #[serde(default)]
         roles: Vec<crate::storage::RoleRow>,
         #[serde(default)]
@@ -358,7 +357,6 @@ pub enum SecureFrame {
         msg_id: String,
         emoji: String,
         add: bool,
-        // Seção 2: serde
         #[serde(default)]
         reactor_fp: String,
     },
@@ -536,7 +534,6 @@ pub fn make_invite_token(
     member_fp: &str,
     exp_ms: i64,
 ) -> String {
-    // Seção 3: use
     use std::fmt::Write as _;
     let msg = invite_sign_bytes(community_id, member_fp, exp_ms);
     let sig = host.sign(&msg);
@@ -704,7 +701,6 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// Seção 4: b64url_encode
 fn b64url_encode(data: &[u8]) -> String {
     b64_encode(data)
         .trim_end_matches('=')
@@ -876,7 +872,6 @@ mod tests {
         assert_eq!(esperado, parse_invite_token(&spaced).unwrap());
     }
 
-    // Seção 5: test
     #[test]
     fn invite_token_aceita_base64_padrao_antigo() {
         let host = Keypair::generate();

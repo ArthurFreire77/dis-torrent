@@ -160,7 +160,6 @@ pub fn sanitize_text(input: &str, max_chars: usize) -> String {
     collapsed.trim().to_string()
 }
 
-// Seção 1: escape_html
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -324,7 +323,6 @@ pub fn validate_name(
         errors.push("muito parecido com um nome existente (anti-spoof)".into());
     }
 
-    // Seção 2: ok
     let ok = errors.is_empty();
     let suggestions = if ok {
         vec![]
@@ -487,7 +485,6 @@ mod tests {
         assert_eq!(escape_html("<a>"), "&lt;a&gt;");
     }
 
-    // Seção 3: test
     #[test]
     fn blocklist_e_cargos() {
         let p = NamePolicy::for_kind(NameKind::User);

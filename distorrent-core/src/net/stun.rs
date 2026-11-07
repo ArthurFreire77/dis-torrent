@@ -163,7 +163,6 @@ fn parse_address_attrs(body: &[u8], txid: &[u8; 12]) -> Option<SocketAddr> {
     mapped
 }
 
-// Seção 1: Cache
 type Cache = StdMutex<Option<(Option<SocketAddr>, i64)>>;
 static STUN_CACHE: OnceLock<Cache> = OnceLock::new();
 
@@ -328,7 +327,6 @@ mod tests {
     }
 
     #[test]
-    // Seção 2: parse_rejeita_resposta_invalida
     fn parse_rejeita_resposta_invalida() {
         let txid = [0x01u8; 12];
         let value = xor_value_v4(Ipv4Addr::new(1, 2, 3, 4), 100);

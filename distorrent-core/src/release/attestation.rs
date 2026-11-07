@@ -347,8 +347,6 @@ pub fn verify_attestation(
             return out;
         }
     }
-    // 3. Replay de manifesto de outra versão: a claim e o manifesto precisam
-    //    concordar em TODOS os campos que o receptor vai usar.
     let Some(trust) = trust else {
         out.reason = "receptor sem chaves de confiança (verificação indisponível)".into();
         return out;
@@ -412,11 +410,6 @@ pub fn verify_attestation(
         out.reason = "o peer admite executável divergente do manifesto".into();
         return out;
     }
-    // Nenhum caminho promove para ATESTACAO_DE_HARDWARE: este build não produz
-    // prova de plataforma verificável, e aceitar a palavra do peer seria
-    // perguntar ao réu se ele é inocente. O estado máximo alcançável aqui é
-    // RELEASE_VERIFICADA — que já é honesto: procedência do artefato, e nada
-    // sobre o processo em execução.
     out.checked_at_ms = crate::identity::now_ms();
     out
 }
@@ -493,9 +486,6 @@ impl PeerPolicy {
             return Some("versão abaixo da epoch mínima de segurança");
         }
         if !verification_available {
-            // Sem raiz de confiança o cliente não pode afirmar que o outro é
-            // falso: bloqueia só se a política for a mais estrita E houver
-            // como verificar. Nunca "bloquear por não saber" em massa.
             return None;
         }
         match self {
@@ -577,8 +567,6 @@ mod tests {
 
     #[test]
     fn peer_que_se_declara_integro_nao_ganha_nada() {
-        // O atacante assina a própria claim dizendo CONFERE. Como ele não tem
-        // o manifesto assinado por 2-de-3, não passa de NAO_VERIFICADO.
         let f = fixture();
         let nonce = [8u8; 32];
         let t = "33".repeat(32);
@@ -600,9 +588,6 @@ mod tests {
 
     #[test]
     fn nunca_promove_para_atestacao_de_hardware_por_declaracao() {
-        // Mesmo com manifesto válido 2-de-3, o estado máximo é
-        // RELEASE_VERIFICADA: não existe campo no fio para o peer "provar"
-        // hardware, e o receptor não inventa um.
         let f = fixture();
         let nonce = [9u8; 32];
         let t = "44".repeat(32);

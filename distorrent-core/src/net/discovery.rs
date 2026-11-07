@@ -94,8 +94,6 @@ fn broadcast_targets() -> Vec<SocketAddrV4> {
             }
         }
     }
-    // Android: `if-addrs` não linka (bionic não tem `getifaddrs`). Usa a faixa
-    // /24 do endereço local, que cobre o caso real (Wi-Fi/4G privado).
     #[cfg(target_os = "android")]
     {
         if let Ok(ip) = local_ipv4() {
@@ -124,8 +122,6 @@ mod tests {
 
     #[test]
     fn broadcast_sai_da_mascara_e_nao_de_lista_fixa() {
-        // 192.168.100.2/24 -> .255 (a lista antiga cobria 0, 1 e 100; agora vale
-        // para QUALQUER faixa, inclusive a de uma escola atrás de CGNAT).
         let ip = Ipv4Addr::new(192, 168, 100, 2);
         let mask = Ipv4Addr::new(255, 255, 255, 0);
         assert_eq!(
@@ -157,8 +153,6 @@ mod tests {
         assert_eq!(ann.fp, "abc123");
         assert_eq!(ann.tcp_port, 12345);
         assert_eq!(ann.ts, 42);
-        // O que vai no fio e volta tem de ser o mesmo anúncio: é isso que
-        // permite responder em unicast sem esperar o tick de 2 s.
         let json = serde_json::to_vec(&ann).unwrap();
         let volta: Announcement = serde_json::from_slice(&json).unwrap();
         assert_eq!(volta.fp, ann.fp);
@@ -168,8 +162,6 @@ mod tests {
 
     #[tokio::test]
     async fn resposta_ao_anuncio_chega_em_milissegundos_nao_em_2s() {
-        // Prova do ganho: A anuncia em unicast para B; B responde na hora.
-        // Antes, B só responderia quando o tick de 2 s disparasse.
         let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let b = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let b_addr = b.local_addr().unwrap();
@@ -228,16 +220,12 @@ impl Discovery {
         let bound = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await {
             Ok(s) => s,
             Err(e) => {
-                // Sem a porta combinada não recebemos ninguém, mas continuamos
-                // anunciando: o outro lado ainda pode nos descobrir e discar.
                 warn!("porta {DISCOVERY_PORT} ocupada ({e}); usando porta efêmera");
                 UdpSocket::bind(("0.0.0.0", 0)).await?
             }
         };
         let socket = Arc::new(bound);
         socket.set_broadcast(true)?;
-        // Multicast além do broadcast: muitas redes de escola/hotel filtram
-        // broadcast de cliente para cliente, mas deixam multicast passar.
         if let Err(e) = socket.join_multicast_v4(DISCOVERY_GROUP, Ipv4Addr::UNSPECIFIED) {
             debug!("multicast de descoberta indisponível ({e}); seguindo só com broadcast");
         }
@@ -281,8 +269,6 @@ impl Discovery {
                         ("255.255.255.255".to_string(), DISCOVERY_PORT),
                         ("127.255.255.255".to_string(), DISCOVERY_PORT),
                     ];
-                    // Broadcast calculado da máscara de CADA interface; sem isto
-                    // o anúncio só saía para 192.168.0/1/100 e 10.0.0.
                     for b in broadcast_targets() {
                         targets.push((b.ip().to_string(), b.port()));
                     }
@@ -342,10 +328,6 @@ impl Discovery {
                                 nickname: ann.nickname,
                                 addr: SocketAddr::new(from.ip(), ann.tcp_port),
                             });
-                            // Responde em unicast para quem anunciou: o laço de
-                            // envio só fala de 2 em 2 s, então quem entrava
-                            // esperava até 2 s (e mais 2 s se o pacote caísse).
-                            // O limiter já limita 1/s por IP, então não vira eco.
                             if !ja_sou_eu {
                                 let ack = announcement(
                                     &self_fp,
@@ -371,4 +353,3 @@ impl Discovery {
         Ok(Self { local_addr })
     }
 }
-// Seção 1: fim

@@ -179,7 +179,6 @@ impl AuthLimiter {
             .saturating_sub(bucket.failures.len() as u32)
     }
 
-    // Seção 1: remaining_after
     pub fn remaining_after(&self, key: &str) -> u32 {
         self.remaining(key)
     }
@@ -351,7 +350,6 @@ mod tests {
         assert_eq!(w, Duration::from_secs(10), "voltou à pena base");
     }
 
-    // Seção 2: test
     #[test]
     fn sweep_remove_chaves_ociosas() {
         let l = lim();

@@ -164,7 +164,6 @@ impl NetworkEngine {
 }
 
 #[cfg(not(target_os = "linux"))]
-// Seção 1: NetworkEngine
 impl NetworkEngine {
     pub async fn resume_held_call(&self, _call_id: &str, _from_fp: &str) {}
 }

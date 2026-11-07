@@ -178,7 +178,6 @@ mod tests {
                 ((x >> 8) as f32 / 8_388_608.0) - 1.0
             })
             .collect();
-        // Seção 1: env
         let env: Vec<f32> = (0..n)
             .map(|i| {
                 let t = i as f64 / SAMPLE_RATE as f64;
@@ -348,7 +347,6 @@ mod tests {
             ec.rebuilt > 0,
             "o filtro deveria ter sido descartado apos referencia morta"
         );
-        // Seção 2: out
         let out = ec.process(&mic).to_vec();
         assert_eq!(out, mic);
     }

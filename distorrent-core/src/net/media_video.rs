@@ -177,7 +177,6 @@ pub fn new_camera(codec: VideoCodec, fps: u32) -> Result<VideoEncoder, String> {
             }
         }
     }
-    // Seção 1: mut
     let mut msg = format!(
         "nenhuma camera utilizavel ({} tentativas: {})",
         errs.len(),
@@ -337,7 +336,6 @@ impl VideoEncoder {
     }
 }
 
-// Seção 2: VideoEncoder
 impl VideoEncoder {
     pub fn push_screen_frame(&mut self, rgba: &[u8], w: u32, h: u32) -> Result<(), String> {
         if self.self_feeding {
@@ -502,7 +500,6 @@ impl VideoDecoder {
         Some((out, w, h))
     }
 
-    // Seção 3: stop
     pub fn stop(&mut self) {
         let _ = self.pipeline.set_state(gstreamer::State::Null);
     }

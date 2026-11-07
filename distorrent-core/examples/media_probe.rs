@@ -156,7 +156,6 @@ fn extra() {
             bytes += img.as_raw().len();
         }
     }
-    // Seção 1: el
     let el = t0.elapsed().as_secs_f64();
     println!(
         "XCAP capture_image puro: {ok} em {el:.1}s = {:.2} fps ({} bytes/frame)",

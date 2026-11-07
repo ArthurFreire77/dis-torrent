@@ -165,7 +165,6 @@ async fn respond_json(
     .await
 }
 
-// Seção 1: respond_raw
 async fn respond_raw(
     stream: &mut tokio::net::TcpStream,
     code: u16,
@@ -342,7 +341,6 @@ async fn main() {
     }
 }
 
-// Seção 2: resolve_peer
 fn resolve_peer(engine: &Arc<NetworkEngine>, who: &str) -> Option<String> {
     let peers = engine.peers();
     if let Some(p) = peers.iter().find(|p| p.fp == who) {

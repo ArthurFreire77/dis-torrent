@@ -167,7 +167,6 @@ impl DuplicateDetector {
     }
 }
 
-// Seção 1: malicious_domains
 pub fn malicious_domains() -> Vec<&'static str> {
     vec![
         "grabify.link",
@@ -331,7 +330,6 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
     n
 }
 
-// Seção 2: derive
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trust {
     New,
@@ -507,7 +505,6 @@ mod tests {
         .verify(0));
     }
 
-    // Seção 3: test
     #[test]
     fn reputacao_transicoes() {
         let mut r = Reputation::fresh();

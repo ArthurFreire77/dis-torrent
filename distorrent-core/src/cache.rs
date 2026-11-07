@@ -168,7 +168,6 @@ impl DiskLru {
             if idx.total <= cap {
                 break;
             }
-            // Seção 1: _
             let _ = std::fs::remove_file(self.dir.join(&name));
             if idx.sizes.remove(&name).is_some() {
                 idx.total = idx.total.saturating_sub(size);
