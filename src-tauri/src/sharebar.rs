@@ -167,7 +167,6 @@ mod imp {
         use super::*;
 
         const BAR_EX: u32 = 0x0020_0008;
-        // Seção 1: BAR_STYLE
         const BAR_STYLE: u32 = 0x1608_0000;
 
         #[test]

@@ -193,8 +193,6 @@ impl Plugins {
             return Err(format!("pasta do bot não existe: {dir}"));
         }
         let (prog, args) = split_command(run)?;
-        // O programa fica DENTRO da pasta do bot: `run` para fora transformaria
-        // "importar bot" em "executar qualquer coisa da máquina".
         let resolved = if std::path::Path::new(&prog).is_absolute() {
             prog.clone()
         } else {
@@ -212,8 +210,6 @@ impl Plugins {
             .current_dir(path)
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
-            // O app entrega a URL JÁ AUTENTICADA (com o segredo no caminho).
-            // O plugin não tem token para colar, guardar nem vazar.
             .env("DISTORRENT_BOT_URL", bridge_url)
             .env("DISTORRENT_BOT_PORT", port_of(bridge_url))
             .env("DISTORRENT_API", "distorrent-bot/1")
@@ -417,8 +413,6 @@ mod tests {
 
     #[test]
     fn saida_do_plugin_nunca_mostra_o_segredo_da_ponte() {
-        // O criador depura com `console.log(process.env)`; a URL autenticada
-        // inteira iria para o console do painel e para o banco.
         let url = "http://127.0.0.1:41234/b/9f2c0d3e4b5a69788796a5b4c3d2e1f0";
         let secret = secret_of(url).expect("segredo");
         assert_eq!(secret, "/b/9f2c0d3e4b5a69788796a5b4c3d2e1f0");

@@ -1,14 +1,3 @@
-// Diagnóstico e liberação do firewall do Windows.
-//
-// POR QUE EXISTE: sem regra de ENTRADA, o Windows descarta as conexões TCP e os
-// datagramas UDP de descoberta que chegam de outro PC. O sintoma relatado foi
-// exatamente esse: dois PCs na MESMA rede não se acham, mas o Discord conecta
-// (ele já tem a regra). Instalação por usuário (PrivilegesRequired=lowest) não
-// dispara o prompt "permitir acesso à rede", então a regra tem de existir.
-//
-// HONESTIDADE: `netsh` exige administrador para criar regra. Quando falha,
-// devolvemos o motivo real para a UI — nada de "liberado" falso.
-
 #[derive(Debug, serde::Serialize, Clone)]
 pub struct FirewallStatus {
     /// Existe regra de entrada liberando o executável atual.
@@ -65,8 +54,6 @@ fn rule_exists(program: &str) -> bool {
     };
     let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
     let alvo = program.to_lowercase();
-    // A saída vem em português OU inglês conforme o Windows; o caminho do
-    // programa aparece igual nos dois.
     text.contains(&alvo) && (text.contains("permitir") || text.contains("allow"))
 }
 
@@ -91,8 +78,6 @@ pub fn network_firewall_status() -> FirewallStatus {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // Linux/macOS: não há firewall por executável que dê para medir aqui.
-        // Não inventamos um estado.
         FirewallStatus {
             allowed: true,
             profile: "unknown".into(),
@@ -104,8 +89,6 @@ pub fn network_firewall_status() -> FirewallStatus {
 
 #[cfg(target_os = "windows")]
 fn netsh_tem_admin() -> bool {
-    // `net session` só responde para administrador. Perguntar primeiro evita
-    // pedir elevação à toa e permite gerar a receita de `RunAs` correta.
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::process::Command::new("net")
@@ -164,8 +147,6 @@ pub fn network_firewall_allow() -> FirewallStatus {
         let mut last_err: Option<String> = None;
         let admin = netsh_tem_admin();
         if !admin {
-            // Sem elevação o `netsh add` sempre falha. Mensagem honesta com o
-            // caminho que funciona sem UAC (a tela do Firewall do Windows).
             let status = network_firewall_status();
             return FirewallStatus {
                 reason: Some(

@@ -15,6 +15,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "botbridge_routes.rs"]
+mod botbridge_routes;
+use botbridge_routes::handle;
+
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -181,16 +185,12 @@ impl Bridge {
                 let _ = h.join();
             }
         }
-        // DROP do `Server` fecha o listener. Sem isso a porta segue aceitando
-        // conexão e o bot continuaria achando que o servidor está no ar.
         self.server.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 }
 
 /// Segredo da ponte: 128 bits em hex, do gerador do próprio core.
 fn secret_hex() -> String {
-    // `bot_create` já usa esse mesmo gerador para token; reaproveitar evita
-    // arrastar `rand`/`hex` como dependência nova no shell.
     distorrent_core::bots::random_secret(32)
 }
 
@@ -207,8 +207,6 @@ pub fn start(
 ) -> Result<Bridge, String> {
     let server = Server::http(("127.0.0.1", port))
         .map_err(|e| format!("não foi possível abrir 127.0.0.1:{port}: {e}"))?;
-    // `ListenAddr` tem variante `Unix` só no Unix: o catch-all cobre as duas
-    // plataformas sem deixar o match não-exaustivo no Linux.
     let real_port = match server.server_addr() {
         tiny_http::ListenAddr::IP(addr) => addr.port(),
         _ => return Err("a ponte só escuta em TCP loopback".to_string()),
@@ -240,8 +238,6 @@ pub fn start(
     let pump = std::thread::Builder::new()
         .name(format!("botbridge-pump-{bot_id}"))
         .spawn(move || {
-            // `blocking_recv` não acorda quando pedimos para parar: o laço vira
-            // polling curto, senão o `stop()` ficaria preso no join para sempre.
             while !pump_shared.stop.load(Ordering::Relaxed) {
                 match rx.try_recv() {
                     Ok(ev) => {
@@ -330,8 +326,6 @@ fn to_queued(cid: &str, bot_id: &str, ev: &EngineEvent) -> Option<(String, serde
     if !ev_cid.is_empty() && ev_cid != cid {
         return None;
     }
-    // A mensagem que o PRÓPRIO bot postou volta no stream. Sem este filtro o
-    // plugin que responde a `message_new` conversa consigo mesmo até o 429.
     let ev_bot = value.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
     if matches!(name, "message_new") && !ev_bot.is_empty() && ev_bot == bot_id {
         return None;
@@ -409,8 +403,6 @@ fn secret_matches(raw: &str, path: &str) -> bool {
     if diff != 0 {
         return false;
     }
-    // O que vem depois do segredo tem que ser fronteira de rota, e não parte
-    // de outro caminho que só começa igual.
     match a.get(b.len()) {
         None => true,
         Some(c) => *c == b'/' || *c == b'?',
@@ -451,496 +443,6 @@ fn read_json<T: for<'de> Deserialize<'de>>(req: &mut Request) -> Result<T, Strin
         return Err(format!("corpo grande demais (máx {MAX_BODY} bytes)"));
     }
     serde_json::from_slice(&buf).map_err(|e| format!("JSON inválido: {e}"))
-}
-
-fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<NetworkEngine>) {
-    shared.requests.fetch_add(1, Ordering::Relaxed);
-
-    // Um navegador manda `Origin` sempre; um programa local, nunca. Bloquear
-    // Origin é o que impede uma página aberta de falar com a ponte.
-    if header(&req, "origin").is_some() {
-        return respond(
-            req,
-            403,
-            serde_json::json!({"error": "origem de navegador não é aceita pela ponte local"}),
-        );
-    }
-    // Anti DNS-rebinding: o Host tem que ser o loopback desta porta.
-    let host_ok = header(&req, "host")
-        .map(|h| {
-            let h = h.to_ascii_lowercase();
-            h == format!("127.0.0.1:{}", shared.port) || h == format!("localhost:{}", shared.port)
-        })
-        .unwrap_or(false);
-    if !host_ok {
-        return respond(req, 421, serde_json::json!({"error": "Host inválido"}));
-    }
-    // Segredo no caminho: é a única credencial. Fica fora de qualquer log e é
-    // comparado em tempo constante. Sem ele, 404 (não confirma que existe).
-    let raw_url = req.url().to_string();
-    if !secret_matches(&raw_url, &shared.path) {
-        return respond(req, 404, serde_json::json!({"error": "rota inexistente"}));
-    }
-
-    // Remove o prefixo secreto: as rotas continuam `/v1/...`.
-    let rest_of_url = raw_url[shared.path.len()..].to_string();
-    let path = rest_of_url.split('?').next().unwrap_or("").to_string();
-    let query = rest_of_url
-        .split_once('?')
-        .map(|(_, q)| q.to_string())
-        .unwrap_or_default();
-    let method = req.method().clone();
-
-    // Três baldes: global (protege o processo), long-poll de eventos e escrita.
-    // Sem separar, um `/v1/events?wait=25000` em laço consumia o orçamento todo
-    // e o bot não conseguia postar nem pedir `/v1/stop`.
-    let per_route = if path == "/v1/events" {
-        RATE_EVENTS_PER_MIN
-    } else {
-        RATE_WRITE_PER_MIN
-    };
-    let route_bucket = if path == "/v1/events" {
-        &shared.window_events
-    } else {
-        &shared.window_write
-    };
-    if !rate_ok(&shared.window, RATE_PER_MIN) || !rate_ok(route_bucket, per_route) {
-        shared.dropped.fetch_add(1, Ordering::Relaxed);
-        return respond(
-            req,
-            429,
-            serde_json::json!({
-                "error": "limite de requisições por minuto",
-                "hint": "respeite o Retry-After e diminua a frequência",
-                "retry_after": 60,
-            }),
-        );
-    }
-
-    // `Idempotency-Key`: repetir o mesmo POST (retry de rede do plugin) não pode
-    // duplicar mensagem nem entrada de auditoria. Vale só para escrita.
-    let idem_key = if method == Method::Post {
-        header(&req, "idempotency-key")
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty() && k.len() <= 128)
-    } else {
-        None
-    };
-    if let Some(key) = &idem_key {
-        if let Some((status, body)) = idem_lookup(shared, key) {
-            let value = serde_json::from_str(&body)
-                .unwrap_or_else(|_| serde_json::json!({"ok": true, "replayed": true}));
-            return respond(req, status, value);
-        }
-    }
-
-    match (&method, path.as_str()) {
-        (Method::Get, "/v1/info") => {
-            let channels = engine
-                .store
-                .channel_rows(&shared.community_id)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(|c| serde_json::json!({"id": c.id, "name": c.name, "kind": c.kind}))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let members = engine
-                .store
-                .list_members(&shared.community_id)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(|(fp, nick, role)| {
-                            serde_json::json!({"fp": fp, "nickname": nick, "role": role})
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let me = engine
-                .store
-                .bots_list(&shared.community_id)
-                .ok()
-                .and_then(|bs| bs.into_iter().find(|b| b.id == shared.bot_id))
-                .map(|b| {
-                    serde_json::json!({
-                        "id": b.id, "name": b.name, "discriminator": b.discriminator,
-                        "perms": b.perms, "online": b.online,
-                    })
-                });
-            let community = engine
-                .store
-                .get_community(&shared.community_id)
-                .ok()
-                .flatten()
-                .map(|(id, name, owner)| {
-                    serde_json::json!({"id": id, "name": name, "owner_fp": owner})
-                });
-            // O plugin descobre o repertório daqui em vez de adivinhar nomes.
-            let actions = distorrent_core::moderation::BOT_ACTIONS
-                .iter()
-                .map(|a| {
-                    serde_json::json!({
-                        "action": a.action, "perm": a.perm, "args": a.args, "label": a.label,
-                    })
-                })
-                .collect::<Vec<_>>();
-            respond(
-                req,
-                200,
-                serde_json::json!({
-                    "api": "distorrent-bot/1",
-                    "bot": me,
-                    "community": community,
-                    "channels": channels,
-                    "members": members,
-                    "actions": actions,
-                }),
-            );
-        }
-        (Method::Get, "/v1/events") => {
-            let since: u64 = query
-                .split('&')
-                .find_map(|p| p.strip_prefix("since="))
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            let wait_ms: u64 = query
-                .split('&')
-                .find_map(|p| p.strip_prefix("wait="))
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0)
-                .min(25_000);
-            let deadline = Instant::now() + Duration::from_millis(wait_ms);
-
-            loop {
-                {
-                    let buf = shared.events.lock().unwrap_or_else(|e| e.into_inner());
-                    // Teto por resposta: o cliente pagina pelo `since`, então um
-                    // buffer cheio não vira uma resposta de dezenas de MB.
-                    let items: Vec<&QueuedEvent> = buf
-                        .iter()
-                        .filter(|e| e.seq > since)
-                        .take(MAX_EVENTS_PER_POLL)
-                        .collect();
-                    if !items.is_empty() {
-                        return respond(
-                            req,
-                            200,
-                            serde_json::json!({"events": items, "since": items.last().map(|e| e.seq)}),
-                        );
-                    }
-                }
-                if shared.stop.load(Ordering::Relaxed) {
-                    return respond(req, 503, serde_json::json!({"error": "ponte encerrada"}));
-                }
-                if Instant::now() >= deadline {
-                    return respond(req, 200, serde_json::json!({"events": [], "since": null}));
-                }
-                std::thread::sleep(Duration::from_millis(120));
-            }
-        }
-        (Method::Get, "/v1/limits") => {
-            // O criador descobre os limites REAIS da plataforma por aqui, em vez
-            // de adivinhar. `implemented:false` é o combinado do §13: não fingir.
-            let cfg = engine
-                .store
-                .bots_list(&shared.community_id)
-                .ok()
-                .and_then(|bs| bs.into_iter().find(|b| b.id == shared.bot_id))
-                .map(|b| b.config)
-                .unwrap_or_default();
-            let parsed = distorrent_core::bots::parse_config(&cfg).unwrap_or_default();
-            let prims: Vec<serde_json::Value> = parsed
-                .primitives
-                .iter()
-                .into_iter()
-                .map(|(id, on, implemented)| {
-                    serde_json::json!({"id": id, "enabled": on, "implemented": implemented})
-                })
-                .collect();
-            respond(
-                req,
-                200,
-                serde_json::json!({
-                    "api": "distorrent-bot/1",
-                    "mode": parsed.mode.as_str(),
-                    "runtime": parsed.runtime.as_str(),
-                    "limits": {
-                        "requestsPerMinute": RATE_PER_MIN,
-                        "eventsPerPoll": MAX_EVENTS_PER_POLL,
-                        "maxBodyBytes": MAX_BODY,
-                        "maxMessageChars": MAX_POST_CHARS,
-                        "maxRepliesPerMinute": parsed.max_replies_per_min,
-                        "maxHttpPerMinute": parsed.max_http_per_min,
-                        "maxMessagesPerExecution": parsed.max_messages_per_exec,
-                        "retentionHours": parsed.retention_hours,
-                    },
-                    "primitives": prims,
-                }),
-            );
-        }
-        (Method::Get, "/v1/health") => {
-            let pending = shared.events.lock().map(|q| q.len()).unwrap_or(0);
-            let online = engine
-                .store
-                .bots_list(&shared.community_id)
-                .ok()
-                .and_then(|bs| bs.into_iter().find(|b| b.id == shared.bot_id))
-                .map(|b| b.online)
-                .unwrap_or(false);
-            respond(
-                req,
-                200,
-                serde_json::json!({
-                    "ok": !shared.stop.load(Ordering::Relaxed),
-                    "online": online,
-                    "events_pending": pending,
-                    "dropped": shared.dropped.load(Ordering::Relaxed),
-                    "requests": shared.requests.load(Ordering::Relaxed),
-                }),
-            );
-        }
-        (Method::Get, "/v1/config") => {
-            // O próprio bot lê a config dele. Não expõe token de outro bot nem
-            // de outro servidor: só este `bot_id`.
-            let cfg = engine
-                .store
-                .bots_list(&shared.community_id)
-                .ok()
-                .and_then(|bs| bs.into_iter().find(|b| b.id == shared.bot_id))
-                .map(|b| b.config)
-                .unwrap_or_default();
-            let parsed = distorrent_core::bots::parse_config(&cfg).unwrap_or_default();
-            respond(
-                req,
-                200,
-                serde_json::json!({
-                    "prefix": parsed.prefix,
-                    "commands": parsed.commands.iter().map(|c| serde_json::json!({
-                        "name": c.name,
-                        "aliases": c.aliases,
-                        "exec": c.exec.as_str(),
-                        "permission": c.need.as_str(),
-                    })).collect::<Vec<_>>(),
-                    "events": parsed.events,
-                    "channels": parsed.channels,
-                }),
-            );
-        }
-        (Method::Post, "/v1/commands") => {
-            // O bot registra/edita os PRÓPRIOS comandos em tempo de execução
-            // (um plugin que descobriu rotas novas, por exemplo). A config
-            // inteira é revalidada pelo core antes de gravar: o bot não
-            // consegue gravar config quebrada nem permissão além da dele.
-            let body: ConfigBody = match read_json(&mut req) {
-                Ok(b) => b,
-                Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
-            };
-            match engine.bot_replace_config(&shared.community_id, &shared.bot_id, &body.config) {
-                Ok(n) => {
-                    let _ = engine.store.bot_log(
-                        &shared.community_id,
-                        &shared.bot_id,
-                        "info",
-                        &format!("o bot atualizou a própria config ({n} comando(s))"),
-                    );
-                    respond(req, 200, serde_json::json!({"ok": true, "commands": n}))
-                }
-                Err(e) => respond(req, 400, serde_json::json!({"error": e.to_string()})),
-            }
-        }
-        (Method::Post, "/v1/message") => {
-            let body: MessageBody = match read_json(&mut req) {
-                Ok(b) => b,
-                Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
-            };
-            let text = body.body.trim();
-            if text.is_empty() {
-                return respond(req, 400, serde_json::json!({"error": "mensagem vazia"}));
-            }
-            if text.chars().count() > MAX_POST_CHARS {
-                return respond(
-                    req,
-                    400,
-                    serde_json::json!({"error": format!("mensagem acima de {MAX_POST_CHARS} caracteres")}),
-                );
-            }
-            // O texto do bot passa pela mesma limpeza de qualquer mensagem.
-            let clean = distorrent_core::names::sanitize_text(text, MAX_POST_CHARS);
-            if clean.is_empty() {
-                return respond(req, 400, serde_json::json!({"error": "mensagem vazia"}));
-            }
-            let channel = match engine.resolve_channel(&shared.community_id, &body.channel) {
-                Some(c) => c,
-                None => {
-                    return respond_idem(
-                        req,
-                        shared,
-                        idem_key.as_ref(),
-                        404,
-                        serde_json::json!({"error": format!("canal `{}` não existe", body.channel)}),
-                    )
-                }
-            };
-            match engine.bot_post_message(&shared.community_id, &channel, &shared.bot_id, &clean) {
-                Ok(m) => respond_idem(
-                    req,
-                    shared,
-                    idem_key.as_ref(),
-                    200,
-                    serde_json::json!({"ok": true, "message_id": m.id, "channel": channel}),
-                ),
-                Err(e) => respond_idem(
-                    req,
-                    shared,
-                    idem_key.as_ref(),
-                    409,
-                    serde_json::json!({"error": e.to_string()}),
-                ),
-            }
-        }
-        (Method::Post, "/v1/admin") => {
-            let body: AdminBody = match read_json(&mut req) {
-                Ok(b) => b,
-                Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
-            };
-            match engine.bot_action_in(
-                &shared.community_id,
-                &shared.bot_id,
-                body.action.trim(),
-                &body.target,
-                &body.reason,
-                body.number,
-                body.channel.as_deref(),
-            ) {
-                Ok(text) => {
-                    let _ =
-                        engine
-                            .store
-                            .bot_log(&shared.community_id, &shared.bot_id, "info", &text);
-                    respond_idem(
-                        req,
-                        shared,
-                        idem_key.as_ref(),
-                        200,
-                        serde_json::json!({"ok": true, "result": text}),
-                    )
-                }
-                Err(e) => respond_idem(
-                    req,
-                    shared,
-                    idem_key.as_ref(),
-                    403,
-                    serde_json::json!({"error": e.to_string()}),
-                ),
-            }
-        }
-        (Method::Post, "/v1/audio/open") => {
-            // O bot abre o canal de música. O som toca no alto-falante DESTE
-            // PC, junto com a voz — não vai para a call (ver botmusic.rs).
-            let key = format!("{}|{}", shared.community_id, shared.bot_id);
-            let (abriu, _) = shared.music.open(&key);
-            respond(
-                req,
-                200,
-                serde_json::json!({
-                    "ok": true,
-                    "opened": abriu,
-                    "delivered": "local",
-                    "to_call": false,
-                    "sample_rate": 48_000,
-                    "channels": 1,
-                }),
-            )
-        }
-        (Method::Post, "/v1/audio/frames") => {
-            let body: AudioBody = match read_json(&mut req) {
-                Ok(b) => b,
-                Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
-            };
-            use base64::Engine as _;
-            let bytes = match base64::engine::general_purpose::STANDARD.decode(body.pcm.as_bytes())
-            {
-                Ok(b) => b,
-                Err(e) => {
-                    return respond(
-                        req,
-                        400,
-                        serde_json::json!({"error": format!("base64 inválido: {e}")}),
-                    )
-                }
-            };
-            let key = format!("{}|{}", shared.community_id, shared.bot_id);
-            match shared.music.push(&key, &bytes, body.gain.unwrap_or(1.0)) {
-                Ok((acc, drop)) => respond(
-                    req,
-                    200,
-                    serde_json::json!({
-                        "ok": true,
-                        "accepted": acc,
-                        "dropped": drop,
-                        "delivered": "local",
-                        "to_call": false,
-                    }),
-                ),
-                Err(e) => respond(req, 409, serde_json::json!({"error": e})),
-            }
-        }
-        (Method::Get, "/v1/audio/status") => {
-            let key = format!("{}|{}", shared.community_id, shared.bot_id);
-            let st = shared.music.status(&key);
-            respond(
-                req,
-                200,
-                match st {
-                    Some((acc, drop)) => serde_json::json!({
-                        "open": true,
-                        "accepted": acc,
-                        "dropped": drop,
-                        "delivered": "local",
-                        "to_call": false,
-                    }),
-                    None => {
-                        serde_json::json!({"open": false, "delivered": "local", "to_call": false})
-                    }
-                },
-            )
-        }
-        (Method::Post, "/v1/audio/stop") => {
-            let key = format!("{}|{}", shared.community_id, shared.bot_id);
-            let fechou = shared.music.close(&key);
-            respond(req, 200, serde_json::json!({"ok": true, "closed": fechou}))
-        }
-        (Method::Post, "/v1/log") => {
-            let body: LogBody = match read_json(&mut req) {
-                Ok(b) => b,
-                Err(e) => return respond(req, 400, serde_json::json!({"error": e})),
-            };
-            match engine.bot_log_append(
-                &shared.community_id,
-                &shared.bot_id,
-                body.level.trim(),
-                &body.message,
-            ) {
-                Ok(()) => respond(req, 200, serde_json::json!({"ok": true})),
-                Err(e) => respond(req, 409, serde_json::json!({"error": e.to_string()})),
-            }
-        }
-        (Method::Post, "/v1/stop") => {
-            shared.stop.store(true, Ordering::SeqCst);
-            respond(req, 200, serde_json::json!({"ok": true, "stopping": true}));
-        }
-        _ => respond(
-            req,
-            404,
-            serde_json::json!({
-                "error": "rota inexistente",
-                "routes": ["GET /v1/info", "GET /v1/events?since=&wait=", "GET /v1/config",
-                           "GET /v1/limits", "GET /v1/health",
-                           "POST /v1/commands", "POST /v1/message", "POST /v1/admin",
-                           "POST /v1/log", "POST /v1/stop"],
-            }),
-        ),
-    }
 }
 
 /// Manifesto do bot em pasta: `<pasta>/bot.json`.
@@ -1147,8 +649,6 @@ mod tests {
 
     #[test]
     fn importar_bot_pede_permissao_mas_nao_concede() {
-        // `perms` no bot.json e um PEDIDO do autor. O import devolve o valor
-        // mascarado por PERM_ALL e nunca grava sozinho: quem concede e o dono.
         let dir = tempdir();
         std::fs::write(
             dir.path().join("bot.json"),

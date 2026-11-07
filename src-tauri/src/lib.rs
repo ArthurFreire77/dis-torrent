@@ -7,13 +7,20 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use distorrent_core::net::engine::{NetworkEngine, NetworkState};
-use distorrent_core::protocol::MessageEnvelope;
 use distorrent_core::storage::{PeerRecord, Store, StoredMessage};
 use distorrent_core::{Identity, Keypair};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod background;
+pub mod commands_bot;
+pub mod commands_files;
+pub mod commands_misc;
+pub mod commands_net;
+pub mod commands_server;
+pub mod commands_social;
+pub mod commands_voice;
+
 mod botbridge;
 mod botmusic;
 mod botplugin;
@@ -54,36 +61,6 @@ fn downloads_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             Ok(())
         })
         .build()
-}
-
-#[tauri::command]
-fn save_public_copy(app: AppHandle, path: String, name: String) -> Result<String, String> {
-    #[cfg(target_os = "android")]
-    {
-        let handle = app
-            .try_state::<tauri::plugin::PluginHandle<tauri::Wry>>()
-            .ok_or_else(|| {
-                "o plugin de downloads não está registrado neste aparelho — \
-             o arquivo continua na área do app"
-                    .to_string()
-            })?;
-        #[derive(serde::Deserialize)]
-        struct Res {
-            path: String,
-        }
-        let r: Res = handle
-            .run_mobile_plugin("save", serde_json::json!({ "path": path, "name": name }))
-            .map_err(|e| format!("não foi possível gravar em Downloads do celular: {e}"))?;
-        if r.path.trim().is_empty() {
-            return Err("o Android devolveu caminho vazio ao salvar em Downloads".into());
-        }
-        Ok(r.path)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = (&app, &name);
-        Ok(path)
-    }
 }
 
 struct AppState {
@@ -183,7 +160,6 @@ struct NetDiagView {
     dht_ms: i64,
 }
 
-// Seção 1: derive
 #[derive(Debug, Serialize)]
 struct NetworkStatusView {
     state: NetworkState,
@@ -227,214 +203,12 @@ fn local_ipv4_addresses() -> Vec<String> {
     out
 }
 
-#[tauri::command]
-fn hide_share_bar() -> bool {
-    crate::sharebar::hide_share_bar()
-}
-
-#[tauri::command]
-fn share_bar_watch(ativo: bool) {
-    if ativo {
-        crate::sharebar::watch_share_bar();
-    } else {
-        crate::sharebar::unwatch_share_bar();
-    }
-}
-
-#[tauri::command]
-fn local_addresses(port: Option<u16>, state: State<AppState>) -> Result<LocalAddresses, String> {
-    let lan_all = local_ipv4_addresses();
-    let port = port.unwrap_or(DEV_PORT);
-    let _ = &state;
-    Ok(LocalAddresses {
-        localhost: format!("http://localhost:{port}"),
-        lan: lan_all.first().cloned(),
-        lan_all,
-        port,
-    })
-}
-
 const DEV_PORT: u16 = 5173;
-
-#[tauri::command]
-fn identity_get(app: AppHandle, state: State<AppState>) -> Result<Option<Identity>, String> {
-    let store = open_store(&state)?;
-    let Some(id) = store.load_identity() else {
-        return Ok(None);
-    };
-    let vault_on = store.kv_get("vault.on").as_deref() == Some("1");
-    let stored = store.load_secret_hex().unwrap_or_default();
-    let has_valid_blob = stored.len() >= 88;
-
-    if vault_on && has_valid_blob {
-        return Ok(None);
-    }
-    if !stored.is_empty() && stored.len() >= 32 {
-        let _ = store.kv_set("identity.secret.backup", &stored);
-        let _ = store.kv_delete("vault.on");
-        boot_engine_with_store(&app, &state, store)?;
-        return Ok(Some(id));
-    }
-    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
-        if let Ok(secret) = entry.get_password() {
-            if !secret.is_empty() && secret.len() >= 32 {
-                let _ = store.save_identity(&id, &secret);
-                let _ = store.kv_set("identity.secret.backup", &secret);
-                let _ = store.kv_delete("vault.on");
-                boot_engine_with_store(&app, &state, store)?;
-                return Ok(Some(id));
-            }
-        }
-    }
-    if let Some(bk) = store.kv_get("identity.secret.backup") {
-        if !bk.is_empty() && bk.len() >= 32 {
-            let _ = store.save_identity(&id, &bk);
-            let _ = store.kv_delete("vault.on");
-            boot_engine_with_store(&app, &state, store)?;
-            return Ok(Some(id));
-        }
-    }
-    tracing::warn!("identidade sem segredo recuperável — requer intervenção do usuário");
-    return Err(
-        "segredo da identidade não encontrado — tente reiniciar o app ou restaurar backup".into(),
-    );
-}
-
-#[tauri::command]
-fn identity_create(
-    app: AppHandle,
-    nickname: String,
-    password: Option<String>,
-    state: State<AppState>,
-) -> Result<Identity, String> {
-    let store = open_store(&state)?;
-    if store.load_identity().is_some() {
-        return Err("identidade já existe neste dispositivo".into());
-    }
-    let nick = nickname.trim();
-    if nick.is_empty() {
-        return Err("nome não pode ser vazio".into());
-    }
-    if nick.chars().count() > 64 {
-        return Err("nome muito longo (máximo 64 caracteres)".into());
-    }
-    let kp = Keypair::generate();
-    let identity = kp.identity(nick);
-    match password.as_deref() {
-        Some(pass) if !pass.is_empty() => {
-            let secret_hex = kp.secret_hex();
-            let blob = distorrent_core::vault::seal_secret(&secret_hex, pass).map_err(err)?;
-            store
-                .save_identity(&identity, &hex::encode(&blob))
-                .map_err(err)?;
-            store.kv_set("vault.on", "1").map_err(err)?;
-            *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = true;
-            boot_engine_with_secret(&app, &state, &store, secret_hex)?;
-            return Ok(identity);
-        }
-        _ => persist_secret(&store, &kp, &identity)?,
-    }
-    boot_engine_if_needed(&app, &state)?;
-    Ok(identity)
-}
 
 #[derive(Debug, Serialize)]
 struct VaultStatus {
     has_identity: bool,
     has_vault: bool,
-}
-
-#[tauri::command]
-fn vault_status(state: State<AppState>) -> Result<VaultStatus, String> {
-    let store = open_store(&state)?;
-    let stored = store.load_secret_hex().unwrap_or_default();
-    let has_vault = store.kv_get("vault.on").as_deref() == Some("1") && stored.len() >= 88;
-    Ok(VaultStatus {
-        has_identity: store.load_identity().is_some(),
-        has_vault,
-    })
-}
-
-// Seção 2: tauri
-#[tauri::command]
-fn vault_unlock(
-    app: AppHandle,
-    password: String,
-    state: State<AppState>,
-) -> Result<Identity, String> {
-    let store = open_store(&state)?;
-    let key = auth_key(&store, "unlock");
-    auth_guard(&state, &key)?;
-
-    let mut identity = store.load_identity().ok_or("sem identidade")?;
-    let stored = store.load_secret_hex().ok_or("sem cofre")?;
-    let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
-
-    let secret = match distorrent_core::vault::open_sealed(&blob, &password) {
-        Ok(s) => s,
-        Err(e) => {
-            return Err(auth_fail(&state, &key, &e.to_string()));
-        }
-    };
-
-    auth_ok(&state, &key);
-
-    if identity.pubkey_hex.is_empty() {
-        if let Ok(kp) = Keypair::from_secret_hex(&secret) {
-            identity.pubkey_hex = kp.public_hex();
-            let _ = store.save_identity(&identity, &stored);
-        }
-    }
-    *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = true;
-    boot_engine_with_secret(&app, &state, &store, secret)?;
-    Ok(identity)
-}
-
-#[tauri::command]
-fn vault_change(old: String, new: String, state: State<AppState>) -> Result<(), String> {
-    let store = open_store(&state)?;
-    let key = auth_key(&store, "change");
-    auth_guard(&state, &key)?;
-
-    let stored = store.load_secret_hex().ok_or("sem cofre")?;
-    let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
-    let secret = match distorrent_core::vault::open_sealed(&blob, &old) {
-        Ok(s) => s,
-        Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
-    };
-    let newblob = match distorrent_core::vault::seal_secret(&secret, &new) {
-        Ok(b) => b,
-        Err(e) => return Err(e.to_string()),
-    };
-    store
-        .save_secret_blob(&hex::encode(&newblob))
-        .map_err(err)?;
-    auth_ok(&state, &key);
-    Ok(())
-}
-
-#[tauri::command]
-fn identity_rename(
-    app: AppHandle,
-    nickname: String,
-    state: State<AppState>,
-) -> Result<Identity, String> {
-    let store = open_store(&state)?;
-    let mut identity = store.load_identity().ok_or("sem identidade")?;
-    let nick = nickname.trim();
-    if nick.is_empty() {
-        return Err("nickname não pode ser vazio".into());
-    }
-    if nick.chars().count() > 64 {
-        return Err("nickname muito longo (máximo 64 caracteres)".into());
-    }
-    identity.nickname = nick.to_string();
-    let current_secret = store.load_secret_hex().unwrap_or_default();
-    store
-        .save_identity(&identity, &current_secret)
-        .map_err(err)?;
-    restart_engine(&app, &state)?;
-    Ok(identity)
 }
 
 fn persist_secret(store: &Store, kp: &Keypair, identity: &Identity) -> Result<(), String> {
@@ -522,7 +296,6 @@ fn boot_engine_if_needed(app: &AppHandle, state: &State<AppState>) -> Result<(),
     boot_engine_with_store(app, state, store)
 }
 
-// Seção 3: boot_engine_with_store
 fn boot_engine_with_store(
     app: &AppHandle,
     state: &State<AppState>,
@@ -648,11 +421,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
         return;
     }
 
-    // Aviso de MENSAGEM: o frontend tem a regra completa (nível por canal,
-    // horário, agrupamento por conversa, silenciado). O Rust só avisa quando
-    // o webview está morto/suspenso — sem isso o usuário recebia DOIS avisos
-    // idênticos por mensagem. O frontend renova `notify.ui_alive` enquanto
-    // está vivo (ver `notify_ui_alive`).
     if matches!(ev, E::MessageNew(_)) && ui_alive(&store_for_prefs) {
         return;
     }
@@ -709,7 +477,6 @@ fn native_notice(app: &AppHandle, ev: &distorrent_core::EngineEvent) {
                 })
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| autor.chars().take(8).collect());
-            // Seção 4: corpo
             let corpo = if prefs.1 {
                 resumo_mensagem(&m.body)
             } else {
@@ -812,120 +579,6 @@ fn nivel_do_canal(
         .to_string()
 }
 
-#[tauri::command]
-fn notify_ui_alive(state: State<AppState>) -> Result<(), String> {
-    // Batida de vida do webview. `native_notice` usa isso para não duplicar
-    // avisos com o frontend — e para ainda avisar quando o webview morre.
-    open_store(&state)?
-        .kv_set(
-            "notify.ui_alive",
-            &distorrent_core::identity::now_ms().to_string(),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn network_status(state: State<AppState>) -> Result<NetworkStatusView, String> {
-    let engine = engine(&state)?;
-    // Uma leitura só: estado e contagem coerentes (ver network_snapshot).
-    let (state, online_peers) = engine.network_snapshot();
-    Ok(NetworkStatusView {
-        state,
-        online_peers,
-        listen_port: engine.listen_port(),
-    })
-}
-
-#[tauri::command]
-fn peers_list(state: State<AppState>) -> Result<Vec<PeerView>, String> {
-    let engine = engine(&state)?;
-    Ok(engine
-        .peers()
-        .into_iter()
-        .map(|record| {
-            let fp = record.fp.clone();
-            let d = engine.peer_diag(&fp);
-            PeerView {
-                via_relay: engine.is_peer_via_relay(&fp),
-                state: engine.peer_state(&fp),
-                last_direct_error: d.last_direct_err,
-                last_relay_error: d.last_relay_err,
-                direct_attempts: d.direct_attempts,
-                relay_attempts: d.relay_attempts,
-                announce_seen_ms: d.announce_seen_ms,
-                last_reject: d.last_reject,
-                last_reject_ms: d.last_reject_ms,
-                send_gave_up: d.send_gave_up,
-                record,
-            }
-        })
-        .collect())
-}
-
-#[tauri::command]
-fn webrtc_report(info: String) {
-    eprintln!("[distorrent-probe] {info}");
-}
-
-#[tauri::command]
-fn net_diag(state: State<AppState>) -> Result<NetDiagView, String> {
-    let engine = engine(&state)?;
-    let d = engine.net_diag();
-    Ok(NetDiagView {
-        stun_ok: d.stun_ok,
-        stun_addr: d.stun_addr,
-        stun_ms: d.stun_ms,
-        announce_addr: d.announce_addr,
-        announce_ms: d.announce_ms,
-        nat_source: d.nat_source,
-        dht_ok: d.dht_ok,
-        dht_ms: d.dht_ms,
-    })
-}
-
-// Seção 5: tauri
-#[tauri::command]
-async fn relay_status(
-    state: State<'_, AppState>,
-) -> Result<Vec<distorrent_core::net::relay::RelayLegStatus>, String> {
-    let engine = state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    match engine {
-        Some(engine) => Ok(engine.relay_diagnostics().await),
-        None => Ok(distorrent_core::net::relay::check_relay_legs().await),
-    }
-}
-
-#[tauri::command]
-fn connect_addr(
-    addr: String,
-    expected_fp: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let engine = engine(&state)?;
-    let trimmed = addr.trim().to_string();
-    if trimmed.is_empty() {
-        return Err("endereço vazio".into());
-    }
-    if let Ok(s) = trimmed.parse::<std::net::SocketAddr>() {
-        engine.add_manual_peer(s, expected_fp);
-    } else {
-        engine
-            .connect_host(&trimmed, expected_fp)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn disconnect_peer(fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.disconnect_peer(&fp);
-    Ok(())
-}
-
 #[derive(Debug, Serialize)]
 struct CommunityView {
     id: String,
@@ -960,132 +613,6 @@ struct InviteView {
     scope: String,
 }
 
-#[tauri::command]
-fn communities_list(state: State<AppState>) -> Result<Vec<CommunityView>, String> {
-    let engine = engine(&state)?;
-    let me = engine.identity().fingerprint.clone();
-    let mut out = Vec::new();
-    for (id, name, owner) in engine.store_list_communities() {
-        let (description, category, icon) = engine.community_meta(&id).unwrap_or_default();
-        out.push(CommunityView {
-            channels: engine.store_list_channels(&id),
-            members: engine.store_list_members(&id),
-            is_owner: owner == me,
-            is_public: engine.community_is_public(&id).unwrap_or(false),
-            id,
-            name,
-            owner_fp: owner,
-            description,
-            category,
-            icon,
-        });
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-fn community_members(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<MemberPairingView>, String> {
-    Ok(engine(&state)?
-        .community_member_states(&community_id)
-        .into_iter()
-        .map(|m| MemberPairingView {
-            fp: m.fp,
-            nickname: m.nickname,
-            role: m.role,
-            state: m.state,
-            via_relay: m.via_relay,
-            is_owner: m.is_owner,
-            is_self: m.is_self,
-        })
-        .collect())
-}
-
-#[tauri::command]
-fn create_community(
-    name: String,
-    channels: Option<Vec<String>>,
-    options: Option<distorrent_core::net::engine::CommunityCreateOptions>,
-    state: State<AppState>,
-) -> Result<String, String> {
-    let name = name.trim().to_string();
-    if name.is_empty() {
-        return Err("nome não pode ser vazio".into());
-    }
-    let opts = options.unwrap_or_default();
-    engine(&state)?
-        .create_community_with_options(&name, channels.as_deref().unwrap_or(&[]), &opts)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn community_set_meta(
-    community_id: String,
-    description: Option<String>,
-    category: Option<String>,
-    icon: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .community_set_meta(
-            &community_id,
-            description.as_deref(),
-            category.as_deref(),
-            icon.as_deref(),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn community_set_public(
-    community_id: String,
-    is_public: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .community_set_public(&community_id, is_public)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn join_public_community(
-    host_fp: String,
-    community_id: String,
-    state: State<AppState>,
-) -> Result<String, String> {
-    engine(&state)?
-        .join_public_community(&host_fp, &community_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn make_invite(
-    community_id: String,
-    member_fp: Option<String>,
-    state: State<AppState>,
-) -> Result<String, String> {
-    const WILDCARD: &str = "000000000000";
-    let raw = member_fp.unwrap_or_default();
-    let member_fp = if raw.trim().is_empty() {
-        WILDCARD.to_string()
-    } else {
-        raw.trim().to_lowercase()
-    };
-    if member_fp != WILDCARD
-        && (member_fp.len() != 12 || !member_fp.chars().all(|c| c.is_ascii_hexdigit()))
-    {
-        return Err(
-            "fingerprint do convidado deve ter 12 hex (ou vazio para convite aberto)".into(),
-        );
-    }
-    engine(&state)?
-        .make_invite(&community_id, &member_fp, 7 * 24 * 3600 * 1000)
-        .map_err(presentation_error)
-}
-
-// Seção 6: presentation_error
 fn presentation_error(e: impl std::fmt::Display) -> String {
     let raw = e.to_string();
     raw.strip_prefix("protocol: ")
@@ -1093,61 +620,6 @@ fn presentation_error(e: impl std::fmt::Display) -> String {
         .or_else(|| raw.strip_prefix("storage: "))
         .unwrap_or(&raw)
         .to_string()
-}
-
-#[tauri::command]
-fn join_community(token: String, state: State<AppState>) -> Result<String, String> {
-    engine(&state)?
-        .join_community(token.trim())
-        .map_err(presentation_error)
-}
-
-#[tauri::command]
-fn make_invite_link(
-    community_id: String,
-    member_fp: Option<String>,
-    state: State<AppState>,
-) -> Result<InviteView, String> {
-    const WILDCARD: &str = "000000000000";
-    const TTL_MS: i64 = 7 * 24 * 3600 * 1000;
-    let raw = member_fp.unwrap_or_default();
-    let fp = if raw.trim().is_empty() {
-        WILDCARD.to_string()
-    } else {
-        raw.trim().to_lowercase()
-    };
-    if fp != WILDCARD && (fp.len() != 12 || !fp.chars().all(|c| c.is_ascii_hexdigit())) {
-        return Err("fingerprint do convidado deve ter 12 hex".into());
-    }
-    let token = engine(&state)?
-        .make_invite(&community_id, &fp, TTL_MS)
-        .map_err(presentation_error)?;
-    let link = format!("distorrent://invite?invite={token}");
-    Ok(InviteView {
-        token,
-        link,
-        expires_at_ms: distorrent_core::identity::now_ms() + TTL_MS,
-        scope: if fp == WILDCARD {
-            "open".into()
-        } else {
-            "fp".into()
-        },
-    })
-}
-
-#[tauri::command]
-fn send_channel_message(
-    community_id: String,
-    channel_id: String,
-    body: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::StoredMessage, String> {
-    if body.trim().is_empty() {
-        return Err("mensagem vazia".into());
-    }
-    engine(&state)?
-        .send_channel_message(&community_id, &channel_id, body.trim())
-        .map_err(err)
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -1197,363 +669,6 @@ struct BotPatch {
     webhook_secret: Option<String>,
 }
 
-#[tauri::command]
-fn channel_create(
-    community_id: String,
-    name: String,
-    topic: Option<String>,
-    category: Option<String>,
-    kind: Option<String>,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::ChannelMetaRow, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("nome do canal não pode ser vazio".into());
-    }
-    engine(&state)?
-        .channel_create(
-            &community_id,
-            name,
-            topic.as_deref().unwrap_or(""),
-            category.as_deref().unwrap_or(""),
-            kind.as_deref().unwrap_or("text"),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn channel_delete(
-    community_id: String,
-    channel_id: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if channel_id.trim().is_empty() {
-        return Err("channel_id vazio".into());
-    }
-    engine(&state)?
-        .channel_delete(&community_id, channel_id.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn channel_rename(
-    community_id: String,
-    channel_id: String,
-    new_name: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if new_name.trim().is_empty() {
-        return Err("nome do canal não pode ser vazio".into());
-    }
-    engine(&state)?
-        .channel_rename(&community_id, &channel_id, new_name.trim())
-        .map_err(err)
-}
-
-// Seção 7: tauri
-#[tauri::command]
-fn channel_set_topic(
-    community_id: String,
-    channel_id: String,
-    topic: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if channel_id.trim().is_empty() {
-        return Err("channel_id vazio".into());
-    }
-    engine(&state)?
-        .channel_set_topic(&community_id, &channel_id, &topic)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn channel_set_category(
-    community_id: String,
-    channel_id: String,
-    category: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if category.trim().is_empty() {
-        return Err("categoria não pode ser vazia".into());
-    }
-    engine(&state)?
-        .channel_set_category(&community_id, &channel_id, category.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn channel_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::ChannelMetaRow>, String> {
-    engine(&state)?.channel_list(&community_id).map_err(err)
-}
-
-#[tauri::command]
-fn community_rename(
-    community_id: String,
-    name: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if name.trim().is_empty() {
-        return Err("nome não pode ser vazio".into());
-    }
-    engine(&state)?
-        .community_rename(&community_id, name.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn role_create(
-    community_id: String,
-    name: String,
-    color: String,
-    permissions: i64,
-    hoist: bool,
-    mentionable: bool,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::RoleRow, String> {
-    if name.trim().is_empty() {
-        return Err("nome do cargo não pode ser vazio".into());
-    }
-    engine(&state)?
-        .role_create(
-            &community_id,
-            name.trim(),
-            &color,
-            permissions,
-            hoist,
-            mentionable,
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-fn role_update(
-    community_id: String,
-    role_id: String,
-    patch: Option<RolePatch>,
-    name: Option<String>,
-    color: Option<String>,
-    permissions: Option<i64>,
-    hoist: Option<bool>,
-    mentionable: Option<bool>,
-    position: Option<i64>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let p = patch.unwrap_or_default();
-    let name = name.or(p.name);
-    let color = color.or(p.color);
-    let permissions = permissions.or(p.permissions);
-    let hoist = hoist.or(p.hoist);
-    let mentionable = mentionable.or(p.mentionable);
-    let position = position.or(p.position);
-    if name.is_none()
-        && color.is_none()
-        && permissions.is_none()
-        && hoist.is_none()
-        && mentionable.is_none()
-        && position.is_none()
-    {
-        return Err("nada para atualizar no cargo".into());
-    }
-    engine(&state)?
-        .role_update(
-            &community_id,
-            &role_id,
-            name.as_deref(),
-            color.as_deref(),
-            permissions,
-            hoist,
-            mentionable,
-            position,
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn role_delete(
-    community_id: String,
-    role_id: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if role_id.trim().is_empty() {
-        return Err("role_id vazio".into());
-    }
-    engine(&state)?
-        .role_delete(&community_id, role_id.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn roles_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::RoleRow>, String> {
-    engine(&state)?.roles_list(&community_id).map_err(err)
-}
-
-#[tauri::command]
-fn member_roles(
-    community_id: String,
-    fp: String,
-    state: State<AppState>,
-) -> Result<Vec<String>, String> {
-    if fp.trim().is_empty() {
-        return Err("fp vazio".into());
-    }
-    engine(&state)?
-        .member_roles(&community_id, fp.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn member_assign_role(
-    community_id: String,
-    fp: String,
-    role_id: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if fp.trim().is_empty() || role_id.trim().is_empty() {
-        return Err("fp/role_id vazios".into());
-    }
-    engine(&state)?
-        .member_assign_role(&community_id, fp.trim(), role_id.trim())
-        .map_err(err)
-}
-
-// Seção 8: tauri
-#[tauri::command]
-fn member_unassign_role(
-    community_id: String,
-    fp: String,
-    role_id: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if fp.trim().is_empty() || role_id.trim().is_empty() {
-        return Err("fp/role_id vazios".into());
-    }
-    engine(&state)?
-        .member_unassign_role(&community_id, fp.trim(), role_id.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn member_kick(community_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
-    if fp.trim().is_empty() {
-        return Err("fp vazio".into());
-    }
-    engine(&state)?
-        .member_kick(&community_id, fp.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn server_rules_get(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::moderation::ServerRules, String> {
-    engine(&state)?
-        .server_rules_get(community_id.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn server_rules_set(
-    rules: distorrent_core::moderation::ServerRules,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?.server_rules_set(rules).map_err(err)
-}
-
-#[tauri::command]
-fn audit_list(
-    community_id: String,
-    limit: Option<i64>,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::moderation::AuditEntry>, String> {
-    engine(&state)?
-        .audit_list(community_id.trim(), limit.unwrap_or(100))
-        .map_err(err)
-}
-
-#[tauri::command]
-fn reputation_get(fp: String, state: State<AppState>) -> Result<(String, i32, u32), String> {
-    engine(&state)?.reputation_get(fp.trim()).map_err(err)
-}
-
-#[tauri::command]
-fn safety_number(peer_fp: String, state: State<AppState>) -> Result<String, String> {
-    engine(&state)?.safety_number(peer_fp.trim()).map_err(err)
-}
-
-#[tauri::command]
-fn moderate(
-    community_id: String,
-    action: String,
-    target: String,
-    reason: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if target.trim().is_empty() {
-        return Err("alvo vazio".into());
-    }
-    engine(&state)?
-        .moderate(
-            community_id.trim(),
-            action.trim(),
-            target.trim(),
-            reason.as_deref().unwrap_or(""),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn report_user(
-    target_fp: String,
-    community_id: Option<String>,
-    reason: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if target_fp.trim().is_empty() {
-        return Err("alvo vazio".into());
-    }
-    engine(&state)?
-        .report_user(
-            target_fp.trim(),
-            community_id.as_deref().unwrap_or(""),
-            reason.as_deref().unwrap_or(""),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn validate_name(
-    kind: String,
-    raw: String,
-    existing: Option<Vec<String>>,
-    state: State<AppState>,
-) -> Result<NameCheckView, String> {
-    let _ = &state;
-    let k = distorrent_core::names::NameKind::from_str(kind.trim())
-        .ok_or_else(|| "tipo inválido (user|server|channel)".to_string())?;
-    let scope = existing.unwrap_or_default();
-    let policy = distorrent_core::names::NamePolicy::for_kind(k);
-    let c = distorrent_core::names::validate_name(k, &raw, &scope, &policy);
-    Ok(NameCheckView {
-        ok: c.ok,
-        normalized: c.normalized,
-        errors: c.errors,
-        suggestions: c.suggestions,
-    })
-}
-
-#[tauri::command]
-fn random_name() -> String {
-    distorrent_core::names::random_name()
-}
-
 #[derive(serde::Serialize)]
 struct NameCheckView {
     ok: bool,
@@ -1562,276 +677,10 @@ struct NameCheckView {
     suggestions: Vec<String>,
 }
 
-#[tauri::command]
-fn bot_create(
-    community_id: String,
-    name: String,
-    avatar: Option<String>,
-    role_id: Option<String>,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::BotRow, String> {
-    if name.trim().is_empty() {
-        return Err("nome do bot não pode ser vazio".into());
-    }
-    engine(&state)?
-        .bot_create(
-            &community_id,
-            name.trim(),
-            avatar.as_deref(),
-            role_id.as_deref(),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_update(
-    community_id: String,
-    bot_id: String,
-    patch: Option<BotPatch>,
-    name: Option<String>,
-    avatar: Option<String>,
-    role_id: Option<String>,
-    online: Option<bool>,
-    config: Option<String>,
-    perms: Option<i64>,
-    webhook_secret: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    // Seção 9: p
-    let p = patch.unwrap_or_default();
-    if let Some(c) = config.as_deref().or(p.config.as_deref()) {
-        if c.len() > 64 * 1024 {
-            return Err("config do bot muito grande (máx 64KB)".into());
-        }
-        // Valida AGORA: config inválida não pode entrar no banco e quebrar o
-        // runtime depois, sem o dono saber qual campo está errado.
-        distorrent_core::bots::parse_config(c).map_err(|e| format!("config inválida: {e}"))?;
-    }
-    let merged = distorrent_core::storage::BotPatch {
-        name: name.or(p.name),
-        avatar: avatar.or(p.avatar),
-        role_id: role_id.map(|r| Some(r)).or(p.role_id),
-        online: online.or(p.online),
-        config: config.or(p.config),
-        perms: perms.or(p.perms),
-        webhook_secret: webhook_secret.or(p.webhook_secret),
-    };
-    if merged.name.is_none()
-        && merged.avatar.is_none()
-        && merged.role_id.is_none()
-        && merged.online.is_none()
-        && merged.config.is_none()
-        && merged.perms.is_none()
-        && merged.webhook_secret.is_none()
-    {
-        return Err("nada para atualizar no bot".into());
-    }
-    engine(&state)?
-        .bot_update(&community_id, &bot_id, merged)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_delete(community_id: String, bot_id: String, state: State<AppState>) -> Result<(), String> {
-    if bot_id.trim().is_empty() {
-        return Err("bot_id vazio".into());
-    }
-    engine(&state)?
-        .bot_delete(&community_id, bot_id.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bots_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::BotRow>, String> {
-    engine(&state)?.bots_list(&community_id).map_err(err)
-}
-
 /// O painel precisa saber se o webhook está assinado sem receber o segredo.
-#[tauri::command]
-fn bot_webhook_secret_set(
-    community_id: String,
-    bot_id: String,
-    state: State<AppState>,
-) -> Result<bool, String> {
-    Ok(engine(&state)?
-        .store
-        .bots_list(&community_id)
-        .map_err(err)?
-        .into_iter()
-        .find(|b| b.id == bot_id)
-        .map(|b| b.webhook_secret_set())
-        .unwrap_or(false))
-}
-
-#[tauri::command]
-fn bot_post_message(
-    community_id: String,
-    channel_id: String,
-    bot_id: String,
-    body: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::StoredMessage, String> {
-    if body.trim().is_empty() {
-        return Err("mensagem vazia".into());
-    }
-    engine(&state)?
-        .bot_post_message(&community_id, &channel_id, &bot_id, body.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_regen_token(
-    community_id: String,
-    bot_id: String,
-    state: State<AppState>,
-) -> Result<String, String> {
-    engine(&state)?
-        .bot_regen_token(&community_id, &bot_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_admin(
-    community_id: String,
-    bot_id: String,
-    action: String,
-    target: Option<String>,
-    reason: Option<String>,
-    number: Option<i64>,
-    channel: Option<String>,
-    state: State<AppState>,
-) -> Result<String, String> {
-    engine(&state)?
-        .bot_action_in(
-            &community_id,
-            &bot_id,
-            action.trim(),
-            target.as_deref().unwrap_or(""),
-            reason.as_deref().unwrap_or(""),
-            number,
-            channel.as_deref(),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_logs(
-    community_id: String,
-    bot_id: String,
-    limit: Option<i64>,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::BotLogRow>, String> {
-    engine(&state)?
-        .bot_logs(&community_id, &bot_id, limit.unwrap_or(120))
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_log_append(
-    community_id: String,
-    bot_id: String,
-    level: String,
-    message: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .bot_log_append(&community_id, &bot_id, level.trim(), message.trim())
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_logs_clear(
-    community_id: String,
-    bot_id: String,
-    state: State<AppState>,
-) -> Result<usize, String> {
-    engine(&state)?
-        .bot_logs_clear(&community_id, &bot_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_vars_list(
-    community_id: String,
-    bot_id: String,
-    state: State<AppState>,
-) -> Result<Vec<(String, String)>, String> {
-    engine(&state)?
-        .bot_vars_list(&community_id, &bot_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bot_var_get(
-    community_id: String,
-    bot_id: String,
-    key: String,
-    state: State<AppState>,
-) -> Result<Option<String>, String> {
-    Ok(engine(&state)?
-        .store
-        .bot_var_get(&community_id, &bot_id, &key))
-}
-
-#[tauri::command]
-fn bot_var_set(
-    community_id: String,
-    bot_id: String,
-    key: String,
-    value: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .bot_var_set(&community_id, &bot_id, &key, &value)
-        .map_err(err)
-}
 
 /// Valida/e normaliza uma config de bot sem gravar. Usado pelo editor visual e
 /// pelo importador para dar o erro exato do campo antes de salvar.
-#[tauri::command]
-fn bot_config_validate(config: String) -> Result<serde_json::Value, String> {
-    let cfg = distorrent_core::bots::parse_config(&config).map_err(|e| e.to_string())?;
-    let commands: Vec<serde_json::Value> = cfg
-        .commands
-        .iter()
-        .map(|c| {
-            serde_json::json!({
-                "name": c.name,
-                "aliases": c.aliases,
-                "description": c.description,
-                "exec": c.exec.as_str(),
-                "permission": c.need.as_str(),
-                "cooldownMs": c.cooldown_ms,
-                "ephemeral": c.ephemeral,
-                "enabled": c.enabled,
-            })
-        })
-        .collect();
-    Ok(serde_json::json!({
-        "prefix": cfg.prefix,
-        "commands": commands,
-        "channels": cfg.channels,
-        "events": cfg.events,
-        "blockPrivate": cfg.block_private,
-        "maxRepliesPerMinute": cfg.max_replies_per_min,
-        "webhook": cfg.webhook,
-    }))
-}
-
-#[tauri::command]
-fn bot_warnings_list(
-    community_id: String,
-    fp: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::WarnRow>, String> {
-    engine(&state)?
-        .store
-        .warnings_for(&community_id, &fp)
-        .map_err(err)
-}
 
 // --- Ponte local do bot (`127.0.0.1`) -------------------------------------
 
@@ -1842,267 +691,19 @@ fn bridge_key(community_id: &str, bot_id: &str) -> String {
 /// Abre `http://127.0.0.1:<porta>` para UM bot falar com o servidor. Só o dono
 /// do servidor pode; a ponte herda o token do bot (não cria segredo novo) e
 /// escuta exclusivamente em loopback.
-#[tauri::command]
-fn bot_bridge_start(
-    community_id: String,
-    bot_id: String,
-    port: Option<u16>,
-    state: State<'_, AppState>,
-) -> Result<botbridge::BridgeInfo, String> {
-    let eng = engine(&state)?;
-    // O bot precisa existir, mas a ponte não usa mais o token dele: a
-    // credencial é o caminho secreto que o app gera e injeta no plugin.
-    if eng
-        .bots_list(&community_id)
-        .map_err(err)?
-        .iter()
-        .all(|b| b.id != bot_id)
-    {
-        return Err("bot inexistente".into());
-    }
-    let key = bridge_key(&community_id, &bot_id);
-    // Clonado ANTES do lock: `state` é `State<'_, _>` e pegar o campo com o
-    // `Mutex` das bridges preso funcionaria, mas manter a ordem evita um
-    // deadlock futuro se o `Music` também precisar do lock de bridges.
-    let music = state.bot_music.clone();
-    let mut map = state.bot_bridges.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(existing) = map.get(&key) {
-        return Ok(existing.info());
-    }
-    let bridge = Arc::new(botbridge::start(
-        eng,
-        community_id.clone(),
-        bot_id.clone(),
-        port.unwrap_or(0),
-        music,
-    )?);
-    let info = bridge.info();
-    map.insert(key, bridge);
-    Ok(info)
-}
-
-#[tauri::command]
-fn bot_bridge_stop(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let key = bridge_key(&community_id, &bot_id);
-    let bridge = state
-        .bot_bridges
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&key);
-    match bridge {
-        Some(b) => {
-            b.stop();
-            Ok(true)
-        }
-        None => Ok(false),
-    }
-}
-
-#[tauri::command]
-fn bot_bridge_status(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<Option<botbridge::BridgeStatus>, String> {
-    let key = bridge_key(&community_id, &bot_id);
-    Ok(state
-        .bot_bridges
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&key)
-        .map(|b| b.status()))
-}
-
-#[tauri::command]
-fn bot_bridge_list(state: State<'_, AppState>) -> Result<Vec<botbridge::BridgeInfo>, String> {
-    Ok(state
-        .bot_bridges
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .values()
-        .map(|b| b.info())
-        .collect())
-}
 
 /// Lê uma pasta de bot (`bot.json` + código) sem gravar. O painel mostra o que
 /// encontrou e o dono confirma a importação.
-#[tauri::command]
-fn bot_folder_read(dir: String) -> Result<botbridge::ImportedFolder, String> {
-    botbridge::read_bot_folder(std::path::Path::new(dir.trim()))
-}
 
 /// Inicia o CÓDIGO do bot (plugin) apontando para a ponte local já aberta.
-#[tauri::command]
-fn bot_plugin_start(
-    community_id: String,
-    bot_id: String,
-    dir: String,
-    run: String,
-    state: State<'_, AppState>,
-) -> Result<botplugin::PluginStatus, String> {
-    let key = bridge_key(&community_id, &bot_id);
-    let info = {
-        let map = state.bot_bridges.lock().unwrap_or_else(|e| e.into_inner());
-        map.get(&key)
-            .map(|b| b.info())
-            .ok_or_else(|| "abra a ponte local do bot antes de iniciar o plugin".to_string())?
-    };
-    state
-        .bot_plugins
-        .start(&key, dir.trim(), run.trim(), &info.url)
-}
-
-#[tauri::command]
-fn bot_plugin_stop(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let key = bridge_key(&community_id, &bot_id);
-    Ok(state.bot_plugins.stop(&key))
-}
-
-#[tauri::command]
-fn bot_plugin_status(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<Option<botplugin::PluginStatus>, String> {
-    let key = bridge_key(&community_id, &bot_id);
-    Ok(state.bot_plugins.status(&key))
-}
-
-#[tauri::command]
-fn bot_plugin_list(state: State<'_, AppState>) -> Result<Vec<botplugin::PluginStatus>, String> {
-    Ok(state
-        .bot_plugins
-        .list()
-        .into_iter()
-        .map(|(_, s)| s)
-        .collect())
-}
 
 /// Abre a janela própria de bots — ou só traz para a frente se já existir.
 ///
 /// A janela nasce em `tauri.conf.json` com `create:false` e `visible:false`:
 /// criada sob demanda (não gasta um webview inteiro no boot) e mostrada só
 /// depois de construir, para não piscar branco.
-#[cfg(desktop)]
-#[tauri::command]
-fn open_bots_window(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("bots") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-        return Ok(());
-    }
-    let config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|w| w.label == "bots")
-        .cloned()
-        .ok_or_else(|| "a janela de bots não está declarada em tauri.conf.json".to_string())?;
-    let janela = tauri::WebviewWindowBuilder::from_config(&app, &config)
-        .map_err(|e| e.to_string())?
-        .build()
-        .map_err(|e| e.to_string())?;
-    let _ = janela.show();
-    let _ = janela.set_focus();
-    Ok(())
-}
 
 /// No celular não existe segunda janela: a tela de bots é a rota `/bots`.
-#[cfg(not(desktop))]
-#[tauri::command]
-fn open_bots_window(_app: AppHandle) -> Result<(), String> {
-    Err("a tela de bots no celular usa a interface do app, não uma janela separada".into())
-}
-
-#[tauri::command]
-async fn http_fetch(
-    url: String,
-    method: String,
-    headers: Vec<(String, String)>,
-    body: Option<String>,
-    timeout_ms: Option<u64>,
-    allow_private: Option<bool>,
-    _state: State<'_, AppState>,
-) -> Result<HttpResponse, String> {
-    use base64::Engine as _;
-    // `allow_private` é o opt-in do dono do bot (`blockPrivate:false`). Sem ele,
-    // o destino privado é recusado aqui — antes a checagem era só no renderer,
-    // e `http_fetch` aceitava qualquer 127.0.0.1/192.168.x vindo da UI.
-    let block_private = !allow_private.unwrap_or(false);
-    distorrent_core::bots::url_allowed(&url, block_private)?;
-    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("URL inválida: {e}"))?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("só http/https são permitidos".into());
-    }
-    if parsed.host_str().map(str::is_empty).unwrap_or(true) {
-        return Err("URL sem host".into());
-    }
-    let method = method.trim().to_uppercase();
-    let method = match method.as_str() {
-        "GET" => reqwest::Method::GET,
-        "POST" => reqwest::Method::POST,
-        other => return Err(format!("método {other} não suportado (use GET|POST)")),
-    };
-    let headers: Vec<(String, String)> = headers
-        .into_iter()
-        .filter(|(k, _)| !k.trim().is_empty())
-        .take(16)
-        .collect();
-    if headers.iter().any(|(k, v)| k.len() > 128 || v.len() > 1024) {
-        return Err("header grande demais".into());
-    }
-    let body_bytes = match body.as_deref() {
-        Some(b) if !b.is_empty() => base64::engine::general_purpose::STANDARD
-            .decode(b)
-            .ok()
-            .map(reqwest::Body::from)
-            .unwrap_or_else(|| reqwest::Body::from(b.to_string())),
-        _ => reqwest::Body::from(Vec::new()),
-    };
-    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000).min(15_000));
-    // Redirect revalidado a CADA salto: `Policy::limited(3)` seguia um 302 para
-    // `http://127.0.0.1` sem olhar o destino, então bastava o endpoint público
-    // devolver `Location` privado para o bot alcançar a LAN.
-    let guarded = block_private;
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 3 {
-                return attempt.error("redirect demais (máx 3)");
-            }
-            match distorrent_core::bots::url_allowed(attempt.url().as_str(), guarded) {
-                Ok(()) => attempt.follow(),
-                Err(e) => attempt.error(format!("redirect bloqueado: {e}")),
-            }
-        }))
-        .build()
-        .map_err(err)?;
-    let mut req = client.request(method, parsed);
-    for (k, v) in headers {
-        req = req.header(&k, &v);
-    }
-    let res = req.body(body_bytes).send().await.map_err(err)?;
-    let status = res.status().as_u16();
-    let bytes = res.bytes().await.map_err(err)?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let truncated = bytes.len() > 256 * 1024;
-    Ok(HttpResponse {
-        status,
-        body_b64: b64,
-        body_text: String::from_utf8(bytes[..bytes.len().min(256 * 1024)].to_vec()).ok(),
-        truncated,
-    })
-}
 
 #[derive(Debug, Serialize)]
 struct HttpResponse {
@@ -2112,111 +713,8 @@ struct HttpResponse {
     truncated: bool,
 }
 
-#[tauri::command]
-fn friends_list(status: Option<String>, state: State<AppState>) -> Result<Vec<PeerRecord>, String> {
-    Ok(engine(&state)?.friends(status.as_deref()))
-}
-
-#[tauri::command]
-fn friend_request(
-    peer_fp: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::net::engine::FriendOutcome, String> {
-    // Aceita fingerprint (12 hex) ou a chave pública completa (64 hex); o core
-    // normaliza e devolve erro honesto quando não é nenhum dos dois.
-    let outcome = engine(&state)?.friend_request(&peer_fp).map_err(err)?;
-    Ok(outcome)
-}
-
-// Seção 10: tauri
-#[tauri::command]
-fn friend_respond(peer_fp: String, accept: bool, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?
-        .friend_respond(peer_fp.trim(), accept)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn friend_remove(peer_fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.friend_remove(peer_fp.trim()).map_err(err)
-}
-
-#[tauri::command]
-fn friend_block(peer_fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.friend_block(peer_fp.trim()).map_err(err)
-}
-
-#[tauri::command]
-fn friend_unblock(peer_fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.friend_unblock(peer_fp.trim()).map_err(err)
-}
-
-#[tauri::command]
-fn conversations_list(
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::Conversation>, String> {
-    Ok(engine(&state)?.conversations())
-}
-
 /// Lista com prévia, horário e não lidas do membro. A UI móvel já lia
 /// `unread_count`/`last_ts`/`last_body` destes objetos e recebia `undefined`.
-#[tauri::command]
-fn conversations_overview(
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::ConversationSummary>, String> {
-    let store = open_store(&state)?;
-    let fp = identity_fp(&state);
-    store.conversations_with_counts(&fp).map_err(err)
-}
-
-#[tauri::command]
-fn dm_open(
-    peer_fp: String,
-    peer_nick: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::Conversation, String> {
-    engine(&state)?.open_dm(&peer_fp, &peer_nick).map_err(err)
-}
-
-#[tauri::command]
-fn messages_list(
-    conv_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::storage::StoredMessage>, String> {
-    Ok(engine(&state)?.messages(&conv_id))
-}
-
-#[tauri::command]
-fn message_send(
-    conv_id: String,
-    body: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::StoredMessage, String> {
-    if body.trim().is_empty() {
-        return Err("mensagem vazia".into());
-    }
-    engine(&state)?.send_dm(&conv_id, body.trim()).map_err(err)
-}
-
-#[tauri::command]
-fn message_resend(
-    msg_id: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::StoredMessage, String> {
-    engine(&state)?.resend_message(&msg_id).map_err(err)
-}
-
-#[tauri::command]
-fn delete_conversation(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    let st = open_store(&state)?;
-    st.delete_conversation(&conv_id).map_err(err)?;
-    Ok(())
-}
-
-#[tauri::command]
-fn message_verify(env: MessageEnvelope, pubkey_hex: String) -> Result<bool, String> {
-    Ok(env.verify_with_pubkey(&pubkey_hex))
-}
 
 #[derive(Debug, Clone, Serialize)]
 struct PrivacySettings {
@@ -2281,117 +779,6 @@ impl PrivacySettings {
     }
 }
 
-#[tauri::command]
-fn privacy_get(state: State<AppState>) -> Result<PrivacySettings, String> {
-    let store = open_store(&state)?;
-    let mode = store
-        .kv_get("privacy.mode")
-        .unwrap_or_else(|| "encrypted".into());
-    let mut settings = PrivacySettings::from_mode(&mode);
-    if let Some(eng) = state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        settings.proxy_effective = eng.relay_is_proxied();
-    }
-    Ok(settings)
-}
-
-#[tauri::command]
-fn privacy_set(mode: String, state: State<AppState>) -> Result<PrivacySettings, String> {
-    let valid = matches!(mode.as_str(), "normal" | "encrypted" | "proxy" | "full");
-    if !valid {
-        return Err("modo inválido — use: normal, encrypted, proxy ou full".into());
-    }
-
-    // Seção 11: engine_opt
-    let engine_opt = state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if let Some(eng) = engine_opt {
-        eng.privacy_set_mode(&mode).map_err(err)?;
-    } else {
-        let store = open_store(&state)?;
-        store.kv_set("privacy.mode", &mode).map_err(err)?;
-    }
-
-    let store = open_store(&state)?;
-    let mut settings = PrivacySettings::from_mode(&mode);
-    store
-        .kv_set(
-            "privacy.encryption",
-            if settings.encryption_enabled {
-                "1"
-            } else {
-                "0"
-            },
-        )
-        .map_err(err)?;
-    store
-        .kv_set("privacy.tor", if settings.tor_proxy { "1" } else { "0" })
-        .map_err(err)?;
-    store
-        .kv_set(
-            "privacy.udp_discovery",
-            if settings.udp_discovery { "1" } else { "0" },
-        )
-        .map_err(err)?;
-    store
-        .kv_set(
-            "privacy.padding",
-            if settings.metadata_padding { "1" } else { "0" },
-        )
-        .map_err(err)?;
-    store
-        .kv_set(
-            "privacy.obfuscation",
-            if settings.traffic_obfuscation {
-                "1"
-            } else {
-                "0"
-            },
-        )
-        .map_err(err)?;
-
-    tracing::info!(
-        mode = %mode,
-        encryption = settings.encryption_enabled,
-        tor = settings.tor_proxy,
-        udp = settings.udp_discovery,
-        padding = settings.metadata_padding,
-        obfuscation = settings.traffic_obfuscation,
-        "modo de privacidade alterado"
-    );
-    if let Some(eng) = state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        settings.proxy_effective = eng.relay_is_proxied();
-    }
-    Ok(settings)
-}
-
-#[tauri::command]
-fn net_limits(
-    state: State<AppState>,
-) -> Result<distorrent_core::net::netlimit::LimitsSnapshot, String> {
-    let engine = state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    match engine {
-        Some(eng) => Ok(eng.net_limits_snapshot()),
-        None => Err("motor de rede não está ativo (cofre trancado?)".into()),
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct ProxyConfig {
     addr: String,
@@ -2410,140 +797,10 @@ fn valid_privacy_mode(mode: &str) -> bool {
     matches!(mode, "normal" | "encrypted" | "proxy" | "full")
 }
 
-#[tauri::command]
-fn proxy_addr_get(mode: Option<String>, state: State<AppState>) -> Result<ProxyConfig, String> {
-    let store = open_store(&state)?;
-    let mode = mode.filter(|m| valid_privacy_mode(m)).unwrap_or_else(|| {
-        store
-            .kv_get("privacy.mode")
-            .unwrap_or_else(|| "encrypted".into())
-    });
-    let saved = store
-        .kv_get(proxy_addr_key(&mode))
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty());
-    match saved {
-        Some(addr) => Ok(ProxyConfig {
-            addr,
-            is_default: false,
-        }),
-        None => {
-            let addr = if mode == "full" {
-                "127.0.0.1:9050"
-            } else {
-                "127.0.0.1:1080"
-            }
-            .to_string();
-            Ok(ProxyConfig {
-                addr,
-                is_default: true,
-            })
-        }
-    }
-}
-
-#[tauri::command]
-fn proxy_addr_set(
-    addr: String,
-    mode: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let engine_opt = state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let mode =
-        mode.filter(|m| valid_privacy_mode(m))
-            .unwrap_or_else(|| match engine_opt.as_ref() {
-                Some(eng) => eng.privacy_mode(),
-                None => open_store(&state)
-                    .ok()
-                    .and_then(|s| s.kv_get("privacy.mode"))
-                    .unwrap_or_else(|| "encrypted".into()),
-            });
-    match engine_opt {
-        Some(eng) => eng.set_anonymity_addr(&mode, &addr).map_err(err),
-        None => {
-            // Seção 12: trimmed
-            let trimmed = addr.trim();
-            let store = open_store(&state)?;
-            if trimmed.is_empty() {
-                store.kv_delete(proxy_addr_key(&mode)).map_err(err)?;
-            } else {
-                let (_, port) = trimmed
-                    .rsplit_once(':')
-                    .ok_or("formato inválido — use host:porta")?;
-                port.parse::<u16>()
-                    .map_err(|_| "porta inválida".to_string())?;
-                store.kv_set(proxy_addr_key(&mode), trimmed).map_err(err)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-#[tauri::command]
-async fn proxy_test(addr: String) -> Result<u64, String> {
-    let trimmed = addr.trim().to_string();
-    if trimmed.is_empty() {
-        return Err("informe o endereço do proxy (ex.: 127.0.0.1:9050 para Tor)".into());
-    }
-    distorrent_core::net::relay::proxy_online_test(&trimmed).await
-}
-
 #[derive(Debug, Serialize)]
 struct VaultExport {
     identity: Identity,
     vault_blob: String,
-}
-
-#[tauri::command]
-fn vault_export(state: State<AppState>) -> Result<VaultExport, String> {
-    let store = open_store(&state)?;
-    let identity = store.load_identity().ok_or("sem identidade")?;
-    if store.kv_get("vault.on").as_deref() != Some("1") {
-        return Err("sem cofre cifrado — defina uma senha (vault) antes de exportar".into());
-    }
-    let vault_blob = store.load_secret_hex().ok_or("sem cofre para exportar")?;
-    if vault_blob.is_empty() {
-        return Err("vault vazio — não há identidade para exportar".into());
-    }
-    Ok(VaultExport {
-        identity,
-        vault_blob,
-    })
-}
-
-#[tauri::command]
-fn vault_import(
-    identity_json: String,
-    vault_blob: String,
-    state: State<AppState>,
-) -> Result<Identity, String> {
-    let store = open_store(&state)?;
-
-    if store.load_identity().is_some() {
-        return Err(
-            "já existe uma identidade neste device — exporte ou apague antes de importar".into(),
-        );
-    }
-
-    let identity: Identity =
-        serde_json::from_str(&identity_json).map_err(|e| format!("identity inválida: {e}"))?;
-
-    if identity.fingerprint.is_empty() {
-        return Err("fingerprint vazio na identidade importada".into());
-    }
-
-    if vault_blob.len() < 88 {
-        return Err("vault blob inválido (muito curto)".into());
-    }
-
-    store.save_identity(&identity, &vault_blob).map_err(err)?;
-    store.kv_set("vault.on", "1").map_err(err)?;
-
-    Ok(identity)
 }
 
 #[derive(Debug, Serialize)]
@@ -2552,738 +809,8 @@ struct SavedAccount {
     fingerprint: String,
 }
 
-#[tauri::command]
-fn accounts_list(state: State<AppState>) -> Result<Vec<SavedAccount>, String> {
-    let store = open_store(&state)?;
-    let mut out = Vec::new();
-    if let Some(id) = store.load_identity() {
-        out.push(SavedAccount {
-            nickname: id.nickname,
-            fingerprint: id.fingerprint,
-        });
-    }
-    if store.kv_get(&format!("imported.0.blob")).is_some() {
-        for i in 0..20 {
-            if let Some(fp) = store.kv_get(&format!("imported.{i}.fp")) {
-                if let Some(nick) = store.kv_get(&format!("imported.{i}.nick")) {
-                    if !out.iter().any(|a| a.fingerprint == fp) {
-                        out.push(SavedAccount {
-                            nickname: nick,
-                            fingerprint: fp,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-fn account_save_imported(
-    identity_json: String,
-    vault_blob: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let identity: Identity =
-        serde_json::from_str(&identity_json).map_err(|e| format!("identity inválida: {e}"))?;
-    if identity.fingerprint.is_empty() {
-        return Err("fingerprint vazio na identidade importada".into());
-    }
-    if vault_blob.len() < 88 {
-        return Err("vault blob inválido (muito curto)".into());
-    }
-
-    let store = open_store(&state)?;
-    for i in 0..20 {
-        if store.kv_get(&format!("imported.{i}.fp")).is_none() {
-            store
-                .kv_set(&format!("imported.{i}.nick"), &identity.nickname)
-                .map_err(err)?;
-            store
-                .kv_set(&format!("imported.{i}.fp"), &identity.fingerprint)
-                .map_err(err)?;
-            store
-                .kv_set(&format!("imported.{i}.pubkey"), &identity.pubkey_hex)
-                .map_err(err)?;
-            store
-                .kv_set(&format!("imported.{i}.blob"), &vault_blob)
-                .map_err(err)?;
-            return Ok(());
-        }
-    }
-    Err("máximo de contas importadas atingido (20)".into())
-}
-
-#[tauri::command]
-fn account_switch(fingerprint: String, state: State<AppState>) -> Result<Identity, String> {
-    let store = open_store(&state)?;
-
-    if let Some(id) = store.load_identity() {
-        if id.fingerprint == fingerprint {
-            return Ok(id);
-        }
-    }
-
-    for i in 0..20 {
-        if store.kv_get(&format!("imported.{i}.fp")).as_deref() == Some(&fingerprint) {
-            let blob = store
-                .kv_get(&format!("imported.{i}.blob"))
-                .ok_or("vault da conta não encontrado")?;
-            let nick = store
-                .kv_get(&format!("imported.{i}.nick"))
-                .unwrap_or_default();
-            // Seção 13: pubkey_hex
-            let pubkey_hex = store
-                .kv_get(&format!("imported.{i}.pubkey"))
-                .unwrap_or_default();
-
-            if let Some(current_id) = store.load_identity() {
-                if let Some(current_blob) = store.load_secret_hex() {
-                    if !current_blob.is_empty() {
-                        for j in 0..20 {
-                            if store.kv_get(&format!("imported.{j}.fp")).as_deref()
-                                != Some(&current_id.fingerprint)
-                            {
-                                if store.kv_get(&format!("imported.{j}.fp")).is_none() {
-                                    store
-                                        .kv_set(&format!("imported.{j}.nick"), &current_id.nickname)
-                                        .map_err(err)?;
-                                    store
-                                        .kv_set(
-                                            &format!("imported.{j}.fp"),
-                                            &current_id.fingerprint,
-                                        )
-                                        .map_err(err)?;
-                                    store
-                                        .kv_set(
-                                            &format!("imported.{j}.pubkey"),
-                                            &current_id.pubkey_hex,
-                                        )
-                                        .map_err(err)?;
-                                    store
-                                        .kv_set(&format!("imported.{j}.blob"), &current_blob)
-                                        .map_err(err)?;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let imported_identity = Identity {
-                fingerprint: fingerprint.clone(),
-                pubkey_hex: if pubkey_hex.is_empty() {
-                    String::new()
-                } else {
-                    pubkey_hex
-                },
-                nickname: nick,
-                created_at: distorrent_core::identity::now_ms(),
-            };
-            store
-                .save_identity(&imported_identity, &blob)
-                .map_err(err)?;
-            store.kv_set("vault.on", "1").map_err(err)?;
-
-            {
-                let guard = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(e) = guard.as_ref() {
-                    e.shutdown();
-                }
-            }
-            *state.engine.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = false;
-
-            return Ok(imported_identity);
-        }
-    }
-
-    Err("conta não encontrada".into())
-}
-
-#[tauri::command]
-fn account_remove_imported(fingerprint: String, state: State<AppState>) -> Result<(), String> {
-    let store = open_store(&state)?;
-    for i in 0..20 {
-        if store.kv_get(&format!("imported.{i}.fp")).as_deref() == Some(&fingerprint) {
-            store
-                .kv_delete(&format!("imported.{i}.nick"))
-                .map_err(err)?;
-            store.kv_delete(&format!("imported.{i}.fp")).map_err(err)?;
-            store
-                .kv_delete(&format!("imported.{i}.blob"))
-                .map_err(err)?;
-            return Ok(());
-        }
-    }
-    Err("conta não encontrada".into())
-}
-
-#[tauri::command]
-fn social_react(
-    conv_id: String,
-    msg_id: String,
-    emoji: String,
-    state: State<AppState>,
-) -> Result<bool, String> {
-    engine(&state)?
-        .social_react(&conv_id, &msg_id, &emoji)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn social_reactions(
-    msg_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
-    let store = open_store(&state)?;
-    let rows = store.reactions_for_msg(&msg_id).map_err(err)?;
-    Ok(store.mark_reactions_mine(rows, &identity_fp(&state)))
-}
-
-#[tauri::command]
-fn social_reactions_bulk(
-    msg_ids: Vec<String>,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::ReactionSummary>, String> {
-    let store = open_store(&state)?;
-    let rows = store.reactions_for_msgs(&msg_ids).map_err(err)?;
-    Ok(store.mark_reactions_mine(rows, &identity_fp(&state)))
-}
-
-#[tauri::command]
-fn social_reply(
-    conv_id: String,
-    msg_id: String,
-    reply_to: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_reply(&conv_id, &msg_id, &reply_to)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn social_edit(
-    conv_id: String,
-    msg_id: String,
-    body: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_edit(&conv_id, &msg_id, &body)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn social_delete(conv_id: String, msg_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?
-        .social_delete(&conv_id, &msg_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn social_pin(
-    conv_id: String,
-    msg_id: String,
-    pinned: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_pin(&conv_id, &msg_id, pinned)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn social_pins(
-    conv_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
-    open_store(&state)?.pins_list(&conv_id).map_err(err)
-}
-
-// Seção 14: tauri
-#[tauri::command]
-fn social_meta_bulk(
-    msg_ids: Vec<String>,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::MsgMetaView>, String> {
-    open_store(&state)?.msg_meta_bulk(&msg_ids).map_err(err)
-}
-
-#[tauri::command]
-fn social_bodies(
-    msg_ids: Vec<String>,
-    state: State<AppState>,
-) -> Result<Vec<(String, String)>, String> {
-    let store = open_store(&state)?;
-    let mut out = Vec::new();
-    for id in msg_ids {
-        if let Some(m) = store.message_by_id(&id).map_err(err)? {
-            let body = store.effective_body(&id, &m.body).map_err(err)?;
-            out.push((id, body));
-        }
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-fn social_forward(
-    src_msg_id: String,
-    target_conv: String,
-    target_channel: String,
-    from_label: String,
-    state: State<AppState>,
-) -> Result<StoredMessage, String> {
-    engine(&state)?
-        .social_forward(&src_msg_id, &target_conv, &target_channel, &from_label)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn read_set(conv_id: String, ts: i64, state: State<AppState>) -> Result<(), String> {
-    let st = open_store(&state)?;
-    st.read_set(&conv_id, ts).map_err(err)?;
-    // Cursor POR MEMBRO: num grupo/canal o "lida" de um não pode marcar para
-    // todos. `read_set` legado continua gravando o cursor global por causa
-    // das chamadas antigas do serviço.
-    let fp = identity_fp(&state);
-    st.conv_read_set(&conv_id, &fp, ts).map_err(err)?;
-    if let Ok(e) = engine(&state) {
-        e.notify_read(&conv_id, ts);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn read_all(state: State<AppState>) -> Result<Vec<distorrent_core::social::ReadCursor>, String> {
-    open_store(&state)?.read_all().map_err(err)
-}
-
-#[tauri::command]
-fn unread_count(conv_id: String, state: State<AppState>) -> Result<i64, String> {
-    let st = open_store(&state)?;
-    let fp = identity_fp(&state);
-    st.unread_count_for(&conv_id, &fp).map_err(err)
-}
-
 /// Estado do limite de introdução para a conversa aberta. A UI não recria a
 /// regra: pergunta ao core quanto já foi usado.
-#[tauri::command]
-fn dm_intro_state(
-    conv_id: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::social::IntroState, String> {
-    let st = open_store(&state)?;
-    let fp = identity_fp(&state);
-    let conv = st
-        .get_conversation(&conv_id)
-        .map_err(err)?
-        .ok_or_else(|| "conversa inexistente".to_string())?;
-    if conv.kind != "dm" {
-        return Err("não é uma conversa direta".into());
-    }
-    st.dm_intro_state(&conv_id, &conv.peer_fp, &fp).map_err(err)
-}
-
-#[tauri::command]
-fn unread_mentions(state: State<AppState>) -> Result<i64, String> {
-    let fp = identity_fp(&state);
-    open_store(&state)?.unread_mentions(&fp).map_err(err)
-}
-
-#[tauri::command]
-fn presence_set(
-    status: String,
-    custom: String,
-    custom_emoji: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_presence_set(&status, &custom, &custom_emoji)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn presence_list(
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::PresenceView>, String> {
-    open_store(&state)?.presence_list().map_err(err)
-}
-
-#[tauri::command]
-fn presence_get(
-    fp: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::social::PresenceView, String> {
-    open_store(&state)?.presence_get(&fp).map_err(err)
-}
-
-#[tauri::command(rename_all = "snake_case")]
-fn profile_set(
-    display_name: String,
-    about: String,
-    avatar_b64: String,
-    banner_b64: String,
-    accent: String,
-    remove_avatar: Option<bool>,
-    remove_banner: Option<bool>,
-    state: State<AppState>,
-) -> Result<distorrent_core::social::ProfileView, String> {
-    engine(&state)?
-        .social_profile_set_full(
-            &display_name,
-            &about,
-            &avatar_b64,
-            &banner_b64,
-            &accent,
-            remove_avatar.unwrap_or(false),
-            remove_banner.unwrap_or(false),
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn profile_sync_now(state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.sync_profiles_with_peers();
-    Ok(())
-}
-
-#[tauri::command]
-fn profile_get(
-    fp: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::social::ProfileView, String> {
-    open_store(&state)?.profile_get(&fp).map_err(err)
-}
-
-#[tauri::command]
-fn profile_list(
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::ProfileView>, String> {
-    open_store(&state)?.profile_list().map_err(err)
-}
-
-#[tauri::command]
-fn nickname_set(
-    community_id: String,
-    fp: String,
-    nickname: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    open_store(&state)?
-        .nickname_set(&community_id, &fp, &nickname)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn nickname_get(
-    community_id: String,
-    fp: String,
-    state: State<AppState>,
-) -> Result<String, String> {
-    open_store(&state)?
-        .nickname_get(&community_id, &fp)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn message_search(
-    mut q: distorrent_core::social::SearchQuery,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::SearchHit>, String> {
-    // O filtro de não lidas precisa saber QUEM está buscando; a UI não deve
-    // poder falsificar isso (nem precisa saber o próprio fp para buscar).
-    if q.me.is_empty() {
-        q.me = identity_fp(&state);
-    }
-    open_store(&state)?.message_search(&q).map_err(err)
-}
-
-#[tauri::command]
-fn messages_around(
-    conv_id: String,
-    ts: i64,
-    limit: i64,
-    state: State<AppState>,
-) -> Result<Vec<StoredMessage>, String> {
-    open_store(&state)?
-        .messages_around(&conv_id, ts, limit)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn message_receipts(
-    msg_ids: Vec<String>,
-    state: State<AppState>,
-) -> Result<Vec<(String, String, i64)>, String> {
-    open_store(&state)?.receipts_for(&msg_ids).map_err(err)
-}
-
-// Seção 15: tauri
-#[tauri::command]
-fn thread_create(
-    community_id: String,
-    parent_channel: String,
-    name: String,
-    kind: String,
-    tags: String,
-    state: State<AppState>,
-) -> Result<distorrent_core::social::ThreadRow, String> {
-    engine(&state)?
-        .social_thread_create(&community_id, &parent_channel, &name, &kind, &tags)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn thread_list(
-    community_id: String,
-    parent: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::ThreadRow>, String> {
-    open_store(&state)?
-        .threads_list(&community_id, &parent)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn thread_messages(
-    thread_id: String,
-    limit: i64,
-    state: State<AppState>,
-) -> Result<Vec<StoredMessage>, String> {
-    open_store(&state)?
-        .list_messages_thread(&thread_id, limit)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn thread_send(
-    community_id: String,
-    thread_id: String,
-    body: String,
-    state: State<AppState>,
-) -> Result<StoredMessage, String> {
-    engine(&state)?
-        .social_thread_send(&community_id, &thread_id, &body)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn thread_archive(thread_id: String, archived: bool, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?
-        .social_thread_archive(&thread_id, archived)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn member_ban(
-    community_id: String,
-    fp: String,
-    until_ms: i64,
-    reason: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_ban(&community_id, &fp, until_ms, &reason)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn member_unban(community_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?
-        .social_unban(&community_id, &fp)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn member_timeout(
-    community_id: String,
-    fp: String,
-    until_ms: i64,
-    reason: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_timeout(&community_id, &fp, until_ms, &reason)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn ban_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::BanRow>, String> {
-    open_store(&state)?.ban_list(&community_id).map_err(err)
-}
-
-#[tauri::command]
-fn timeout_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::BanRow>, String> {
-    open_store(&state)?.timeout_list(&community_id).map_err(err)
-}
-
-#[tauri::command]
-fn channel_cfg_set(
-    community_id: String,
-    channel_id: String,
-    slowmode_secs: i64,
-    nsfw: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_channel_cfg(&community_id, &channel_id, slowmode_secs, nsfw)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn channel_cfg_get(channel_id: String, state: State<AppState>) -> Result<i64, String> {
-    open_store(&state)?
-        .channel_cfg_slowmode(&channel_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn poll_create(
-    community_id: String,
-    channel_id: String,
-    question: String,
-    options: Vec<String>,
-    multi: bool,
-    ends_at: i64,
-    state: State<AppState>,
-) -> Result<distorrent_core::social::PollRow, String> {
-    engine(&state)?
-        .social_poll_create(
-            &community_id,
-            &channel_id,
-            &question,
-            options,
-            multi,
-            ends_at,
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn poll_list(
-    community_id: String,
-    channel_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::PollRow>, String> {
-    open_store(&state)?
-        .poll_list(&community_id, &channel_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn poll_vote(
-    community_id: String,
-    channel_id: String,
-    poll_id: String,
-    option_idx: i64,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_poll_vote(&community_id, &channel_id, &poll_id, option_idx)
-        .map_err(err)
-}
-
-// Seção 16: tauri
-#[tauri::command]
-fn poll_tally(
-    poll_id: String,
-    state: State<AppState>,
-) -> Result<(Vec<i64>, i64, Vec<i64>), String> {
-    let store = open_store(&state)?;
-    let (counts, total) = store.poll_tally(&poll_id).map_err(err)?;
-    let mine = store
-        .poll_my_votes(&poll_id, &identity_fp(&state))
-        .map_err(err)?;
-    Ok((counts, total, mine))
-}
-
-#[tauri::command]
-fn event_upsert(
-    ev: distorrent_core::social::EventRow,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?.social_event_upsert(ev).map_err(err)
-}
-
-#[tauri::command]
-fn event_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::EventRow>, String> {
-    open_store(&state)?.event_list(&community_id).map_err(err)
-}
-
-#[tauri::command]
-fn event_interest(
-    community_id: String,
-    event_id: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_event_interest(&community_id, &event_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn event_delete(
-    community_id: String,
-    event_id: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .social_event_delete(&community_id, &event_id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn emoji_upsert(
-    e: distorrent_core::social::EmojiRow,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?.social_emoji_upsert(e).map_err(err)
-}
-
-#[tauri::command]
-fn emoji_list(
-    community_id: String,
-    state: State<AppState>,
-) -> Result<Vec<distorrent_core::social::EmojiRow>, String> {
-    open_store(&state)?.emoji_list(&community_id).map_err(err)
-}
-
-#[tauri::command]
-fn emoji_delete(community_id: String, id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?
-        .social_emoji_delete(&community_id, &id)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bookmark_set(
-    conv_id: String,
-    name: String,
-    payload: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    open_store(&state)?
-        .bookmark_set(&conv_id, &name, &payload)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn bookmark_list(conv_id: String, state: State<AppState>) -> Result<Vec<(String, String)>, String> {
-    open_store(&state)?.bookmark_list(&conv_id).map_err(err)
-}
 
 fn identity_fp(state: &State<AppState>) -> String {
     open_store(state)
@@ -3301,997 +828,9 @@ fn engine(state: &State<AppState>) -> Result<Arc<NetworkEngine>, String> {
         .ok_or_else(|| "motor não iniciado (sem identidade)".to_string())
 }
 
-fn is_reserved_key(key: &str) -> bool {
-    key == "identity.secret" || key == "identity.secret.backup" || key.is_empty() || key.len() > 128
-}
-
-#[tauri::command]
-fn secure_store(key: String, value: String) -> Result<(), String> {
-    if is_reserved_key(&key) {
-        return Err("chave reservada do sistema".into());
-    }
-    let entry = keyring::Entry::new("distorrent-app", &key).map_err(|e| e.to_string())?;
-    entry.set_password(&value).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn secure_load(key: String) -> Result<Option<String>, String> {
-    if is_reserved_key(&key) {
-        return Err("chave reservada do sistema".into());
-    }
-    let entry = keyring::Entry::new("distorrent-app", &key).map_err(|e| e.to_string())?;
-    match entry.get_password() {
-        Ok(v) => Ok(Some(v)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[tauri::command]
-fn create_group(
-    title: String,
-    members: Vec<String>,
-    state: State<AppState>,
-) -> Result<distorrent_core::storage::Conversation, String> {
-    engine(&state)?.create_group(&title, members).map_err(err)
-}
-
-#[tauri::command]
-fn group_members(conv_id: String, state: State<AppState>) -> Result<Vec<(String, String)>, String> {
-    Ok(engine(&state)?.group_members(&conv_id))
-}
-
-#[tauri::command]
-fn group_pair_now(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_pair_now(&conv_id);
-    Ok(())
-}
-
-#[tauri::command]
-fn community_pair_now(community_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.community_pair_now(&community_id);
-    Ok(())
-}
-
-#[tauri::command]
-fn community_sync_now(community_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.community_sync_now(&community_id);
-    Ok(())
-}
-
-#[tauri::command]
-fn group_add(conv_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_add(&conv_id, &fp).map_err(err)
-}
-
-#[tauri::command]
-// Seção 17: group_remove
-fn group_remove(conv_id: String, fp: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_remove(&conv_id, &fp).map_err(err)
-}
-
-#[tauri::command]
-fn group_rename(conv_id: String, title: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_rename(&conv_id, &title).map_err(err)
-}
-
-#[tauri::command]
-fn group_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_leave(&conv_id).map_err(err)
-}
-
-#[tauri::command]
-fn group_delete(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_delete(&conv_id).map_err(err)
-}
-
-#[tauri::command]
-fn group_delete_local(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.group_delete_local(&conv_id).map_err(err)
-}
-
-#[tauri::command]
-fn call_room_publish(
-    call_id: String,
-    conv_id: String,
-    kind: String,
-    participants: Vec<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let e = engine(&state)?;
-    e.publish_room(&call_id, &conv_id, &kind, participants);
-    Ok(())
-}
-
-#[tauri::command]
-fn call_room_close(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.unpublish_room(&conv_id);
-    Ok(())
-}
-
-#[tauri::command]
-fn call_room_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.leave_room(&conv_id);
-    Ok(())
-}
-
-#[tauri::command]
-fn call_room_join(
-    conv_id: String,
-    kind: String,
-    state: State<AppState>,
-) -> Result<(String, Vec<String>), String> {
-    engine(&state)?.room_join(&conv_id, &kind).map_err(err)
-}
-
-#[tauri::command]
-fn call_rooms_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
-    let e = engine(&state)?;
-    let mut out = Vec::new();
-    for ev in e.rooms_snapshot() {
-        if let distorrent_core::EngineEvent::CallRoom {
-            call_id,
-            conv_id,
-            kind,
-            state,
-            participants,
-            host_fp,
-        } = ev
-        {
-            out.push(serde_json::json!({
-                "call_id": call_id,
-                "conv_id": conv_id,
-                "kind": kind,
-                "state": state,
-                "participants": participants,
-                "host_fp": host_fp,
-            }));
-        }
-    }
-    Ok(out)
-}
-
-#[tauri::command]
-async fn call_invite(
-    target_fp: String,
-    kind: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let e = engine(&state)?;
-    tauri::async_runtime::spawn_blocking(move || e.call_invite(&target_fp, &kind))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)
-}
-
-#[tauri::command]
-async fn call_accept(
-    call_id: String,
-    from_fp: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let e = engine(&state)?;
-    let e2 = e.clone();
-    let (cid, fp) = (call_id.clone(), from_fp.clone());
-    tauri::async_runtime::spawn_blocking(move || e.call_accept(&cid, &fp))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)?;
-    e2.resume_held_call(&call_id, &from_fp).await;
-    Ok(())
-}
-
-#[tauri::command]
-fn call_ring_retry(
-    call_id: String,
-    target_fp: String,
-    kind: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .call_ring_retry(&call_id, &target_fp, &kind)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn call_reject(
-    call_id: String,
-    from_fp: String,
-    reason: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .call_reject(&call_id, &from_fp, &reason)
-        .map_err(err)
-}
-
-#[tauri::command]
-async fn call_end(call_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let e = engine(&state)?;
-    tauri::async_runtime::spawn_blocking(move || e.call_end(&call_id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)
-}
-
-#[tauri::command]
-fn call_offer(
-    target_fp: String,
-    call_id: String,
-    sdp: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .call_signal(
-            &target_fp,
-            distorrent_core::protocol::SecureFrame::CallOffer { call_id, sdp },
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn call_answer(
-    target_fp: String,
-    call_id: String,
-    sdp: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .call_signal(
-            &target_fp,
-            distorrent_core::protocol::SecureFrame::CallAnswer { call_id, sdp },
-        )
-        .map_err(err)
-}
-
-// Seção 18: tauri
-#[tauri::command]
-fn call_ice(
-    target_fp: String,
-    call_id: String,
-    candidate: String,
-    mid: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .call_signal(
-            &target_fp,
-            distorrent_core::protocol::SecureFrame::CallIce {
-                call_id,
-                candidate,
-                mid,
-            },
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn call_add_participant(
-    target_fp: String,
-    call_id: String,
-    fp: String,
-    kind: Option<String>,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .call_add_participant(&target_fp, &call_id, &fp, kind.as_deref().unwrap_or(""))
-        .map_err(err)
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_media_available(state: State<AppState>) -> Result<bool, String> {
-    match state
-        .engine
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-    {
-        Some(e) => Ok(e.voice_media_available()),
-        None => Ok(distorrent_core::net::engine::native_voice_capable()),
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_media_stats(call_id: String, state: State<AppState>) -> Result<serde_json::Value, String> {
-    match engine(&state)?.voice_media_stats(&call_id) {
-        Some(s) => serde_json::to_value(s).map_err(|e| e.to_string()),
-        None => Ok(serde_json::Value::Null),
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_set_muted(call_id: String, muted: bool, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.voice_set_muted(&call_id, muted);
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_hangup(call_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.voice_hangup(&call_id);
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_set_deafened(
-    call_id: String,
-    deafened: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?.voice_set_deafened(&call_id, deafened);
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_video_start(
-    call_id: String,
-    peer_fp: String,
-    source: String,
-    monitor_id: Option<u32>,
-    state: State<AppState>,
-) -> Result<String, String> {
-    let e = engine(&state)?;
-    let Some(v) = e.voice() else {
-        return Err("mídia nativa indisponível (voz nativa desligada?)".into());
-    };
-    v.video_start(&call_id, &peer_fp, &source, monitor_id)
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_video_stop(
-    call_id: String,
-    peer_fp: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let e = engine(&state)?;
-    if let Some(v) = e.voice() {
-        v.video_stop(&call_id, &peer_fp);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_video_frame(
-    call_id: String,
-    peer_fp: String,
-    since_seq: Option<u64>,
-    state: State<AppState>,
-) -> Result<serde_json::Value, String> {
-    let e = engine(&state)?;
-    let Some(v) = e.voice() else {
-        return Ok(serde_json::Value::Null);
-    };
-    match v.video_frame(&call_id, &peer_fp) {
-        Some(f) => {
-            if let Some(since) = since_seq {
-                if f.seq <= since {
-                    return Ok(serde_json::json!({ "seq": f.seq, "w": f.w, "h": f.h }));
-                }
-            }
-            let b64 = {
-                use base64::Engine as _;
-                base64::engine::general_purpose::STANDARD.encode(&f.jpeg)
-            };
-            Ok(serde_json::json!({ "jpeg": b64, "w": f.w, "h": f.h, "seq": f.seq }))
-        }
-        None => Ok(serde_json::Value::Null),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_media_available(_state: State<AppState>) -> Result<bool, String> {
-    Ok(false)
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_media_stats(
-    _call_id: String,
-    _state: State<AppState>,
-) -> Result<serde_json::Value, String> {
-    Ok(serde_json::Value::Null)
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_set_muted(_call_id: String, _muted: bool, _state: State<AppState>) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-// Seção 19: voice_hangup
-fn voice_hangup(_call_id: String, _state: State<AppState>) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_set_deafened(
-    _call_id: String,
-    _deafened: bool,
-    _state: State<AppState>,
-) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_video_start(
-    _call_id: String,
-    _peer_fp: String,
-    _source: String,
-    _monitor_id: Option<u32>,
-    _state: State<AppState>,
-) -> Result<String, String> {
-    Err("vídeo nativo indisponível nesta plataforma".into())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_video_stop(
-    _call_id: String,
-    _peer_fp: String,
-    _state: State<AppState>,
-) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_video_frame(
-    _call_id: String,
-    _peer_fp: String,
-    _since_seq: Option<u64>,
-    _state: State<AppState>,
-) -> Result<serde_json::Value, String> {
-    Ok(serde_json::Value::Null)
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_mic_test_start(state: State<AppState>) -> Result<u64, String> {
-    engine(&state)?
-        .voice_mic_test_start()
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_mic_test_level(test_id: u64, state: State<AppState>) -> Result<f32, String> {
-    Ok(engine(&state)?.voice_mic_test_level(test_id))
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_mic_test_stop(test_id: u64, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.voice_mic_test_stop(test_id);
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[tauri::command]
-fn voice_mic_name(state: State<AppState>) -> Result<String, String> {
-    Ok(engine(&state)?.voice_mic_name())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_mic_test_start(_state: State<AppState>) -> Result<u64, String> {
-    Err("teste de mic nativo indisponível nesta plataforma".into())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_mic_test_level(_test_id: u64, _state: State<AppState>) -> Result<f32, String> {
-    Ok(0.0)
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_mic_test_stop(_test_id: u64, _state: State<AppState>) -> Result<(), String> {
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn voice_mic_name(_state: State<AppState>) -> Result<String, String> {
-    Ok(String::new())
-}
-
-#[tauri::command]
-fn send_typing(conv_id: String, state: State<AppState>) -> Result<(), String> {
-    engine(&state)?.social_typing(&conv_id).map_err(err)
-}
-
-#[tauri::command]
-fn screen_share_offer(
-    target_fp: String,
-    call_id: String,
-    sdp: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if sdp.len() > 4 * 1024 {
-        return Err("sinal de tela grande demais (máx 4KB)".into());
-    }
-    engine(&state)?
-        .call_signal(
-            &target_fp,
-            distorrent_core::protocol::SecureFrame::ScreenShareOffer { call_id, sdp },
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-fn screen_share_answer(
-    target_fp: String,
-    call_id: String,
-    sdp: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    if sdp.len() > 256 * 1024 {
-        return Err("sinal de tela grande demais".into());
-    }
-    engine(&state)?
-        .call_signal(
-            &target_fp,
-            distorrent_core::protocol::SecureFrame::ScreenShareAnswer { call_id, sdp },
-        )
-        .map_err(err)
-}
-
-#[tauri::command]
-async fn voice_join(
-    community_id: String,
-    channel_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let e = engine(&state)?;
-    tauri::async_runtime::spawn_blocking(move || e.voice_join(&community_id, &channel_id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)
-}
-
-// --- Música do bot (`/v1/audio/*`) -----------------------------------------
-//
-// O SOM TOCA NO ALTO-FALANTE DESTE PC, junto com a voz. Não é transmitido aos
-// outros participantes: esse caminho é o track de saída por peer, alimentado
-// pelo microfone. A resposta diz `delivered: "local"` para o criador não
-// acreditar que a call toda está ouvindo.
-
-fn music_key(community_id: &str, bot_id: &str) -> String {
-    format!("{community_id}|{bot_id}")
-}
-
 /// Abre o canal de música de um bot. Idempotente.
-#[tauri::command]
-fn bot_audio_open(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    if engine(&state)?
-        .bots_list(&community_id)
-        .map_err(err)?
-        .iter()
-        .all(|b| b.id != bot_id)
-    {
-        return Err("bot inexistente".into());
-    }
-    let key = music_key(&community_id, &bot_id);
-    let (abriu, _) = state.bot_music.open(&key);
-    Ok(abriu)
-}
 
 /// Enfileira PCM i16 mono 48 kHz em base64. Devolve `(aceitos, descartados)`.
-#[tauri::command]
-fn bot_audio_push(
-    community_id: String,
-    bot_id: String,
-    pcm_b64: String,
-    gain: Option<f32>,
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(pcm_b64.as_bytes())
-        .map_err(|e| format!("base64 inválido: {e}"))?;
-    let key = music_key(&community_id, &bot_id);
-    let (acc, drop) = state.bot_music.push(&key, &bytes, gain.unwrap_or(1.0))?;
-    Ok(serde_json::json!({
-        "accepted": acc,
-        "dropped": drop,
-        // Honestidade: o áudio saiu neste PC, não na call.
-        "delivered": "local",
-        "to_call": false,
-    }))
-}
-
-#[tauri::command]
-fn bot_audio_status(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<Option<serde_json::Value>, String> {
-    let key = music_key(&community_id, &bot_id);
-    Ok(state.bot_music.status(&key).map(|(acc, drop)| {
-        serde_json::json!({
-            "accepted": acc,
-            "dropped": drop,
-            "delivered": "local",
-        })
-    }))
-}
-
-#[tauri::command]
-fn bot_audio_close(
-    community_id: String,
-    bot_id: String,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    let key = music_key(&community_id, &bot_id);
-    Ok(state.bot_music.close(&key))
-}
-
-#[tauri::command]
-async fn voice_leave(
-    community_id: String,
-    channel_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let e = engine(&state)?;
-    tauri::async_runtime::spawn_blocking(move || e.voice_leave(&community_id, &channel_id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(err)
-}
-
-#[tauri::command]
-fn voice_state(
-    community_id: String,
-    channel_id: String,
-    muted: bool,
-    deafened: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .voice_state_update(&community_id, &channel_id, muted, deafened)
-        .map_err(err)
-}
-
-// Seção 20: tauri
-#[tauri::command]
-fn voice_states(
-    community_id: String,
-    channel_id: String,
-    state: State<AppState>,
-) -> Result<Vec<(String, bool, bool)>, String> {
-    Ok(engine(&state)?.list_voice_states(&community_id, &channel_id))
-}
-
-#[tauri::command]
-fn file_announce(
-    file_id: String,
-    name: String,
-    size: u64,
-    chunks: u32,
-    hash: String,
-    state: State<AppState>,
-    chunk_hashes: Option<Vec<String>>,
-) -> Result<(), String> {
-    if let Some(hs) = chunk_hashes {
-        engine(&state)?
-            .file_announce_with_chunks(&file_id, &name, size, chunks, &hash, hs)
-            .map_err(err)
-    } else {
-        engine(&state)?
-            .file_announce(&file_id, &name, size, chunks, &hash)
-            .map_err(err)
-    }
-}
-
-#[tauri::command]
-fn file_request_chunk(
-    file_id: String,
-    index: u32,
-    holder_fp: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .file_request_chunk(&file_id, index, &holder_fp)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn file_send_chunk(
-    target_fp: String,
-    file_id: String,
-    index: u32,
-    data_b64: String,
-    state: State<AppState>,
-) -> Result<(), String> {
-    engine(&state)?
-        .file_send_chunk(&target_fp, &file_id, index, &data_b64)
-        .map_err(err)
-}
-
-#[tauri::command]
-fn save_file(
-    app: AppHandle,
-    name: String,
-    data_b64: String,
-    state: State<AppState>,
-) -> Result<String, String> {
-    use std::fs;
-    if data_b64.len() > 280_000_000 {
-        return Err("arquivo grande demais para salvar (máx ~200MB)".into());
-    }
-    let bytes = {
-        use base64::{engine::general_purpose, Engine as _};
-        general_purpose::STANDARD
-            .decode(&data_b64)
-            .or_else(|_| {
-                general_purpose::STANDARD_NO_PAD
-                    .decode(&data_b64)
-                    .map_err(|e| e.to_string())
-            })
-            .or_else(|_| hex::decode(&data_b64))
-            .map_err(|e| format!("save_file travou em decode base64: {e}"))?
-    };
-    let safety = open_store(&state)
-        .map(|s| media_safety_read(&s))
-        .unwrap_or(MediaSafetyView {
-            strip_exif: true,
-            block_executables: true,
-        });
-    let sniffed = distorrent_core::media::sniff_mime(&bytes);
-    if sniffed.is_executable() && safety.block_executables {
-        return Err(format!(
-            "save_file bloqueou: executável recebido por P2P (tipo real: {}) — risco de malware. Se você confia na origem, desligue o bloqueio em Configurações → Cofre & Backup → Mídia e baixe de novo.",
-            sniffed.as_str()
-        ));
-    }
-    if distorrent_core::media::extension_is_blocked(&name) && safety.block_executables {
-        return Err("save_file bloqueou: extensão de executável/script recebida por P2P — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se tiver certeza.".into());
-    }
-    let bytes = if safety.strip_exif {
-        match distorrent_core::media::strip_metadata(&bytes) {
-            Ok(clean) => clean,
-            Err(e) => {
-                tracing::warn!("save_file: imagem com metadados intactos (strip falhou: {e}) — salvando original");
-                bytes
-            }
-        }
-    } else {
-        bytes
-    };
-    let safe = std::path::Path::new(&name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "save_file travou em sanitize: nome de arquivo inválido".to_string())?;
-    if safe != name.as_str()
-        || safe.trim().is_empty()
-        || safe.starts_with('.')
-        || safe.contains('\\')
-        || safe.contains('/')
-        || safe.contains('\0')
-        || safe.len() > 255
-    {
-        return Err(
-            "save_file travou em sanitize: nome de arquivo inválido (traversal bloqueado)".into(),
-        );
-    }
-    let _ = &app;
-    let downloads = {
-        #[cfg(target_os = "android")]
-        {
-            android_private_download_dir(&app)?
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            resolve_downloads_dir()?
-        }
-    };
-    if let Err(e) = fs::create_dir_all(&downloads) {
-        return Err(format!(
-            "save_file travou em mkdir {}: {e}",
-            downloads.display()
-        ));
-    }
-    let path = unique_download_path(&downloads, safe);
-    let tmp = path.with_extension("distorrent-part");
-    if let Err(e) = fs::write(&tmp, &bytes) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!(
-            "save_file travou em write {}: {e} (Android 10+ com scoped storage pode negar escrita direta; verifique permissão de armazenamento)",
-            tmp.display()
-        ));
-    }
-    if let Err(e) = fs::rename(&tmp, &path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!(
-            "save_file travou em rename {}: {e}",
-            path.display()
-        ));
-    }
-    Ok(path.to_string_lossy().to_string())
-}
-
-// Seção 21: tauri
-#[tauri::command]
-fn save_file_stream(
-    app: AppHandle,
-    job_id: String,
-    name: String,
-    data_b64: String,
-    flush: bool,
-    total_bytes: u64,
-    // Hash blake3 (hex) do arquivo anunciado. Quando presente, é conferido
-    // ANTES do rename: arquivo corrompido nunca vira "concluído".
-    expect_blake3: Option<String>,
-    state: State<AppState>,
-) -> Result<String, String> {
-    use std::fs::{self, OpenOptions};
-    use std::io::Write;
-
-    if job_id.is_empty()
-        || job_id.len() > 64
-        || !job_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        return Err("save_file_stream: job_id inválido".into());
-    }
-
-    let safe = std::path::Path::new(&name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "save_file_stream: nome de arquivo inválido".to_string())?
-        .to_string();
-    if safe.is_empty()
-        || safe.starts_with('.')
-        || safe.contains('\\')
-        || safe.contains('/')
-        || safe.contains('\0')
-        || safe.len() > 255
-    {
-        return Err("save_file_stream: nome de arquivo inválido (traversal bloqueado)".into());
-    }
-
-    let bytes = decode_b64_batches(&data_b64)
-        .map_err(|e| format!("save_file_stream travou em decode base64: {e}"))?;
-
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err("save_file_stream: lote acima de 32 MB".into());
-    }
-    if total_bytes > MAX_STREAM_FILE_BYTES {
-        return Err(format!(
-            "arquivo grande demais para salvar (máx {})",
-            crate::fmt_mb(MAX_STREAM_FILE_BYTES)
-        ));
-    }
-
-    let safety = open_store(&state)
-        .map(|s| media_safety_read(&s))
-        .unwrap_or(MediaSafetyView {
-            strip_exif: true,
-            block_executables: true,
-        });
-    if safety.block_executables && distorrent_core::media::extension_is_blocked(&safe) {
-        return Err("save_file_stream bloqueou: extensão de executável/script recebida por P2P — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se tiver certeza.".into());
-    }
-
-    let _ = &app;
-    let downloads = {
-        #[cfg(target_os = "android")]
-        {
-            android_private_download_dir(&app)?
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            resolve_downloads_dir()?
-        }
-    };
-    fs::create_dir_all(&downloads).map_err(|e| format!("save_file_stream travou em mkdir: {e}"))?;
-
-    let tmp = downloads.join(format!(".{safe}.{job_id}.distorrent-part"));
-
-    let primeiro_lote = fs::metadata(&tmp).map(|m| m.len() == 0).unwrap_or(true);
-    if primeiro_lote && safety.block_executables && !bytes.is_empty() {
-        let sniffed = distorrent_core::media::sniff_mime(&bytes);
-        if sniffed.is_executable() {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!(
-                "save_file_stream bloqueou: executável recebido por P2P (tipo real: {}) — risco de malware. Desligue o bloqueio em Configurações → Cofre & Backup → Mídia se você confia na origem.",
-                sniffed.as_str()
-            ));
-        }
-    }
-
-    if !bytes.is_empty() {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&tmp)
-            .map_err(|e| format!("save_file_stream travou em open {}: {e}", tmp.display()))?;
-        f.write_all(&bytes)
-            .map_err(|e| format!("save_file_stream travou em write: {e}"))?;
-        f.sync_all().ok();
-    }
-
-    if total_bytes > 0 {
-        if let Ok(m) = fs::metadata(&tmp) {
-            if m.len() > total_bytes {
-                let _ = fs::remove_file(&tmp);
-                return Err(
-                    "save_file_stream: o peer enviou mais bytes que o tamanho anunciado".into(),
-                );
-            }
-        }
-    }
-
-    if flush {
-        // Integridade ANTES do rename (e antes do strip de EXIF, que muda os
-        // bytes de propósito). Sem isso, um arquivo corrompido era salvo como
-        // concluído e o retry reencontrava os mesmos bytes ruins para sempre.
-        if let Some(esperado) = expect_blake3
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let bytes = fs::read(&tmp).map_err(|e| {
-                format!("save_file_stream: não consegui reler para conferir o hash: {e}")
-            })?;
-            let real = distorrent_core::blake3::hash(&bytes).to_hex().to_string();
-            if !real.eq_ignore_ascii_case(esperado) {
-                let _ = fs::remove_file(&tmp);
-                return Err(format!(
-                    "arquivo corrompido: o hash não bate (esperado {esperado}, recebido {real}). Baixe de novo."
-                ));
-            }
-        }
-        if safety.strip_exif {
-            if let Ok(mut f) = fs::File::open(&tmp) {
-                use std::io::Read;
-                let mut head = vec![0u8; 512];
-                let n = f.read(&mut head).unwrap_or(0);
-                head.truncate(n);
-                let sniffed = distorrent_core::media::sniff_mime(&head);
-                let is_image = matches!(
-                    sniffed,
-                    distorrent_core::media::SniffedMime::Jpeg
-                        | distorrent_core::media::SniffedMime::Png
-                        | distorrent_core::media::SniffedMime::Gif
-                        | distorrent_core::media::SniffedMime::Webp
-                );
-                if is_image {
-                    if let Ok(all) = fs::read(&tmp) {
-                        if let Ok(clean) = distorrent_core::media::strip_metadata(&all) {
-                            let _ = fs::write(&tmp, &clean);
-                        }
-                    }
-                }
-            }
-        }
-        let dest = unique_download_path(&downloads, &safe);
-        if let Err(e) = fs::rename(&tmp, &dest) {
-            let _ = fs::remove_file(&tmp);
-            return Err(format!("save_file_stream travou em rename: {e}"));
-        }
-        return Ok(dest.to_string_lossy().to_string());
-    }
-
-    Ok(tmp.to_string_lossy().to_string())
-}
 
 fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose, Engine as _};
@@ -4320,7 +859,6 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
             0
         };
         if pad > 0 {
-            // Seção 22: piece
             let piece = &s[start..end];
             let decoded = general_purpose::STANDARD
                 .decode(piece)
@@ -4396,14 +934,6 @@ fn unique_download_path(dir: &std::path::Path, file_name: &str) -> PathBuf {
     first
 }
 
-#[tauri::command]
-fn get_app_version(app: tauri::AppHandle) -> String {
-    app.config()
-        .version
-        .clone()
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
-}
-
 #[derive(Debug, Serialize)]
 struct StormVaultExportView {
     path: String,
@@ -4445,57 +975,6 @@ fn export_secret(state: &State<AppState>, store: &Store) -> Result<String, Strin
     load_secret(store, true)
 }
 
-#[tauri::command]
-async fn stormvault_export(
-    app: AppHandle,
-    password: String,
-    include_secret: Option<bool>,
-    max_messages: Option<u64>,
-    state: State<'_, AppState>,
-) -> Result<StormVaultExportView, String> {
-    let store = open_store(&state)?;
-    let identity = store
-        .load_identity()
-        .ok_or("sem identidade para exportar")?;
-    let include_secret = include_secret.unwrap_or(true);
-    let secret = if include_secret {
-        Some(export_secret(&state, &store)?)
-    } else {
-        None
-    };
-    let max = max_messages.map(|m| m.min(5_000_000) as usize);
-    let data = distorrent_core::stormvault::collect(&store, secret, max).map_err(err)?;
-    let sealed = distorrent_core::stormvault::seal_with_password(&data, &password).map_err(err)?;
-    let header = distorrent_core::stormvault::read_header(&sealed).map_err(err)?;
-
-    let base = export_base_dir(&app)?;
-    std::fs::create_dir_all(&base)
-        .map_err(|e| format!("não consegui criar a pasta de export: {e}"))?;
-    let fname = format!(
-        "distorrent-cofre-{}-{}.stormvault",
-        identity.fingerprint,
-        distorrent_core::identity::now_ms()
-    );
-    let path = unique_download_path(&base, &fname);
-    let tmp = path.with_extension("stormvault-part");
-    if let Err(e) = std::fs::write(&tmp, &sealed) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("falha ao gravar o cofre: {e}"));
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        // Seção 23: _
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("falha ao gravar o cofre: {e}"));
-    }
-    distorrent_core::metrics::metrics().vault_op();
-    drop(password);
-    Ok(StormVaultExportView {
-        path: path.to_string_lossy().to_string(),
-        bytes: sealed.len() as u64,
-        header,
-    })
-}
-
 fn export_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
@@ -4524,38 +1003,6 @@ fn android_private_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(android_files_dir(app)?.join("Download"))
 }
 
-#[tauri::command]
-async fn stormvault_import(
-    content_b64: String,
-    password: String,
-    state: State<'_, AppState>,
-) -> Result<distorrent_core::stormvault::ImportReport, String> {
-    use base64::{engine::general_purpose, Engine as _};
-    let bytes = general_purpose::STANDARD
-        .decode(content_b64.trim())
-        .map_err(|e| format!("arquivo inválido (base64): {e}"))?;
-    if bytes.len() > 512 * 1024 * 1024 {
-        return Err("arquivo grande demais (máx 512MB)".into());
-    }
-    let store = open_store(&state)?;
-
-    let key = auth_key(&store, "stormvault");
-    auth_guard(&state, &key)?;
-
-    if store.load_identity().is_some() {
-        engine(&state)?;
-    }
-    let report = match distorrent_core::stormvault::import_with_password(&store, &bytes, &password)
-    {
-        Ok(r) => r,
-        Err(e) => return Err(auth_fail(&state, &key, &e.to_string())),
-    };
-    auth_ok(&state, &key);
-    distorrent_core::metrics::metrics().vault_op();
-    drop(password);
-    Ok(report)
-}
-
 fn list_backup_files(state: &State<AppState>) -> Result<Vec<BackupView>, String> {
     Ok(
         distorrent_core::stormvault::list_backup_files(&backups_dir(state))
@@ -4569,85 +1016,7 @@ fn list_backup_files(state: &State<AppState>) -> Result<Vec<BackupView>, String>
     )
 }
 
-#[tauri::command]
-fn stormvault_backups_list(state: State<AppState>) -> Result<Vec<BackupView>, String> {
-    list_backup_files(&state)
-}
-
-#[tauri::command]
-async fn stormvault_backup_now(state: State<'_, AppState>) -> Result<BackupView, String> {
-    let eng = engine(&state)?;
-    let secret = eng.secret_hex();
-    let store = open_store(&state)?;
-    let data =
-        distorrent_core::stormvault::collect(&store, Some(secret.clone()), None).map_err(err)?;
-    let key = distorrent_core::stormvault::backup_key_for(&secret);
-    let sealed = distorrent_core::stormvault::seal_with_key(&data, &key).map_err(err)?;
-    let dir = backups_dir(&state);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("pasta de backups: {e}"))?;
-    let now = distorrent_core::identity::now_ms();
-    let file = distorrent_core::stormvault::backup_file_name(now);
-    std::fs::write(dir.join(&file), &sealed).map_err(|e| format!("gravar backup: {e}"))?;
-    distorrent_core::metrics::metrics().vault_op();
-    prune_backups(&state).map_err(err)?;
-    Ok(BackupView {
-        file,
-        created_ms: now,
-        bytes: sealed.len() as u64,
-    })
-}
-
-#[tauri::command]
-async fn stormvault_backup_restore(
-    file: String,
-    state: State<'_, AppState>,
-) -> Result<distorrent_core::stormvault::ImportReport, String> {
-    let safe = std::path::Path::new(&file)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "nome de backup inválido".to_string())?;
-    if safe != file.as_str()
-        || !safe.starts_with("stormvault-")
-        || !safe.ends_with(".stormvault")
-        || safe.contains("..")
-    {
-        return Err("nome de backup inválido".into());
-    }
-    let bytes = std::fs::read(backups_dir(&state).join(safe))
-        .map_err(|_| "backup não encontrado".to_string())?;
-    let eng = engine(&state)?;
-    let key = distorrent_core::stormvault::backup_key_for(&eng.secret_hex());
-    let data = distorrent_core::stormvault::open_with_key(&bytes, &key)
-        .map_err(|e| format!("não abriu como backup automático ({e}) — use Importar com senha"))?;
-    if data.identity.fingerprint != eng.identity().fingerprint {
-        return Err("backup de outra conta — restaure na conta certa".into());
-    }
-    let store = open_store(&state)?;
-    let report = distorrent_core::stormvault::import_merge_only(&store, &data).map_err(err)?;
-    distorrent_core::metrics::metrics().vault_op();
-    Ok(report)
-}
-
-#[tauri::command]
-fn stormvault_backup_set_retention(days: i64, state: State<AppState>) -> Result<(), String> {
-    if !(1..=3650).contains(&days) {
-        return Err("retenção inválida (1 a 3650 dias)".into());
-    }
-    let store = open_store(&state)?;
-    store
-        .kv_set("stormvault.backup_retention_days", &days.to_string())
-        .map_err(err)?;
-    prune_backups(&state).map_err(err)?;
-    Ok(())
-}
-
-#[tauri::command]
-fn stormvault_backup_get_retention(state: State<AppState>) -> Result<i64, String> {
-    Ok(backup_retention_days(&open_store(&state)?))
-}
-
 fn prune_backups(state: &State<AppState>) -> Result<usize, String> {
-    // Seção 24: store
     let store = open_store(state)?;
     distorrent_core::stormvault::prune_backup_files(
         &backups_dir(state),
@@ -4657,78 +1026,9 @@ fn prune_backups(state: &State<AppState>) -> Result<usize, String> {
     .map_err(err)
 }
 
-#[tauri::command]
-fn vault_wipe(
-    app: AppHandle,
-    confirm: String,
-    state: State<AppState>,
-) -> Result<WipeReport, String> {
-    if confirm != "APAGAR" {
-        return Err("confirmação inválida — digite APAGAR".into());
-    }
-    {
-        let mut guard = state.engine.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(e) = guard.as_ref() {
-            e.shutdown();
-        }
-        *guard = None;
-    }
-    *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = false;
-    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
-        let _ = entry.delete_password();
-    }
-    for f in ["distorrent.db", "distorrent.db-wal", "distorrent.db-shm"] {
-        let _ = std::fs::remove_file(state.data_dir.join(f));
-    }
-    let _ = std::fs::remove_dir_all(backups_dir(&state));
-    let _ = std::fs::remove_dir_all(state.data_dir.join("cache"));
-    let _ = state.cache.clear();
-    let mut leftovers = Vec::new();
-    if let Ok(base) = export_base_dir(&app) {
-        if let Ok(rd) = std::fs::read_dir(&base) {
-            for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("distorrent-cofre-") && name.ends_with(".stormvault") {
-                    leftovers.push(entry.path().to_string_lossy().to_string());
-                }
-            }
-        }
-    }
-    leftovers.sort();
-    let _ = &app;
-    tracing::warn!("modo pânico executado: dados locais apagados");
-    Ok(WipeReport { leftovers })
-}
-
 #[derive(Debug, Serialize)]
 struct WipeReport {
     leftovers: Vec<String>,
-}
-
-#[tauri::command]
-fn metrics_snapshot() -> serde_json::Value {
-    distorrent_core::metrics::metrics().snapshot()
-}
-
-#[tauri::command]
-fn peer_rtt(fp: String, state: State<AppState>) -> Result<Option<u64>, String> {
-    Ok(engine(&state)?.peer_rtt_ms(fp.trim()))
-}
-
-#[tauri::command]
-fn messages_window(
-    conv_id: String,
-    before_ts: Option<i64>,
-    limit: Option<i64>,
-    state: State<AppState>,
-) -> Result<Vec<StoredMessage>, String> {
-    engine(&state)?
-        .messages_window(
-            conv_id.trim(),
-            before_ts,
-            limit.unwrap_or(100).clamp(1, 1000),
-        )
-        .map_err(err)
 }
 
 #[derive(Debug, Serialize)]
@@ -4745,60 +1045,6 @@ fn check_cache_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn cache_get(key: String, state: State<AppState>) -> Result<Option<String>, String> {
-    use base64::{engine::general_purpose, Engine as _};
-    check_cache_key(&key)?;
-    match state.cache.get(&key).map_err(err)? {
-        Some(bytes) => {
-            distorrent_core::metrics::metrics().cache_hit();
-            Ok(Some(general_purpose::STANDARD.encode(&bytes)))
-        }
-        None => {
-            distorrent_core::metrics::metrics().cache_miss();
-            Ok(None)
-        }
-    }
-}
-
-#[tauri::command]
-fn cache_put(key: String, data_b64: String, state: State<AppState>) -> Result<(), String> {
-    use base64::{engine::general_purpose, Engine as _};
-    check_cache_key(&key)?;
-    let bytes = general_purpose::STANDARD
-        .decode(&data_b64)
-        .map_err(|e| format!("cache_put: base64 inválido: {e}"))?;
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err("entrada de cache muito grande (máx 32MB)".into());
-    }
-    state.cache.put(&key, &bytes).map_err(err)
-}
-
-#[tauri::command]
-fn cache_delete(key: String, state: State<AppState>) -> Result<(), String> {
-    check_cache_key(&key)?;
-    state.cache.delete(&key).map_err(err)
-}
-
-#[tauri::command]
-fn cache_stats(state: State<AppState>) -> Result<CacheStatsView, String> {
-    Ok(CacheStatsView {
-        cap_mb: state.cache.cap() / (1024 * 1024),
-        total_bytes: state.cache.total_bytes(),
-        entries: state.cache.entries(),
-    })
-}
-
-#[tauri::command]
-fn cache_set_cap(cap_mb: u64, state: State<AppState>) -> Result<(), String> {
-    let cap = cap_mb.clamp(16, 4096);
-    let store = open_store(&state)?;
-    store
-        .kv_set("cache.cap_mb", &cap.to_string())
-        .map_err(err)?;
-    state.cache.set_cap(cap * 1024 * 1024).map_err(err)
-}
-
 #[derive(Debug, Serialize)]
 struct MediaSafetyView {
     strip_exif: bool,
@@ -4810,31 +1056,6 @@ fn media_safety_read(store: &Store) -> MediaSafetyView {
         strip_exif: store.kv_get("media.strip_exif").as_deref() != Some("0"),
         block_executables: store.kv_get("media.block_executables").as_deref() != Some("0"),
     }
-}
-
-#[tauri::command]
-// Seção 25: media_safety_get
-fn media_safety_get(state: State<AppState>) -> Result<MediaSafetyView, String> {
-    Ok(media_safety_read(&open_store(&state)?))
-}
-
-#[tauri::command]
-fn media_safety_set(
-    strip_exif: bool,
-    block_executables: bool,
-    state: State<AppState>,
-) -> Result<(), String> {
-    let store = open_store(&state)?;
-    store
-        .kv_set("media.strip_exif", if strip_exif { "1" } else { "0" })
-        .map_err(err)?;
-    store
-        .kv_set(
-            "media.block_executables",
-            if block_executables { "1" } else { "0" },
-        )
-        .map_err(err)?;
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -4897,42 +1118,6 @@ fn retention_apply(store: &Store) -> Result<usize, String> {
     Ok(total)
 }
 
-#[tauri::command]
-fn retention_get(state: State<AppState>) -> Result<RetentionSettings, String> {
-    Ok(retention_read(&open_store(&state)?))
-}
-
-#[tauri::command]
-fn retention_set(
-    days: u32,
-    servers: bool,
-    groups: bool,
-    dms: bool,
-    state: State<AppState>,
-) -> Result<RetentionSettings, String> {
-    let store = open_store(&state)?;
-    let days = if days == 0 { 0 } else { days.clamp(1, 3650) };
-    store
-        .kv_set("privacy.retention_days", &days.to_string())
-        .map_err(err)?;
-    store
-        .kv_set("privacy.retention_servers", if servers { "1" } else { "0" })
-        .map_err(err)?;
-    store
-        .kv_set("privacy.retention_groups", if groups { "1" } else { "0" })
-        .map_err(err)?;
-    store
-        .kv_set("privacy.retention_dms", if dms { "1" } else { "0" })
-        .map_err(err)?;
-    retention_apply(&store)?;
-    Ok(retention_read(&store))
-}
-
-#[tauri::command]
-fn retention_run(state: State<AppState>) -> Result<usize, String> {
-    retention_apply(&open_store(&state)?)
-}
-
 fn log_filter() -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,distorrent_core=info"))
@@ -4993,7 +1178,6 @@ fn main() {
             .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
             .try_init(),
     };
-    // Seção 26: _
     let _ = boot;
 
     #[cfg_attr(mobile, allow(unused_mut))]
@@ -5032,12 +1216,12 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_app_version,
-            hide_share_bar,
-            share_bar_watch,
-            updater::update_check,
-            updater::update_download,
-            updater::update_apply,
+            commands_misc::get_app_version,
+            commands_misc::hide_share_bar,
+            commands_misc::share_bar_watch,
+            updater::updater_checks::update_check,
+            updater::updater_download::update_download,
+            updater::updater_apply::update_apply,
             updater::update_verify_ready,
             updater::update_trust_info,
             updater::update_trust_apply,
@@ -5050,239 +1234,233 @@ fn main() {
             updater::update_cleanup,
             updater::open_release_page,
             updater::open_external,
-            identity_get,
-            identity_create,
-            identity_rename,
-            vault_status,
-            vault_unlock,
-            vault_change,
-            local_addresses,
-            communities_list,
-            community_members,
-            create_community,
-            make_invite,
-            make_invite_link,
-            join_community,
-            send_channel_message,
-            network_status,
-            notify_ui_alive,
-            peers_list,
-            net_diag,
-            webrtc_report,
-            relay_status,
-            connect_addr,
-            disconnect_peer,
-            save_file_stream,
-            save_public_copy,
-            friends_list,
-            friend_request,
-            friend_respond,
-            friend_remove,
-            friend_block,
-            friend_unblock,
-            conversations_list,
-            conversations_overview,
-            dm_open,
-            delete_conversation,
-            messages_list,
-            messages_window,
-            message_send,
-            message_resend,
-            message_verify,
-            metrics_snapshot,
-            peer_rtt,
-            stormvault_export,
-            stormvault_import,
-            stormvault_backups_list,
-            stormvault_backup_now,
-            stormvault_backup_restore,
-            stormvault_backup_set_retention,
-            stormvault_backup_get_retention,
-            vault_wipe,
-            cache_get,
-            cache_put,
-            cache_delete,
-            cache_stats,
-            cache_set_cap,
-            media_safety_get,
-            media_safety_set,
-            retention_get,
-            retention_set,
-            retention_run,
-            secure_store,
-            secure_load,
-            privacy_get,
-            privacy_set,
-            net_limits,
-            proxy_addr_get,
-            proxy_addr_set,
-            proxy_test,
-            vault_export,
-            vault_import,
-            accounts_list,
-            account_save_imported,
-            account_switch,
-            account_remove_imported,
-            create_group,
-            group_members,
-            group_pair_now,
-            community_pair_now,
-            community_sync_now,
-            group_add,
-            group_remove,
-            group_rename,
-            group_leave,
-            group_delete,
-            group_delete_local,
-            call_room_publish,
-            call_room_close,
-            call_room_leave,
-            call_room_join,
-            call_rooms_list,
-            call_invite,
-            call_ring_retry,
-            call_accept,
-            call_reject,
-            call_end,
-            call_offer,
-            call_answer,
-            call_ice,
-            call_add_participant,
-            voice_media_available,
-            voice_media_stats,
-            voice_set_muted,
-            voice_hangup,
-            voice_set_deafened,
-            voice_video_start,
-            voice_video_stop,
-            voice_video_frame,
-            voice_mic_test_start,
-            voice_mic_test_level,
-            voice_mic_test_stop,
-            voice_mic_name,
-            send_typing,
-            screen_share_offer,
-            screen_share_answer,
-            channel_create,
-            channel_delete,
-            channel_rename,
-            channel_set_topic,
-            channel_set_category,
-            channel_list,
-            community_rename,
-            community_set_meta,
-            community_set_public,
-            join_public_community,
-            role_create,
-            role_update,
-            role_delete,
-            roles_list,
-            member_roles,
-            member_assign_role,
-            member_unassign_role,
-            member_kick,
-            server_rules_get,
-            server_rules_set,
-            audit_list,
-            reputation_get,
-            safety_number,
-            // Seção 27: moderate
-            moderate,
-            report_user,
-            validate_name,
-            random_name,
-            bot_create,
-            bot_update,
-            bot_delete,
-            bots_list,
-    bot_webhook_secret_set,
-            bot_post_message,
-            bot_regen_token,
-            bot_admin,
-            bot_logs,
-            bot_log_append,
-            bot_logs_clear,
-            bot_vars_list,
-            bot_var_get,
-            bot_var_set,
-            bot_config_validate,
-            bot_warnings_list,
-            bot_bridge_start,
-            bot_bridge_stop,
-            bot_bridge_status,
-            bot_bridge_list,
-            bot_folder_read,
-            bot_plugin_start,
-            bot_plugin_stop,
-            bot_plugin_status,
-            bot_plugin_list,
-            open_bots_window,
-            http_fetch,
-            voice_join,
-            bot_audio_open,
-            bot_audio_push,
-            bot_audio_status,
-            bot_audio_close,
-            voice_leave,
-            voice_state,
-            voice_states,
-            file_announce,
-            file_request_chunk,
-            file_send_chunk,
-            save_file,
-            social_react,
-            social_reactions,
-            social_reactions_bulk,
-            social_reply,
-            social_edit,
-            social_delete,
-            social_pin,
-            social_pins,
-            social_meta_bulk,
-            social_bodies,
-            social_forward,
-            read_set,
-            read_all,
-            unread_count,
-            unread_mentions,
-            dm_intro_state,
-            presence_set,
-            presence_list,
-            presence_get,
-            profile_set,
-            profile_get,
-            profile_list,
-            profile_sync_now,
-            nickname_set,
-            nickname_get,
-            message_search,
-            messages_around,
-            message_receipts,
-            thread_create,
-            thread_list,
-            thread_messages,
-            thread_send,
-            thread_archive,
-            member_ban,
-            member_unban,
-            ban_list,
-            member_timeout,
-            timeout_list,
-            channel_cfg_set,
-            channel_cfg_get,
-            poll_create,
-            poll_list,
-            poll_vote,
-            poll_tally,
-            event_upsert,
-            event_list,
-            event_interest,
-            event_delete,
-            emoji_upsert,
-            emoji_list,
-            emoji_delete,
-            bookmark_set,
-            bookmark_list,
+            commands_net::identity_get,
+            commands_net::identity_create,
+            commands_net::identity_rename,
+            commands_files::vault_status,
+            commands_files::vault_unlock,
+            commands_files::vault_change,
+            commands_misc::local_addresses,
+            commands_misc::communities_list,
+            commands_server::community_members,
+            commands_server::create_community,
+            commands_server::make_invite,
+            commands_server::make_invite_link,
+            commands_server::join_community,
+            commands_server::send_channel_message,
+            commands_net::network_status,
+            commands_misc::notify_ui_alive,
+            commands_misc::peers_list,
+            commands_net::net_diag,
+            commands_net::webrtc_report,
+            commands_net::relay_status,
+            commands_net::connect_addr,
+            commands_net::disconnect_peer,
+            commands_files::save_file_stream,
+            commands_files::save_public_copy,
+            commands_net::friends_list,
+            commands_social::friend_request,
+            commands_social::friend_respond,
+            commands_social::friend_remove,
+            commands_social::friend_block,
+            commands_social::friend_unblock,
+            commands_net::conversations_list,
+            commands_net::conversations_overview,
+            commands_net::dm_open,
+            commands_net::delete_conversation,
+            commands_social::messages_list,
+            commands_social::messages_window,
+            commands_social::message_send,
+            commands_social::message_resend,
+            commands_files::metrics_snapshot,
+            commands_net::peer_rtt,
+            commands_files::stormvault_export,
+            commands_files::stormvault_import,
+            commands_files::stormvault_backups_list,
+            commands_files::stormvault_backup_now,
+            commands_files::stormvault_backup_restore,
+            commands_files::stormvault_backup_set_retention,
+            commands_files::stormvault_backup_get_retention,
+            commands_files::vault_wipe,
+            commands_files::cache_get,
+            commands_files::cache_put,
+            commands_files::cache_delete,
+            commands_files::cache_stats,
+            commands_files::cache_set_cap,
+            commands_files::media_safety_get,
+            commands_files::media_safety_set,
+            commands_files::retention_get,
+            commands_files::retention_set,
+            commands_files::retention_run,
+            commands_net::privacy_get,
+            commands_net::privacy_set,
+            commands_net::proxy_addr_get,
+            commands_net::proxy_addr_set,
+            commands_net::proxy_test,
+            commands_files::vault_export,
+            commands_files::vault_import,
+            commands_files::accounts_list,
+            commands_files::account_save_imported,
+            commands_files::account_switch,
+            commands_files::account_remove_imported,
+            commands_misc::create_group,
+            commands_server::group_members,
+            commands_server::group_pair_now,
+            commands_server::community_pair_now,
+            commands_server::community_sync_now,
+            commands_server::group_add,
+            commands_server::group_remove,
+            commands_server::group_rename,
+            commands_server::group_leave,
+            commands_server::group_delete,
+            commands_server::group_delete_local,
+            commands_voice::call_room_publish,
+            commands_voice::call_room_close,
+            commands_voice::call_room_leave,
+            commands_voice::call_room_join,
+            commands_voice::call_rooms_list,
+            commands_voice::call_invite,
+            commands_voice::call_ring_retry,
+            commands_voice::call_accept,
+            commands_voice::call_reject,
+            commands_voice::call_end,
+            commands_voice::call_offer,
+            commands_voice::call_answer,
+            commands_voice::call_ice,
+            commands_voice::call_add_participant,
+            commands_voice::voice_media_available,
+            commands_voice::voice_media_stats,
+            commands_voice::voice_set_muted,
+            commands_voice::voice_hangup,
+            commands_voice::voice_set_deafened,
+            commands_voice::voice_video_start,
+            commands_voice::voice_video_stop,
+            commands_voice::voice_video_frame,
+            commands_voice::voice_mic_test_start,
+            commands_voice::voice_mic_test_level,
+            commands_voice::voice_mic_test_stop,
+            commands_voice::voice_mic_name,
+            commands_misc::send_typing,
+            commands_misc::screen_share_offer,
+            commands_misc::screen_share_answer,
+            commands_server::channel_create,
+            commands_server::channel_delete,
+            commands_server::channel_rename,
+            commands_server::channel_set_topic,
+            commands_server::channel_set_category,
+            commands_server::channel_list,
+            commands_server::community_rename,
+            commands_server::community_set_meta,
+            commands_server::community_set_public,
+            commands_server::join_public_community,
+            commands_server::role_create,
+            commands_server::role_update,
+            commands_server::role_delete,
+            commands_misc::roles_list,
+            commands_server::member_roles,
+            commands_server::member_assign_role,
+            commands_server::member_unassign_role,
+            commands_server::member_kick,
+            commands_server::server_rules_get,
+            commands_server::server_rules_set,
+            commands_server::audit_list,
+            commands_server::reputation_get,
+            commands_server::safety_number,
+            commands_server::moderate,
+            commands_server::report_user,
+            commands_misc::validate_name,
+            commands_misc::random_name,
+            commands_bot::bot_create,
+            commands_bot::bot_update,
+            commands_bot::bot_delete,
+            commands_bot::bots_list,
+    commands_bot::bot_webhook_secret_set,
+            commands_bot::bot_post_message,
+            commands_bot::bot_regen_token,
+            commands_bot::bot_admin,
+            commands_bot::bot_logs,
+            commands_bot::bot_log_append,
+            commands_bot::bot_logs_clear,
+            commands_bot::bot_vars_list,
+            commands_bot::bot_var_get,
+            commands_bot::bot_var_set,
+            commands_bot::bot_config_validate,
+            commands_bot::bot_warnings_list,
+            commands_bot::bot_bridge_start,
+            commands_bot::bot_bridge_stop,
+            commands_bot::bot_bridge_status,
+            commands_bot::bot_bridge_list,
+            commands_bot::bot_folder_read,
+            commands_bot::bot_plugin_start,
+            commands_bot::bot_plugin_stop,
+            commands_bot::bot_plugin_status,
+            commands_bot::bot_plugin_list,
+            commands_misc::open_bots_window,
+            commands_misc::http_fetch,
+            commands_voice::voice_join,
+            commands_bot::bot_audio_open,
+            commands_bot::bot_audio_push,
+            commands_bot::bot_audio_status,
+            commands_bot::bot_audio_close,
+            commands_voice::voice_leave,
+            commands_voice::voice_state,
+            commands_voice::voice_states,
+            commands_files::file_announce,
+            commands_files::file_request_chunk,
+            commands_files::file_send_chunk,
+            commands_social::social_react,
+            commands_social::social_reactions,
+            commands_social::social_reactions_bulk,
+            commands_social::social_reply,
+            commands_social::social_edit,
+            commands_social::social_delete,
+            commands_social::social_pin,
+            commands_social::social_pins,
+            commands_social::social_meta_bulk,
+            commands_social::social_bodies,
+            commands_social::social_forward,
+            commands_social::read_set,
+            commands_social::read_all,
+            commands_net::unread_count,
+            commands_net::unread_mentions,
+            commands_net::dm_intro_state,
+            commands_social::presence_set,
+            commands_social::presence_list,
+            commands_social::presence_get,
+            commands_social::profile_set,
+            commands_social::profile_get,
+            commands_social::profile_list,
+            commands_social::profile_sync_now,
+            commands_social::nickname_set,
+            commands_social::nickname_get,
+            commands_social::message_search,
+            commands_social::messages_around,
+            commands_social::message_receipts,
+            commands_social::thread_create,
+            commands_social::thread_list,
+            commands_social::thread_messages,
+            commands_social::thread_send,
+            commands_social::thread_archive,
+            commands_server::member_ban,
+            commands_server::member_unban,
+            commands_server::ban_list,
+            commands_server::member_timeout,
+            commands_server::timeout_list,
+            commands_server::channel_cfg_set,
+            commands_server::channel_cfg_get,
+            commands_social::poll_create,
+            commands_social::poll_list,
+            commands_social::poll_vote,
+            commands_social::poll_tally,
+            commands_social::event_upsert,
+            commands_social::event_list,
+            commands_social::event_interest,
+            commands_social::event_delete,
+            commands_social::emoji_upsert,
+            commands_social::emoji_list,
+            commands_social::emoji_delete,
+            commands_social::bookmark_set,
+            commands_social::bookmark_list,
             background_prefs_get,
             background_prefs_set,
             autostart_get,
@@ -5360,10 +1538,6 @@ fn main() {
             });
             app.manage(background::Background::new());
             background::init(app.handle());
-            // Sem regra de firewall o Windows descarta o tráfego de ENTRADA: dois
-            // PCs na mesma rede não se acham. Tenta liberar no primeiro boot;
-            // se o Windows negar (sem admin), o diagnóstico mostra e oferece o
-            // botão. Roda fora da thread de UI para não atrasar o boot.
             #[cfg(target_os = "windows")]
             std::thread::spawn(|| {
                 let s = firewall::network_firewall_allow();
@@ -5413,7 +1587,6 @@ fn main() {
         });
 }
 
-// Seção 28: cfg
 #[cfg(any(
     target_os = "linux",
     target_os = "freebsd",

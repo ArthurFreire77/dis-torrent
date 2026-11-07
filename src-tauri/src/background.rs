@@ -198,7 +198,6 @@ pub fn autostart_ensure(app: AppHandle, state: State<AppState>) -> Result<bool, 
     }
 }
 
-// Seção 1: tauri
 #[tauri::command]
 pub fn autostart_mark_decided(state: State<AppState>, enabled: bool) -> Result<(), String> {
     kv_set_bool(&state, KV_AUTOSTART_DECIDED, enabled);
@@ -363,7 +362,6 @@ pub fn app_quit(app: AppHandle, state: State<AppState>, bg: State<Background>) {
             engine.shutdown();
         }
     }
-    // Seção 2: cfg
     #[cfg(desktop)]
     {
         if let Ok(mut t) = bg.tray.lock() {
@@ -535,7 +533,6 @@ fn refresh_tray(bg: &Background) {
     }
 }
 
-// Seção 3: cfg
 #[cfg(mobile)]
 fn refresh_tray(_bg: &Background) {}
 
@@ -698,15 +695,10 @@ pub fn init(app: &AppHandle) {
     });
 
     let pediu_minimizado = std::env::args().any(|a| a == "--minimized");
-    // `--minimized` = veio do autostart; sem ele, abrir pelo atalho é ação do
-    // usuário e a janela precisa aparecer mesmo com a opção ligada.
     let quer_minimizado = app
         .try_state::<Background>()
         .map(|b| b.start_minimized.load(Ordering::Relaxed))
         .unwrap_or(false);
-    // Sem bandeja não existe jeito de reabrir a janela escondida: nesse caso
-    // nunca minimiza, senão o app "abre e não aparece" (o usuário só vê o
-    // processo no gerenciador). Erro honesto > janela fantasma.
     let tem_bandeja = app
         .try_state::<Background>()
         .map(|b| tray_available(b.inner()))
@@ -714,11 +706,6 @@ pub fn init(app: &AppHandle) {
     let deve_minimizar = pediu_minimizado && quer_minimizado && tem_bandeja;
     if let Some(w) = app.get_webview_window("main") {
         if deve_minimizar {
-            // Esconder AQUI não elimina o flash: a janela já foi criada visível.
-            // Com `visible: false` no tauri.conf.json ela nasce escondida e o
-            // frontend chama `app_ui_ready` depois do primeiro render (que a
-            // mostra se não for o autostart). Não há janela fantasma: o
-            // `app_ui_ready` é a rede de segurança.
             let _ = w.hide();
         } else {
             let _ = w.show();
