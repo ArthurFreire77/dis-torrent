@@ -45,6 +45,52 @@ function readAspect(el: HTMLVideoElement | null): string | null {
 
 const PARTICIPANT_ASPECT = '16 / 9'
 
+/**
+ * A trilha pode continuar `live` depois de `replaceTrack(null)` no outro lado —
+ * o WebRTC só a marca `muted`. Sem checar isso, o card ficava no último quadro
+ * para sempre (o "parou de compartilhar e a imagem congelou na tela").
+ * Imagem estática legitimamente "congelada" (janela parada) ainda toca, porque
+ * `muted` só liga quando NENHUM RTP chega — não por falta de mudança visual.
+ */
+function streamIsPlayable(stream: MediaStream | null | undefined): boolean {
+  try {
+    return !!stream?.getVideoTracks?.().some(
+      (t) => t.readyState === 'live' && (t as MediaStreamTrack & { muted?: boolean }).muted !== true,
+    )
+  } catch {
+    return false
+  }
+}
+
+/** `attachStream` precisa ser re-chamado quando a trilha desmuta. */
+function useUnmuteTick(stream: MediaStream | null | undefined): number {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const tracks = stream?.getVideoTracks?.() ?? []
+    if (tracks.length === 0) return
+    let vivo = true
+    const bump = () => { if (vivo) setTick((n) => n + 1) }
+    for (const t of tracks) {
+      try {
+        t.addEventListener('unmute', bump)
+        t.addEventListener('mute', bump)
+        t.addEventListener('ended', bump)
+      } catch {  }
+    }
+    return () => {
+      vivo = false
+      for (const t of tracks) {
+        try {
+          t.removeEventListener('unmute', bump)
+          t.removeEventListener('mute', bump)
+          t.removeEventListener('ended', bump)
+        } catch {  }
+      }
+    }
+  }, [stream])
+  return tick
+}
+
 export function CallTile({
   tile,
   pinned = false,
@@ -65,6 +111,10 @@ export function CallTile({
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [aspect, setAspect] = useState<string | null>(null)
   const isScreen = tile.kind === 'screen'
+  // Re-renderiza quando a trilha (des)muta: sem isso o `showVideo` acima fica
+  // com a decisão antiga e o card não troca entre vídeo e avatar/“aguardando”.
+  const muteTick = useUnmuteTick(tile.stream)
+  void muteTick
 
   // Solta a mídia ao desmontar: `attachStream` pode ter deixado listeners de
   // gesto e um retry de play() apontando para o elemento que saiu da tela.
@@ -106,7 +156,7 @@ export function CallTile({
     }
   }, [syncAspect, tile.stream])
 
-  const showVideo = !!tile.stream
+  const showVideo = !!tile.stream && streamIsPlayable(tile.stream)
   const showImage = !showVideo && !!tile.videoUrl
 
   return (
@@ -319,7 +369,7 @@ export function CallTile({
             type="button"
             aria-label={pinned ? `Desafixar ${tile.label}` : `Fixar ${tile.label}`}
             title={pinned ? 'Desafixar' : 'Fixar'}
-            onClick={() => onPin(tile.id)}
+            onClick={(e) => { e.stopPropagation(); onPin(tile.id) }}
             style={{
               border: '1px solid #ffffff44', borderRadius: 6,
               background: pinned ? c.accent : '#111c',
@@ -340,7 +390,7 @@ export function CallTile({
                 : (isScreen ? 'Ver tela compartilhada em tela cheia' : pinned ? 'Ampliar participante fixado' : `Ampliar ${tile.label}`)
             }
             title={expanded ? 'Recolher (Esc)' : 'Tela cheia'}
-            onClick={() => onExpand(tile.id)}
+            onClick={(e) => { e.stopPropagation(); onExpand(tile.id) }}
             style={{
               border: '1px solid #ffffff44', borderRadius: 6,
               background: expanded ? c.accent : '#111c',

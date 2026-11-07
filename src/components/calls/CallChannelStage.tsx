@@ -1,6 +1,7 @@
 import { Ic } from '../../shared/icons'
 import type { ChannelMeta } from '../../services/models'
 import { useChannelVoicePeers } from './ChannelVoicePeers'
+import { joinButtonState } from '../../services/callUiState'
 
 export interface CallChannelStageProps {
   communityId: string
@@ -40,6 +41,7 @@ export default function CallChannelStage({
   const peers = useChannelVoicePeers(communityId, channel.id, true)
   const isVideo = channel.kind === 'video'
   const outros = peers.filter((p) => p.fp !== myFp)
+  const entrar = joinButtonState({ inThisCall: inCall, busy, unavailable })
 
   return (
     <div
@@ -160,22 +162,24 @@ export default function CallChannelStage({
           <button
             type="button"
             onClick={inCall ? onLeave : onJoin}
-            disabled={!inCall && (busy || !!unavailable)}
-            title={!inCall && unavailable ? unavailable : undefined}
+            disabled={!inCall && entrar.disabled}
+            title={!inCall ? (entrar.reason ?? undefined) : undefined}
+            aria-label={inCall ? 'Sair da chamada' : entrar.ariaLabel}
+            aria-busy={!inCall && entrar.tone === 'joining' ? true : undefined}
             style={{
               marginTop: 2,
-              background: inCall ? c.red : unavailable ? c.border : c.green,
+              background: inCall ? c.red : entrar.tone === 'unavailable' ? c.border : c.green,
               color: '#fff',
               border: 'none',
               borderRadius: 10,
               padding: '12px',
               fontSize: 13.5,
               fontWeight: 800,
-              cursor: !inCall && (busy || unavailable) ? 'not-allowed' : 'pointer',
-              opacity: !inCall && (busy || unavailable) ? 0.65 : 1,
+              cursor: !inCall && entrar.disabled ? 'not-allowed' : 'pointer',
+              opacity: !inCall && entrar.disabled ? 0.65 : 1,
             }}
           >
-            {inCall ? 'Sair da chamada' : unavailable ? 'Chamada indisponível' : busy ? 'Já existe uma chamada' : 'Entrar na chamada'}
+            {inCall ? 'Sair da chamada' : entrar.label}
           </button>
 
           {!inCall && unavailable && (

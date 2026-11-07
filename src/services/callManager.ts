@@ -314,6 +314,14 @@ export function getScreenShareBackend(): ScreenShareBackend {
   } catch { return 'none' }
 }
 
+function hasLiveVideoTrack(stream: MediaStream | null | undefined): boolean {
+  try {
+    return !!stream?.getVideoTracks?.().some((t) => t.readyState === 'live')
+  } catch {
+    return false
+  }
+}
+
 function attachRemoteTrack(
   state: CallState | null,
   onUpdate: (s: CallState | null) => void,
@@ -325,6 +333,26 @@ function attachRemoteTrack(
     const p = state.participants.find(x => x.fp === fp)
     if (!p) {
       state.participants.push({ fp, nickname: fp.slice(0, 6), stream })
+      onUpdate({ ...state })
+      return
+    }
+    const temVideo = hasLiveVideoTrack(stream)
+    const telaAtual = (p as any).screenStream as MediaStream | null | undefined
+    // Câmera e tela dividem a MESMA m-line de vídeo (`seedScreenPeers` usa
+    // `replaceTrack`), então o `mid` não as distingue. Quem distingue é o
+    // sinal `sharing` já recebido: sem ele, vídeo novo é câmera. Tratar todo
+    // "segundo stream" como tela fazia a câmera religada virar card de tela.
+    const ehTela = !!p.sharing && temVideo && !!p.stream && p.stream.id !== stream.id
+    if (ehTela) {
+      if (!telaAtual || telaAtual.id !== stream.id) {
+        ;(p as any).screenStream = stream
+        onUpdate({ ...state })
+      }
+      return
+    }
+    if (telaAtual && telaAtual.id === stream.id) {
+      // Reentrega da MESMA tela (ontrack repetido): mantém no quadro da tela.
+      p.sharing = true
       onUpdate({ ...state })
       return
     }
@@ -1708,6 +1736,7 @@ export class CallManager {
       this.localIce.delete(fp)
       this.lastRemoteOffer.delete(fp)
       this.pendingIce.delete(fp)
+      this.renegociacaoPendente.delete(fp)
       this.onUpdate({ ...st })
     } catch {  }
   }
@@ -1762,6 +1791,9 @@ export class CallManager {
         if (!on) {
           try { delete (p as any).videoUrl } catch {  }
           try { (p as any).videoSeq = -1 } catch {  }
+          // A tela acabou: soltar o stream próprio, senão um vídeo novo (a
+          // câmera religada) seria confundido com "mais uma tela".
+          try { (p as any).screenStream = null } catch {  }
         }
         this.onUpdate({ ...st })
       }
@@ -1897,6 +1929,16 @@ export class CallManager {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes de entrar num canal de voz')
     }
     const alvo = `voice-${communityId}-${channelId}`
+    // Reentrar no MESMO canal já ativo era um "entrar" que recriava o estado e
+    // abria PCs novos sem fechar os antigos: áudio duplicado e botão instável
+    // no duplo clique. Entrar de novo é no-op.
+    if (
+      this.state
+      && this.state.callId === alvo
+      && isCallPhaseActive(this.state.phase)
+    ) {
+      return this.state
+    }
     if (
       this.state
       && this.state.callId.startsWith('voice-')
@@ -3036,6 +3078,7 @@ export class CallManager {
       this.pendingIce.clear()
       this.localIce.clear()
       this.pendingOffers.clear()
+      this.pendingAnswers.clear()
       this.pendingVoiceJoins.clear()
       this.acceptedCalls.clear()
       this.lastRemoteOffer.clear()
@@ -3125,6 +3168,7 @@ export class CallManager {
       this.pendingIce.clear()
       this.localIce.clear()
       this.pendingOffers.clear()
+      this.pendingAnswers.clear()
       this.pendingVoiceJoins.clear()
       this.acceptedCalls.clear()
       this.lastRemoteOffer.clear()
@@ -3359,7 +3403,7 @@ export class CallManager {
   }
 
   /** Manda a track de câmera para TODOS os pares, promovendo a m-line de
-   *  vídeo para envio. Devolve quantos pares aceitaram. */
+   *  vídeo para envio. Devolve quantos pares confirmaram o envio. */
   private async publicarCameraEmTodos(track: MediaStreamTrack): Promise<number> {
     const st = this.state
     if (!st) return 0
@@ -3370,13 +3414,25 @@ export class CallManager {
         const tr = this.findVideoTransceiver(pc)
         let precisaOffer = false
         if (tr) {
+          // `setCallVideoSending` só devolve true quando a DIREÇÃO muda. Se a
+          // transceiver já estava em `sendrecv` mas o outro lado nunca recebeu
+          // a track (offer perdida), nada era reenviado — e a câmera só
+          // aparecia depois de desligar e ligar de novo.
+          const anterior = tr.sender?.track?.id ?? null
           precisaOffer = setCallVideoSending(tr, true)
           await tr.sender.replaceTrack(track)
+          if (!precisaOffer && anterior !== track.id) precisaOffer = true
         } else {
           pc.addTrack(track, this.localStream ?? new MediaStream([track]))
           precisaOffer = true
         }
-        if (precisaOffer) await this.enviarOfferComRetry(fp, st.callId)
+        if (precisaOffer) {
+          const saiu = await this.enviarOfferComRetry(fp, st.callId)
+          if (!saiu) {
+            this.marcarRenegociacaoPendente(fp)
+            continue
+          }
+        }
         const sender = tr?.sender ?? pc.getSenders().find((s) => s.track === track) ?? null
         if (sender) await applyCameraTuning(sender, this.cameraQuality())
         ok++
@@ -3552,7 +3608,12 @@ export class CallManager {
   }
 
   private async startScreenShareNow(opts?: Partial<ScreenShareOptions>): Promise<void> {
-    if (!this.state) return
+    if (!this.state) {
+      // Clicou em compartilhar sem chamada: o picker fica aberto e o usuário
+      // escolhe "Compartilhar agora" — antes isso retornava em silêncio e o
+      // botão parecia morto.
+      throw new ScreenShareError('no-source', 'entre na chamada antes de compartilhar a tela', false)
+    }
     const gen = ++this.screenGen
     if ((this.state as any)?.nativeMedia) {
       const next = normalizeOptions(opts, this.screenOptions)
@@ -3604,6 +3665,10 @@ export class CallManager {
     try { this.stopScreenStreamOnly() } catch {  }
     this.screenStream = stream
     this.state.sharing = true
+    // O quadro da tela aparece NA HORA (antes do primeiro frame e mesmo se a
+    // negociação falhar em um dos pares): compartilhar sem nenhum card era o
+    // "cliquei e nada aconteceu".
+    this.onUpdate({ ...this.state })
     this.screenError = null
     // Se o sistema exigiu compartilhar sem áudio, avise: silêncio aqui era o
     // "compartilhei a tela e ninguém ouve o jogo".
@@ -3782,8 +3847,12 @@ export class CallManager {
         const transceiver = this.findVideoTransceiver(pc)
         let needsOffer = false
         if (transceiver) {
+          // Igual à câmera: direção já em `sendrecv` não pode significar "nada
+          // a anunciar" — se a track mudou, o outro lado precisa da nova offer.
+          const anterior = transceiver.sender?.track?.id ?? null
           needsOffer = setCallVideoSending(transceiver, true)
           await transceiver.sender.replaceTrack(track)
+          if (!needsOffer && anterior !== track.id) needsOffer = true
         } else {
           pc.addTrack(track, stream)
           needsOffer = true
@@ -3803,8 +3872,16 @@ export class CallManager {
         }
         if (needsOffer) {
           if (!this.state) throw new Error('chamada encerrada durante o compartilhamento')
-          const saiu = await this.sendOffer(fp, this.state.callId)
-          if (!saiu) throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
+          // Retry, não uma tentativa só: a fila de offer pode estar ocupada por
+          // um ICE restart e a tela nunca chegava (o "só volta se parar e
+          // compartilhar de novo").
+          const saiu = await this.enviarOfferComRetry(fp, this.state.callId)
+          if (!saiu) {
+            // Mesmo caso da câmera: sem enfileirar, a tela só chegava no outro
+            // lado depois de parar e compartilhar de novo.
+            this.marcarRenegociacaoPendente(fp)
+            throw new Error('negociação ocupada; não foi possível enviar a nova track agora')
+          }
         }
         peersSeeded++
       } catch (e) {
@@ -3918,14 +3995,19 @@ export class CallManager {
         const transceiver = this.findVideoTransceiver(pc)
         let needsOffer = false
         if (transceiver) {
+          const anterior = transceiver.sender?.track?.id ?? null
           needsOffer = setCallVideoSending(transceiver, !!cam)
           await transceiver.sender.replaceTrack(cam)
+          // Voltando da tela para a câmera: a direção não muda, mas a track
+          // sim. Sem reoferecer, o peer ficava no último quadro da tela.
+          if (!needsOffer && (cam?.id ?? null) !== anterior) needsOffer = true
         } else if (cam && this.localStream) {
           pc.addTrack(cam, this.localStream)
           needsOffer = true
         }
         if (needsOffer && this.state) {
-          await this.sendOffer(fp, this.state.callId).catch(() => false)
+          const saiu = await this.enviarOfferComRetry(fp, this.state.callId)
+          if (!saiu) this.marcarRenegociacaoPendente(fp)
         }
       } catch {  }
     }
@@ -4562,6 +4644,10 @@ export class CallManager {
         if (!offer) return false
         if ((this.state && this.state.callId !== callId) || this.pcs.get(fp) !== pc) return false
         await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+        // A answer pode ter chegado antes desta offer (fila de sinalização
+        // adiantada ou retry). Ela fica guardada e é aplicada agora, em vez de
+        // forçar o usuário a desligar/ligar para a negociação recomeçar.
+        await this.flushPendingAnswer(fp, pc, callId)
         return true
       })
     this.offerQueue.set(fp, tarefa)
@@ -4593,6 +4679,7 @@ export class CallManager {
         if (pc.signalingState === 'stable') {
           await pc.setLocalDescription(offer)
           await services.callOffer(fp, callId, JSON.stringify(offer)).catch(() => {})
+          await this.flushPendingAnswer(fp, pc, callId)
         }
       } catch (e) {
         try { pc.close() } catch {  }
@@ -4603,9 +4690,107 @@ export class CallManager {
     }
   }
 
+  /** Pares com negociação pendente. `resend` reenvia a offer já criada (glare);
+   *  `new` cria outra (a anterior se perdeu). Sem esta fila, a única forma de
+   *  refazer a negociação era o usuário mexer de novo no botão. */
+  private renegociacaoPendente = new Map<string, { since: number; mode: 'resend' | 'new'; tentativas: number }>()
+
+  private static readonly MAX_RENEGOCIACOES = 6
+
+  private marcarRenegociacaoPendente(fp: string, mode: 'resend' | 'new' = 'new'): void {
+    const atual = this.renegociacaoPendente.get(fp)
+    if (atual && atual.tentativas >= CallManager.MAX_RENEGOCIACOES) return
+    // `resend` é mais barato e não gera glare: se já dá para reenviar, não
+    // troque por uma offer nova.
+    if (!atual) {
+      this.renegociacaoPendente.set(fp, { since: Date.now(), mode, tentativas: 0 })
+    } else if (atual.mode === 'new' && mode === 'resend') {
+      this.renegociacaoPendente.set(fp, { ...atual, mode, since: Date.now() })
+    }
+    // O reparo de pares roda a cada 15 s; esperar esse tick faria a tela
+    // demorar uma eternidade para aparecer no outro lado. Agenda um retry
+    // curto além dele (idempotente: se já resolveu, o mapa está vazio).
+    if (this.renegociacaoTimer) return
+    try {
+      this.renegociacaoTimer = setTimeout(() => {
+        this.renegociacaoTimer = null
+        const st = this.state
+        if (!st || !isCallPhaseActive(st.phase)) return
+        void this.repairMidiaDivergente(st).catch(() => {  })
+      }, 2_500)
+    } catch { this.renegociacaoTimer = null }
+  }
+
+  private renegociacaoTimer: ReturnType<typeof setTimeout> | null = null
+
+  private stopRenegociacaoRetry(): void {
+    try { if (this.renegociacaoTimer) clearTimeout(this.renegociacaoTimer) } catch {  }
+    this.renegociacaoTimer = null
+    this.renegociacaoPendente.clear()
+  }
+
+  private async repairMidiaDivergente(st: CallState): Promise<void> {
+    if (this.renegociacaoPendente.size === 0) return
+    for (const [fp, pend] of [...this.renegociacaoPendente]) {
+      try {
+        const pc = this.pcs.get(fp)
+        if (!pc || pc.signalingState === 'closed') {
+          this.renegociacaoPendente.delete(fp)
+          continue
+        }
+        // Dá espaço entre as tentativas: duas offers simultâneas viram glare
+        // e pioram justamente o que se quer consertar.
+        if (Date.now() - pend.since < 2_000) continue
+
+        // Caso travado do glare: eu tenho offer local que ele nunca recebeu.
+        // Reenviar a MESMA offer é idempotente e não abre nova negociação.
+        if (pc.signalingState === 'have-local-offer') {
+          if (pend.mode !== 'resend') {
+            this.renegociacaoPendente.delete(fp)
+            continue
+          }
+          const local = pc.localDescription
+          if (!local?.sdp) {
+            this.renegociacaoPendente.delete(fp)
+            continue
+          }
+          await services.callOffer(fp, st.callId, JSON.stringify({ type: 'offer', sdp: local.sdp })).catch(() => {})
+          // Se o outro lado já tinha a offer e só a answer se perdeu, este
+          // reenvio não basta: a próxima volta cria offer nova.
+          const feitas = pend.tentativas + 1
+          if (feitas >= CallManager.MAX_RENEGOCIACOES) this.renegociacaoPendente.delete(fp)
+          else this.renegociacaoPendente.set(fp, { since: Date.now(), mode: 'new', tentativas: feitas })
+          continue
+        }
+
+        if (pc.signalingState !== 'stable' || !pc.remoteDescription) continue
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') continue
+
+        const temMidia = pc.getSenders().some((s) => s.track && s.track.readyState === 'live')
+          || !!st.cameraOn || !!st.sharing
+        if (!temMidia) {
+          this.renegociacaoPendente.delete(fp)
+          continue
+        }
+        if (await this.enviarOfferComRetry(fp, st.callId)) {
+          this.renegociacaoPendente.delete(fp)
+        } else {
+          const feitas = pend.tentativas + 1
+          if (feitas >= CallManager.MAX_RENEGOCIACOES) this.renegociacaoPendente.delete(fp)
+          else this.renegociacaoPendente.set(fp, { since: Date.now(), mode: 'new', tentativas: feitas })
+        }
+      } catch {  }
+    }
+  }
+
   private async repairHalfOpenPairs(): Promise<void> {
     const st = this.state
     if (!st || !isCallPhaseActive(st.phase) || !this.myFp) return
+    // A tela e a câmera só existem no outro lado depois que a renegociação
+    // completa. Se a oferta se perdeu, NADA no ciclo antigo tentava de novo:
+    // o usuário via "compartilhando" e o peer sem card até parar/recomeçar
+    // manualmente (o "desliga e liga para voltar").
+    await this.repairMidiaDivergente(st)
     for (const p of st.participants) {
       const fp = p.fp
       if (!fp || fp === this.myFp) continue
@@ -4704,6 +4889,27 @@ export class CallManager {
     return st.invited.length !== antes
   }
 
+  /** Reenvia a answer local quando a offer remota repete (answer perdida). */
+  private async reenviarAnswerLocal(
+    fp: string,
+    callId: string,
+    pc: RTCPeerConnection,
+    offerSdp: string,
+  ): Promise<void> {
+    try {
+      if (this.pcs.get(fp) !== pc || pc.signalingState !== 'stable') return
+      if (this.state?.callId !== callId) return
+      const local = pc.localDescription
+      if (!local?.sdp || local.type !== 'answer') return
+      // A answer só serve para ESTA offer. Se o PC já aplicou outra (nova
+      // renegociação no meio), reenviar a antiga faria o outro lado falhar em
+      // silêncio e voltaríamos ao "desliga e liga para destravar".
+      const remote = pc.remoteDescription
+      if (!remote?.sdp || remote.sdp !== offerSdp) return
+      await services.callAnswer(fp, callId, JSON.stringify({ type: 'answer', sdp: local.sdp })).catch(() => {})
+    } catch {  }
+  }
+
   private async handleOffer(fromFp: string, callId: string, sdpStr: string) {
     if (!fromFp || fromFp === this.myFp) return
     if (this.endedCalls.has(callId)) return
@@ -4748,7 +4954,15 @@ export class CallManager {
       this.attachLocalStreamToPC(pc)
     }
 
-    if (pc.signalingState === 'stable' && this.lastRemoteOffer.get(fromFp) === sdpStr) return
+    // Oferta repetida com o PC em `stable`: já respondi, mas a minha answer
+    // pode ter se perdido. Antes eu descartava em silêncio (`return`) e quem
+    // ficou sem answer travava até desligar e ligar a chamada — exatamente o
+    // "meio bugado, tem que sair e entrar de novo". Reenviar a answer é
+    // idempotente e destrava o outro lado.
+    if (pc.signalingState === 'stable' && this.lastRemoteOffer.get(fromFp) === sdpStr) {
+      void this.reenviarAnswerLocal(fromFp, callId, pc, sdpStr)
+      return
+    }
 
     const polite = this.isPolite(fromFp)
     const anterior = this.offerQueue.get(fromFp)
@@ -4758,7 +4972,13 @@ export class CallManager {
     }
     if (pc.signalingState === 'have-local-offer') {
       if (!polite) {
+        // Glare: ignoro a offer dele (a minha vence), MAS se a minha offer se
+        // perdeu no caminho ninguém destrava — ele fica esperando answer e eu
+        // esperando uma offer nova. Antes isso só se resolvia desligando e
+        // ligando de novo. Marcar a renegociação pendente faz o reparo
+        // reenviar a minha offer em segundos.
         console.debug(`[call] GLARE ${callId}: impolite ignora offer de ${fromFp.slice(0, 8)}`)
+        this.marcarRenegociacaoPendente(fromFp, 'resend')
         return
       }
       try { await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit) }
@@ -4783,18 +5003,48 @@ export class CallManager {
   private async handleAnswer(fromFp: string, callId: string, sdpStr: string) {
     if (!fromFp || fromFp === this.myFp || this.state?.callId !== callId) return
     const pc = this.pcs.get(fromFp)
-    if (!pc) return
+    if (!pc) {
+      // A answer chegou antes do PC existir (offer nossa ainda em voo ou PC
+      // recriado pelo reparo). Descartar aqui era o "só funciona se mexer de
+      // novo": guardamos e aplicamos quando o PC estiver em have-local-offer.
+      this.pendingAnswers.set(fromFp, { callId, sdp: sdpStr })
+      return
+    }
     const ans = parseWireSdp(sdpStr, 'answer')
     if (!ans) return
     this.markJoined(fromFp)
     try {
-      if (pc.signalingState !== 'have-local-offer') return
+      if (pc.signalingState !== 'have-local-offer') {
+        // `stable` = já aplicamos (duplicata); qualquer outro estado = a
+        // negociação mudou debaixo (glare/ICE restart). A answer antiga não
+        // serve, mas a nova oferta que estamos devendo resolve.
+        if (pc.signalingState !== 'stable') this.marcarRenegociacaoPendente(fromFp)
+        return
+      }
       await pc.setRemoteDescription(ans as RTCSessionDescriptionInit)
       if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       await this.flushPendingIce(fromFp, pc, callId)
     } catch (e) {
       console.warn(`[call] falha ao aplicar answer de ${fromFp.slice(0, 8)}: ${(e as Error)?.message ?? e}`)
+      this.marcarRenegociacaoPendente(fromFp)
     }
+  }
+
+  /** Answers que chegaram antes do PC (ou da offer local) estarem prontos. */
+  private pendingAnswers = new Map<string, { callId: string; sdp: string }>()
+
+  private async flushPendingAnswer(fp: string, pc: RTCPeerConnection, callId: string): Promise<void> {
+    const pend = this.pendingAnswers.get(fp)
+    if (!pend || pend.callId !== callId) return
+    this.pendingAnswers.delete(fp)
+    if (pc.signalingState !== 'have-local-offer') return
+    const ans = parseWireSdp(pend.sdp, 'answer')
+    if (!ans) return
+    try {
+      await pc.setRemoteDescription(ans as RTCSessionDescriptionInit)
+      if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
+      await this.flushPendingIce(fp, pc, callId)
+    } catch {  }
   }
 
   private async handleIce(fromFp: string, callId: string, candidateStr: string, mid: string) {
@@ -5064,6 +5314,7 @@ export class CallManager {
     this.pendingIce.clear()
     this.localIce.clear()
     this.pendingOffers.clear()
+    this.pendingAnswers.clear()
     this.pendingVoiceJoins.clear()
     this.offerQueue.clear()
     this.acceptedCalls.clear()
@@ -5073,6 +5324,8 @@ export class CallManager {
     this.pairStuckSince.clear()
     this.soloWaitSince.clear()
     this.qualityNotice = null
+    this.renegociacaoPendente.clear()
+    this.stopRenegociacaoRetry()
     this.pcs.forEach(pc => { try { pc.close() } catch {  } })
     this.pcs.clear()
     this.localStream?.getTracks().forEach(t => { try { t.stop() } catch {  } })

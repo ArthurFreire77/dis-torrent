@@ -32,6 +32,7 @@ import { resolveBootPhase } from '../services/bootPhase'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
+import { callIsActive, callMediaLive } from '../services/callUiState'
 import { cameraCycleLabel, shouldShowCameraSwitch } from '../services/callCameras'
 import { useCallCameras } from '../services/useCallCameras'
 import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
@@ -996,18 +997,17 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (mudou) setActiveCall((cur: any) => (cur ? { ...cur, participants: [...cur.participants] } : cur))
   }, [activeCall?.participants, identity?.fingerprint, socialProfiles, peers])
 
-  const mediaLive = useMemo(() => {
-    if (!activeCall) return false
-    const parts = (activeCall.participants ?? []) as any[]
-    for (const p of parts) {
-      if (p?.videoUrl) return true
-      const tracks = p?.stream?.getTracks?.() as any[] | undefined
-      if (tracks?.some((t) => t?.readyState === 'live')) return true
-    }
-    const local = (activeCall as any).localStream
-    const localTracks = local?.getTracks?.() as any[] | undefined
-    return !!localTracks?.some((t) => t?.readyState === 'live')
-  }, [activeCall?.participants, (activeCall as any)?.localStream])
+  const mediaLive = useMemo(() => (activeCall ? callMediaLive({
+    participants: (activeCall.participants ?? []) as any[],
+    localStream: (activeCall as any).localStream ?? null,
+    localScreenStream: (activeCall as any).localScreenStream ?? null,
+    sharing: !!activeCall.sharing,
+  }) : false), [
+    activeCall?.participants,
+    activeCall?.sharing,
+    (activeCall as any)?.localStream,
+    (activeCall as any)?.localScreenStream,
+  ])
 
   useEffect(() => {
     if (activeCall) return
@@ -1416,6 +1416,10 @@ export default function ThemeShell({ designId }: {designId:string}){
     return isCallableChannel(meta.kind) ? meta : null
   })()
   const inThisCall = !!activeCall && !!selCallChannel && activeCall.convId === selCallChannel.id
+  // `activeCall` continua preenchido com fase `ended`/`failed` até o cleanup.
+  // Usar o objeto cru mantinha "Já existe uma chamada" e o painel lateral
+  // presos depois de sair — a UI agora pergunta se a chamada está VIVA.
+  const callViva = callIsActive(activeCall)
   const canalDaChamada = useMemo(
     () => parseVoiceCallId(activeCall?.callId, activeCall?.convId),
     [activeCall?.callId, activeCall?.convId],
@@ -1431,7 +1435,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   // px e nunca come a coluna abaixo do mínimo legível (era o composer com uma
   // letra por linha). Quando não cabe ao lado, ele sobrepõe.
   const callDock = resolveCallDock({
-    hasActiveCall: !!activeCall,
+    hasActiveCall: callViva,
     inThisCall: inCallHere,
     panelSize: callPanelSize,
     chromePx: chromeWidth,
@@ -1439,6 +1443,9 @@ export default function ThemeShell({ designId }: {designId:string}){
   })
   const painelLateralVisivel = callDock.panelVisible
   const painelChamadaVisivel = painelLateralVisivel && !callPanelHidden
+  // Esconder o painel não pode ser um beco sem saída: com a chamada viva e o
+  // painel oculto, a barra do canal oferece "chamada" para reabrir.
+  const reabrirChamada = callViva && !inThisCall && !painelChamadaVisivel
   useEffect(() => {
     // Sem chamada ativa o painel volta a aparecer na próxima; o "esconder" é
     // só da sessão atual e não pode virar preferência escondida.
@@ -1822,7 +1829,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     else if (conv?.peer_fp) fps = [conv.peer_fp]
     if (fps.length === 0) { setError('selecione um amigo ou crie um grupo'); return }
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
-    if (activeCall) { setError('já existe uma chamada em andamento'); return }
+    if (callViva) { setError('já existe uma chamada em andamento'); return }
     setCallActionBusy(true)
     try { await callManager.start(kind, selConv, fps, { group: isGroup }) } catch (e: any) { setError(String(e?.message ?? e)) }
     finally { setCallActionBusy(false) }
@@ -2002,7 +2009,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     async function enterRoomFromList(convId: string, sala: CallRoomView, nome: (fp: string) => string) {
     if (callActionBusy) return
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
-    if (activeCall) { setError('já existe uma chamada em andamento'); return }
+    if (callViva) { setError('já existe uma chamada em andamento'); return }
     setCallActionBusy(true)
     try {
       const conv = conversations.find((c) => c.id === convId)
@@ -2535,10 +2542,12 @@ export default function ThemeShell({ designId }: {designId:string}){
                           type="button"
                           title={roomSummary(sala, nameOfFp) ?? 'Entrar na chamada'}
                           aria-label={`Entrar na chamada de ${c.title}`}
-                          onClick={(e) => { e.stopPropagation(); void enterRoomFromList(c.id, sala, nameOfFp) }}
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}
+                          aria-busy={callActionBusy || undefined}
+                          disabled={callActionBusy}
+                          onClick={(e) => { e.stopPropagation(); if (!callActionBusy) void enterRoomFromList(c.id, sala, nameOfFp) }}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: callActionBusy ? 'wait' : 'pointer', flexShrink: 0, minHeight: 24, whiteSpace: 'nowrap', opacity: callActionBusy ? 0.7 : 1 }}
                         >
-                          <Icon d={Icons.phone} size={11} /> Entrar {sala.participants.length || ''}
+                          <Icon d={Icons.phone} size={11} /> {callActionBusy ? 'entrando…' : `Entrar ${sala.participants.length || ''}`}
                         </button>
                       )}
                       <button title={c.kind === 'group' ? 'Sair ou apagar o grupo' : 'Apagar conversa'} onClick={async (e) => { e.stopPropagation(); if (c.kind === 'group') { let owner = false; try { const mems = await services.groupMembers(c.id); owner = mems.length > 0 && mems[0][0] === identity?.fingerprint } catch {  } setLeaveTarget({ id: c.id, title: c.title, owner }); return } if (!confirm(`Apagar conversa com ${c.title}?`)) return; try { await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={14} /></button>
@@ -2717,53 +2726,54 @@ export default function ThemeShell({ designId }: {designId:string}){
               </span>
             </div>
           ) : selConv ? (
-            <div style={{ height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)' }}>
-              <span style={{ color: muted, fontWeight: 800, fontSize: 18 }}>{conversations.find(c=>c.id===selConv)?.kind==='group' ? <Icon d={Icons.users} size={18}/> : '@'}</span>
+            <div className="hide-scrollbar" style={{ minHeight: 48, height: 48, borderBottom: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', padding: '0 16px', gap: 10, flexShrink: 0, boxShadow: '0 1px 0 rgba(0,0,0,.2)', minWidth: 0, overflowX: 'auto', overflowY: 'hidden' }}>
+              <span style={{ color: muted, fontWeight: 800, fontSize: 18, flexShrink: 0 }}>{conversations.find(c=>c.id===selConv)?.kind==='group' ? <Icon d={Icons.users} size={18}/> : '@'}</span>
               {}
               {ehGrupo ? (
                 <button
                   onClick={() => setShowGroupPanel(true)}
                   title="Ver membros, renomear ou remover alguem"
                   aria-label={`${peerTitle} - ${groupMemberCount} membros. Abrir painel do grupo`}
-                  style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', minWidth: 0, flex: 1, color: 'inherit', textAlign: 'left' }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', minWidth: 0, overflow: 'hidden', flex: 1, color: 'inherit', textAlign: 'left' }}
                 >
-                  <span style={{ fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: muted, whiteSpace: 'nowrap' }}>
+                  <span style={{ fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{peerTitle}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: muted, whiteSpace: 'nowrap', flexShrink: 0 }}>
                     {groupMemberCount} {groupMemberCount === 1 ? 'membro' : 'membros'}
                   </span>
                 </button>
               ) : (
-                <span style={{ fontWeight: 700, color: t.heading, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
+                <span style={{ fontWeight: 700, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
               )}
               {}
               {selRoom && (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0, minWidth: 0 }}>
                   <button
                     type="button"
                     onClick={() => setShowRoomMembers(true)}
                     title={roomSummary(selRoom, nameOfFp) ?? 'Quem está na chamada'}
                     aria-label="Ver quem está na chamada"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: `${t.green}22`, color: t.green, border: `1px solid ${t.green}66`, borderRadius: 99, padding: '3px 9px', fontSize: 11, fontWeight: 800, cursor: 'pointer' }}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: `${t.green}22`, color: t.green, border: `1px solid ${t.green}66`, borderRadius: 99, padding: '3px 9px', fontSize: 11, fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap' }}
                   >
-                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}` }} />
-                    {selRoom.participants.length || 1} na chamada
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}`, flexShrink: 0 }} />
+                    {selRoom.participants.length || 1}{viewportWidth >= 1080 ? ' na chamada' : ''}
                   </button>
-                  {!activeCall && (
+                  {!callViva && (
                     <button
                       type="button"
                       onClick={() => void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp)}
                       disabled={callActionBusy || !callsOk}
                       title={callsOk ? 'Entrar na chamada que já está acontecendo' : callsUnavailableDetail}
                       aria-label="Entrar na chamada"
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '4px 10px', fontSize: 11, fontWeight: 800, cursor: callActionBusy || !callsOk ? 'not-allowed' : 'pointer', opacity: callsOk ? 1 : 0.6 }}
+                      aria-busy={callActionBusy || undefined}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '4px 10px', fontSize: 11, fontWeight: 800, cursor: callActionBusy || !callsOk ? 'not-allowed' : 'pointer', opacity: callsOk ? 1 : 0.6, whiteSpace: 'nowrap' }}
                     >
-                      <Icon d={Icons.phone} size={12} /> Entrar
+                      <Icon d={Icons.phone} size={12} /> {callActionBusy ? 'entrando…' : 'Entrar'}
                     </button>
                   )}
                 </span>
               )}
               {}
-              <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <span style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, marginLeft: 'auto' }}>
                 <button onClick={() => setShowDownloads(true)} title="Downloads" aria-label="Downloads" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex', position: 'relative' }}>
                   <Icon d={Icons.download} size={18} />
                   {dlCount > 0 && <span style={{ position: 'absolute', top: 0, right: 0, background: t.accent, color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: 99, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount}</span>}
@@ -2797,6 +2807,24 @@ export default function ThemeShell({ designId }: {designId:string}){
                   aria-label="Fixadas e salvas"
                   style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 5, borderRadius: 6, display: 'flex' }}
                 ><Icon d={Icons.pin} size={17} /></button>
+                {reabrirChamada && (
+                  <button
+                    type="button"
+                    data-testid="call-panel-reopen"
+                    onClick={() => { setCallPanelHidden(false); setCallPanelSize((s) => (s === 'compact' ? 'normal' : s)) }}
+                    title="Voltar para a chamada em andamento"
+                    aria-label="Voltar para a chamada em andamento"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                      background: t.green, color: '#fff', border: 'none', borderRadius: 99,
+                      padding: '4px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#fff' }} />
+                    chamada
+                  </button>
+                )}
                 {netPill(status)}
               </span>
             </div>
@@ -3017,7 +3045,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               peers={channelCallPeers}
               waitingAlone={canalVazio}
               unavailable={!callsOk ? callsUnavailableDetail : null}
-              busy={!!activeCall && !inThisCall}
+              busy={callViva && !inThisCall}
               notice={notice}
               muted={isMuted}
               deafened={isDeafened}
@@ -3716,14 +3744,14 @@ export default function ThemeShell({ designId }: {designId:string}){
       {
 }
       {painelLateralVisivel && (
-        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callDock.sideBySide ? callDock.mainInsetPx || callPanelWidth(callPanelSize, viewportWidth) : Math.min(callPanelWidth(callPanelSize, viewportWidth), Math.max(360, viewportWidth - 96)), background: '#0f0f0f', zIndex: 88, display: 'flex', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
+        <div data-testid="call-panel" style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: callDock.sideBySide ? callDock.mainInsetPx || callPanelWidth(callPanelSize, viewportWidth) : Math.min(callPanelWidth(callPanelSize, viewportWidth), Math.max(360, viewportWidth - 96)), background: '#0f0f0f', zIndex: 88, display: painelChamadaVisivel ? 'flex' : 'none', flexDirection: 'column', borderLeft: `1px solid ${borderColor}`, boxShadow: '-8px 0 28px rgba(0,0,0,.2)', transition: 'width 180ms ease' }}>
           <div style={{ minHeight: 56, height: 'auto', background: '#232428', borderBottom: `1px solid ${borderColor}`, display: 'flex', flexWrap: 'wrap', alignItems: 'center', padding: '8px 12px', gap: 8 }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 250, flex: '1 1 250px' }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flex: '1 1 220px' }}>
               <span style={{ width: 30, height: 30, borderRadius: 8, background: `${t.accent}22`, color: t.accent, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{activeCall.kind === 'video' ? <Icon d={Icons.video} size={16} /> : <Icon d={Icons.phone} size={16} />}</span>
-              <span style={{ minWidth: 0 }}>
+              <span style={{ minWidth: 0, flex: 1 }}>
                 <span style={{ display: 'block', fontWeight: 800, color: t.heading, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{conversations.find(c=>c.id===activeCall.convId)?.title ?? peerTitle ?? 'Chamada'}</span>
                 {}
-                <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2, flexWrap: 'wrap' }}>
                   <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} ringing={activeCall.ringing} />
                 {}
                   <span style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{fmtDuration(callDuration)}</span>
@@ -3989,8 +4017,8 @@ export default function ThemeShell({ designId }: {designId:string}){
             ))}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
               <Button onClick={() => setShowRoomMembers(false)}>Fechar</Button>
-              {!activeCall && (
-                <Button variant="success" icon="phone" disabled={callActionBusy || !callsOk} onClick={() => { setShowRoomMembers(false); if (selRoom) void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp) }}>
+              {!callViva && (
+                <Button variant="success" icon="phone" busy={callActionBusy} disabled={callActionBusy || !callsOk} onClick={() => { setShowRoomMembers(false); if (selRoom) void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp) }}>
                   Entrar na chamada
                 </Button>
               )}

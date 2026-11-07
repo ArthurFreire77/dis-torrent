@@ -21,6 +21,7 @@ import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { pastedImages } from '../shared/clipboardImage'
 import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
+import { callIsActive, callMediaLive } from '../services/callUiState'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
 import MobileCallStage from './MobileCallStage'
@@ -156,7 +157,7 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
           aria-label={`Entrar na chamada de ${c.title}`}
           data-testid="mobile-join-room"
           onClick={(e) => { e.stopPropagation(); onJoinRoom(c, room) }}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap' }}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: t.green, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', flexShrink: 0, whiteSpace: 'nowrap', minHeight: 34 }}
         >
           <Icon d={Icons.phone} size={13} /> Entrar
         </button>
@@ -846,16 +847,17 @@ export default function MobileShell() {
   ])
 
   // Seção 5: mediaLiveMobile
-  const mediaLiveMobile = useMemo(() => {
-    if (!activeCall) return false
-    for (const p of ((activeCall as any).participants ?? []) as any[]) {
-      if (p?.videoUrl) return true
-      const tracks = p?.stream?.getTracks?.() as any[] | undefined
-      if (tracks?.some((t) => t?.readyState === 'live')) return true
-    }
-    const tracks = (activeCall as any).localStream?.getTracks?.() as any[] | undefined
-    return !!tracks?.some((t) => t?.readyState === 'live')
-  }, [activeCall?.participants, (activeCall as any)?.localStream])
+  const mediaLiveMobile = useMemo(() => (activeCall ? callMediaLive({
+    participants: (activeCall.participants ?? []) as any[],
+    localStream: (activeCall as any).localStream ?? null,
+    localScreenStream: (activeCall as any).localScreenStream ?? null,
+    sharing: !!activeCall.sharing,
+  }) : false), [
+    activeCall?.participants,
+    activeCall?.sharing,
+    (activeCall as any)?.localStream,
+    (activeCall as any)?.localScreenStream,
+  ])
 
   const visibleCallTilesMobile = useMemo(() => {
     const valid = callTilesMobile.map((tile) => tile.id)
@@ -1177,12 +1179,15 @@ export default function MobileShell() {
     return () => { try { un() } catch {  } }
   }, [])
   const joinRoom = useCallback(async (c: Conversation, room: CallRoomView) => {
-    if (activeCall) { setError('já existe uma chamada em andamento'); return }
+    if (callActionBusy) return
+    if (callIsActive(activeCall)) { setError('já existe uma chamada em andamento'); return }
+    setCallActionBusy(true)
     try {
       setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp)
       await callManager.enterRoom(c.id, room.kind)
     } catch (e: any) { setError(String(e?.message ?? e)) }
-  }, [activeCall])
+    finally { setCallActionBusy(false) }
+  }, [activeCall, callActionBusy])
   const enterCallChannel = useCallback(async (communityId: string, channelId: string) => {
     if (callActionBusy) return
     const support = getCallsSupport()
@@ -2206,6 +2211,7 @@ export default function MobileShell() {
       }
       const participantes = [...porFp.values()]
       return (
+        <>
         <MobileCallChannel
           channelName={selCallChannel.name}
           kind={selCallChannel.kind === 'video' ? 'video' : 'voice'}
@@ -2222,6 +2228,20 @@ export default function MobileShell() {
           error={error}
           canSwitchCamera={mostrarTrocaCameraMobile}
           onSwitchCamera={() => { void trocarCameraMobile() }}
+          canShareScreen={supportsScreenShare() || !!st?.sharing}
+          sharing={!!st?.sharing}
+          onToggleScreen={() => {
+            if (st?.sharing) {
+              void callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))
+              return
+            }
+            if (!supportsScreenShare()) {
+              setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)
+              return
+            }
+            setShowScreenPicker(true)
+          }}
+          joining={callActionBusy}
           onBack={() => { setSelConv(null); setSelPeerFp(null) }}
           onJoin={() => { if (!selCommunity || !selCallChannel) return; void enterCallChannel(selCommunity, selCallChannel.id) }}
           onLeave={() => { void leaveCallChannel() }}
@@ -2229,6 +2249,10 @@ export default function MobileShell() {
           onToggleDeafen={() => { const nd = !isDeafened; setIsDeafened(nd); if (nd) setIsMuted(true); callManager.toggleDeafen() }}
           onToggleCamera={() => { void callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e))) }}
         />
+        {/* A vista do canal faz `return` antes do rodapé do shell: sem este
+            picker aqui, "compartilhar tela" no canal só mudava estado. */}
+        <ScreenSharePicker open={showScreenPicker} onClose={() => setShowScreenPicker(false)} onError={setError} />
+        </>
       )
     }
     const channelName = activeComm?.channels.find(([id]) => id === selConv)?.[1] ?? selConvObj?.title ?? peerTitle
@@ -2256,16 +2280,18 @@ export default function MobileShell() {
             <>
               {
 }
-              {selConvRoom && !activeCall && (
+              {selConvRoom && !callIsActive(activeCall) && (
                 <button
                   type="button"
                   data-testid="mobile-header-join-room"
                   aria-label={`Entrar na chamada — ${selConvRoom.participants.length || 1} na sala`}
                   title={`Entrar na chamada em andamento (${selConvRoom.participants.length || 1} na sala)`}
-                  onClick={() => { if (selConv) void joinRoom(selConvObj!, selConvRoom) }}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, background: t.accent, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                  aria-busy={callActionBusy || undefined}
+                  disabled={callActionBusy}
+                  onClick={() => { if (selConv && !callActionBusy) void joinRoom(selConvObj!, selConvRoom) }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, background: t.accent, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: callActionBusy ? 'wait' : 'pointer', whiteSpace: 'nowrap', opacity: callActionBusy ? 0.7 : 1 }}
                 >
-                  <Icon d={Icons.phone} size={13} /> Entrar
+                  <Icon d={Icons.phone} size={13} /> {callActionBusy ? 'entrando…' : 'Entrar'}
                 </button>
               )}
               {}

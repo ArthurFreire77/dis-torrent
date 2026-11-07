@@ -1,5 +1,6 @@
 import { Ic, type IconName } from '../shared/icons'
 import type { ReactNode } from 'react'
+import { joinButtonState } from '../services/callUiState'
 
 const T = {
   rail: '#0f1115', main: '#14161a', panel: '#1e2128', input: '#23262f',
@@ -79,6 +80,9 @@ export default function MobileCallChannel({
   cameraOn,
   error,
   canSwitchCamera,
+  canShareScreen,
+  sharing,
+  onToggleScreen,
   onBack,
   onJoin,
   onLeave,
@@ -86,6 +90,7 @@ export default function MobileCallChannel({
   onToggleDeafen,
   onToggleCamera,
   onSwitchCamera,
+  joining,
 }: {
   channelName: string
   kind: 'voice' | 'video'
@@ -101,6 +106,9 @@ export default function MobileCallChannel({
   cameraOn: boolean
   error: string | null
   canSwitchCamera?: boolean
+  canShareScreen?: boolean
+  sharing?: boolean
+  onToggleScreen?: () => void
   onBack: () => void
   onJoin: () => void
   onLeave: () => void
@@ -108,9 +116,11 @@ export default function MobileCallChannel({
   onToggleDeafen: () => void
   onToggleCamera: () => void
   onSwitchCamera?: () => void
+  joining?: boolean
 }) {
   const titulo = kind === 'video' ? 'Canal de vídeo' : 'Canal de voz'
   const outros = participants.filter((p) => p.fp !== myFp)
+  const entrar = joinButtonState({ inThisCall: inCall, joining });
 
   const barraTopo = (
     <div style={{
@@ -192,6 +202,7 @@ export default function MobileCallChannel({
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
           padding: '8px 10px', paddingBottom: 'calc(8px + env(safe-area-inset-bottom))',
           background: T.panel, borderTop: `1px solid ${T.border}`, flexShrink: 0,
+          flexWrap: 'wrap',
         }}>
           <Botao
             label={muted ? 'Ativar microfone' : 'Silenciar microfone'}
@@ -213,6 +224,21 @@ export default function MobileCallChannel({
             on={cameraOn}
             onClick={onToggleCamera}
           />
+          {onToggleScreen && (
+            <Botao
+              label={
+                sharing
+                  ? 'Parar de compartilhar a tela'
+                  : canShareScreen
+                    ? 'Compartilhar tela'
+                    : 'Compartilhar tela indisponível neste aparelho'
+              }
+              icon="screen"
+              on={!!sharing}
+              disabled={!sharing && !canShareScreen}
+              onClick={onToggleScreen}
+            />
+          )}
           {canSwitchCamera && onSwitchCamera && (
             <Botao
               label={cameraOn ? 'Inverter câmera (frontal/traseira)' : 'Escolher a câmera da próxima transmissão'}
@@ -314,15 +340,20 @@ export default function MobileCallChannel({
         <button
           type="button"
           onClick={onJoin}
-          aria-label="Entrar na chamada"
+          disabled={entrar.disabled}
+          title={entrar.reason ?? undefined}
+          aria-label={entrar.ariaLabel}
+          aria-busy={entrar.tone === 'joining' ? true : undefined}
           style={{
-            width: '100%', background: T.green, border: 'none', color: '#fff',
+            width: '100%', background: entrar.disabled ? T.muted : T.green, border: 'none', color: '#fff',
             borderRadius: 12, padding: '14px', fontSize: 15, fontWeight: 800,
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            cursor: entrar.disabled ? 'not-allowed' : 'pointer',
+            opacity: entrar.disabled ? 0.7 : 1,
           }}
         >
           <Ic name={kind === 'video' ? 'video' : 'phone'} size={18} />
-          Entrar na chamada
+          {entrar.label}
         </button>
       </div>
     </div>

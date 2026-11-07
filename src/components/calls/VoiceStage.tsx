@@ -3,6 +3,7 @@ import { Icon, Icons } from '../../shared/icons'
 import CallPhaseBadge from '../CallPhaseBadge'
 import type { CallPhase } from '../../services/callPhases'
 import { participantsLabel, type VoiceLayout } from '../../services/voiceLayout'
+import { joinButtonState } from '../../services/callUiState'
 
 export interface VoiceStagePalette {
   stage: string
@@ -166,8 +167,12 @@ export function VoiceStage({
   settings,
   compact = false,
 }: VoiceStageProps) {
-  // Seção 1: entrarBloqueado
-  const entrarBloqueado = !inCall && (busy || !!unavailable)
+  const entrar = joinButtonState({
+    inThisCall: inCall,
+    busy,
+    unavailable,
+  })
+  const entrarBloqueado = entrar.disabled
   const duracao = inCall ? fmtDuracao(Math.max(0, nowMs - startAt)) : ''
   const [painelAberto, setPainelAberto] = useState(false)
 
@@ -215,8 +220,12 @@ export function VoiceStage({
         border: `1px solid ${c.border}`,
         borderRadius: compact ? 0 : 999,
         boxShadow: compact ? 'none' : '0 6px 24px rgba(0,0,0,.45)',
+        // Nunca mais largo que o palco: em janela estreita a pílula vazava e
+        // os botões saíam da tela (o "botão em posição errada" no canto).
+        maxWidth: 'calc(100% - 24px)',
+        boxSizing: 'border-box',
         ...(compact
-          ? { flexShrink: 0 }
+          ? { flexShrink: 0, width: '100%' }
           : { position: 'absolute' as const, left: '50%', bottom: 20, transform: 'translateX(-50%)', zIndex: 3 }),
       }}
     >
@@ -315,15 +324,15 @@ export function VoiceStage({
           type="button"
           onClick={onJoin}
           disabled={entrarBloqueado}
-          title={unavailable ?? undefined}
-          aria-label={unavailable ? 'Chamada indisponível' : 'Entrar na chamada'}
+          title={entrar.reason ?? undefined}
+          aria-label={entrar.ariaLabel}
           style={{
             height: 48,
             minWidth: 220,
             padding: '0 26px',
             borderRadius: 24,
             border: 'none',
-            background: unavailable ? c.border : '#1a73e8',
+            background: entrar.tone === 'unavailable' ? c.border : '#1a73e8',
             color: '#fff',
             cursor: entrarBloqueado ? 'not-allowed' : 'pointer',
             opacity: entrarBloqueado ? 0.7 : 1,
@@ -336,7 +345,7 @@ export function VoiceStage({
           }}
         >
           <Icon d={kind === 'video' ? Icons.video : Icons.phone} size={18} />
-          {unavailable ? 'Chamada indisponível' : busy ? 'Já existe uma chamada' : 'Entrar na chamada'}
+          {entrar.label}
         </button>
       )}
     </div>
@@ -465,64 +474,84 @@ export function VoiceStage({
     </div>
   ) : null
 
+  // Lobby em COLUNA: o conteúdo rola e os controles ficam ancorados embaixo.
+  // Antes os controles eram `position:absolute` DENTRO da área que rola — em
+  // janela baixa eles saíam da tela junto com o conteúdo e o botão "Entrar"
+  // ficava inalcançável (o "botão que não responde").
   const lobby = !inCall && (
     <div
       style={{
-        flex: 1, minHeight: 0, overflowY: 'auto', background: c.stage,
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: compact ? 16 : 24,
+        flex: 1, minHeight: 0, background: c.stage,
+        display: 'flex', flexDirection: 'column', alignItems: 'stretch',
         position: 'relative',
       }}
     >
-      <div style={{ width: '100%', maxWidth: compact ? 460 : 560, display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center' }}>
-          <span style={{
-            width: 72, height: 72, borderRadius: 24,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'rgba(255,255,255,.1)', color: c.text,
-          }}>
-            <Icon d={kind === 'video' ? Icons.video : Icons.speaker} size={32} />
-          </span>
-          <div style={{ fontSize: 20, fontWeight: 500, color: c.heading }}>{title}</div>
-          <div style={{ fontSize: 13, color: c.muted, lineHeight: 1.6, maxWidth: 420 }}>
-            {kind === 'video'
-              ? 'Canal de vídeo é uma chamada como a de voz. A câmera é opcional e liga no botão da chamada.'
-              : 'Entre para falar com quem já está aqui. A mídia vai direto entre os membros (P2P).'}
-          </div>
-        </div>
-
-        <div style={{
-          background: c.input, border: `1px solid ${c.border}`,
-          borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 10,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div
+        style={{
+          flex: 1, minHeight: 0, overflowY: 'auto',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: compact ? 16 : 24,
+          // Espaço para a pílula de controles em fluxo absoluto (desktop).
+          paddingBottom: compact ? 16 : 104,
+        }}
+      >
+        <div style={{ width: '100%', maxWidth: compact ? 460 : 560, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, textAlign: 'center' }}>
             <span style={{
-              width: 9, height: 9, borderRadius: '50%', flexShrink: 0,
-              background: peers.length > 0 ? c.green : c.muted,
-            }} />
-            <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: c.text }}>
-              {participantsLabel(peers.length)}
+              width: 72, height: 72, borderRadius: 24,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'rgba(255,255,255,.1)', color: c.text,
+            }}>
+              <Icon d={kind === 'video' ? Icons.video : Icons.speaker} size={32} />
             </span>
+            <div style={{ fontSize: 20, fontWeight: 500, color: c.heading }}>{title}</div>
+            <div style={{ fontSize: 13, color: c.muted, lineHeight: 1.6, maxWidth: 420 }}>
+              {kind === 'video'
+                ? 'Canal de vídeo é uma chamada como a de voz. A câmera é opcional e liga no botão da chamada.'
+                : 'Entre para falar com quem já está aqui. A mídia vai direto entre os membros (P2P).'}
+            </div>
           </div>
-          {peers.length === 0 ? (
-            <div style={{ fontSize: 12.5, color: c.muted, lineHeight: 1.6 }}>
-              Ninguém no canal agora. Entre e fique à vontade: quando alguém
-              chegar, a chamada conecta sozinha — todos pareiam direto entre si
-              (mesh), sem servidor de mídia.
+
+          <div style={{
+            background: c.input, border: `1px solid ${c.border}`,
+            borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 10,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{
+                width: 9, height: 9, borderRadius: '50%', flexShrink: 0,
+                background: peers.length > 0 ? c.green : c.muted,
+              }} />
+              <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, color: c.text }}>
+                {participantsLabel(peers.length)}
+              </span>
             </div>
-          ) : listaPeers}
-          {notice && (
-            <div role="status" style={{ fontSize: 11.5, color: c.yellow ?? '#fdd663', lineHeight: 1.5 }}>
-              {notice}
-            </div>
-          )}
-          {!inCall && unavailable && (
-            <div role="alert" style={{ fontSize: 11.5, color: '#f28b82', lineHeight: 1.5 }}>
-              {unavailable}
-            </div>
-          )}
+            {peers.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: c.muted, lineHeight: 1.6 }}>
+                Ninguém no canal agora. Entre e fique à vontade: quando alguém
+                chegar, a chamada conecta sozinha — todos pareiam direto entre si
+                (mesh), sem servidor de mídia.
+              </div>
+            ) : listaPeers}
+            {notice && (
+              <div role="status" style={{ fontSize: 11.5, color: c.yellow ?? '#fdd663', lineHeight: 1.5 }}>
+                {notice}
+              </div>
+            )}
+            {!inCall && unavailable && (
+              <div role="alert" style={{ fontSize: 11.5, color: '#f28b82', lineHeight: 1.5 }}>
+                {unavailable}
+              </div>
+            )}
+          </div>
         </div>
       </div>
-      {!compact && controles}
+      {compact ? (
+        <div style={{ flexShrink: 0 }}>{controles}</div>
+      ) : (
+        // Desktop: a pílula é absoluta DENTRO do lobby (position:relative),
+        // não dentro da área que rola — assim ela não sai da tela.
+        controles
+      )}
     </div>
   )
 

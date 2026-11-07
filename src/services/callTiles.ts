@@ -65,7 +65,13 @@ export function screenTileLabel(nickname: string, isLocal: boolean): string {
 export function streamHasLiveVideo(stream: MediaStream | null | undefined): boolean {
   try {
     if (!stream || typeof stream.getVideoTracks !== 'function') return false
-    return stream.getVideoTracks().some((t) => t.readyState === 'live')
+    // `muted` é o que o WebRTC marca quando a fonte parou de mandar RTP:
+    // `replaceTrack(null)` no outro lado deixa a track viva e muda, e sem esta
+    // checagem o card ficava mostrando o último quadro da tela/câmera para
+    // sempre (o "vídeo congelado" depois de parar de compartilhar).
+    return stream.getVideoTracks().some(
+      (t) => t.readyState === 'live' && (t as MediaStreamTrack & { muted?: boolean }).muted !== true,
+    )
   } catch {
     return false
   }
