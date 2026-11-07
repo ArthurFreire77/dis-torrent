@@ -1,11 +1,29 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Ic } from '../shared/icons'
 import { formatFileSize } from '../shared/bytes'
 import { isVideoName } from '../services/fileRules'
 import { downloadButtonLabel, formatSpeed, type FileCardProgress } from './fileCardRules'
+import { MediaViewer } from './MediaViewer'
 
 export type { FileCardProgress }
 export { downloadButtonLabel, formatSpeed }
+
+/** Selo de "abrir em tela cheia" no canto da prévia. */
+const expandBadge: React.CSSProperties = {
+  position: 'absolute',
+  top: 8,
+  right: 8,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 26,
+  height: 26,
+  borderRadius: 7,
+  background: 'rgba(0,0,0,.62)',
+  color: '#fff',
+  pointerEvents: 'none',
+  backdropFilter: 'blur(2px)',
+}
 
 export interface FileCardPalette {
   text: string
@@ -53,9 +71,25 @@ export function FileCard({
   const failed = progress?.status === 'failed'
   const paused = progress?.status === 'paused'
   const video = isVideoName(name)
+  const [full, setFull] = useState(false)
+
+  const openFull = () => {
+    if (previewUrl) setFull(true)
+  }
 
   return (
-    <div
+    <>
+      {full && previewUrl && (
+        <MediaViewer
+          url={previewUrl}
+          name={name}
+          video={video}
+          onSave={onDownload}
+          saveLabel={downloadButtonLabel(announced, done, progress, !!previewUrl)}
+          onClose={() => setFull(false)}
+        />
+      )}
+      <div
       style={{
         marginTop: 6,
         background: pal.input,
@@ -68,19 +102,41 @@ export function FileCard({
     >
       {}
       {previewUrl && video && (
-        <video
-          src={previewUrl}
-          controls
-          preload="metadata"
-          style={{ width: '100%', maxHeight: 340, borderRadius: 10, display: 'block', marginBottom: 10, background: '#000' }}
-        />
+        <div
+          role="button"
+          tabIndex={0}
+          title="Abrir em tela cheia"
+          aria-label={`Abrir ${name} em tela cheia`}
+          onClick={openFull}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openFull() }}
+          style={{ position: 'relative', cursor: 'zoom-in', marginBottom: 10 }}
+        >
+          <video
+            src={previewUrl}
+            controls
+            preload="metadata"
+            style={{ width: '100%', maxHeight: 340, borderRadius: 10, display: 'block', background: '#000' }}
+          />
+          <span style={expandBadge} aria-hidden="true"><Ic name="expand" size={13} /></span>
+        </div>
       )}
       {previewUrl && !video && (
-        <img
-          src={previewUrl}
-          alt={name}
-          style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 10, display: 'block', marginBottom: 10 }}
-        />
+        <div
+          role="button"
+          tabIndex={0}
+          title="Abrir em tela cheia"
+          aria-label={`Abrir ${name} em tela cheia`}
+          onClick={openFull}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openFull() }}
+          style={{ position: 'relative', cursor: 'zoom-in', marginBottom: 10, display: 'inline-block', maxWidth: '100%' }}
+        >
+          <img
+            src={previewUrl}
+            alt={name}
+            style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 10, display: 'block' }}
+          />
+          <span style={expandBadge} aria-hidden="true"><Ic name="expand" size={13} /></span>
+        </div>
       )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
@@ -190,7 +246,7 @@ export function FileCard({
           </button>
         )}
       </div>
-    </div>
+      </div>
+    </>
   )
 }
-// Seção 1: fim
