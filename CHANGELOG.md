@@ -1,5 +1,54 @@
 # CHANGELOG
 
+## [1.1.64-pre-alpha] - 2026-11-07
+
+### Arquivos: imagem e vídeo em tela cheia, e um código bem menor
+
+**Tela cheia para mídia.** Clicar na prévia de uma imagem ou vídeo abre um
+diálogo em tela cheia com a mídia no centro, **Salvar** (o mesmo download do
+card) e **Fechar**. Esc e clique fora fecham; o scroll do fundo fica travado
+enquanto o diálogo está aberto. Vale no desktop e no celular, porque o
+`FileCard` é o mesmo nos dois.
+
+**O código tinha crescido sem controle.** Quatro arquivos somavam 30 mil linhas
+e o mesmo trecho existia duas vezes em lugares diferentes. Esta versão reduz
+isso sem mudar comportamento.
+
+- `engine.rs` **15.231 → 2.585** linhas e 41 módulos por assunto. O
+  `handle_frame` (2.467 linhas) virou um arquivo por família de frame. A
+  divisão usa o padrão que o projeto já tinha: o pai declara os filhos com
+  `#[path]` e cada filho escreve outro `impl NetworkEngine`, então campo
+  privado continua acessível e nada virou API pública sem necessidade.
+- `lib.rs` **5.312 → 1.715** e os 243 comandos Tauri em sete módulos por área;
+  `updater.rs` **1.735 → ~850** em quatro; `botbridge.rs` **1.488 → 1.024**;
+  `storage.rs` **3.818 → 673**; `social.rs` **2.187 → 512**; `bots.rs`
+  **1.915 → 950**; `media_voice.rs` **2.951 → 2.097**; `relay.rs`
+  **1.691 → 1.097**.
+- No front-end: `callManager.ts` perdeu os blocos puros para `callQuality`,
+  `callPeer`, `callDiagnostics`, `callRelayCodec`, `callMediaGate` e
+  `callSdpTuning`; as telas de auth do desktop e do celular viraram um
+  componente só (`AuthScreens`); `Avatar`/`PeerDot` (quatro cópias) foram para
+  `shared/avatarView`; a lógica de privacidade duplicada virou
+  `usePrivacySettings`.
+
+**Código morto removido.** `BotConfigPanel` (1.100 linhas) e
+`CallChannelStage` não eram importados por nenhuma rota — o painel de bots real
+é o `BotPanel` e a tela de canal é o `VoiceStage`. No Rust saíram `save_file`
+(o caminho real é `save_file_stream`), `message_verify`, `secure_store`,
+`secure_load`, `net_limits`, `music_key`, `peer_proto`, `parse_relay_hello`,
+`peer_trust_all`, `set_proxy_addr`, `wait_connected` e três guardas de
+privacidade idênticas.
+
+**Comentários.** O `strip-comments.mjs` inseria `// Seção N:` a cada 150 linhas
+e isso tinha virado 451 marcadores espalhados. A ferramenta agora **remove**
+banner, bloco de prosa e parágrafo, e preserva documentação de API (`///`,
+`//!`) e diretivas de ferramenta (`eslint-disable`, `ts-ignore`, `SAFETY`).
+
+**Build.** O cross-compile Android e Linux pegou dois problemas que o `cargo
+check` do Windows não vê: `pre_update_snapshot` (só Windows) sendo reexportado
+sem `cfg` e funções movidas do relay invisíveis aos irmãos. Ambos corrigidos;
+zero warnings nos dois crates.
+
 ## [1.1.63-pre-alpha] - 2026-11-06
 
 ### Chamadas: renegociação que se recupera sozinha, tela de verdade e botão de entrar honesto
