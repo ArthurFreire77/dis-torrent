@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## [1.1.66-pre-alpha] - 2026-11-08
+
+### Atualização que finalmente chega, mídia automática e cache que cresce
+
+**Quem está na 1.1.63 atualiza sozinho.** Duas travas foram derrubadas:
+
+1. a comparação de versão era por **igualdade** (`manifesto != tag`), e como o
+   manifesto declara `1.1.65-pre-alpha` e a tag é `v1.1.65`, **toda** release
+   era recusada como "divergência de versão". Agora compara pelo núcleo
+   `N.N.N`;
+2. o "último manifesto verificado" desempatava por `security_epoch >= atual` e,
+   como releases da mesma linha compartilham a epoch, vencia o **último da
+   ordem de hash** — às vezes a versão anterior, e o download morria em "o
+   manifesto verificado não está mais em cache". Agora desempata por **versão**.
+
+A release-ponte `v1.1.65-pre-alpha` usa `security_epoch: 3` justamente para o
+desempate antigo cair nela mesmo com o bug.
+
+**Toda abertura do app consulta o GitHub.** Antes o boot respondia do cache por
+até 6 h e podia passar o dia sem ver uma release nova. Agora o boot ignora
+cache/ETag/backoff; a checagem de rotina com o app aberto é de 30 min e relê a
+preferência de auto-instalar a cada ciclo. A falha da sessão anterior não
+bloqueia a tentativa do boot.
+
+**Configurações → ATUALIZAÇÕES** (desktop e celular): versão instalada, versão
+disponível, **Verificar agora** e o checkbox "instalar sozinho". Antes não havia
+nenhum lugar na interface para verificar à mão.
+
+**Instalado em Program Files** o app recusava atualizar e mandava baixar o
+instalador no GitHub. Agora abre com `runas` (UAC); UAC negado tem mensagem
+própria.
+
+**Imagem e vídeo baixam sozinhos dentro do limite e ficam no cache.** Imagem até
+**7 MB** e vídeo até **250 MB** viram prévia automática e ficam no cache de
+**7 dias**. Vão para a pasta Downloads **só quando você clica em Baixar**.
+
+- Corrigido: vídeo entre **40 e 250 MB nunca baixava sozinho** — havia uma
+  recusa para qualquer mídia acima de 40 MB, mesmo cabendo no cache. Agora vai
+  para o spool em disco.
+- Acima do limite (imagem > 7 MB, vídeo > 250 MB) continua exigindo o clique.
+
+**O cache cresce conforme o uso.** Antes eram 256 MB fixos: um único vídeo de
+250 MB enchia o cache e expulsava todo o resto. Agora começa em **512 MB**, sobe
+de 512 em 512 e para em **8 GB**. Cresce **antes** de podar, então não apaga o
+que ainda cabe. O TTL de 7 dias continua valendo e é independente do teto.
+
+**Perfil no clique.** A lista de membros (desktop e celular) não abria nada ao
+clicar na pessoa. Agora abre o perfil, com Enter/Espaço e texto acessível; no
+celular a gaveta fecha ao abrir o perfil.
+
 ## [1.1.65-pre-alpha] - 2026-11-07
 
 ### Downloads grandes, cache de prévia, cofre e identidade
