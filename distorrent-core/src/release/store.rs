@@ -102,11 +102,7 @@ impl ReleaseTrust {
             cache.insert(hash.to_string(), v);
             if let Some(t) = &trust {
                 if let Ok(vm) = verify_manifest(t, &signed, epoch_floor) {
-                    if vm.is_verified()
-                        && latest.as_ref().map_or(true, |l| {
-                            vm.manifest.body.security_epoch >= l.manifest.body.security_epoch
-                        })
-                    {
+                    if vm.is_verified() && melhor_que(&vm, latest.as_ref()) {
                         latest = Some(vm);
                     }
                 }
@@ -266,6 +262,25 @@ fn kv_prefix(kv: &dyn KvStore, prefix: &str) -> Vec<(String, String)> {
     kv.list_prefix(prefix)
 }
 
+/// Qual dos manifestos em cache é o "último verificado".
+///
+/// POR QUE não é só `security_epoch`: todos os releases da mesma linha usam a
+/// mesma epoch, e com `>=` o vencedor virava o ÚLTIMO da iteração (ordem de
+/// hash do BTreeMap) — às vezes a versão anterior. O `update_download` exige
+/// que o `latest_verified()` seja exatamente o manifesto do `pending`, então
+/// isso dava "o manifesto verificado não está mais em cache" e o download
+/// nunca começava. Desempate agora é por versão.
+fn melhor_que(novo: &VerifiedManifest, atual: Option<&VerifiedManifest>) -> bool {
+    use crate::net::release_trust::versao_maior;
+    let Some(atual) = atual else { return true };
+    let e_novo = novo.manifest.body.security_epoch;
+    let e_atual = atual.manifest.body.security_epoch;
+    if e_novo != e_atual {
+        return e_novo > e_atual;
+    }
+    versao_maior(&novo.manifest.body.version, &atual.manifest.body.version)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::trust::tests::{body, fixture, sign};
@@ -288,6 +303,15 @@ mod tests {
             }
             Ok(())
         }
+        fn list_prefix(&self, prefix: &str) -> Vec<(String, String)> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }
     }
 
     fn trust_of(fixture: &super::super::trust::tests::Fixture) -> ReleaseTrust {
@@ -295,6 +319,61 @@ mod tests {
             trust: Some(fixture.trust.clone()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn desempate_de_epoch_escolhe_a_maior_versao() {
+        // Duas releases com a MESMA security_epoch (é o normal: 1.1.64 e 1.1.65
+        // usam a epoch 2). O `latest_verified()` precisa ser a mais nova,
+        // senão o `update_download` recusa o pending com "manifesto não está
+        // mais em cache" e o download nunca começa.
+        let f = fixture();
+        let kv = MemKv::default();
+
+        let mut b_novo = body();
+        b_novo.version = "1.1.65-pre-alpha".into();
+        b_novo.tag = "v1.1.65".into();
+        b_novo.security_epoch = 7;
+        b_novo.min_security_epoch = 5;
+        let m_novo = sign(&f, b_novo, &[0, 1]);
+        let vm_novo = trust_of(&f).accept(&kv, &m_novo).unwrap();
+        assert!(vm_novo.is_verified());
+
+        let mut b_velho = body();
+        b_velho.version = "1.1.64-pre-alpha".into();
+        b_velho.tag = "v1.1.64".into();
+        b_velho.security_epoch = 7;
+        b_velho.min_security_epoch = 5;
+        let m_velho = sign(&f, b_velho, &[0, 1]);
+        trust_of(&f).accept(&kv, &m_velho).unwrap();
+
+        // `load()` só reconstrói o `latest` se a raiz de confiança estiver no kv
+        // (é o que o app grava no primeiro boot).
+        let ts = &f.trust;
+        let raw = format!(
+            "{}|{}|{}",
+            ts.epoch,
+            ts.threshold,
+            ts.keys
+                .iter()
+                .map(|k| format!("{}:{}", k.key_id, k.pubkey_hex))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        kv.set(KV_TRUST, &raw).unwrap();
+
+        // Recarrega do kv e confere o vencedor.
+        let recarregado = ReleaseTrust::load(&kv);
+        let latest = recarregado.latest_verified().expect("um latest");
+        assert_eq!(
+            latest.manifest.body.version, "1.1.65-pre-alpha",
+            "epoch empatada: quem manda é a versão, não a ordem do BTreeMap"
+        );
+        // E o hash do pending continua achável — era o que quebrava.
+        assert_eq!(
+            latest.manifest_hash, vm_novo.manifest_hash,
+            "o latest tem que ser o mesmo que o pending aponta"
+        );
     }
 
     #[test]

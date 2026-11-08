@@ -15,7 +15,9 @@ const FAILED: &str = "update.failed";
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("uso: clear_update_cache <distorrent.db>");
+    let path = args
+        .next()
+        .expect("uso: clear_update_cache <distorrent.db>");
     let dry = args.any(|a| a == "--dry-run");
     let conn = match Connection::open(&path) {
         Ok(c) => c,
@@ -30,7 +32,10 @@ fn main() {
     };
 
     println!("antes:");
-    println!("  {CACHE}  => {} bytes", ler(CACHE).map(|v| v.len()).unwrap_or(0));
+    println!(
+        "  {CACHE}  => {} bytes",
+        ler(CACHE).map(|v| v.len()).unwrap_or(0)
+    );
     println!("  {LAST}   => {:?}", ler(LAST));
     println!("  {FAILED} => {:?}", ler(FAILED));
 
@@ -41,9 +46,13 @@ fn main() {
 
     // Apaga a LISTA (é o que prende o cliente na janela de 6 h). Mantém
     // `update.last_check_ms` para o backoff continuar coerente.
-    let n1 = conn.execute("delete from kv where key=?1", [CACHE]).unwrap_or(0);
+    let n1 = conn
+        .execute("delete from kv where key=?1", [CACHE])
+        .unwrap_or(0);
     // Marca de falha de uma versão antiga (1.1.62) não deve assombrar.
-    let n2 = conn.execute("delete from kv where key=?1", [FAILED]).unwrap_or(0);
+    let n2 = conn
+        .execute("delete from kv where key=?1", [FAILED])
+        .unwrap_or(0);
     println!("\napagadas: {n1} lista(s) de releases, {n2} marca(s) de falha");
     println!("PROXIMO PASSO: feche e reabra o DisTorrent. Na abertura ele consulta");
     println!("o GitHub de verdade e baixa a versao nova sozinho.");

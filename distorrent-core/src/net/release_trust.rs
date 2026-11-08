@@ -11,6 +11,40 @@ use crate::Result;
 
 pub struct StoreKv(pub Arc<Store>);
 
+/// Compara duas versões (`1.1.9` < `1.1.10`) pelo núcleo numérico.
+///
+/// POR QUE existe: o `ReleaseTrust` guarda vários manifestos e precisa dizer
+/// qual é o mais novo. Comparar a string inverteria (`"1.1.9" > "1.1.10"`), e
+/// comparar só a `security_epoch` empata entre releases da mesma linha.
+pub fn versao_maior(a: &str, b: &str) -> bool {
+    fn nucleo(v: &str) -> Vec<u64> {
+        v.trim()
+            .trim_start_matches(['v', 'V'])
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| {
+                p.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0)
+            })
+            .collect()
+    }
+    let pa = nucleo(a);
+    let pb = nucleo(b);
+    for i in 0..pa.len().max(pb.len()) {
+        let x = pa.get(i).copied().unwrap_or(0);
+        let y = pb.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
 impl KvStore for StoreKv {
     fn get(&self, key: &str) -> Option<String> {
         self.0.kv_get(key)
