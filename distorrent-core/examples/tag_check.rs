@@ -15,10 +15,16 @@ fn main() {
     println!("manifesto declara : {vm}");
     println!("tag do GitHub     : {tag} -> {tag_limpa}");
     let igualdade = vm == tag_limpa;
-    println!("\ncliente 1.1.63 (igualdade exata): {}", if igualdade { "PASSA" } else { "RECUSA" });
+    println!(
+        "\ncliente 1.1.63 (igualdade exata): {}",
+        if igualdade { "PASSA" } else { "RECUSA" }
+    );
     // A comparacao de versao que o update usa para decidir se ha versao nova.
     let mesma = normalize(&vm) == normalize(tag_limpa);
-    println!("comparacao normalizada          : {}", if mesma { "PASSA" } else { "RECUSA" });
+    println!(
+        "comparacao normalizada          : {}",
+        if mesma { "PASSA" } else { "RECUSA" }
+    );
     if !igualdade {
         println!("\n>>> BUG CONFIRMADO: toda release e recusada por 'divergencia de versao'.");
     }

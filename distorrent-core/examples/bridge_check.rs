@@ -30,7 +30,11 @@ fn main() {
     );
     println!(
         "cliente NOVO   (nucleo)     : {}",
-        if nucleo(&vm) == nucleo(&tag) { "ACEITA" } else { "RECUSA" }
+        if nucleo(&vm) == nucleo(&tag) {
+            "ACEITA"
+        } else {
+            "RECUSA"
+        }
     );
     if vm != limpa {
         println!("\nPara o cliente antigo aceitar, a tag precisa ser exatamente \"v{vm}\".");
