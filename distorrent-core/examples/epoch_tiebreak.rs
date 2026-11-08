@@ -49,9 +49,39 @@ fn main() {
     }
     let escolhido = latest.map(|(v, _)| v).unwrap_or_default();
     println!("\n1.1.63 escolheria: {escolhido}");
-    if escolhido.starts_with("1.1.65") {
-        println!("\nRESULTADO: OK — o desempate bugado cai na ponte mesmo assim.");
+    // A escolha tem de ser a MAIOR versão entre as candidatas, não uma string
+    // fixa: o exemplo precisa continuar válido em releases futuras.
+    let maior = itens
+        .iter()
+        .map(|(_, v, _)| v.clone())
+        .max_by(|a, b| {
+            let na: Vec<u64> = a
+                .split('-')
+                .next()
+                .unwrap_or("")
+                .split('.')
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            let nb: Vec<u64> = b
+                .split('-')
+                .next()
+                .unwrap_or("")
+                .split('.')
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            for i in 0..na.len().max(nb.len()) {
+                let x = na.get(i).copied().unwrap_or(0);
+                let y = nb.get(i).copied().unwrap_or(0);
+                if x != y {
+                    return x.cmp(&y);
+                }
+            }
+            std::cmp::Ordering::Equal
+        })
+        .unwrap_or_default();
+    if escolhido == maior {
+        println!("\nRESULTADO: OK — o desempate bugado cai na MAIOR versão mesmo assim.");
     } else {
-        println!("\nRESULTADO: RUIM — escolheu a versao errada; o download falharia.");
+        println!("\nRESULTADO: RUIM — escolheu {escolhido}, mas a maior é {maior}.");
     }
 }
