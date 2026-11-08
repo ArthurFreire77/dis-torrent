@@ -204,9 +204,7 @@ impl ReleaseTrust {
             KV_REVOKED,
             &serde_json::to_string(&self.revoked).unwrap_or_default(),
         );
-        if self.latest.as_ref().map_or(true, |l| {
-            vm.manifest.body.security_epoch >= l.manifest.body.security_epoch
-        }) {
+        if melhor_que(&vm, self.latest.as_ref()) {
             self.latest = Some(vm.clone());
         }
         Ok(vm)
