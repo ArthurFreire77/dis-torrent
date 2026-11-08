@@ -77,6 +77,26 @@ banco em texto claro. **Android continua com o segredo no SQLite do sandbox**
 (sem Keystore nesta versão), documentado como limitação em
 `THREAT_MODEL.md`, com `allowBackup=false`.
 
+**Auto-update: o app não ficava sabendo da versão nova.** Quem estava na
+1.1.63 não via a 1.1.65. Medido no banco local: último check às 08:57, release
+publicada às 09:33, e o intervalo mínimo era **6 h** — dentro da janela o código
+devolvia o cache só por ele não estar vazio, mesmo com o cache dizendo "nada
+novo". Reabrir o app não checava de novo. Agora:
+
+- o cache só responde quando ele **já aponta versão maior** que a instalada;
+  caso contrário a consulta é feita de verdade (ETag continua evitando banda);
+- o intervalo de rotina caiu para **30 min**;
+- `update_check` aceita `force` e existe **Configurações → ATUALIZAÇÕES** com
+  "Verificar agora", versão instalada, versão disponível e o checkbox de
+  instalar sozinho (antes não havia **nenhum** lugar na interface para isso);
+- instalado em `Program Files`, o app **recusava** atualizar e mandava baixar o
+  instalador do GitHub. Agora abre com `runas` (UAC); se o UAC for negado, a
+  mensagem diz isso em vez de um erro genérico.
+
+O diagnóstico foi feito com o código real do cliente: o manifesto da 1.1.65 é
+**aceito** (ReleaseVerificada, 2 assinaturas, epoch 2) e o digest do asset bate
+com o do GitHub — o problema nunca foi assinatura.
+
 ## [1.1.64-pre-alpha] - 2026-11-07
 
 ### Arquivos: imagem e vídeo em tela cheia, e um código bem menor
