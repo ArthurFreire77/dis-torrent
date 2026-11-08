@@ -2086,7 +2086,15 @@ export default function MobileShell() {
             <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width: 260, maxWidth: '80vw', background: t.sidebar, borderLeft: `1px solid ${t.border}`, padding: '14px 8px', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
               <div className="member-group-head">MEMBROS — {activeComm?.members?.length ?? 0}</div>
               {janela.visiveis.map(([fp, nick]) => (
-                <div key={fp} className="member-row">
+                <div
+                  key={fp}
+                  className="member-row"
+                  role="button"
+                  tabIndex={0}
+                  title={`Ver perfil de ${nick || fp}`}
+                  onClick={() => { setShowMembers(false); setProfilePeer({ fp, name: nick || fp.slice(0, 8) }) }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { setShowMembers(false); setProfilePeer({ fp, name: nick || fp.slice(0, 8) }) } }}
+                >
                   <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                     <Avatar name={nick || fp} fp={fp} size={28} avatarB64={profilesByFp[fp]?.avatar_b64} />
                     <PeerDot on={onlineFps.has(fp) || (!!identity?.fingerprint && fp === identity.fingerprint)} ring={t.sidebar} />

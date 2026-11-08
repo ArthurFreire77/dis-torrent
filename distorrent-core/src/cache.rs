@@ -9,6 +9,32 @@ const MIN_CAP_BYTES: u64 = 16 * 1024 * 1024;
 /// Prévias baixadas ficam uma semana no disco; depois disso o chunk é lixo.
 pub const DEFAULT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
+/// Teto do cache que cresce com o uso.
+///
+/// POR QUE cresce: começar com 256 MB fazia um único vídeo de 250 MB encher o
+/// cache e expulsar todo o resto. O teto sobe conforme o histórico pede, mas
+/// sempre com um limite — sem ele o cache viraria um segundo "Downloads".
+pub const GROW_START_BYTES: u64 = 512 * 1024 * 1024;
+pub const GROW_STEP_BYTES: u64 = 512 * 1024 * 1024;
+pub const GROW_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Teto efetivo para o que já foi usado: o próximo degrau acima do maior
+/// total já visto, limitado por `GROW_MAX_BYTES`. Determinístico pelo uso, sem
+/// depender de relógio nem de configuração manual.
+pub fn cap_para_uso(maior_uso: u64) -> u64 {
+    if maior_uso <= GROW_START_BYTES {
+        return GROW_START_BYTES;
+    }
+    let passos = maior_uso.div_ceil(GROW_STEP_BYTES);
+    (passos * GROW_STEP_BYTES).min(GROW_MAX_BYTES)
+}
+
+/// Cresce só quando `behaviour` é automático. Teto fixo (teste ou escolha do
+/// usuário) NÃO cresce — senão a poda deixa de ser previsível.
+fn deve_crescer(autogrow: bool) -> bool {
+    autogrow
+}
+
 #[derive(Debug)]
 struct Index {
     sizes: HashMap<String, u64>,
@@ -19,6 +45,9 @@ pub struct DiskLru {
     dir: PathBuf,
     cap_bytes: Mutex<u64>,
     ttl_secs: Mutex<u64>,
+    high_water: Mutex<u64>,
+    /// `true` quando o teto acompanha o uso; `false` quando foi fixado.
+    autogrow: std::sync::atomic::AtomicBool,
     index: Mutex<Index>,
 }
 
@@ -33,6 +62,28 @@ impl DiskLru {
             dir,
             cap_bytes: Mutex::new(cap_bytes.unwrap_or(DEFAULT_CAP_BYTES).max(MIN_CAP_BYTES)),
             ttl_secs: Mutex::new(ttl_secs.max(60)),
+            high_water: Mutex::new(0),
+            autogrow: std::sync::atomic::AtomicBool::new(false),
+            index: Mutex::new(Index {
+                sizes: HashMap::new(),
+                total: 0,
+            }),
+        };
+        cache.reindex()?;
+        Ok(cache)
+    }
+
+    /// Cache de prévias do app: começa em `GROW_START_BYTES` e sobe conforme o
+    /// uso, sempre limitado por `GROW_MAX_BYTES`. É o modo que o usuário pediu
+    /// ("aumenta gradualmente conforme o uso").
+    pub fn open_growing(dir: PathBuf, ttl_secs: u64) -> Result<Self> {
+        std::fs::create_dir_all(&dir)?;
+        let cache = Self {
+            dir,
+            cap_bytes: Mutex::new(GROW_START_BYTES),
+            ttl_secs: Mutex::new(ttl_secs.max(60)),
+            high_water: Mutex::new(0),
+            autogrow: std::sync::atomic::AtomicBool::new(true),
             index: Mutex::new(Index {
                 sizes: HashMap::new(),
                 total: 0,
@@ -56,15 +107,46 @@ impl DiskLru {
         *self.cap_bytes.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    pub fn total_bytes(&self) -> u64 {
+        self.index.lock().unwrap_or_else(|e| e.into_inner()).total
+    }
+
+    /// Maior total já ocupado desde o último boot: é o que faz o teto crescer
+    /// para o próximo degrau sem apagar o que o usuário acabou de baixar.
+    pub fn high_water(&self) -> u64 {
+        self.high_water
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .to_owned()
+    }
+
+    /// Sobe o teto para o próximo degrau se o uso chegou perto do atual.
+    fn grow_if_needed(&self) {
+        if !deve_crescer(self.autogrow.load(std::sync::atomic::Ordering::Relaxed)) {
+            return;
+        }
+        let total = self.total_bytes();
+        {
+            let mut hw = self.high_water.lock().unwrap_or_else(|e| e.into_inner());
+            if total > *hw {
+                *hw = total;
+            }
+        }
+        let novo = cap_para_uso(total);
+        let mut cap = self.cap_bytes.lock().unwrap_or_else(|e| e.into_inner());
+        if novo > *cap {
+            *cap = novo;
+        }
+    }
+
+    /// Fixa o teto (escolha explícita). Desliga o crescimento automático.
     pub fn set_cap(&self, cap_bytes: u64) -> Result<()> {
         let cap = cap_bytes.max(MIN_CAP_BYTES);
+        self.autogrow
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         *self.cap_bytes.lock().unwrap_or_else(|e| e.into_inner()) = cap;
         self.prune()?;
         Ok(())
-    }
-
-    pub fn total_bytes(&self) -> u64 {
-        self.index.lock().unwrap_or_else(|e| e.into_inner()).total
     }
 
     pub fn entries(&self) -> usize {
@@ -102,6 +184,9 @@ impl DiskLru {
             }
         }
         *self.index.lock().unwrap_or_else(|e| e.into_inner()) = Index { sizes, total };
+        // No boot o teto sobe para caber o que já está em disco: senão a
+        // primeira poda apagaria mídia que o usuário ainda quer ver.
+        self.grow_if_needed();
         self.prune()?;
         Ok(())
     }
@@ -123,6 +208,9 @@ impl DiskLru {
         );
         idx.total = idx.total.saturating_sub(prev) + bytes.len() as u64;
         drop(idx);
+        // Antes de podar: se o uso cresceu, sobe o teto. Podar primeiro
+        // expulsaria a mídia antiga justamente quando há espaço para crescer.
+        self.grow_if_needed();
         self.prune()?;
         Ok(())
     }
@@ -238,6 +326,80 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = DiskLru::open(dir.path().to_path_buf(), None).unwrap();
         assert!(c.get("nao-existe").unwrap().is_none());
+    }
+
+    #[test]
+    fn teto_cresce_com_o_uso_e_respeita_o_maximo() {
+        // 512 MB de início; sobe de 512 em 512 até 8 GB.
+        assert_eq!(cap_para_uso(0), GROW_START_BYTES);
+        assert_eq!(cap_para_uso(100 * 1024 * 1024), GROW_START_BYTES);
+        assert_eq!(cap_para_uso(GROW_START_BYTES), GROW_START_BYTES);
+        assert_eq!(
+            cap_para_uso(GROW_START_BYTES + 1),
+            GROW_START_BYTES + GROW_STEP_BYTES
+        );
+        assert_eq!(cap_para_uso(3 * 1024 * 1024 * 1024), 3 * 1024 * 1024 * 1024);
+        assert_eq!(cap_para_uso(7 * 1024 * 1024 * 1024), 7 * 1024 * 1024 * 1024);
+        assert_eq!(
+            cap_para_uso(100 * 1024 * 1024 * 1024),
+            GROW_MAX_BYTES,
+            "nunca passa do teto"
+        );
+    }
+
+    #[test]
+    fn put_acima_do_teto_inicial_sobe_o_teto_em_vez_de_expulsar() {
+        let dir = tempfile::tempdir().unwrap();
+        // Modo crescente (é o do app): começa em 512 MB e sobe com o uso.
+        let c = DiskLru::open_growing(dir.path().to_path_buf(), DEFAULT_TTL_SECS).unwrap();
+        assert_eq!(c.cap(), GROW_START_BYTES);
+        // Enche até passar do teto inicial: o teto sobe e nada é expulso.
+        let passo = 64 * 1024 * 1024;
+        for i in 0..10 {
+            c.put(&format!("k{i}"), &vec![1u8; passo]).unwrap();
+        }
+        assert!(c.cap() > GROW_START_BYTES, "teto cresceu com o uso");
+        assert!(
+            c.get("k0").unwrap().is_some(),
+            "nada foi expulso ao crescer"
+        );
+        assert_eq!(c.entries(), 10);
+        assert!(c.high_water() >= 10 * passo as u64);
+    }
+
+    #[test]
+    fn teto_fixo_nao_cresce() {
+        // `set_cap` é escolha explícita: o teto fica onde o usuário mandou.
+        let dir = tempfile::tempdir().unwrap();
+        let c = DiskLru::open(dir.path().to_path_buf(), Some(16 * 1024 * 1024)).unwrap();
+        c.set_cap(16 * 1024 * 1024).unwrap();
+        for i in 0..6 {
+            c.put(&format!("k{i}"), &vec![1u8; 6 * 1024 * 1024])
+                .unwrap();
+        }
+        assert_eq!(c.cap(), 16 * 1024 * 1024, "teto fixo não pode crescer");
+        assert!(c.total_bytes() <= c.cap());
+    }
+
+    #[test]
+    fn ttl_continua_expirando_mesmo_com_teto_maior() {
+        let dir = tempfile::tempdir().unwrap();
+        let c =
+            DiskLru::open_with_ttl(dir.path().to_path_buf(), Some(64 * 1024 * 1024), 60).unwrap();
+        c.put("velho", b"dados").unwrap();
+        // Envelhece o mtime além do TTL.
+        let p = {
+            let mut it = std::fs::read_dir(dir.path()).unwrap();
+            it.next().unwrap().unwrap().path()
+        };
+        let antigo = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+        filetime::set_file_times(&p, antigo, antigo).unwrap();
+        c.put("novo", b"x").unwrap();
+        assert!(
+            c.get("velho").unwrap().is_none(),
+            "TTL manda mais que o teto"
+        );
+        assert!(c.get("novo").unwrap().is_some());
     }
 
     #[test]

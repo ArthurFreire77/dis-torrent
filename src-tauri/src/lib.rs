@@ -1634,21 +1634,17 @@ fn main() {
             tracing::info!(?dir, "DisTorrent iniciando");
             #[cfg(target_os = "linux")]
             isolate_fontconfig_cache_managed(&dir);
-            let cap_mb: u64 = Store::open(&dir.join("distorrent.db"))
-                .ok()
-                .and_then(|s| s.kv_get("cache.cap_mb"))
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(256)
-                .clamp(16, 4096);
+            // O teto do cache de prévias cresce com o uso (512 MB → 8 GB), como
+            // o dono pediu. `cache.cap_mb` não é mais lido no boot; um teto
+            // explícito via `cache_set_cap` continua desligando o crescimento.
             let ttl_days: u64 = Store::open(&dir.join("distorrent.db"))
                 .ok()
                 .and_then(|s| s.kv_get("cache.ttl_days"))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(7)
                 .clamp(1, 30);
-            let cache = distorrent_core::cache::DiskLru::open_with_ttl(
+            let cache = distorrent_core::cache::DiskLru::open_growing(
                 dir.join("cache"),
-                Some(cap_mb * 1024 * 1024),
                 ttl_days * 24 * 60 * 60,
             )
             .map_err(|e| format!("cache: {e}"))?;

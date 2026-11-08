@@ -492,8 +492,10 @@ export class FileSwarm {
       return
     }
     sf.data.set(index, bytes)
-    if (services.kind === 'native' && shouldCacheMedia(sf.name, sf.size)) {
-      // Só prévia pequena (imagem ≤7 MB, vídeo ≤250 MB) fica no cache de 7 dias.
+    const mídiaCache = services.kind === 'native' && shouldCacheMedia(sf.name, sf.size)
+    if (mídiaCache) {
+      // Mídia dentro do limite fica no cache de 7 dias. Os bytes também ficam
+      // em memória para montar a prévia; "Baixar" só copia para Downloads.
       void services.cachePut(spoolKey(file_id, index), b64data).catch(() => {  })
     }
     sf.have.add(index)
@@ -564,13 +566,16 @@ export class FileSwarm {
     if (sf.have.size === sf.chunks && sf.chunks > 0) { onProgress?.(100); return }
     await this.ensureHydrated(sf)
     if (sf.have.size === sf.chunks && sf.chunks > 0) { onProgress?.(100); return }
-    // Prévia automática só até 7 MB (imagem) / 250 MB (vídeo); acima disso o
+    // Prévia automática: imagem até 7 MB, vídeo até 250 MB. Acima disso o
     // usuário decide, porque baixaria centenas de MB sem pedir.
     if (!shouldCacheMedia(sf.name, sf.size)) {
       throw new Error(`mídia de ${Math.round(sf.size / (1024 * 1024))}MB acima do automático — toque em Baixar`)
     }
-    if (sf.size > mediaAutoFetchCap(sf.name) && sf.onDisk !== true) {
-      throw new Error(`mídia de ${Math.round(sf.size / (1024 * 1024))}MB grande demais para a prévia em memória — toque em Baixar`)
+    // Acima do teto de RAM (40 MB de vídeo), o download vai para o spool em
+    // disco em vez de ser recusado: senão um vídeo de 41–250 MB nunca baixava
+    // sozinho, apesar de caber no cache.
+    if (sf.size > mediaAutoFetchCap(sf.name) && !sf.onDisk && services.kind === 'native') {
+      sf.onDisk = true
     }
     await this.fetchOnly(sf.file_id, onProgress, timeoutMs)
   }

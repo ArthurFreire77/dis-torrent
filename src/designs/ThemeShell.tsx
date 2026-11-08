@@ -3007,7 +3007,15 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <div key={role.id} style={{ padding: '6px 8px' }}>
                   <div className="member-group-head" style={{ color: role.color }}>{role.name} — {doCargo.length}</div>
                   {doCargo.map(([fp, nick]) => (
-                    <div key={fp} className="member-row">
+                    <div
+                      key={fp}
+                      className="member-row"
+                      role="button"
+                      tabIndex={0}
+                      title={`Ver perfil de ${nick || fp}`}
+                      onClick={() => setProfileFp(fp)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setProfileFp(fp) }}
+                    >
                       <Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13, fontWeight: 600, color: role.color, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nick || fp}</div>
@@ -3031,7 +3039,15 @@ export default function ThemeShell({ designId }: {designId:string}){
                 if (hasRole && roles.some(r => r.hoist && (memberRolesCache[fp] ?? []).includes(r.id))) return null
                 const online = isOnlineFp(fp)
                 return (
-                  <div key={fp} className="member-row">
+                  <div
+                    key={fp}
+                    className="member-row"
+                    role="button"
+                    tabIndex={0}
+                    title={`Ver perfil de ${nick || fp}`}
+                    onClick={() => setProfileFp(fp)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setProfileFp(fp) }}
+                  >
                     <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nick || fp}</div>
