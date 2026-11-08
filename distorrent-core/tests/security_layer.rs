@@ -46,6 +46,114 @@ fn replay_e_duplicada_barrados() {
 }
 
 #[test]
+fn fingerprint_bind_and_pubkey_swap_rejected() {
+    use distorrent_core::identity::{fingerprint_matches, fingerprint_of_pubkey_hex};
+    use distorrent_core::storage::{PeerRecord, Store};
+
+    // 1) Fingerprint é função determinística da pubkey e do esquema legado.
+    let alice = Keypair::generate();
+    let mallory = Keypair::generate();
+    let fp = alice.fingerprint();
+    assert_eq!(fp, fingerprint_of_pubkey_hex(&alice.public_hex()));
+    assert!(fingerprint_matches(&fp, &alice.public_hex()));
+    assert!(!fingerprint_matches(&fp, &mallory.public_hex()));
+
+    // 2) O envelope assinado por Mallory não passa como Alice (auto-atestação
+    //    não vale: o receptor verifica contra a pubkey da sessão).
+    let env = MessageEnvelope::new(&alice, "c1", "oi");
+    assert!(!env.verify_with_pubkey(&mallory.public_hex()));
+    let mut forjado = env.clone();
+    forjado.author_fp = mallory.fingerprint();
+    forjado.sig = mallory.sign(&distorrent_core::protocol::message_sign_bytes(
+        &forjado.id,
+        &forjado.conv_id,
+        &forjado.author_fp,
+        &forjado.body,
+        forjado.ts,
+    ));
+    assert!(!forjado.verify_with_pubkey(&alice.public_hex()));
+
+    // 3) Um peer conhecido NÃO troca de pubkey para o mesmo fingerprint.
+    let store = Store::open_in_memory().unwrap();
+    let p = PeerRecord {
+        fp: fp.clone(),
+        pubkey_hex: alice.public_hex(),
+        nickname: "alice".into(),
+        addr: None,
+        last_seen: 1,
+        origin: "handshake".into(),
+    };
+    store.upsert_peer(&p).unwrap();
+    let ataque = PeerRecord {
+        pubkey_hex: mallory.public_hex(),
+        ..p.clone()
+    };
+    let err = store.upsert_peer(&ataque).unwrap_err();
+    assert!(err.to_string().contains("pubkey diferente"), "erro: {err}");
+    assert_eq!(
+        store.get_peer(&fp).unwrap().unwrap().pubkey_hex,
+        alice.public_hex()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_recusa_pubkey_trocada_para_mesmo_fp() {
+    use distorrent_core::net::transport::handshake_stream;
+    use std::sync::Arc;
+
+    let bob = Arc::new(Keypair::generate());
+    let mallory = Arc::new(Keypair::generate());
+    let fp_alice = Keypair::generate().fingerprint();
+    let (client, server) = tokio::io::duplex(1 << 16);
+
+    // O RESPONDENTE usa a chave de Mallory mas se anuncia como "Alice"
+    // (fp_vítima). O iniciador tem de derrubar no `verify_hello` do HelloAck.
+    let m = mallory.clone();
+    let fp_forjado = fp_alice.clone();
+    let servidor = tokio::spawn(async move {
+        let _ = handshake_stream(server, m, "alice", 0, false, Some(fp_forjado)).await;
+    });
+    let res = handshake_stream(client, bob, "bob", 0, true, None).await;
+    let err = match res {
+        Ok(hs) => panic!(
+            "handshake aceitou pubkey que não deriva o fingerprint anunciado (peer {})",
+            hs.peer_fp
+        ),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("identidade forjada") || msg.contains("fingerprint"),
+        "erro inesperado (esperava rejeição de identidade): {msg}"
+    );
+    let _ = servidor.await;
+}
+
+#[test]
+fn spoof_de_autoria_nao_passa_pelo_peer_da_sessao() {
+    // Regra do motor: `author_fp` tem de ser o peer autenticado da conexão.
+    // Aqui provamos que o par (author_fp, pubkey da sessão) não fecha quando
+    // alguém tenta assinar por outro autor.
+    let alice = Keypair::generate();
+    let bob = Keypair::generate();
+    let mallory = Keypair::generate();
+    let mut env = MessageEnvelope::new(&alice, "conv", "sou o alice");
+    env.author_fp = mallory.fingerprint();
+    // Assinado pelo autor declarado (Mallory): fingerprint bate, mas quem
+    // assinou não é o peer autenticado da sessão.
+    env.sig = mallory.sign(&distorrent_core::protocol::message_sign_bytes(
+        &env.id,
+        &env.conv_id,
+        &env.author_fp,
+        &env.body,
+        env.ts,
+    ));
+    assert!(env.verify_with_pubkey(&mallory.public_hex()));
+    assert!(!env.verify_with_pubkey(&bob.public_hex()));
+    assert_ne!(env.author_fp, bob.fingerprint());
+}
+
+#[test]
 fn spoof_de_nome_barrado() {
     let p = names::NamePolicy::for_kind(names::NameKind::User);
     assert!(!names::validate_name(names::NameKind::User, "аdmin", &[], &p).ok);

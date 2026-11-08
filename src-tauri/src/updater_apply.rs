@@ -172,7 +172,10 @@ pub fn pre_update_snapshot(app: &tauri::AppHandle) -> Result<Option<PathBuf>, St
     let Some(_identity) = store.load_identity() else {
         return Ok(None);
     };
-    let secret = match store.load_secret_hex() {
+    // Só dá para selar o snapshot com a chave de backup quando o segredo está
+    // recuperável SEM senha (keyring). Conta protegida por senha não gera
+    // snapshot aqui — não há como derivar a chave do blob selado.
+    let secret = match crate::recover_plaintext_secret(&store) {
         Some(s) => s,
         None => return Ok(None),
     };

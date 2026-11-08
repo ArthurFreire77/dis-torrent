@@ -103,6 +103,12 @@ button{ touch-action:manipulation; user-select:none }
 .spin{ animation: spin .7s linear infinite }
 @keyframes shimmer { 0%{ transform: translateX(-100%) } 100%{ transform: translateX(100%) } }
 
+/* Barra de download: brilho correndo enquanto está amarela (baixando). */
+.dl-bar{ position:relative; overflow:hidden }
+.dl-bar::after{ content:''; position:absolute; inset:0; background:linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); animation: shimmer 1.2s linear infinite }
+@keyframes dl-pop { 0%{ transform:scale(.82) } 60%{ transform:scale(1.06) } 100%{ transform:scale(1) } }
+.dl-pop{ animation: dl-pop .28s ease-out }
+
 .tooltip-desktop-only { }
 @media (hover: none), (pointer: coarse) {
   .tooltip-desktop-only { display: none !important; }

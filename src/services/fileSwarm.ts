@@ -5,9 +5,12 @@ import {
   CHUNK, MAX_CHUNKS, FILE_MARKER, FILE_PREFIX,
   validateAnnounce, chunkCountFor, expectedChunkSize, formatFileSize,
   mimeFor, isImageName, isVideoName, isMediaName, mediaAutoFetchCap,
+  shouldCacheMedia, chunkHashesForAnnounce,
   spoolKey, chunkKey, swarmProgress, safeFileName, type FileMsgMeta,
 } from './fileRules'
+import { ChunkSet } from './chunkSet'
 import { encodeFileMeta, parseFileBody } from './fileBody'
+import { inFlightForLimit, getDownloadSpeedLimit } from './downloadSpeed'
 import { isTauriRuntime, isAndroidRuntime, isTauriAndroid } from '../shared/runtime.ts'
 import { bytesToBase64, base64ToBytes } from '../shared/base64.ts'
 import { sleep } from '../shared/async.ts'
@@ -23,25 +26,47 @@ export type { FileMsgMeta }
 export const MAX_FILE_SIZE = (() => {
   const meta = import.meta as unknown as { env?: Record<string, string> }
   const n = Number(meta.env?.VITE_DISTORRENT_MAX_FILE_MB)
-  const mb = Number.isFinite(n) && n > 0 ? n : 51200
+  const mb = Number.isFinite(n) && n > 0 ? n : 512000
   return mb * 1024 * 1024
 })()
 export const MAX_FILE_MB_LABEL = Math.round(MAX_FILE_SIZE / (1024 * 1024)) >= 1024
   ? `${(MAX_FILE_SIZE / (1024 * 1024 * 1024)).toFixed(MAX_FILE_SIZE % (1024 * 1024 * 1024) === 0 ? 0 : 1)} GB`
   : `${Math.round(MAX_FILE_SIZE / (1024 * 1024))} MB`
 
-const MAX_IN_FLIGHT = 24
+// 64 pedidos em voo × 256 KiB = 16 MB em trânsito: enche uma LAN Gigabit sem
+// estourar memória. Com 24 o teto prático ficava perto de 20 MB/s.
+const MAX_IN_FLIGHT = 64
 const CHUNK_TIMEOUT_MS = 5000
 const RETRY_BASE_MS = 1000
 const RETRY_MAX_MS = 8000
 const MAX_CHUNK_ATTEMPTS = 8
 const MAX_RETRY_CYCLES = 6
 const SEEDER_IDLE_MS = 90_000
+/** Acima disto os blocos ficam SÓ no disco: 500 GB na memória derrubaria a WebView. */
+const MEMORY_MAX_BYTES = 64 * 1024 * 1024
+const LS_INDEX = 'distorrent:swarm:index:v1'
+const INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 export { encodeFileMeta as encodeFileBody, parseFileBody }
 
 function toHexBlake3(b: Uint8Array): string {
   return Array.from(blake3(b)).map(x=>x.toString(16).padStart(2,'0')).join('')
+}
+
+/**
+ * Hash de arquivo grande em streaming: carregar 500 GB no `arrayBuffer` mata a
+ * aba, então lê o `File` em fatias e alimenta o hasher incremental. Não gera
+ * `chunk_hashes` (seriam milhões e estouram o frame de 1 MB); a integridade é
+ * conferida pelo hash do arquivo inteiro no fim.
+ */
+async function hashLargeFile(file: File): Promise<string> {
+  const total = blake3.create()
+  for (let off = 0; off < file.size; off += CHUNK) {
+    const fim = Math.min(file.size, off + CHUNK)
+    const bytes = new Uint8Array(await file.slice(off, fim).arrayBuffer())
+    total.update(bytes)
+  }
+  return Array.from(total.digest()).map((x) => x.toString(16).padStart(2, '0')).join('').slice(0, 32)
 }
 
 export interface SwarmFile {
@@ -51,7 +76,7 @@ export interface SwarmFile {
   chunks: number
   hash: string
   chunkHashes?: string[]
-  have: Set<number>
+  have: ChunkSet
   data: Map<number, Uint8Array>
   seeders: Set<string>
   owner_fp: string
@@ -59,6 +84,14 @@ export interface SwarmFile {
   completed?: boolean
   /** Blocos que esgotaram as tentativas. A UI precisa saber para não mentir. */
   failedChunks?: Set<number>
+  /** Blocos vivem no spool em disco (não na memória) — retomável. */
+  onDisk?: boolean
+  /** Nome real do arquivo salvo, quando veio do spool. */
+  savedPath?: string
+  /** Escritas no spool ainda em voo: completar antes delas mentiria o progresso. */
+  pendingWrites?: number
+  /** Blocos com escrita em voo (não pedir de novo enquanto o disco trabalha). */
+  writing?: Set<number>
 }
 
 function b64(bytes: Uint8Array): string {
@@ -135,15 +168,44 @@ export class FileSwarm {
   private seededAsSeeder = new Set<string>()
   private pausedFiles = new Set<string>()
   private hydratedFiles = new Set<string>()
+  /** `File` original de arquivos grandes que EU estou semeando (fonte dos blocos). */
+  private sourceFiles = new Map<string, File>()
+  /** Arquivos grandes semeados por CAMINHO: sobrevivem a fechar e reabrir o app. */
+  private seededPaths = new Set<string>()
 
   async shareFile(file: File): Promise<SwarmFile> {
     if (file.size === 0) throw new Error('arquivo vazio')
     const sizeErr = validateAnnounce(file.size, Math.max(1, Math.ceil(file.size / CHUNK)))
     if (sizeErr) throw new Error(sizeErr)
-    const buf = new Uint8Array(await file.arrayBuffer())
-    const chunks = Math.max(1, Math.ceil(buf.length / CHUNK))
+    const chunks = Math.max(1, Math.ceil(file.size / CHUNK))
     const safeName = file.name.split(/[\\/]/).pop()?.trim() || 'arquivo'
     const file_id = `file-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36)}`
+    // Arquivo grande NÃO entra na memória: o hash é calculado em streaming e
+    // os blocos são lidos do `File` original a cada pedido (nunca um spool
+    // vazio — servir zeros seria corrupção silenciosa).
+    if (file.size > MEMORY_MAX_BYTES) {
+      const hash = await hashLargeFile(file)
+      const sf: SwarmFile = {
+        file_id,
+        name: safeName,
+        size: file.size,
+        chunks,
+        hash,
+        have: ChunkSet.full(chunks),
+        data: new Map(),
+        seeders: new Set(),
+        owner_fp: 'me',
+        lastSeen: new Map(),
+        onDisk: true,
+      }
+      this.sourceFiles.set(file_id, file)
+      this.files.set(file_id, sf)
+      await this.announceWithHashes(file_id, safeName, file.size, chunks, hash, [])
+      this.rememberInIndex(file_id, safeName, file.size, chunks, hash)
+      this.onChange?.()
+      return sf
+    }
+    const buf = new Uint8Array(await file.arrayBuffer())
     const hash = toHexBlake3(buf.length ? buf : new Uint8Array([0])).slice(0, 32)
     const chunkHashes = Array.from({ length: chunks }, (_, i) => toHexBlake3(buf.slice(i * CHUNK, (i + 1) * CHUNK)).slice(0, 32))
     const sf: SwarmFile = {
@@ -153,7 +215,7 @@ export class FileSwarm {
       chunks,
       hash,
       chunkHashes,
-      have: new Set(Array.from({ length: chunks }, (_, i) => i)),
+      have: ChunkSet.full(chunks),
       data: new Map(),
       seeders: new Set(),
       owner_fp: 'me',
@@ -163,14 +225,147 @@ export class FileSwarm {
       sf.data.set(i, buf.slice(i * CHUNK, (i + 1) * CHUNK))
     }
     this.files.set(file_id, sf)
-    try {
-      await services.fileAnnounce(file_id, safeName, buf.length, chunks, hash, chunkHashes)
-    } catch {
-      await services.fileAnnounce(file_id, safeName, buf.length, chunks, hash).catch(() => {  })
-    }
+    await this.announceWithHashes(file_id, safeName, buf.length, chunks, hash, chunkHashes)
+    this.rememberInIndex(file_id, safeName, buf.length, chunks, hash)
     try { localStorage.setItem(`distorrent:filemeta:${file_id}`, JSON.stringify({ name: safeName, size: buf.length, chunks, hash, chunkHashes })) } catch {  }
     this.onChange?.()
     return sf
+  }
+
+  /** Primeiro bloco deste download já reservou o `.part` na pasta de destino. */
+  private spoolReady = new Set<string>()
+  /** Fila de escrita em lote por arquivo: vários blocos numa única chamada de IPC. */
+  private spoolQueues = new Map<string, {
+    entries: [number, string][]
+    resolvers: { index: number; resolve: () => void; reject: (e: unknown) => void }[]
+    timer?: number
+  }>()
+
+  /**
+   * Mete o bloco na fila de escrita e devolve uma promessa por bloco. A cada
+   * ~16 ms ou 16 blocos a fila é enviada de uma vez: cada `spool_put` avulso
+   * custa uma ida/volta de IPC com base64, e isso limitava a velocidade.
+   */
+  private enqueueSpoolWrite(fileId: string, index: number, dataB64: string, size: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let q = this.spoolQueues.get(fileId)
+      if (!q) {
+        q = { entries: [], resolvers: [] }
+        this.spoolQueues.set(fileId, q)
+      }
+      q.entries.push([index, dataB64])
+      q.resolvers.push({ index, resolve, reject })
+      if (q.timer === undefined) {
+        q.timer = window.setTimeout(() => this.flushSpoolQueue(fileId, size), 16)
+      }
+      if (q.entries.length >= 16) this.flushSpoolQueue(fileId, size)
+    })
+  }
+
+  private flushSpoolQueue(fileId: string, size: number): void {
+    const q = this.spoolQueues.get(fileId)
+    if (!q) return
+    if (q.timer !== undefined) {
+      window.clearTimeout(q.timer)
+      q.timer = undefined
+    }
+    const entries = q.entries.splice(0, q.entries.length)
+    const resolvers = q.resolvers.splice(0, q.resolvers.length)
+    if (entries.length === 0) return
+    const done = (ok: boolean, err?: unknown) => {
+      for (const r of resolvers) {
+        if (ok) r.resolve()
+        else r.reject(err)
+      }
+    }
+    const lote: [number, string][] = entries
+    const enviar = services.spoolPutBatch
+      ? services.spoolPutBatch(fileId, size, lote)
+      : Promise.all(lote.map(([i, d]) => services.spoolPut(fileId, i, d, size))).then(() => lote.length)
+    void enviar.then(() => done(true)).catch((e) => {
+      // Um bloco ruim derruba o lote: reenvia um por um para saber qual falhou.
+      void Promise.allSettled(lote.map(([i, d]) => services.spoolPut(fileId, i, d, size)))
+        .then((results) => {
+          results.forEach((r, n) => {
+            if (r.status === 'fulfilled') resolvers[n]?.resolve()
+            else resolvers[n]?.reject(r.reason ?? e)
+          })
+        })
+    })
+  }
+  private async announceWithHashes(
+    file_id: string,
+    name: string,
+    size: number,
+    chunks: number,
+    hash: string,
+    chunkHashes: string[],
+  ): Promise<void> {
+    const comHashes = chunkHashesForAnnounce(chunks) && chunkHashes.length === chunks
+    try {
+      await services.fileAnnounce(file_id, name, size, chunks, hash, comHashes ? chunkHashes : undefined)
+    } catch {
+      await services.fileAnnounce(file_id, name, size, chunks, hash).catch(() => {  })
+    }
+  }
+
+  private rememberInIndex(file_id: string, name: string, size: number, chunks: number, hash: string): void {
+    try {
+      const raw = localStorage.getItem(LS_INDEX)
+      const now = Date.now()
+      const list = raw ? (JSON.parse(raw) as Array<Record<string, unknown>>) : []
+      const limpo = list.filter((e) => now - Number(e.at ?? 0) < INDEX_TTL_MS && e.file_id !== file_id)
+      limpo.push({ file_id, name, size, chunks, hash, at: now })
+      localStorage.setItem(LS_INDEX, JSON.stringify(limpo.slice(-500)))
+    } catch {  }
+  }
+
+  /**
+   * Reabre os arquivos semeados por caminho depois de reiniciar o app: sem
+   * isto a mensagem continuava dizendo "semeando" mas o bloco nunca chegava.
+   */
+  async restoreSeeds(): Promise<number> {
+    if (services.kind !== 'native') return 0
+    let entradas: { file_id: string; name: string; size: number; chunks: number; hash: string; path: string }[] = []
+    try {
+      entradas = await services.seedList()
+    } catch { return 0 }
+    let n = 0
+    for (const e of entradas) {
+      if (!e?.file_id || this.files.has(e.file_id)) continue
+      const sf: SwarmFile = {
+        file_id: e.file_id,
+        name: e.name,
+        size: e.size,
+        chunks: e.chunks,
+        hash: e.hash,
+        have: ChunkSet.full(e.chunks),
+        data: new Map(),
+        seeders: new Set(),
+        owner_fp: 'me',
+        lastSeen: new Map(),
+        onDisk: false,
+      }
+      this.files.set(e.file_id, sf)
+      this.seededPaths.add(e.file_id)
+      void services.fileAnnounce(e.file_id, e.name, e.size, e.chunks, e.hash).catch(() => {  })
+      n++
+    }
+    if (n > 0) this.onChange?.()
+    return n
+  }
+
+  /** Guarda o caminho do arquivo que EU enviei, para semear de novo no futuro. */
+  async rememberSeedPath(file_id: string, path: string): Promise<void> {
+    const sf = this.files.get(file_id)
+    if (!sf || services.kind !== 'native') return
+    try {
+      const e = await services.seedRegister(file_id, sf.name, sf.size, sf.hash, path)
+      if (e?.file_id) {
+        this.seededPaths.add(file_id)
+        this.sourceFiles.delete(file_id)
+      }
+    } catch {  }
   }
 
   onAnnounce(file_id: string, name: string, size: number, chunks: number, hash: string, from_fp: string, chunkHashes?: string[]): boolean {
@@ -211,7 +406,7 @@ export class FileSwarm {
         if (j) { const o = JSON.parse(j); if (this.validChunkHashes(o?.chunkHashes, chunks)) ch = o.chunkHashes }
       } catch {  }
     }
-    const sf: SwarmFile = { file_id, name: safeName, size, chunks, hash, chunkHashes: ch, have: new Set(), data: new Map(), seeders: new Set([from_fp]), owner_fp: from_fp, lastSeen: new Map([[from_fp, Date.now()]]) }
+    const sf: SwarmFile = { file_id, name: safeName, size, chunks, hash, chunkHashes: ch, have: new ChunkSet(chunks), data: new Map(), seeders: new Set([from_fp]), owner_fp: from_fp, lastSeen: new Map([[from_fp, Date.now()]]) }
     this.files.set(file_id, sf)
     try { localStorage.setItem(`distorrent:filemeta:${file_id}`, JSON.stringify({ name: safeName, size, chunks, hash, chunkHashes: ch })) } catch {  }
     this.onChange?.()
@@ -253,37 +448,92 @@ export class FileSwarm {
         return
       }
     }
+    const grande = sf.size > MEMORY_MAX_BYTES
+    if (grande) {
+      // No arquivo grande o bloco vai DIRETO para o `.part` na pasta de destino.
+      // A marca de recebido só entra DEPOIS do disco confirmar: marcar antes
+      // fazia a UI dizer 100% com bloco faltando e o retry nunca pedia de novo.
+      sf.onDisk = true
+      if (!this.spoolReady.has(file_id)) {
+        // Primeiro bloco deste download: reserva o `.part` (set_len, sem copiar).
+        this.spoolReady.add(file_id)
+        void services.spoolBegin(file_id, sf.size, sf.name).catch((e) => {
+          this.spoolReady.delete(file_id)
+          this.failChunk(sf, index, from_fp, `chunk ${index}: não consegui reservar o arquivo (${String((e as Error)?.message ?? e)})`)
+        })
+      }
+      sf.pendingWrites = (sf.pendingWrites ?? 0) + 1
+      if (!sf.writing) sf.writing = new Set()
+      sf.writing.add(index)
+      this.enqueueSpoolWrite(file_id, index, b64data, sf.size)
+        .then(() => {
+          sf.have.add(index)
+          sf.seeders.add(from_fp)
+          sf.lastSeen.set(from_fp, Date.now())
+          this.badPeers.delete(k)
+          this.attempts.delete(k)
+          this.retryAttempts.set(file_id, 0)
+          this.lastError = null
+          this.onChange?.()
+          if (sf.have.size === sf.chunks) this.onSwarmComplete(sf)
+          else void this.fetchSwarm(sf)
+        })
+        .catch((e) => {
+          this.failChunk(sf, index, from_fp, `chunk ${index}: disco recusou (${String((e as Error)?.message ?? e)})`)
+        })
+        .finally(() => {
+          sf.pendingWrites = Math.max(0, (sf.pendingWrites ?? 1) - 1)
+          sf.writing?.delete(index)
+        })
+      return
+    }
     sf.data.set(index, bytes)
+    if (services.kind === 'native' && shouldCacheMedia(sf.name, sf.size)) {
+      // Só prévia pequena (imagem ≤7 MB, vídeo ≤250 MB) fica no cache de 7 dias.
+      void services.cachePut(spoolKey(file_id, index), b64data).catch(() => {  })
+    }
     sf.have.add(index)
     sf.seeders.add(from_fp)
     sf.lastSeen.set(from_fp, Date.now())
-    if (services.kind === 'native') {
-      void services.cachePut(spoolKey(file_id, index), b64data).catch(() => {  })
-    }
     this.badPeers.delete(k)
     this.attempts.delete(k)
     this.retryAttempts.set(file_id, 0)
     this.lastError = null
     this.onChange?.()
-    if (sf.have.size === sf.chunks) {
-      this.clearRetry(file_id)
-      this.clearFileTimers(file_id)
-      if (!this.seededAsSeeder.has(file_id)) {
-        this.seededAsSeeder.add(file_id)
-        void services.fileAnnounce(sf.file_id, sf.name, sf.size, sf.chunks, sf.hash, sf.chunkHashes).catch(() => {})
-      }
-    } else {
-      void this.fetchSwarm(sf)
-    }
+    if (sf.have.size === sf.chunks) this.onSwarmComplete(sf)
+    else void this.fetchSwarm(sf)
+  }
+
+  /** Completou de baixar: para os timers e passa a semear o que recebeu. */
+  private onSwarmComplete(sf: SwarmFile): void {
+    this.clearRetry(sf.file_id)
+    this.clearFileTimers(sf.file_id)
+    if (this.seededAsSeeder.has(sf.file_id)) return
+    this.seededAsSeeder.add(sf.file_id)
+    void this.announceWithHashes(sf.file_id, sf.name, sf.size, sf.chunks, sf.hash, sf.chunkHashes ?? []).catch(() => {  })
   }
 
   async ensureHydrated(sf: SwarmFile): Promise<number> {
     if (services.kind !== 'native') return 0
     if (this.hydratedFiles.has(sf.file_id)) return 0
     this.hydratedFiles.add(sf.file_id)
+    if (sf.size > MEMORY_MAX_BYTES) {
+      // Arquivo grande já está no spool: o bitmap vem do disco, não da memória.
+      try {
+        const r = await services.spoolBitmap(sf.file_id, sf.size)
+        const bytes = fromB64(r.bitmap_b64 || '')
+        for (let i = 0; i < sf.chunks; i++) {
+          if ((bytes[i >> 3] ?? 0) & (1 << (i & 7))) sf.have.add(i)
+        }
+        sf.onDisk = true
+        if (r.have > 0) this.onChange?.()
+        return r.have
+      } catch { return 0 }
+    }
+    if (!shouldCacheMedia(sf.name, sf.size)) return 0
     let back = 0
     const missing: number[] = []
-    for (let i = 0; i < sf.chunks; i++) if (!sf.have.has(i)) missing.push(i)
+    for (const i of sf.have.missing()) missing.push(i)
     for (let w = 0; w < missing.length; w += 8) {
       const wave = missing.slice(w, w + 8)
       const results = await Promise.all(wave.map(async (i) => {
@@ -310,8 +560,13 @@ export class FileSwarm {
     if (sf.have.size === sf.chunks && sf.chunks > 0) { onProgress?.(100); return }
     await this.ensureHydrated(sf)
     if (sf.have.size === sf.chunks && sf.chunks > 0) { onProgress?.(100); return }
-    if (sf.size > mediaAutoFetchCap(sf.name)) {
+    // Prévia automática só até 7 MB (imagem) / 250 MB (vídeo); acima disso o
+    // usuário decide, porque baixaria centenas de MB sem pedir.
+    if (!shouldCacheMedia(sf.name, sf.size)) {
       throw new Error(`mídia de ${Math.round(sf.size / (1024 * 1024))}MB acima do automático — toque em Baixar`)
+    }
+    if (sf.size > mediaAutoFetchCap(sf.name) && sf.onDisk !== true) {
+      throw new Error(`mídia de ${Math.round(sf.size / (1024 * 1024))}MB grande demais para a prévia em memória — toque em Baixar`)
     }
     await this.fetchOnly(sf.file_id, onProgress, timeoutMs)
   }
@@ -329,8 +584,16 @@ export class FileSwarm {
     const file_id = sf.file_id
     if (this.pausedFiles.has(file_id)) return
     await this.ensureHydrated(sf)
-    const missing = Array.from({ length: sf.chunks }, (_, i) => i).filter(i => !sf.have.has(i))
-    if (missing.length === 0) { this.clearRetry(file_id); return }
+    // Percorrer só o que falta: com 2 milhões de blocos, materializar a lista
+    // inteira (`Array.from({length: chunks})`) trava a UI por segundos.
+    const missing: number[] = []
+    for (const i of sf.have.missing()) {
+      if (sf.writing?.has(i)) continue
+      missing.push(i)
+      if (missing.length >= MAX_IN_FLIGHT * 8) break
+    }
+    const faltando = sf.chunks - sf.have.size
+    if (faltando <= 0) { this.clearRetry(file_id); return }
 
     this.pruneSeeders(sf)
     const seeders = [...sf.seeders]
@@ -342,6 +605,8 @@ export class FileSwarm {
 
     const eligible = missing.filter((i) => (this.attempts.get(this.key(file_id, i)) ?? 0) < MAX_CHUNK_ATTEMPTS)
     if (eligible.length === 0) {
+      // Todos os não-recebidos estão com escrita em voo: não é motivo de falha.
+      if ((sf.pendingWrites ?? 0) > 0) return
       const ciclos = (this.retryAttempts.get(sf.file_id) ?? 0)
       if (ciclos >= MAX_RETRY_CYCLES) {
         const presos = missing.filter((i) => (this.attempts.get(this.key(file_id, i)) ?? 0) >= MAX_CHUNK_ATTEMPTS)
@@ -359,7 +624,11 @@ export class FileSwarm {
 
     let inFlight = 0
     for (const k of this.pendingReq) if (k.startsWith(`${file_id}:`)) inFlight++
-    const dynamicCap = Math.min(MAX_IN_FLIGHT, Math.max(8, seeders.length * 8))
+    // A janela respeita o teto escolhido pelo usuário (Configurações). Sem
+    // teto, 64 em voo; com teto, a janela que enche a banda no RTT típico.
+    const tetoMbps = getDownloadSpeedLimit()
+    const janela = inFlightForLimit(tetoMbps)
+    const dynamicCap = Math.min(janela, Math.max(8, seeders.length * 8))
     let budget = dynamicCap - inFlight
     if (budget <= 0) return
 
@@ -518,6 +787,36 @@ export class FileSwarm {
   onChunkRequest(file_id: string, index: number, from_fp: string) {
     const sf = this.files.get(file_id)
     if (!sf || !sf.have.has(index)) return
+    sf.lastSeen.set(from_fp, Date.now())
+    if (this.seededPaths.has(file_id)) {
+      // Semeado por caminho (reaberto depois de fechar): leitura em disco.
+      void services.seedReadChunk(file_id, index, sf.size)
+        .then((hit) => {
+          if (hit) services.fileSendChunk(from_fp, file_id, index, hit).catch(() => {  })
+        })
+        .catch(() => {  })
+      return
+    }
+    const origem = this.sourceFiles.get(file_id)
+    if (origem) {
+      // Semeador grande: lê só o bloco pedido do arquivo original — 500 GB
+      // nunca passam pela memória de uma vez.
+      const ini = index * CHUNK
+      const fim = Math.min(origem.size, ini + CHUNK)
+      void origem.slice(ini, fim).arrayBuffer()
+        .then((buf) => services.fileSendChunk(from_fp, file_id, index, b64(new Uint8Array(buf))))
+        .catch(() => {  })
+      return
+    }
+    if (sf.onDisk) {
+      // Quem baixou grande: o bloco vem do spool em disco.
+      void services.spoolGet(file_id, index, sf.size)
+        .then((hit) => {
+          if (hit) services.fileSendChunk(from_fp, file_id, index, hit).catch(() => {  })
+        })
+        .catch(() => {  })
+      return
+    }
     const data = sf.data.get(index)
     if (!data) {
       void this.ensureDataLoaded(sf)
@@ -528,11 +827,13 @@ export class FileSwarm {
         .catch(() => {  })
       return
     }
-    sf.lastSeen.set(from_fp, Date.now())
     services.fileSendChunk(from_fp, file_id, index, b64(data)).catch(() => {  })
   }
 
   assembleAndDownload(sf: SwarmFile): Blob {
+    if (sf.onDisk) {
+      throw new Error('arquivo grande: use "Salvar em…" (o spool já está no disco)')
+    }
     if (sf.have.size !== sf.chunks) throw new Error(`arquivo incompleto: ${sf.have.size}/${sf.chunks} chunks`)
     const ordered = Array.from({ length: sf.chunks }, (_, i) => sf.data.get(i))
     if (ordered.some(c => !c)) throw new Error('chunk faltando na montagem')
@@ -552,13 +853,13 @@ export class FileSwarm {
 
   blobFor(file_id: string): Blob | null {
     const sf = this.files.get(file_id)
-    if (!sf || sf.chunks === 0 || sf.have.size !== sf.chunks) return null
+    if (!sf || sf.onDisk || sf.chunks === 0 || sf.have.size !== sf.chunks) return null
     try { return this.assembleAndDownload(sf) } catch { return null }
   }
 
   async ensureBlobFor(file_id: string): Promise<Blob | null> {
     const sf = this.files.get(file_id)
-    if (!sf || sf.chunks === 0 || sf.have.size !== sf.chunks) return null
+    if (!sf || sf.onDisk || sf.chunks === 0 || sf.have.size !== sf.chunks) return null
     await this.ensureDataLoaded(sf)
     return this.blobFor(file_id)
   }
@@ -591,12 +892,16 @@ export class FileSwarm {
     this.clearRetry(file_id)
     this.clearFileTimers(file_id)
     sf.completed = true
-    sf.data.clear()
+    // Arquivo grande já foi movido para Downloads (spool apagado): repetir o
+    // salvamento exigiria baixar de novo. Pequeno continua montado, então
+    // "Salvar" cria outra cópia sem tocar na rede.
+    if (sf.onDisk && !this.sourceFiles.has(file_id) && !this.seededPaths.has(file_id)) {
+      sf.have.clear()
+      sf.data.clear()
+    }
     this.hydratedFiles.delete(file_id)
     this.onChange?.()
-  }
-
-  /**
+  }  /**
    * Descarta tudo o que foi baixado deste arquivo.
    *
    * Usado quando o hash do arquivo não bate: sem isto o retry reencontrava
@@ -612,11 +917,13 @@ export class FileSwarm {
     sf.data.clear()
     sf.completed = false
     this.hydratedFiles.delete(file_id)
+    if (sf.onDisk) void services.spoolDiscard(file_id).catch(() => {  })
     this.onChange?.()
   }
 
   async ensureDataLoaded(sf: SwarmFile): Promise<number> {
     if (services.kind !== 'native') return 0
+    if (sf.onDisk) return 0
     const faltando = [...sf.have].filter((i) => !sf.data.has(i))
     if (faltando.length === 0) return 0
     let back = 0
@@ -644,6 +951,7 @@ export class FileSwarm {
     this.clearFileTimers(file_id)
     sf.data.clear()
     sf.have.clear()
+    if (sf.onDisk && !this.sourceFiles.has(file_id)) void services.spoolDiscard(file_id).catch(() => {  })
     if (services.kind === 'native') {
       for (let i = 0; i < sf.chunks; i++) {
         void services.cacheDelete(spoolKey(file_id, i)).catch(() => {  })
@@ -662,6 +970,8 @@ export class FileSwarm {
     this.files.delete(file_id)
     this.pausedFiles.delete(file_id)
     this.hydratedFiles.delete(file_id)
+    this.sourceFiles.delete(file_id)
+    if (sf?.onDisk) void services.spoolDiscard(file_id).catch(() => {  })
     if (sf && services.kind === 'native') {
       for (let i = 0; i < sf.chunks; i++) {
         void services.cacheDelete(spoolKey(file_id, i)).catch(() => {  })
@@ -706,11 +1016,18 @@ export class FileSwarm {
   async download(sf: SwarmFile): Promise<string | null> {
     if (sf.have.size !== sf.chunks) throw new Error(`ainda faltam ${sf.chunks - sf.have.size} chunks — não dá para salvar`)
     if (this.saving.has(sf.file_id)) throw new Error('salvamento já em andamento para este arquivo')
-    await this.ensureDataLoaded(sf)
-    const blob = this.assembleAndDownload(sf)
     const safeName = baseNameOf(sf.name) || 'arquivo'
     this.saving.add(sf.file_id)
     try {
+      // Arquivo grande RECEBIDO: o spool já está no disco; só falta verificar
+      // e mover. (Quem está SEMEANDO grande não tem spool: o arquivo já é dele.)
+      if (sf.onDisk && isTauri() && !this.sourceFiles.has(sf.file_id)) {
+        const saved = await services.spoolFinish(sf.file_id, safeName, sf.size, sf.hash)
+        sf.savedPath = saved
+        return saved
+      }
+      await this.ensureDataLoaded(sf)
+      const blob = this.assembleAndDownload(sf)
       if (isTauri()) {
         try {
           const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`

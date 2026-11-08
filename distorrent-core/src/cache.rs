@@ -6,6 +6,8 @@ use crate::{DistorrentError, Result};
 
 const DEFAULT_CAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MIN_CAP_BYTES: u64 = 16 * 1024 * 1024;
+/// Prévias baixadas ficam uma semana no disco; depois disso o chunk é lixo.
+pub const DEFAULT_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug)]
 struct Index {
@@ -16,15 +18,21 @@ struct Index {
 pub struct DiskLru {
     dir: PathBuf,
     cap_bytes: Mutex<u64>,
+    ttl_secs: Mutex<u64>,
     index: Mutex<Index>,
 }
 
 impl DiskLru {
     pub fn open(dir: PathBuf, cap_bytes: Option<u64>) -> Result<Self> {
+        Self::open_with_ttl(dir, cap_bytes, DEFAULT_TTL_SECS)
+    }
+
+    pub fn open_with_ttl(dir: PathBuf, cap_bytes: Option<u64>, ttl_secs: u64) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let cache = Self {
             dir,
             cap_bytes: Mutex::new(cap_bytes.unwrap_or(DEFAULT_CAP_BYTES).max(MIN_CAP_BYTES)),
+            ttl_secs: Mutex::new(ttl_secs.max(60)),
             index: Mutex::new(Index {
                 sizes: HashMap::new(),
                 total: 0,
@@ -32,6 +40,16 @@ impl DiskLru {
         };
         cache.reindex()?;
         Ok(cache)
+    }
+
+    pub fn ttl_secs(&self) -> u64 {
+        *self.ttl_secs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_ttl(&self, ttl_secs: u64) -> Result<()> {
+        *self.ttl_secs.lock().unwrap_or_else(|e| e.into_inner()) = ttl_secs.max(60);
+        self.prune()?;
+        Ok(())
     }
 
     pub fn cap(&self) -> u64 {
@@ -149,10 +167,9 @@ impl DiskLru {
 
     fn prune(&self) -> Result<()> {
         let cap = self.cap();
+        let ttl = std::time::Duration::from_secs(self.ttl_secs());
+        let agora = std::time::SystemTime::now();
         let mut idx = self.index.lock().unwrap_or_else(|e| e.into_inner());
-        if idx.total <= cap {
-            return Ok(());
-        }
         let mut infos: Vec<(std::time::SystemTime, u64, String)> =
             Vec::with_capacity(idx.sizes.len());
         for name in idx.sizes.keys() {
@@ -162,6 +179,27 @@ impl DiskLru {
             };
             let mtime = md.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             infos.push((mtime, md.len(), name.clone()));
+        }
+        // TTL primeiro: a prévia vence mesmo com espaço sobrando no cache.
+        let mut expirados: Vec<(std::time::SystemTime, u64, String)> = Vec::new();
+        infos.retain(|(mtime, size, name)| {
+            let venceu = agora
+                .duration_since(*mtime)
+                .map(|d| d > ttl)
+                .unwrap_or(false);
+            if venceu {
+                expirados.push((*mtime, *size, name.clone()));
+            }
+            !venceu
+        });
+        for (_, size, name) in expirados {
+            let _ = std::fs::remove_file(self.dir.join(&name));
+            if idx.sizes.remove(&name).is_some() {
+                idx.total = idx.total.saturating_sub(size);
+            }
+        }
+        if idx.total <= cap {
+            return Ok(());
         }
         infos.sort();
         for (_, size, name) in infos {

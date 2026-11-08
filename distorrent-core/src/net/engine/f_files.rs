@@ -23,7 +23,7 @@ pub(super) async fn handle_files(
                     "FileAnnounce com campos gigantes".into(),
                 ));
             }
-            if chunks > 1_000_000 {
+            if chunks > 2_200_000 {
                 return Err(DistorrentError::Protocol(
                     "FileAnnounce com chunks excessivos".into(),
                 ));

@@ -1305,6 +1305,32 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
 
+  // Sem disco no navegador: o fileSwarm cai no caminho em memória.
+  spoolBegin: () => Promise.reject(new Error('download em disco disponível apenas no app nativo')),
+  spoolPut: () => Promise.reject(new Error('download em disco disponível apenas no app nativo')),
+  spoolPutBatch: () => Promise.reject(new Error('download em disco disponível apenas no app nativo')),
+  spoolGet: () => Promise.resolve(null),
+  spoolBitmap: () => Promise.resolve({ have: 0, bitmap_b64: '', dir: '' }),
+  spoolFinish: () => Promise.reject(new Error('download em disco disponível apenas no app nativo')),
+  spoolDiscard: () => Promise.resolve(),
+  spoolStats: () => Promise.resolve({ bytes: 0, entries: 0 }),
+  spoolGc: () => Promise.resolve(0),
+  downloadDirGet: () => Promise.resolve({ dir: 'Downloads do navegador', is_default: true }),
+  downloadDirSet: () => Promise.reject(new Error('escolher pasta só no app nativo — o navegador usa o Downloads dele')),
+  downloadDirReset: () => Promise.resolve({ dir: 'Downloads do navegador', is_default: true }),
+  downloadDirBrowse: () => Promise.reject(new Error('navegar pastas só no app nativo')),
+  downloadDirOpen: () => Promise.reject(new Error('abrir pasta só no app nativo')),
+  downloadDirSpace: () => Promise.resolve({ free_bytes: 0, total_bytes: 0 }),
+  seedRegister: () => Promise.reject(new Error('semear por caminho só no app nativo')),
+  seedUnregister: () => Promise.resolve(),
+  seedList: () => Promise.resolve([]),
+  seedReadChunk: () => Promise.resolve(null),
+  cacheGetTtl: () => Promise.resolve(Number(localStorage.getItem('distorrent:cache:ttl_days') ?? '7') || 7),
+  cacheSetTtl: (days) => {
+    try { localStorage.setItem('distorrent:cache:ttl_days', String(days)) } catch {  }
+    return Promise.resolve()
+  },
+
   serverRulesGet: (cid) => {
     try {
       const raw = localStorage.getItem(`distorrent:rules:${cid}`)

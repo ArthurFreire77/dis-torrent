@@ -287,4 +287,32 @@ fn peers_upsert() {
     assert_eq!(got.nickname, "Node A");
     assert_eq!(got.addr.as_deref(), Some("192.168.0.5:40000"));
     assert_eq!(got.last_seen, 2);
+    // A chave NÃO pode trocar para o mesmo fingerprint.
+    let mut trocado = p.clone();
+    trocado.pubkey_hex = "cd".repeat(32);
+    assert!(
+        store.upsert_peer(&trocado).is_err(),
+        "troca de pubkey para o mesmo fp precisa ser recusada"
+    );
+    assert_eq!(
+        store.get_peer("fp0000000001").unwrap().unwrap().pubkey_hex,
+        p.pubkey_hex
+    );
+    // Sem pubkey conhecida ainda, a primeira chave vale; depois fica travada.
+    let vazio = PeerRecord {
+        fp: "fp0000000002".into(),
+        pubkey_hex: String::new(),
+        nickname: "sem chave".into(),
+        addr: None,
+        last_seen: 1,
+        origin: "discovery".into(),
+    };
+    store.upsert_peer(&vazio).unwrap();
+    let mut depois = vazio.clone();
+    depois.pubkey_hex = p.pubkey_hex.clone();
+    store.upsert_peer(&depois).unwrap();
+    assert_eq!(
+        store.get_peer("fp0000000002").unwrap().unwrap().pubkey_hex,
+        p.pubkey_hex
+    );
 }

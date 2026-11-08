@@ -31,3 +31,9 @@ test('botão só habilita quando o anúncio chegou', () => {
   assert.equal(canDownload(false), false)
   assert.equal(canDownload(true), true)
 })
+
+test('arquivo grande é o que pede pasta (>= 512 MB)', async () => {
+  const { LARGE_DOWNLOAD_BYTES } = await import('../src/services/downloadDirPrompt.ts')
+  assert.equal(LARGE_DOWNLOAD_BYTES, 512 * 1024 * 1024)
+  assert.ok(LARGE_DOWNLOAD_BYTES > 512 * 1024 * 1024 - 1)
+})

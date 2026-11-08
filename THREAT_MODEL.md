@@ -21,18 +21,24 @@
   **falha fechado — NUNCA cai para conexão direta**. Isto protege o transporte,
   **não** cobre WebRTC/STUN — ver "Limitações assumidas" abaixo.
 - **Privacidade de conteúdo** — mensagens DM são cifradas fim-a-fim (X25519 efêmero + HKDF + ChaCha20Poly1305). Observador de rede vê metadados (quem fala com quem, quando, tamanho) — mitigações futuras: padding, transporte variado.
-- **Privacidade local** — chave privada no keyring do SO (Secret Service/Keychain/DPAPI). Fallback SQLite sem cifrar é **documentado e visível** (Linux sem secret service). Backup/export seguro: cofre portátil `.stormvault` v1 (Argon2id + ChaCha20Poly1305) — ver
-[`docs/STORMVAULT.md`](docs/STORMVAULT.md).
+- **Privacidade local** — no **desktop** a chave privada vive só no keyring do
+  SO (DPAPI no Windows, Secret Service no Linux, Keychain no macOS) ou selada
+  por senha (`vault.on`); **não há mais texto claro no SQLite**. No **Android**
+  ela ainda fica no SQLite do sandbox do app (sem keystore neste build) — ver
+  "Cofre portátil e segredo da identidade" abaixo. Backup/export: cofre
+  portátil `.stormvault` (Argon2id + ChaCha20Poly1305, conteúdo v2) — ver
+  [`docs/STORMVAULT.md`](docs/STORMVAULT.md).
 
 ## Ameaças e mitigações (estado atual)
 
 | Ameaça | Mitigação implementada | Residual |
 |---|---|---|
-| **Impersonation** | Handshake assina transcript com ed25519; fingerprint é derivado da pubkey (`blake3(pub)`) — impossível apresentar pubkey diferente do fp anunciado | Phishing de fingerprint (usuário aceita peer errado) → verificação visual/QR futura |
+| **Impersonation** | Handshake assina transcript com ed25519; fingerprint é derivado da pubkey (`blake3(pub)[..12]`) — impossível apresentar pubkey diferente do fp anunciado. Para um fp JÁ conhecido, a pubkey fica travada: outra chave é recusada (`upsert_peer` + `register_and_run`) | Phishing de fingerprint (usuário aceita peer errado) → verificação visual/QR futura |
 | **Replay** | Nonces frescos de 16 bytes por conexão entram no transcript; sessão usa contadores por direção | — |
 | **MITM na conexão** | Ambos assinam (fps + nonces + chaves efêmeras X25519) | — |
 | **Mensagem forjada/tamper** | Envelope assinado sobre bytes canônicos; receptor re-verifica SEMPRE (não confia na UI); testado | — |
 | **Spoof de autoria via conexão aberta** | `author_fp` deve ser igual ao peer autenticado da conexão | — |
+| **Sequestro de fingerprint** (apresentar outra pubkey para um fp já conhecido) | `upsert_peer` recusa pubkey diferente para o mesmo fp e `register_and_run` derruba a sessão nova que não apresente a chave já conhecida; fingerprint é derivado da pubkey nos dois esquemas (atual e legado) | Colisão real de blake3 de 12 hex (~48 bits) é inviável por acaso, mas o espaço curto permite busca dirigida por GPU; a defesa é a pubkey completa travada, não o fp |
 | **Convite/addr falso (testado)** | Conectar com `expected_fp` errado derruba a conexão pós-handshake | — |
 | **Sybil** (identidades baratas em massa) | Convite amarrado a fingerprint + PoW p/ novatos + reputação persistente (Storm §2/§5) | Sem custo de identidade: mitigado, não resolvido |
 | **Spam/flood** | Gate no receptor pós-assinatura: 10 msgs/10s por peer, dup 60s, link malicioso derrubado; sessão preservada (Storm §2) | Flood distribuído de N peers distintos (cada um abaixo do teto) → moderação + ban |
@@ -40,7 +46,7 @@
 | **Spoof de nome** (homoglifo, cargo, parecido) | Gate NFC+skeleton+blocklist no core + unicidade por escopo; apelidos da rede sanitizados (Storm §3) | Confusável fora do skeleton (ex.: fonte exótica) → denúncia + moderação |
 | **Link malicioso de peer autenticado** | `check_links` + palavras/dominios por servidor; encurtador avisa (medium) ou cai (high) | Domínio novo ainda não listado → denúncia + `blocked_domains` do servidor |
 | **Peer malicioso** | Vê apenas suas DMs com ele; não consegue ler mensagens de terceiros | DoS no app (crash por parsing — frames limitados a 1 MiB, JSON tipado) |
-| **Roubo de chave** | Keyring do SO; nunca sai do processo; não vai para logs | Malware com acesso ao keyring (fora do escopo de app) |
+| **Roubo de chave** | Desktop: chave privada só no keyring do SO (DPAPI/Secret Service/Keychain) ou selada por senha; nunca em texto claro no `distorrent.db`; nunca sai do processo; não vai para logs. Android: SQLite do sandbox do app (ver limitação) | Malware com acesso ao keyring/memória do usuário logado (fora do escopo de app). No Android, root/backup físico do aparelho lê a chave |
 | **Vazamento de metadados** | Broadcast UDP anuncia fp+nickname na LAN (necessário p/ discovery) | Modo stealth / intervalo variável futuro |
 | **Ataque de sincronização** (peer envia lixo ao reconectar) | Toda mensagem do outbox é assinada pelo autor e revalidada ao chegar | — |
 | **Abuso de permissões** | N/A nesta fase (sem comunidades). Fase comunidades: validação no CORE, nunca na UI | — |
@@ -90,7 +96,13 @@ Nunca logamos: chave privada, corpos de mensagem, segredos de sessão. Logs cobr
    ou VPN transparente.
 2. **Discovery LAN expõe presença** na rede local — exceto em `proxy`/`full`,
    onde broadcaster UDP, mDNS e UPnP/NAT-PMP ficam desligados (gate na fonte).
-3. **Fallback de keyring** (sem secret service) guarda a chave em SQLite plano — visível na UI/documentação; mitigue exportando um .stormvault (cifrado) e guardando fora do device.
+3. **Fallback de keyring no desktop foi REMOVIDO.** Antes, se o Secret
+   Service/DPAPI falhasse, a chave caía em texto claro no SQLite — o que fazia
+   "copiar `%APPDATA%`" virar "ser o dono". Hoje, sem keyring, `identity_create`
+   sem senha **falha** e pede a senha do cofre; a chave fica selada
+   (`vault.on=1`) ou no keyring, nunca em claro. Instalação antiga com
+   `identity.secret` em texto claro é migrada para o keyring no primeiro boot e
+   as chaves são apagadas do banco. Ver seção seguinte.
 4. Cripto é feita **apenas** com primitivas maduras (ed25519-dalek, x25519-dalek, chacha20poly1305, hkdf, blake3). Nenhuma primitiva própria. A **composição** (handshake) é nossa e está documentada aqui e em `protocol.rs`.
 5. **O Tor não é "7 saltos".** O app conecta ao SOCKS5 do daemon Tor local; o
    comprimento do circuito é configuração do SEU Tor (padrão 3). Qualquer
@@ -190,7 +202,7 @@ criptográfico sem freio; cada Hello novo no relay nascia um respondente).
 Testado em `netlimit.rs` (unit, determinístico) e `privacy_fail_closed.rs`
 (integração).
 
-## Cofre portátil (.stormvault v1) — modelo de ameaça
+## Cofre portátil (.stormvault) — modelo de ameaça
 
 Spec completo em `docs/STORMVAULT.md`. Resumo:
 
@@ -198,5 +210,75 @@ Spec completo em `docs/STORMVAULT.md`. Resumo:
 - Sem a senha: Argon2id (19 MiB, t=2) torna força-bruta cara por tentativa.
 - Chave privada NUNCA em claro no disco; só dentro do payload cifrado.
 - Header inteiro como AAD do AEAD + `payload_len`/`payload_hash`: truncamento, colagem ou adulteração são detectados antes/depois da KDF.
+- **Identidade amarrada ao conteúdo**: o fingerprint tem de ser `blake3(pubkey)[..12]`, o header tem de apontar para a MESMA identidade do payload e, quando há chave privada, ela tem de derivar a mesma pubkey. Um arquivo com senha conhecida não monta identidade "vitrine" com a pubkey de outra pessoa.
 - Backups automáticos usam chave derivada em RAM (sem senha) — valem enquanto o app está desbloqueado; não substituem um .stormvault com senha guardado fora.
 - Modo pânico (vaultWipe) apaga cofre+backups locais; um .stormvault externo continua válido para restaurar.
+
+## Cofre portátil e segredo da identidade — o que a pasta do app entrega
+
+Esta seção é a resposta curta a "copiei `%APPDATA%\\com.distorrent.app`, virei
+o usuário?".
+
+### Desktop (Windows / Linux / macOS): a chave NÃO está na pasta
+
+| Onde | O que fica | Quem lê |
+|---|---|---|
+| Keyring do SO (DPAPI / Secret Service / Keychain) | chave privada em claro (protegida pelo login do SO) | o processo do usuário logado; malware no mesmo login |
+| `distorrent.db` `kv.identity.secret` | **nada**, quando a conta usa keyring (novas contas) ou senha | — |
+| `distorrent.db` `kv.identity.secret` (só `vault.on=1`) | blob ChaCha20Poly1305 + Argon2id (salt+nonce+tag), não a chave | quem souber a senha |
+| `distorrent.db` `kv.identity.secret` (legado, keyring nunca respondeu) | **hex da chave** — pendência de migração | **quem copiar a pasta**; some no próximo boot com keyring ou ao definir senha |
+| `distorrent.db` (resto) | mensagens, contatos, comunidades, perfis, reações | **quem copiar a pasta** (texto claro) |
+| `backups/*.stormvault` | cofre selado por chave derivada do segredo | quem tiver o segredo (keyring) — copiar a pasta não abre |
+
+**Atacante com cópia da pasta `%APPDATA%` (ou do home Linux/macOS) de uma
+conta JÁ migrada, sem o keyring do SO e sem a senha:**
+
+- **NÃO** obtém a chave privada, **NÃO** assina como o usuário, **NÃO** abre os
+  backups automáticos, **NÃO** abre um `.stormvault` com senha.
+- **CONSEGUE** ler o banco: histórico de mensagens, lista de contatos e
+  fingerprints, comunidades, perfis (incluindo avatar/banner), reações,
+  marcadores, preferências e metadados de rede já gravados (endereços vistos).
+  Isso é inerente a um app local sem cifra de banco — a proteção é o login do
+  SO e a permissão da pasta, não o cofre.
+- **NÃO** consegue se passar pelo usuário no handshake: sem a chave privada não
+  assina o transcript. (No Windows o DPAPI é vinculado ao perfil do SO; copiar a
+  pasta para outro usuário/máquina não leva o item do Credential Manager.)
+- **Ressalva honesta:** numa instalação LEGADA em que o keyring nunca funcionou,
+  a chave ainda está em hex no SQLite até a migração rodar. Nesse caso copiar a
+  pasta entrega a conta. O app tenta migrar em todo boot; a pendência só
+  persiste enquanto o keyring do SO estiver indisponível.
+
+**Migração do legado em claro:** instalações antigas tinham
+`identity.secret` (e/ou `identity.secret.backup`) com a chave em hex no SQLite.
+No primeiro boot com a versão nova, se o keyring responder, a chave sobe para
+ele e as duas entradas são **apagadas** do banco. Se o keyring não responder, o
+app **não** apaga o texto claro (perderia a conta): continua abrindo com a
+chave legada e registra o aviso no log. A exposição só termina quando o keyring
+voltar a funcionar (a migração roda no próximo boot) ou o usuário definir uma
+senha de cofre — aí o blob selado substitui o texto claro e a entrada do
+keyring é apagada.
+
+### Android: honestidade sobre a limitação
+
+Este build **não** usa Android Keystore e não tem keyring no APK. A chave
+privada fica no SQLite **dentro do sandbox do app**
+(`/data/data/com.distorrent.app/...`), com `allowBackup="false"` no manifest,
+o que impede backup de nuvem/ADB padrão. Isso **não é** a mesma garantia do
+desktop:
+
+- aparelho com **root** (ou exploit equivalente) lê a chave;
+- um backup físico/autorizado do aparelho pode incluí-la;
+- **não** existe proteção por hardware (StrongBox/TEE) neste caminho.
+
+O que **não** fazemos: fingir que há keystore. Não há dependência nova para
+isso nesta rodada; quando existir, a chave deve migrar para o Keystore e o
+SQLite deve ser limpo como no desktop. Enquanto isso, a mitigação real é:
+senha do cofre (`vault.on`) + `.stormvault` guardado fora do aparelho, e o
+fato de que copiar a pasta do app **em outro Android sem root** não é um
+caminho suportado.
+
+### O que o `.stormvault` NÃO carrega (por design)
+
+Token/`webhook_secret` de bot, presença e cursores de leitura de terceiros,
+histórico de chamadas/outbox, logs de bot e mídia baixada. Lista completa e
+motivo em `docs/STORMVAULT.md`.

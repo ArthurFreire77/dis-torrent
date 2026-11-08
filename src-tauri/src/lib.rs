@@ -20,6 +20,9 @@ pub mod commands_net;
 pub mod commands_server;
 pub mod commands_social;
 pub mod commands_voice;
+mod download_spool;
+mod download_target;
+mod seed_files;
 
 mod botbridge;
 mod botmusic;
@@ -209,60 +212,140 @@ const DEV_PORT: u16 = 5173;
 struct VaultStatus {
     has_identity: bool,
     has_vault: bool,
+    /// Tem identidade, mas o segredo não está no keyring nem há cofre: a conta
+    /// só volta importando um `.stormvault` com senha.
+    locked: bool,
 }
 
+/// Guarda o segredo da identidade. No desktop ele vive SÓ no keyring do SO:
+/// gravar em `distorrent.db` transformava "copiar a pasta" em "virar o dono".
+/// Sem keyring, a única alternativa segura é o cofre por senha (`vault.on`) —
+/// por isso esta função devolve erro pedindo a senha em vez de cair para SQLite.
 fn persist_secret(store: &Store, kp: &Keypair, identity: &Identity) -> Result<(), String> {
     let secret = kp.secret_hex();
     #[cfg(target_os = "android")]
     {
-        tracing::info!("Android: salvando secret no SQLite");
+        // Android não tem keyring neste build. O sandbox + allowBackup=false
+        // limitam o dano; a limitação está documentada em THREAT_MODEL.md.
+        tracing::info!("Android: secret no SQLite (sandbox do app, allowBackup=false)");
         store.save_identity(identity, &secret).map_err(err)?;
-        let _ = store.kv_set("identity.secret.backup", &secret);
         return Ok(());
     }
-    match keyring::Entry::new("distorrent-app", "identity.secret") {
-        Ok(entry) => match entry.set_password(&secret) {
-            Ok(_) => {
-                store.save_identity(identity, &secret).map_err(err)?;
-                let _ = store.kv_set("identity.secret.backup", &secret);
+    #[cfg(not(target_os = "android"))]
+    {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .map_err(|e| format!("keyring indisponível ({e}) — defina uma senha do cofre"))?;
+        match entry.set_password(&secret) {
+            Ok(()) => {
+                // Metadados apenas: o segredo NÃO entra no SQLite.
+                store.save_identity_meta(identity).map_err(err)?;
+                purge_plaintext_secret(store);
+                Ok(())
             }
             Err(e) => {
-                tracing::warn!("keyring set_password falhou ({e}); fallback SQLite");
-                store.save_identity(identity, &secret).map_err(err)?;
-                let _ = store.kv_set("identity.secret.backup", &secret);
+                tracing::warn!("keyring set_password falhou ({e})");
+                Err(format!(
+                    "o keyring do sistema não está disponível ({e}). \
+                     Crie a conta com uma senha do cofre para guardar a chave com segurança."
+                ))
             }
-        },
-        Err(e) => {
-            tracing::warn!("keyring indisponível ({e}); secret no SQLite local");
-            store.save_identity(identity, &secret).map_err(err)?;
-            let _ = store.kv_set("identity.secret.backup", &secret);
         }
     }
-    Ok(())
+}
+
+/// Remove segredo em claro do banco (migração de instalações antigas).
+fn purge_plaintext_secret(store: &Store) {
+    let _ = store.kv_delete("identity.secret");
+    let _ = store.kv_delete("identity.secret.backup");
+}
+
+const KEYRING_SERVICE: &str = "distorrent-app";
+const KEYRING_USER: &str = "identity.secret";
+
+/// Segredo em claro, quando existe em local recuperável SEM senha (keyring ou
+/// legado no SQLite). `None` = cofre por senha (precisa desbloquear).
+fn plaintext_secret(store: &Store) -> Option<String> {
+    let identity = store.load_identity()?;
+    let matches_identity = |s: &str| {
+        is_plaintext_secret(s)
+            && Keypair::from_secret_hex(s)
+                .map(|kp| kp.fingerprint() == identity.fingerprint)
+                .unwrap_or(false)
+    };
+    #[cfg(target_os = "android")]
+    {
+        let _ = &matches_identity;
+        return store.load_secret_hex().filter(|s| is_plaintext_secret(s));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+            if let Ok(s) = entry.get_password() {
+                if matches_identity(&s) {
+                    return Some(s);
+                }
+                // Keyring de OUTRA conta: não entrega para a identidade errada.
+                tracing::warn!("keyring tem segredo de outra identidade — ignorado");
+            }
+        }
+        let stored = store.load_secret_hex().unwrap_or_default();
+        if matches_identity(&stored) {
+            return Some(stored);
+        }
+        let bk = store.kv_get("identity.secret.backup").unwrap_or_default();
+        if matches_identity(&bk) {
+            return Some(bk);
+        }
+        None
+    }
+}
+
+/// 32 bytes em hex = 64 caracteres. Um blob selado tem salt+nonce+tag, sempre
+/// bem maior, então o tamanho separa os dois sem tentar decifrar.
+fn is_plaintext_secret(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Migra o legado em claro para o keyring e apaga do SQLite. Chamado no boot.
+fn migrate_plaintext_to_keyring(store: &Store, secret: &str) -> bool {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (store, secret);
+        false
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) else {
+            return false;
+        };
+        if entry.set_password(secret).is_err() {
+            return false;
+        }
+        purge_plaintext_secret(store);
+        true
+    }
+}
+
+/// Segredo em claro recuperável SEM senha (keyring ou legado no SQLite), já
+/// conferido contra a identidade. Usado pelo snapshot pré-update (Windows).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn recover_plaintext_secret(store: &Store) -> Option<String> {
+    plaintext_secret(store)
 }
 
 fn load_secret(store: &Store, unlocked: bool) -> Result<String, String> {
-    let stored = store.load_secret_hex().unwrap_or_default();
     if store.kv_get("vault.on").as_deref() == Some("1") {
         if unlocked {
             return Err("usar cache".into());
         }
         return Err("bloqueado — informe a senha".into());
     }
-    if !stored.is_empty() {
-        return Ok(stored);
-    }
-    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
-        if let Ok(s) = entry.get_password() {
-            if !s.is_empty() {
-                return Ok(s);
-            }
+    if let Some(secret) = plaintext_secret(store) {
+        // Instalação antiga: sobe para o keyring e limpa o texto claro.
+        if migrate_plaintext_to_keyring(store, &secret) {
+            tracing::info!("segredo legado movido para o keyring; SQLite limpo");
         }
-    }
-    if let Some(bk) = store.kv_get("identity.secret.backup") {
-        if !bk.is_empty() {
-            return Ok(bk);
-        }
+        return Ok(secret);
     }
     Err("segredo da identidade não encontrado".into())
 }
@@ -276,6 +359,12 @@ fn boot_engine_with_secret(
     tauri::async_runtime::block_on(async {
         let identity = store.load_identity().ok_or("sem identidade")?;
         let kp = Keypair::from_secret_hex(&secret).map_err(err)?;
+        if kp.public_hex() != identity.pubkey_hex || kp.fingerprint() != identity.fingerprint {
+            return Err(
+                "o segredo não corresponde à identidade deste perfil — importe o cofre certo"
+                    .into(),
+            );
+        }
         let engine = NetworkEngine::new_with_identity(
             Arc::new(Store::open(&db_path(state)).map_err(err)?),
             kp,
@@ -326,6 +415,15 @@ fn boot_engine_with_store(
         let identity = store.load_identity().ok_or("sem identidade")?;
         let secret = load_secret(&store, true)?;
         let kp = Keypair::from_secret_hex(&secret).map_err(err)?;
+        // O keyring pode ter segredo de OUTRA conta (pasta copiada/trocada).
+        // Nunca inicia o motor com uma identidade que o segredo não prova.
+        if kp.fingerprint() != identity.fingerprint || kp.public_hex() != identity.pubkey_hex {
+            return Err(
+                "o segredo guardado não corresponde à identidade deste perfil — \
+                 importe o .stormvault correto"
+                    .into(),
+            );
+        }
         let engine = NetworkEngine::new_with_identity(
             Arc::new(store),
             kp,
@@ -879,7 +977,7 @@ fn decode_b64_batches(data: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-const MAX_STREAM_FILE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+const MAX_STREAM_FILE_BYTES: u64 = 500 * 1024 * 1024 * 1024;
 
 pub(crate) fn fmt_mb(b: u64) -> String {
     const MB: u64 = 1024 * 1024;
@@ -891,7 +989,7 @@ pub(crate) fn fmt_mb(b: u64) -> String {
 }
 
 #[cfg(not(target_os = "android"))]
-fn resolve_downloads_dir() -> Result<PathBuf, String> {
+pub(crate) fn resolve_downloads_dir() -> Result<PathBuf, String> {
     if let Some(d) = dirs::download_dir() {
         return Ok(d);
     }
@@ -999,7 +1097,7 @@ fn android_files_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "android")]
-fn android_private_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn android_private_download_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(android_files_dir(app)?.join("Download"))
 }
 
@@ -1287,6 +1385,27 @@ fn main() {
             commands_files::cache_delete,
             commands_files::cache_stats,
             commands_files::cache_set_cap,
+            commands_files::cache_get_ttl,
+            commands_files::cache_set_ttl,
+            download_spool::spool_begin,
+            download_spool::spool_put,
+            download_spool::spool_put_batch,
+            download_spool::spool_get,
+            download_spool::spool_bitmap,
+            download_spool::spool_finish,
+            download_spool::spool_discard,
+            download_spool::spool_stats,
+            download_spool::spool_gc,
+            download_target::download_dir_get,
+            download_target::download_dir_set,
+            download_target::download_dir_reset,
+            download_target::download_dir_browse,
+            download_target::download_dir_open,
+            download_target::download_dir_space,
+            seed_files::seed_register,
+            seed_files::seed_unregister,
+            seed_files::seed_list,
+            seed_files::seed_read_chunk,
             commands_files::media_safety_get,
             commands_files::media_safety_set,
             commands_files::retention_get,
@@ -1521,9 +1640,16 @@ fn main() {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(256)
                 .clamp(16, 4096);
-            let cache = distorrent_core::cache::DiskLru::open(
+            let ttl_days: u64 = Store::open(&dir.join("distorrent.db"))
+                .ok()
+                .and_then(|s| s.kv_get("cache.ttl_days"))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(7)
+                .clamp(1, 30);
+            let cache = distorrent_core::cache::DiskLru::open_with_ttl(
                 dir.join("cache"),
                 Some(cap_mb * 1024 * 1024),
+                ttl_days * 24 * 60 * 60,
             )
             .map_err(|e| format!("cache: {e}"))?;
             app.manage(AppState {

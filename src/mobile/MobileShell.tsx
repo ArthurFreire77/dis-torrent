@@ -496,7 +496,7 @@ export default function MobileShell() {
     })
     let stopBots: (() => void) | undefined
     try { stopBots = botRuntime.start() } catch {  }
-    try { downloadManager.load() } catch {  }
+    void downloadManager.load().catch(() => {  })
     let unCount = () => {}
     try {
       unCount = downloadManager.subscribe((items) => {

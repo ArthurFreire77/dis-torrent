@@ -35,13 +35,16 @@ class DownloadManager {
   private listeners = new Set<(items: DownloadItem[]) => void>()
   private doneListeners = new Set<(item: DownloadItem) => void>()
 
-  load(): DownloadItem[] {
+  async load(): Promise<DownloadItem[]> {
     let raw: string | null = null
     try { raw = localStorage.getItem(LS_KEY) } catch {  }
     for (const it of deserializeQueue(raw)) {
       const status = rehydrateStatus(it.status)
+      // Concluído continua concluído ao reabrir: o arquivo já está no disco.
       this.items.set(it.file_id, { ...it, status, speedBps: 0 })
     }
+    // Semeadores por caminho: reabrir o app não pode perder o que você enviava.
+    try { await fileSwarm.restoreSeeds() } catch {  }
     const pendentes = [...this.items.values()].filter((i) => i.status === 'queued')
     if (pendentes.length > 0) {
       setTimeout(() => {
@@ -165,6 +168,41 @@ class DownloadManager {
     this.emit()
   }
 
+  /**
+   * Baixar de novo um arquivo concluído: o vermelho só aparece depois do verde,
+   * e é o ÚNICO caminho que reinicia uma transferência já terminada.
+   */
+  async redownload(fileId: string): Promise<void> {
+    const it = this.items.get(fileId)
+    if (!it) return
+    fileSwarm.resetForRetry(fileId)
+    const sf = fileSwarm.files.get(fileId)
+    if (sf) {
+      if (sf.savedPath) {
+        // Já existe no disco: "baixar novamente" salva outra cópia.
+        await fileSwarm.download(sf)
+        return
+      }
+      if (sf.have.size >= sf.chunks && !sf.onDisk) {
+        await fileSwarm.download(sf)
+        return
+      }
+    }
+    it.status = 'queued'
+    it.progress = 0
+    it.have = 0
+    it.speedBps = 0
+    it.error = undefined
+    it.startedAt = now()
+    it.updatedAt = now()
+    this.pausedFps.delete(fileId)
+    this.cancelled.delete(fileId)
+    fileSwarm.resumeFile(fileId)
+    this.persist()
+    this.emit()
+    this.kick(fileId)
+  }
+
   clearFinished(): void {
     const done: string[] = []
     for (const [fid, it] of [...this.items.entries()]) {
@@ -266,7 +304,7 @@ class DownloadManager {
         }
         if (it.status === 'completed' || it.status === 'cancelled' || it.status === 'failed' || it.status === 'paused') return
 
-        if (sf.have.size === sf.chunks) {
+        if (sf.have.size === sf.chunks && (sf.pendingWrites ?? 0) === 0) {
           void this.finalize(fileId, sf)
           return
         }
@@ -279,7 +317,8 @@ class DownloadManager {
           lastProgressAt = now()
           noSeederSince = null
           const itNow = this.items.get(fileId)
-          if (itNow && itNow.status === 'downloading') {
+          if (itNow && (itNow.status === 'downloading' || itNow.status === 'queued')) {
+            if (itNow.status !== 'downloading') this.setStatus(itNow, 'start')
             itNow.have = have
             itNow.progress = computeProgress(have, sf.chunks)
             itNow.updatedAt = now()
@@ -347,6 +386,26 @@ class DownloadManager {
     if (!it) return
     this.setStatus(it, 'chunks-complete')
     try {
+      // Arquivo grande: os bytes estão no spool do disco; o hash final e a
+      // gravação em Downloads são feitos pelo Rust (ler 500 GB na WebView não dá).
+      if (sf.onDisk) {
+        this.setStatus(it, 'verify-ok')
+        const savedPath = await fileSwarm.download(sf)
+        const cur = this.items.get(fileId)
+        if (!cur) return
+        this.setStatus(cur, 'save-ok')
+        cur.savedPath = savedPath ?? cur.name
+        cur.progress = 100
+        cur.have = sf.chunks
+        cur.speedBps = 0
+        cur.updatedAt = now()
+        this.persist()
+        this.emit()
+        this.notifyDone(cur)
+        try { fileSwarm.markDownloaded(fileId) } catch {  }
+        if (savedPath) void fileSwarm.rememberSeedPath(fileId, savedPath).catch(() => {  })
+        return
+      }
       const blob = fileSwarm.assembleAndDownload(sf)
       const bytes = new Uint8Array(await blob.arrayBuffer())
       if (!verifyFileIntegrity(bytes, sf.hash)) {
@@ -403,6 +462,6 @@ class DownloadManager {
 export const downloadManager = new DownloadManager()
 try {
   if (typeof window !== 'undefined') {
-    window.addEventListener('DOMContentLoaded', () => { try { downloadManager.load() } catch {  } })
+    window.addEventListener('DOMContentLoaded', () => { try { void downloadManager.load() } catch {  } })
   }
 } catch {  }

@@ -7,14 +7,43 @@ use crate::storage::Store;
 use crate::{DistorrentError, Result};
 
 pub const MAGIC: [u8; 4] = *b"DSVT";
+/// Versão do CONTAINER (magic + framing + AAD). Fica em 1: alterar aqui muda o
+/// AAD e faria todo cofre antigo falhar ao abrir. A evolução do conteúdo é
+/// versionada em `StormVaultMeta::data_version`.
 pub const FORMAT_VERSION: u16 = 1;
+/// Versão do CONTEÚDO. v1 não tinha perfis/reações/pins/read states; o leitor
+/// novo aceita v1 porque todos os campos novos têm `serde(default)`.
+pub const DATA_VERSION: u16 = 2;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const HKDF_INFO: &[u8] = b"distorrent/stormvault/v1";
 const COMPRESS_MIN_GAIN: f64 = 0.15;
 pub const DEFAULT_MAX_MESSAGES: usize = 200_000;
 
-const SETTINGS_WHITELIST: &[&str] = &["privacy.mode", "privacy.proxy_addr", "privacy.tor_addr"];
+/// Chaves que pertencem à CONTA (não ao aparelho). Ficam de fora: `vault.on`,
+/// `identity.*`, `imported.*` (slots locais), `notify.ui_alive`, `ui.autostart_*`
+/// e `update.*` — todos descrevem ESTE aparelho, não a pessoa.
+const SETTINGS_WHITELIST: &[&str] = &[
+    "privacy.mode",
+    "privacy.proxy_addr",
+    "privacy.tor_addr",
+    "privacy.encryption",
+    "privacy.tor",
+    "privacy.udp_discovery",
+    "privacy.padding",
+    "privacy.obfuscation",
+    "privacy.retention_days",
+    "privacy.retention_servers",
+    "privacy.retention_groups",
+    "privacy.retention_dms",
+    "media.strip_exif",
+    "media.block_executables",
+    "cache.cap_mb",
+    "stormvault.backup_retention_days",
+    "notify.system",
+    "notify.preview",
+    "notify.policy",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StormVaultHeader {
@@ -37,6 +66,13 @@ pub struct StormVaultHeader {
 pub struct StormVaultMeta {
     pub app_version: Option<String>,
     pub messages_truncated: bool,
+    /// Versão do CONTEÚDO. Ausente em cofres v1 (lidos como 1).
+    #[serde(default = "data_version_v1")]
+    pub data_version: u16,
+}
+
+fn data_version_v1() -> u16 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +81,90 @@ pub struct FriendRow {
     pub nickname: String,
     pub status: String,
     pub added_at: i64,
+    /// Campos de relacionamento entraram no conteúdo v2; v1 lê vazio/zero.
+    #[serde(default)]
+    pub requested_by: String,
+    #[serde(default)]
+    pub requested_at: i64,
+    #[serde(default)]
+    pub blocked_at: i64,
+}
+
+/// Estado de leitura por membro. `read_cursors` (legado) entra com `fp` vazio.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadStateRow {
+    pub conv_id: String,
+    #[serde(default)]
+    pub fp: String,
+    pub last_read_ts: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookmarkRow {
+    pub conv_id: String,
+    pub name: String,
+    pub payload: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PollVoteRow {
+    pub poll_id: String,
+    pub voter_fp: String,
+    pub option_idx: i64,
+    pub voted_at: i64,
+}
+
+/// Ban e timeout têm a mesma forma; `until_ms` distingue (0 = permanente).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommunitySanctionRow {
+    pub community_id: String,
+    pub fp: String,
+    pub reason: String,
+    pub actor_fp: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub until_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelCfgRow {
+    pub channel_id: String,
+    #[serde(default)]
+    pub slowmode_secs: i64,
+    #[serde(default)]
+    pub nsfw: bool,
+    #[serde(default)]
+    pub topic_locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerNicknameRow {
+    pub community_id: String,
+    pub fp: String,
+    pub nickname: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupOwnerRow {
+    pub conv_id: String,
+    pub owner_fp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MentionRow {
+    pub msg_id: String,
+    pub conv_id: String,
+    pub target_fp: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HiddenRow {
+    pub msg_id: String,
+    pub conv_id: String,
+    pub hidden_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +225,47 @@ pub struct StormVaultData {
     pub groups: Vec<GroupExport>,
     pub settings: Vec<(String, String)>,
     pub meta: StormVaultMeta,
+    // ---- conteúdo v2 (todos com `default`: cofre v1 continua abrindo) ----
+    /// Perfis sociais (avatar/banner/status/sobre). O DO PRÓPRIO usuário é o
+    /// que importa para migrar a conta; os de terceiros são cache e também
+    /// viajam porque são inofensivos (vieram do próprio peer assinados).
+    #[serde(default)]
+    pub profiles: Vec<crate::social::ProfileView>,
+    #[serde(default)]
+    pub presence: Vec<crate::social::PresenceView>,
+    #[serde(default)]
+    pub reactions: Vec<crate::social::ReactionRow>,
+    #[serde(default)]
+    pub message_meta: Vec<crate::social::MsgMetaView>,
+    #[serde(default)]
+    pub read_states: Vec<ReadStateRow>,
+    #[serde(default)]
+    pub bookmarks: Vec<BookmarkRow>,
+    #[serde(default)]
+    pub threads: Vec<crate::social::ThreadRow>,
+    #[serde(default)]
+    pub polls: Vec<crate::social::PollRow>,
+    #[serde(default)]
+    pub poll_votes: Vec<PollVoteRow>,
+    #[serde(default)]
+    pub events: Vec<crate::social::EventRow>,
+    #[serde(default)]
+    pub emojis: Vec<crate::social::EmojiRow>,
+    #[serde(default)]
+    pub bans: Vec<CommunitySanctionRow>,
+    #[serde(default)]
+    pub timeouts: Vec<CommunitySanctionRow>,
+    #[serde(default)]
+    pub channel_cfg: Vec<ChannelCfgRow>,
+    #[serde(default)]
+    pub server_nicknames: Vec<ServerNicknameRow>,
+    #[serde(default)]
+    pub group_owners: Vec<GroupOwnerRow>,
+    #[serde(default)]
+    pub mentions: Vec<MentionRow>,
+    /// Mensagens escondidas SÓ deste usuário ("apagar para mim").
+    #[serde(default)]
+    pub hidden: Vec<HiddenRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +287,10 @@ pub struct ImportReport {
     pub groups_merged: usize,
     pub settings_imported: usize,
     pub messages_truncated: bool,
+    // Contadores do conteúdo v2 (somam no relatório sem quebrar a UI antiga).
+    pub profiles_merged: usize,
+    pub social_merged: usize,
+    pub data_version: u16,
 }
 
 pub fn backup_key_for(secret_hex: &str) -> [u8; 32] {
@@ -326,8 +491,50 @@ fn open_payload(
     } else {
         body
     };
-    serde_json::from_slice(&plain)
-        .map_err(|e| DistorrentError::Protocol(format!("conteúdo do cofre inválido: {e}")))
+    let data: StormVaultData = serde_json::from_slice(&plain)
+        .map_err(|e| DistorrentError::Protocol(format!("conteúdo do cofre inválido: {e}")))?;
+    validate_identity_binding(header, &data)?;
+    Ok(data)
+}
+
+/// Fecha a falha da "identidade vitrine": um arquivo com senha conhecida podia
+/// trazer a pubkey de outra pessoa e fingerprint inventado. Aqui a pubkey tem de
+/// derivar o MESMO fingerprint do header e do payload, e o segredo (quando
+/// presente) tem de derivar a mesma pubkey. Recusar aqui vale para senha e para
+/// chave de backup.
+fn validate_identity_binding(header: &StormVaultHeader, data: &StormVaultData) -> Result<()> {
+    validate_identity_binding_inner(&header.fp, data)
+}
+
+fn validate_identity_binding_inner(header_fp: &str, data: &StormVaultData) -> Result<()> {
+    let id = &data.identity;
+    if header_fp != id.fingerprint {
+        return Err(DistorrentError::Protocol(
+            "cofre adulterado: header descreve outra identidade".into(),
+        ));
+    }
+    if !id.pubkey_hex.trim().is_empty() {
+        let fp_da_pubkey = crate::identity::fingerprint_of_pubkey_hex(&id.pubkey_hex);
+        if fp_da_pubkey != id.fingerprint {
+            return Err(DistorrentError::Protocol(
+                "cofre adulterado: fingerprint não corresponde à pubkey da identidade".into(),
+            ));
+        }
+    }
+    if let Some(secret) = data.secret_hex.as_deref() {
+        let kp = crate::identity::Keypair::from_secret_hex(secret)?;
+        // A chave privada não pode "apontar" para outra pubkey/fingerprint —
+        // era assim que um cofre com senha montava identidade vitrine.
+        if kp.fingerprint() != id.fingerprint
+            || (!id.pubkey_hex.trim().is_empty()
+                && !kp.public_hex().eq_ignore_ascii_case(&id.pubkey_hex))
+        {
+            return Err(DistorrentError::Protocol(
+                "cofre adulterado: chave privada não corresponde à identidade".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_container_shape(header: &StormVaultHeader, payload: &[u8]) -> Result<()> {
@@ -360,6 +567,10 @@ pub fn import_with_password(store: &Store, bytes: &[u8], password: &str) -> Resu
 }
 
 pub fn import_merge_only(store: &Store, data: &StormVaultData) -> Result<ImportReport> {
+    // Defesa em profundidade: `open_payload` já checou contra o header, mas
+    // `import_merge_only` também é chamado com dados já abertos e a identidade
+    // tem de estar internamente coerente de qualquer forma.
+    validate_identity_binding_inner(&data.identity.fingerprint, data)?;
     let mut report = ImportReport {
         fp: data.identity.fingerprint.clone(),
         nickname: data.identity.nickname.clone(),
@@ -378,6 +589,9 @@ pub fn import_merge_only(store: &Store, data: &StormVaultData) -> Result<ImportR
         groups_merged: 0,
         settings_imported: 0,
         messages_truncated: data.meta.messages_truncated,
+        profiles_merged: 0,
+        social_merged: 0,
+        data_version: data.meta.data_version,
     };
     let Some(local) = store.load_identity() else {
         return Err(DistorrentError::Protocol(
@@ -495,7 +709,10 @@ mod tests {
     use crate::storage::Store;
 
     fn sample_data(store: &Store) -> StormVaultData {
-        collect(store, Some("ab".repeat(32)), None).unwrap()
+        // A chave privada TEM de ser a da identidade: o cofre recusa um segredo
+        // que não derive a pubkey do payload (identidade vitrine).
+        let secret = store.load_secret_hex();
+        collect(store, secret, None).unwrap()
     }
 
     fn seeded_store() -> Store {
@@ -517,6 +734,7 @@ mod tests {
     #[test]
     fn roundtrip_com_senha() {
         let store = seeded_store();
+        let secret = store.load_secret_hex().unwrap();
         let data = sample_data(&store);
         let sealed = seal_with_password(&data, "senha-forte-123").unwrap();
         assert_eq!(&sealed[..4], &MAGIC[..]);
@@ -525,7 +743,7 @@ mod tests {
         assert_eq!(opened.identity.fingerprint, data.identity.fingerprint);
         assert_eq!(opened.messages.len(), 1);
         assert_eq!(opened.messages[0].body, "histórico portável");
-        assert_eq!(opened.secret_hex.as_deref(), Some("ab".repeat(32).as_str()));
+        assert_eq!(opened.secret_hex.as_deref(), Some(secret.as_str()));
         assert!(!sealed.windows(16).any(|w| w == [0xabu8; 16]));
     }
 

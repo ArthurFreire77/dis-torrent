@@ -17,37 +17,22 @@ pub(crate) fn identity_get(
     let has_valid_blob = stored.len() >= 88;
 
     if vault_on && has_valid_blob {
+        // Cofre por senha: só `vault_unlock` destrava. Nunca apagar o cofre
+        // aqui — era o caminho que devolvia a identidade sem senha.
         return Ok(None);
     }
-    if !stored.is_empty() && stored.len() >= 32 {
-        let _ = store.kv_set("identity.secret.backup", &stored);
+    if plaintext_secret(&store).is_some() {
         let _ = store.kv_delete("vault.on");
         boot_engine_with_store(&app, &state, store)?;
         return Ok(Some(id));
     }
-    if let Ok(entry) = keyring::Entry::new("distorrent-app", "identity.secret") {
-        if let Ok(secret) = entry.get_password() {
-            if !secret.is_empty() && secret.len() >= 32 {
-                let _ = store.save_identity(&id, &secret);
-                let _ = store.kv_set("identity.secret.backup", &secret);
-                let _ = store.kv_delete("vault.on");
-                boot_engine_with_store(&app, &state, store)?;
-                return Ok(Some(id));
-            }
-        }
+    if vault_on {
+        return Ok(None);
     }
-    if let Some(bk) = store.kv_get("identity.secret.backup") {
-        if !bk.is_empty() && bk.len() >= 32 {
-            let _ = store.save_identity(&id, &bk);
-            let _ = store.kv_delete("vault.on");
-            boot_engine_with_store(&app, &state, store)?;
-            return Ok(Some(id));
-        }
-    }
+    // `stored` != blob válido e sem segredo recuperável: não invente. A UI
+    // mostra a tela de bloqueio/criação, que é o estado honesto.
     tracing::warn!("identidade sem segredo recuperável — requer intervenção do usuário");
-    return Err(
-        "segredo da identidade não encontrado — tente reiniciar o app ou restaurar backup".into(),
-    );
+    Err("segredo da identidade não encontrado — tente reiniciar o app ou restaurar backup".into())
 }
 
 #[tauri::command]
@@ -104,10 +89,9 @@ pub(crate) fn identity_rename(
         return Err("nickname muito longo (máximo 64 caracteres)".into());
     }
     identity.nickname = nick.to_string();
-    let current_secret = store.load_secret_hex().unwrap_or_default();
-    store
-        .save_identity(&identity, &current_secret)
-        .map_err(err)?;
+    // Só metadados mudaram: reescrever o segredo aqui é o que re-criava o
+    // texto claro no SQLite (ou apagava o blob selado).
+    store.save_identity_meta(&identity).map_err(err)?;
     restart_engine(&app, &state)?;
     Ok(identity)
 }

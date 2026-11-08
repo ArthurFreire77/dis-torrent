@@ -601,7 +601,7 @@ export interface DisTorrentServices {
   identityGet(): Promise<Identity | null>
   identityCreate(nickname: string, password?: string | null): Promise<Identity>
   identityRename(nickname: string): Promise<Identity>
-  vaultStatus(): Promise<{ has_identity: boolean; has_vault: boolean }>
+  vaultStatus(): Promise<{ has_identity: boolean; has_vault: boolean; locked?: boolean }>
   vaultUnlock(password: string): Promise<Identity>
   localAddresses(port?: number): Promise<LocalAddresses>
   networkStatus(): Promise<NetworkStatusView>
@@ -783,6 +783,30 @@ export interface DisTorrentServices {
   fileRequestChunk(fileId: string, index: number, holderFp: string): Promise<void>
   fileSendChunk(targetFp: string, fileId: string, index: number, dataB64: string): Promise<void>
 
+  /** Download em disco: retoma, não estoura a memória e pergunta onde salvar. */
+  spoolBegin(fileId: string, size: number, name: string): Promise<{ have: number; bitmap_b64: string; dir: string }>
+  spoolPut(fileId: string, index: number, dataB64: string, size: number): Promise<number>
+  spoolPutBatch(fileId: string, size: number, entries: [number, string][]): Promise<number>
+  spoolGet(fileId: string, index: number, size: number): Promise<string | null>
+  spoolBitmap(fileId: string, size: number): Promise<{ have: number; bitmap_b64: string; dir: string }>
+  spoolFinish(fileId: string, name: string, size: number, expectBlake3?: string | null): Promise<string>
+  spoolDiscard(fileId: string): Promise<void>
+  spoolStats(): Promise<{ bytes: number; entries: number }>
+  spoolGc(): Promise<number>
+
+  downloadDirGet(): Promise<DownloadDirView>
+  downloadDirSet(path: string): Promise<DownloadDirView>
+  downloadDirReset(): Promise<DownloadDirView>
+  downloadDirBrowse(path?: string | null): Promise<DownloadBrowseView>
+  downloadDirOpen(path?: string | null): Promise<void>
+  downloadDirSpace(path?: string | null): Promise<{ free_bytes: number; total_bytes: number }>
+  seedRegister(fileId: string, name: string, size: number, hash: string, path: string): Promise<SeedEntryView>
+  seedUnregister(fileId: string): Promise<void>
+  seedList(): Promise<SeedEntryView[]>
+  seedReadChunk(fileId: string, index: number, size: number): Promise<string | null>
+  cacheGetTtl(): Promise<number>
+  cacheSetTtl(days: number): Promise<void>
+
   serverRulesGet(communityId: string): Promise<ServerRules>
   serverRulesSet(rules: ServerRules): Promise<void>
   auditList(communityId: string, limit?: number): Promise<AuditEntry[]>
@@ -956,6 +980,12 @@ export interface VaultImportReport {
   groups_merged: number
   settings_imported: number
   messages_truncated: boolean
+  /** Perfis sociais (avatar/banner/status) mesclados. */
+  profiles_merged: number
+  /** Reações, pins, reads, bookmarks, polls etc. mesclados. */
+  social_merged: number
+  /** Versão do CONTEÚDO do cofre: 1 = antigo (só histórico), 2 = completo. */
+  data_version: number
 }
 
 export interface WipeReport {
@@ -972,6 +1002,29 @@ export interface CacheStats {
   cap_mb: number
   total_bytes: number
   entries: number
+}
+
+/** Pasta escolhida para os downloads (vazia = Downloads do sistema). */
+export interface DownloadDirView {
+  dir: string
+  is_default: boolean
+}
+
+export interface DownloadBrowseView {
+  path: string
+  parent: string | null
+  dirs: { name: string; path: string }[]
+  drives: string[]
+}
+
+/** Arquivo no disco que continua sendo semeado depois de reabrir o app. */
+export interface SeedEntryView {
+  file_id: string
+  name: string
+  size: number
+  chunks: number
+  hash: string
+  path: string
 }
 
 export interface MediaSafetySettings {

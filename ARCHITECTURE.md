@@ -16,7 +16,7 @@
 | **P2P: discovery LAN** (UDP broadcast 45900) | REAL | anúncio assinável, anti-spoof de fingerprint |
 | **Estados de conexão** CONNECTED/CONNECTING/RECONNECTING/DISCONNECTED | REAL | máquina de estados por peer + agregada, heartbeat 10s, timeout 25s, backoff 1s→15s |
 | **Estados de mensagem** PENDING/SENDING/SENT/DELIVERED/FAILED | REAL | ACK criptográfico real; outbox persistente reenvia após reconexão — testado |
-| **Keyring do SO** para chave privada | REAL (fallback SQLite documentado) | `src-tauri/src/main.rs::persist_secret` |
+| **Keyring do SO** para chave privada | REAL no desktop (sem fallback em claro); Android usa SQLite do sandbox — limitação documentada em `THREAT_MODEL.md` | `src-tauri/src/lib.rs::persist_secret` |
 | **UI DisTorrent ligada ao motor** | REAL | `services → hooks → ThemeShell`; `mocks.ts` DELETADO |
 | App desktop instalável | REAL | `npm run tauri:build` (Tauri 2) — `.deb` + `.AppImage` no Linux, `.msi`/NSIS no Windows |
 | Android | REAL | `npx tauri android build --apk`; voz nativa é só no Linux, no Android o WebRTC do navegador assume |

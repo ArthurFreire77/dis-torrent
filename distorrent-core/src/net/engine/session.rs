@@ -52,6 +52,16 @@ pub(super) async fn register_and_run(
         }
     }
 
+    // Autenticidade da identidade: se já conhecemos a pubkey deste fingerprint,
+    // uma sessão nova TEM de apresentar a mesma chave. Sem isso, uma colisão do
+    // esquema legado de fingerprint (pubkey como texto) sequestrava a identidade.
+    if let Ok(Some(known)) = engine.store.get_peer(peer_fp) {
+        if !known.pubkey_hex.is_empty() && !known.pubkey_hex.eq_ignore_ascii_case(peer_pubkey) {
+            debug!(peer_fp, "sessão recusada: pubkey diferente da já conhecida");
+            return false;
+        }
+    }
+
     let _ = engine.store.upsert_peer(&PeerRecord {
         fp: peer_fp.to_string(),
         pubkey_hex: peer_pubkey.to_string(),

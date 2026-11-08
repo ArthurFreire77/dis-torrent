@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { downloadManager } from '../services/downloadManager'
 import { formatFileSize } from '../services/fileSwarm'
+import { services } from '../services'
 import type { DownloadItem, DownloadStatus } from '../services/downloadQueue'
 
 const t = {
@@ -24,7 +25,7 @@ const STATUS_LABEL: Record<DownloadStatus, string> = {
   paused: 'pausado',
   verifying: 'verificando',
   saving: 'salvando',
-  completed: 'concluído',
+  completed: 'baixado',
   failed: 'falhou',
   cancelled: 'cancelado',
 }
@@ -32,9 +33,17 @@ const STATUS_LABEL: Record<DownloadStatus, string> = {
 function statusColor(status: DownloadStatus): string {
   if (status === 'downloading' || status === 'queued') return t.accent
   if (status === 'paused') return t.yellow
-  if (status === 'verifying' || status === 'saving') return t.link
+  if (status === 'verifying' || status === 'saving') return t.yellow
   if (status === 'completed') return t.green
   return t.red
+}
+
+/** Cor da barra: azul não iniciado, amarelo em andamento, verde baixado. */
+function barColor(status: DownloadStatus): string {
+  if (status === 'completed') return t.green
+  if (status === 'failed' || status === 'cancelled') return t.red
+  if (status === 'downloading' || status === 'verifying' || status === 'saving') return t.yellow
+  return t.accent
 }
 
 function safeCall(fn: () => void): void {
@@ -208,10 +217,11 @@ export default function DownloadsPanel({ open, onClose, onDoneToast }: {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                   <div style={{ flex: 1, height: 6, background: t.sidebar, borderRadius: 99, overflow: 'hidden' }}>
                     <div
+                      className={barColor(item.status) === t.yellow ? 'dl-bar' : undefined}
                       style={{
                         width: `${item.progress}%`,
                         height: '100%',
-                        background: t.accent,
+                        background: barColor(item.status),
                         borderRadius: 99,
                         transition: 'width .3s',
                       }}
@@ -219,11 +229,21 @@ export default function DownloadsPanel({ open, onClose, onDoneToast }: {
                   </div>
                 </div>
                 {item.error && (
-                  <div style={{ fontSize: 11, color: '#ff9c9c', marginTop: 6 }}>{item.error}</div>
+                  <div style={{ fontSize: 11, color: '#ff9c9c', marginTop: 6, lineHeight: 1.5 }}>{item.error}</div>
                 )}
                 {item.status === 'completed' && (
                   <div style={{ fontSize: 11, color: t.green, marginTop: 6 }}>
                     {`salvo em ${item.savedPath ?? item.name}`}
+                  </div>
+                )}
+                {item.status === 'completed' && item.savedPath && (
+                  <div style={{ marginTop: 6 }}>
+                    <ActionButton
+                      title="Abrir pasta"
+                      onClick={() => safeCall(() => {
+                        void services.downloadDirOpen(item.savedPath!.replace(/[\\/][^\\/]+$/, '')).catch(() => {})
+                      })}
+                    />
                   </div>
                 )}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
@@ -238,6 +258,12 @@ export default function DownloadsPanel({ open, onClose, onDoneToast }: {
                   )}
                   {item.status === 'failed' && (
                     <ActionButton title="Tentar novamente" onClick={() => safeCall(() => downloadManager.retry(item.file_id))} />
+                  )}
+                  {item.status === 'completed' && (
+                    <ActionButton
+                      title="Baixar novamente"
+                      onClick={() => safeCall(() => { void downloadManager.redownload(item.file_id).catch(() => {}) })}
+                    />
                   )}
                   <ActionButton title="Remover da lista" onClick={() => safeCall(() => downloadManager.remove(item.file_id))} />
                 </div>

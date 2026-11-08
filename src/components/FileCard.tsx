@@ -2,7 +2,12 @@ import { useState, type ReactNode } from 'react'
 import { Ic } from '../shared/icons'
 import { formatFileSize } from '../shared/bytes'
 import { isVideoName } from '../services/fileRules'
-import { downloadButtonLabel, formatSpeed, type FileCardProgress } from './fileCardRules'
+import {
+  downloadButtonLabel,
+  downloadButtonState,
+  formatSpeed,
+  type FileCardProgress,
+} from './fileCardRules'
 import { MediaViewer } from './MediaViewer'
 
 export type { FileCardProgress }
@@ -67,15 +72,20 @@ export function FileCard({
 }) {
   const done = (progress?.pct ?? 0) >= 100 && progress?.status === 'completed'
   const pct = Math.round(progress?.pct ?? 0)
-  const showBar = !!announced && !done
   const failed = progress?.status === 'failed'
   const paused = progress?.status === 'paused'
+  const st = downloadButtonState(announced, done, progress)
+  const showBar = !!announced && !done && (st.tone === 'busy' || failed || paused || pct > 0)
   const video = isVideoName(name)
   const [full, setFull] = useState(false)
 
   const openFull = () => {
     if (previewUrl) setFull(true)
   }
+
+  // Azul = não iniciado, amarelo = em andamento, verde = baixado, vermelho = falhou.
+  const toneColor =
+    st.tone === 'done' ? pal.green : st.tone === 'failed' ? pal.red : st.tone === 'busy' ? pal.yellow : pal.accent
 
   return (
     <>
@@ -85,7 +95,7 @@ export function FileCard({
           name={name}
           video={video}
           onSave={onDownload}
-          saveLabel={downloadButtonLabel(announced, done, progress, !!previewUrl)}
+          saveLabel={done ? 'Salvar' : downloadButtonLabel(announced, done, progress, !!previewUrl)}
           onClose={() => setFull(false)}
         />
       )}
@@ -162,10 +172,11 @@ export function FileCard({
         <div style={{ marginTop: 8 }}>
           <div style={{ height: 6, background: pal.main, borderRadius: 99, overflow: 'hidden' }}>
             <div
+              className={st.tone === 'busy' ? 'dl-bar' : undefined}
               style={{
                 width: `${Math.max(2, pct)}%`,
                 height: '100%',
-                background: failed ? pal.red : paused ? pal.yellow : pal.accent,
+                background: failed ? pal.red : paused ? pal.yellow : pal.yellow,
                 transition: 'width .3s',
               }}
             />
@@ -187,6 +198,12 @@ export function FileCard({
         </div>
       )}
 
+      {done && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, fontSize: 11, color: pal.green, fontWeight: 700 }}>
+          <Ic name="check" size={13} />
+          completa e verificada
+        </div>
+      )}
       {!announced && (
         <div style={{ fontSize: 11, color: pal.muted, marginTop: 6 }}>
           aguardando o anúncio do arquivo…
@@ -199,33 +216,64 @@ export function FileCard({
       <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           type="button"
+          className={done ? 'dl-pop' : undefined}
           onClick={onDownload}
-          disabled={!announced}
+          disabled={!st.clickable}
+          aria-busy={st.spinning}
           title={
             !announced
               ? 'o anúncio deste arquivo ainda não chegou'
               : done
-                ? 'salvar na pasta Downloads'
-                : 'baixar do swarm e salvar em Downloads'
+                ? 'baixado e verificado'
+                : st.tone === 'busy'
+                  ? 'download em andamento'
+                  : 'baixar do swarm e salvar em Downloads'
           }
           style={{
-            background: pal.accent,
-            color: '#fff',
+            background: toneColor,
+            color: st.tone === 'busy' ? '#1e1f22' : '#fff',
             border: 'none',
             padding: '7px 12px',
             borderRadius: 8,
-            cursor: announced ? 'pointer' : 'not-allowed',
+            cursor: st.clickable ? 'pointer' : 'default',
             fontSize: 12,
             fontWeight: 800,
-            opacity: announced ? 1 : 0.55,
+            opacity: !announced ? 0.55 : 1,
             display: 'inline-flex',
             alignItems: 'center',
             gap: 6,
+            transition: 'background .25s, transform .12s',
           }}
         >
-          <Ic name={done ? 'save' : 'download'} size={14} />
-          {downloadButtonLabel(announced, done, progress, !!previewUrl)}
+          <span className={st.spinning ? 'spin' : undefined} style={{ display: 'inline-flex' }}>
+            <Ic name={st.icon} size={14} />
+          </span>
+          {st.label}
         </button>
+        {st.showRedownload && (
+          <button
+            type="button"
+            className="dl-pop"
+            onClick={onDownload}
+            title="baixar outra cópia do swarm e salvar em Downloads"
+            style={{
+              background: pal.red,
+              color: '#fff',
+              border: 'none',
+              padding: '7px 12px',
+              borderRadius: 8,
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 800,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <Ic name="download" size={14} />
+            Baixar novamente
+          </button>
+        )}
         {extra}
         {mine && mstatus === 'failed' && onRetry && (
           <button
@@ -250,3 +298,5 @@ export function FileCard({
     </>
   )
 }
+
+export default FileCard

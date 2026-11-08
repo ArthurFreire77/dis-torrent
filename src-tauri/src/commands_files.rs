@@ -42,9 +42,14 @@ pub(crate) fn vault_status(state: State<AppState>) -> Result<VaultStatus, String
     let store = open_store(&state)?;
     let stored = store.load_secret_hex().unwrap_or_default();
     let has_vault = store.kv_get("vault.on").as_deref() == Some("1") && stored.len() >= 88;
+    let has_identity = store.load_identity().is_some();
+    // Sem cofre e sem segredo legível = keyring sumiu (ou nunca houve). A UI
+    // precisa saber disso para pedir a senha em vez de oferecer "criar conta".
+    let secret_available = has_vault || plaintext_secret(&store).is_some();
     Ok(VaultStatus {
-        has_identity: store.load_identity().is_some(),
+        has_identity,
         has_vault,
+        locked: has_identity && !secret_available,
     })
 }
 
@@ -59,7 +64,13 @@ pub(crate) fn vault_unlock(
     auth_guard(&state, &key)?;
 
     let mut identity = store.load_identity().ok_or("sem identidade")?;
-    let stored = store.load_secret_hex().ok_or("sem cofre")?;
+    let Some(stored) = store.load_secret_hex().filter(|s| s.len() >= 88) else {
+        return Err(
+            "esta conta não tem senha de cofre e o keyring do sistema não respondeu — \
+             importe um .stormvault com senha para recuperar"
+                .into(),
+        );
+    };
     let blob = hex::decode(&stored).map_err(|_| "cofre corrompido".to_string())?;
 
     let secret = match distorrent_core::vault::open_sealed(&blob, &password) {
@@ -74,7 +85,9 @@ pub(crate) fn vault_unlock(
     if identity.pubkey_hex.is_empty() {
         if let Ok(kp) = Keypair::from_secret_hex(&secret) {
             identity.pubkey_hex = kp.public_hex();
-            let _ = store.save_identity(&identity, &stored);
+            identity.fingerprint = kp.fingerprint();
+            // Metadados apenas: o blob selado já está em `identity.secret`.
+            let _ = store.save_identity_meta(&identity);
         }
     }
     *state.unlocked.lock().unwrap_or_else(|e| e.into_inner()) = true;
@@ -101,6 +114,13 @@ pub(crate) fn vault_change(old: String, new: String, state: State<AppState>) -> 
     store
         .save_secret_blob(&hex::encode(&newblob))
         .map_err(err)?;
+    // Depois que existe senha do cofre, o texto claro da chave no keyring não
+    // pode continuar valendo: seria um segundo caminho sem senha para a conta.
+    store.kv_set("vault.on", "1").map_err(err)?;
+    #[cfg(not(target_os = "android"))]
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+        let _ = entry.delete_password();
+    }
     auth_ok(&state, &key);
     Ok(())
 }
@@ -145,6 +165,12 @@ pub(crate) fn vault_import(
 
     if vault_blob.len() < 88 {
         return Err("vault blob inválido (muito curto)".into());
+    }
+    // A identidade tem de ser coerente com o blob: sem isso um JSON arbitrário
+    // vira "conta" na UI até a senha falhar.
+    if !distorrent_core::identity::fingerprint_matches(&identity.fingerprint, &identity.pubkey_hex)
+    {
+        return Err("identity inválida: fingerprint não corresponde à pubkey".into());
     }
 
     store.save_identity(&identity, &vault_blob).map_err(err)?;
@@ -193,6 +219,10 @@ pub(crate) fn account_save_imported(
     }
     if vault_blob.len() < 88 {
         return Err("vault blob inválido (muito curto)".into());
+    }
+    if !distorrent_core::identity::fingerprint_matches(&identity.fingerprint, &identity.pubkey_hex)
+    {
+        return Err("identity inválida: fingerprint não corresponde à pubkey".into());
     }
 
     let store = open_store(&state)?;
@@ -285,10 +315,24 @@ pub(crate) fn account_switch(
                 nickname: nick,
                 created_at: distorrent_core::identity::now_ms(),
             };
+            if !imported_identity.pubkey_hex.is_empty()
+                && !distorrent_core::identity::fingerprint_matches(
+                    &imported_identity.fingerprint,
+                    &imported_identity.pubkey_hex,
+                )
+            {
+                return Err("conta importada corrompida: fingerprint não bate com a pubkey".into());
+            }
+            // Blob selado no slot ativo; o texto claro anterior (keyring) não
+            // pode continuar valendo para OUTRA conta.
             store
                 .save_identity(&imported_identity, &blob)
                 .map_err(err)?;
             store.kv_set("vault.on", "1").map_err(err)?;
+            #[cfg(not(target_os = "android"))]
+            if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
+                let _ = entry.delete_password();
+            }
 
             {
                 let guard = state.engine.lock().unwrap_or_else(|e| e.into_inner());
@@ -442,7 +486,9 @@ pub(crate) fn save_file_stream(
         }
         #[cfg(not(target_os = "android"))]
         {
-            resolve_downloads_dir()?
+            // Respeita a pasta escolhida pelo usuário (Configurações → Cofre &
+            // Backup → Onde salvar). Antes ignorava e sempre salvava em Downloads.
+            crate::download_target::target_dir(&app, &state)?
         }
     };
     fs::create_dir_all(&downloads).map_err(|e| format!("save_file_stream travou em mkdir: {e}"))?;
@@ -802,6 +848,21 @@ pub(crate) fn cache_set_cap(cap_mb: u64, state: State<AppState>) -> Result<(), S
         .kv_set("cache.cap_mb", &cap.to_string())
         .map_err(err)?;
     state.cache.set_cap(cap * 1024 * 1024).map_err(err)
+}
+
+#[tauri::command]
+pub(crate) fn cache_get_ttl(state: State<AppState>) -> Result<u64, String> {
+    Ok(state.cache.ttl_secs())
+}
+
+#[tauri::command]
+pub(crate) fn cache_set_ttl(days: u64, state: State<AppState>) -> Result<(), String> {
+    let days = days.clamp(1, 30);
+    let store = open_store(&state)?;
+    store
+        .kv_set("cache.ttl_days", &days.to_string())
+        .map_err(err)?;
+    state.cache.set_ttl(days * 24 * 60 * 60).map_err(err)
 }
 
 #[tauri::command]

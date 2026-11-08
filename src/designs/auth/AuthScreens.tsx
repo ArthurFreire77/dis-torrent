@@ -105,6 +105,7 @@ export function CreateAccount({ palette, mobile, onDone }: {
   onDone: (identity: Identity) => void
 }) {
   const [nick, setNick] = useState('')
+  const [pass, setPass] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [vaultName, setVaultName] = useState<string | null>(null)
@@ -118,9 +119,11 @@ export function CreateAccount({ palette, mobile, onDone }: {
   async function submit() {
     setErr(null)
     if (!nick.trim()) return setErr('escolha seu nome')
+    const senha = services.kind === 'native' && pass.length > 0 ? pass : null
+    if (senha !== null && pass.length < 8) return setErr('a senha do cofre precisa de pelo menos 8 caracteres')
     setBusy(true)
     try {
-      onDone(await services.identityCreate(nick.trim(), null))
+      onDone(await services.identityCreate(nick.trim(), senha))
     } catch (e) {
       setErr(message(e))
     } finally {
@@ -165,12 +168,27 @@ export function CreateAccount({ palette, mobile, onDone }: {
     <AuthCard palette={palette} mobile={mobile}>
       <div style={{ fontWeight: 800, color: palette.heading, fontSize: 16, marginBottom: 4 }}>Criar conta</div>
       <div style={{ fontSize: 12, color: palette.muted, marginBottom: 14, lineHeight: 1.5 }}>
-        Escolha seu nome. Sua chave é gerada neste {mobile ? 'dispositivo' : 'computador'} — <b>sem senha</b>, login direto pela chave.
+        Escolha seu nome. Sua chave é gerada neste {mobile ? 'dispositivo' : 'computador'} — sem
+        cadastro. {services.kind === 'native'
+          ? 'A senha abaixo é opcional: sem ela, a chave fica no keyring do sistema (não copia para outro PC sem o cofre).'
+          : 'A chave fica só neste navegador.'}
       </div>
       <input
         style={inputStyle} placeholder="Seu nome" value={nick} autoCapitalize="none" spellCheck={false}
         onChange={e => setNick(e.target.value)} onKeyDown={e => e.key === 'Enter' && void submit()}
       />
+      {services.kind === 'native' && (
+        <input
+          style={{ ...inputStyle, marginTop: 8 }} type="password" placeholder="senha do cofre (opcional)"
+          aria-label="Senha do cofre" value={pass} autoCapitalize="none" spellCheck={false}
+          onChange={e => setPass(e.target.value)} onKeyDown={e => e.key === 'Enter' && void submit()}
+        />
+      )}
+      {services.kind === 'native' && (
+        <div style={{ fontSize: 11, color: palette.muted, marginTop: 6, lineHeight: 1.5 }}>
+          Sem senha a chave vai para o keyring do SO. Ela NÃO fica em texto claro no banco do app.
+        </div>
+      )}
       {err && errorBox(palette, err)}
       <button style={{ ...btnStyle, marginTop: 14 }} disabled={busy || !nick.trim()} onClick={submit}>
         {busy ? 'criando…' : 'Criar conta'}
@@ -192,7 +210,7 @@ export function CreateAccount({ palette, mobile, onDone }: {
         </div>
       )}
       <div style={{ fontSize: 11, color: palette.muted, marginTop: 2, textAlign: 'center', lineHeight: 1.5 }}>
-        Sem senha — o app verifica se você tem a chave local.
+        A identidade é a chave: o fingerprint de 12 caracteres é o que o outro lado verifica.
       </div>
     </AuthCard>
   )
@@ -211,6 +229,9 @@ export function LockScreen({ palette, mobile, nickname, onUnlock }: {
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState<SavedAccount[]>([])
   const [selectedFp, setSelectedFp] = useState<string | null>(null)
+  /** Identidade existe, mas o segredo não está neste PC (keyring de outro
+   *  perfil / pasta copiada). Sem cofre por senha não há como desbloquear. */
+  const [noKeyHere, setNoKeyHere] = useState(false)
 
   const inputStyle = authInputStyle(palette, mobile)
   const btnStyle = authButtonStyle(palette, mobile)
@@ -220,6 +241,13 @@ export function LockScreen({ palette, mobile, nickname, onUnlock }: {
     if (mobile) return
     services.accountsList().then(setSaved).catch(() => {})
   }, [mobile])
+
+  useEffect(() => {
+    if (services.kind !== 'native') return
+    services.vaultStatus()
+      .then((s) => setNoKeyHere(!!s.locked && !s.has_vault))
+      .catch(() => {})
+  }, [])
 
   async function submit() {
     setErr(null)
@@ -241,6 +269,13 @@ export function LockScreen({ palette, mobile, nickname, onUnlock }: {
       </div>
       <div style={{ textAlign: 'center', fontWeight: 800, color: palette.heading, fontSize: 16 }}>Bem-vindo de volta, {currentNick}</div>
       <div style={{ textAlign: 'center', fontSize: 12, color: palette.muted, marginTop: 4, marginBottom: 14 }}>Digite sua senha para desbloquear</div>
+      {noKeyHere && (
+        <div style={{ fontSize: 12, color: '#faa61a', background: '#2a2110', border: '1px solid #faa61a55', borderRadius: 6, padding: '8px 10px', marginBottom: 10, lineHeight: 1.5 }}>
+          A chave desta conta não está no keyring deste {mobile ? 'aparelho' : 'computador'}.
+          Sem ela a conta não abre aqui. Se você tem um <b>.stormvault</b> desta conta (com a
+          chave), apague os dados locais do app e importe o arquivo na primeira tela.
+        </div>
+      )}
       {saved.length > 1 && (
         <select
           value={selectedFp ?? ''} onChange={e => setSelectedFp(e.target.value || null)}

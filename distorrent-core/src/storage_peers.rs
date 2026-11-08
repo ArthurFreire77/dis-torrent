@@ -6,12 +6,35 @@ use super::*;
 use rusqlite::params;
 
 impl Store {
+    /// Grava/atualiza um peer. Uma vez que um fingerprint esteja ligado a uma
+    /// pubkey, outra chave para o mesmo fp é RECUSADA: aceitar a troca deixaria
+    /// alguém assumir um fingerprint já conhecido (colisão entre o esquema
+    /// atual e o legado de fingerprint).
     pub fn upsert_peer(&self, p: &PeerRecord) -> Result<()> {
+        let existing: Option<String> = self
+            .locked()
+            .query_row(
+                "SELECT pubkey_hex FROM peers WHERE fp=?1",
+                params![p.fp],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(bound) = existing {
+            if !bound.is_empty()
+                && !p.pubkey_hex.is_empty()
+                && !bound.eq_ignore_ascii_case(&p.pubkey_hex)
+            {
+                return Err(DistorrentError::Protocol(format!(
+                    "pubkey diferente para o fingerprint {} — recusado",
+                    p.fp
+                )));
+            }
+        }
         self.locked().execute(
             "INSERT INTO peers(fp,pubkey_hex,nickname,addr,last_seen,origin)
              VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(fp) DO UPDATE SET
-               pubkey_hex=excluded.pubkey_hex,
+               pubkey_hex=CASE WHEN peers.pubkey_hex='' THEN excluded.pubkey_hex ELSE peers.pubkey_hex END,
                nickname=CASE WHEN excluded.nickname='' THEN peers.nickname ELSE excluded.nickname END,
                addr=COALESCE(excluded.addr, peers.addr),
                last_seen=excluded.last_seen,

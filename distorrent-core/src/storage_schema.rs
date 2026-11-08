@@ -94,6 +94,16 @@ impl Store {
         self.kv_set("identity.secret", secret_hex)
     }
 
+    /// Grava só os metadados públicos. No desktop o segredo vive no keyring;
+    /// chamar `save_identity` ali gravaria a chave privada em texto claro.
+    pub fn save_identity_meta(&self, id: &Identity) -> Result<()> {
+        self.kv_set(
+            "identity",
+            &serde_json::to_string(id)
+                .map_err(|e| DistorrentError::Protocol(format!("serializar identidade: {e}")))?,
+        )
+    }
+
     pub fn load_identity(&self) -> Option<Identity> {
         let raw = self.kv_get("identity")?;
         serde_json::from_str(&raw).ok()

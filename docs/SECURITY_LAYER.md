@@ -134,8 +134,11 @@ localStorage honesto entre abas): `serverRulesGet/Set`, `auditList`,
   (amizade aceita já é o gate).
 - Metadados (quem fala com quem, quando, tamanho) continuam visíveis —
   padding só no modo `full`.
-- Fallback de keyring sem secret service guarda chave em SQLite plano
-  (documentado em THREAT_MODEL.md, visível na UI).
+- Fallback de keyring no **desktop** foi removido: sem keyring e sem senha,
+  a criação de conta falha e pede senha; a chave nunca fica em texto claro no
+  SQLite (ver THREAT_MODEL.md, "Cofre portátil e segredo da identidade").
+- No **Android** a chave ainda fica no SQLite do sandbox do app (sem keystore
+  neste build) — limitação documentada e aberta.
 - Sibyl continua sem solução criptográfica; reputação + PoW + convite
   com fingerprint mitigam em servidores.
 

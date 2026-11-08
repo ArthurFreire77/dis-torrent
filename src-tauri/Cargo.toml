@@ -47,7 +47,7 @@ tiny_http = "0.12"
 # Esconder a barra "tauri.localhost está compartilhando sua tela" no Windows:
 # é uma janela do Chromium, sem API de controle (WebView2Feedback#2442).
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 # LIGA O WebRTC NO WEBCOMPATÍVEL DO LINUX. wry liga `enable_webgl`,# `enable_webaudio` e `enable_canvas` por conta própria, mas ESQUECE do
 # `enable_webrtc` — que no WebKitGTK vem DESLIGADO por padrão. Resultado:

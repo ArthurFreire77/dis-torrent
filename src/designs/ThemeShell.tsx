@@ -529,7 +529,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch (e) { console.warn('[distorrent-probe] AppState FALHOU:', String(e)) }
     let stopBots: (() => void) | undefined
     try { stopBots = botRuntime.start() } catch {  }
-    try { downloadManager.load() } catch {  }
+    void downloadManager.load().catch(() => {  })
     let unCount = () => {}
     try {
       unCount = downloadManager.subscribe((items) => {

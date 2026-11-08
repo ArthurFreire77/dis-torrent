@@ -247,3 +247,236 @@ fn export_message_cap() {
     assert_eq!(full.messages.len(), 50);
     assert!(!full.meta.messages_truncated);
 }
+
+#[test]
+fn perfil_react_pin_read_e_bookmark_viajam_no_cofre() {
+    let (a, kp) = mk_account("alice");
+    let me = kp.fingerprint();
+    seed_conversation(
+        &a,
+        &kp,
+        "b0b0b0b0b0b0",
+        &["oi", "combinado", "apagar pra mim"],
+    );
+    a.profile_set_local(
+        &me,
+        "Alice",
+        "sobre mim",
+        "QUJD",
+        "REVG",
+        "#5865f2",
+        false,
+        false,
+    )
+    .unwrap();
+    let conv = a.list_conversations().unwrap()[0].clone();
+    let msgs = a.list_messages(&conv.id, 10).unwrap();
+    let first = msgs[0].id.clone();
+    let second = msgs[1].id.clone();
+    let third = msgs[2].id.clone();
+    a.reaction_toggle(&first, &conv.id, "🔥", &me).unwrap();
+    a.msg_pin(&second, &conv.id, true, &me).unwrap();
+    a.bookmark_set(&conv.id, "receita", "https://exemplo")
+        .unwrap();
+    a.conv_read_set(&conv.id, &me, msgs[0].ts).unwrap();
+    a.hide_messages_local(&[third.clone()]).unwrap();
+
+    let data = stormvault::collect(&a, Some(kp.secret_hex()), None).unwrap();
+    assert_eq!(data.meta.data_version, 2);
+    assert!(data
+        .profiles
+        .iter()
+        .any(|p| p.fp == me && p.avatar_b64 == "QUJD"));
+    assert!(data.reactions.iter().any(|r| r.msg_id == first));
+    assert!(data
+        .message_meta
+        .iter()
+        .any(|m| m.msg_id == second && m.pinned));
+    assert!(data.bookmarks.iter().any(|b| b.name == "receita"));
+    assert!(
+        data.read_states.iter().any(|r| r.conv_id == conv.id),
+        "read state do usuário deve exportar"
+    );
+    assert!(data.hidden.iter().any(|h| h.msg_id == third));
+
+    let sealed = stormvault::seal_with_password(&data, "senha-forte-123").unwrap();
+    let b = Store::open_in_memory().unwrap();
+    let report = stormvault::import_with_password(&b, &sealed, "senha-forte-123").unwrap();
+    assert!(report.identity_installed);
+    assert!(report.profiles_merged >= 1);
+    assert!(
+        report.social_merged >= 3,
+        "reação/pin/read/bookmark: {}",
+        report.social_merged
+    );
+    let prof = b.profile_get(&me).unwrap();
+    assert_eq!(prof.avatar_b64, "QUJD", "avatar não sobreviveu ao cofre");
+    assert_eq!(prof.banner_b64, "REVG");
+    assert!(b
+        .pins_list(&conv.id)
+        .unwrap()
+        .iter()
+        .any(|p| p.msg_id == second));
+    assert!(
+        !b.reaction_toggle(&first, &conv.id, "🔥", &me).unwrap(),
+        "reação importada já existia"
+    );
+    assert_eq!(b.conv_read_cursor(&conv.id, &me).unwrap(), msgs[0].ts);
+    assert_eq!(b.bookmark_list(&conv.id).unwrap().len(), 1);
+    let visible = b.list_messages(&conv.id, 100).unwrap();
+    assert!(
+        visible.iter().all(|m| m.id != third),
+        "mensagem apagada-para-mim deve continuar oculta"
+    );
+}
+
+#[test]
+fn bots_nao_exportam_token_nem_segredo_de_webhook() {
+    let (a, kp) = mk_account("alice");
+    let me = kp.fingerprint();
+    a.create_community("cid-bot", "clube", &me, &[("ch-1", "geral")])
+        .unwrap();
+    let mut bot = distorrent_core::storage::BotRow {
+        id: "bot-1".into(),
+        community_id: "cid-bot".into(),
+        name: "Ajudante".into(),
+        discriminator: "0001".into(),
+        avatar: "🤖".into(),
+        role_id: None,
+        token: "token-local-secreto".into(),
+        online: true,
+        owner_fp: me.clone(),
+        created_at: 1,
+        config: "{}".into(),
+        perms: 0,
+        webhook_secret: "webhook-secreto".into(),
+    };
+    a.bot_upsert(&bot).unwrap();
+    let data = stormvault::collect(&a, None, None).unwrap();
+    let exported = data.communities.iter().find(|c| c.id == "cid-bot").unwrap();
+    assert!(
+        exported
+            .bots
+            .iter()
+            .all(|b| b.token.is_empty() && b.webhook_secret.is_empty()),
+        "credencial de bot não pode sair no cofre"
+    );
+    bot.token.clear();
+    bot.webhook_secret.clear();
+    assert!(exported
+        .bots
+        .iter()
+        .any(|b| b.name == "Ajudante" && b.owner_fp == me));
+}
+
+#[test]
+fn cofre_v1_antigo_continua_abrindo() {
+    let (a, kp) = mk_account("alice");
+    seed_conversation(&a, &kp, "b0b0b0b0b0b0", &["histórico antigo"]);
+    // Simula um cofre v1: remove os campos novos do JSON e do meta.
+    let data = stormvault::collect(&a, Some(kp.secret_hex()), None).unwrap();
+    let mut json = serde_json::to_value(&data).unwrap();
+    let obj = json.as_object_mut().unwrap();
+    for key in [
+        "profiles",
+        "presence",
+        "reactions",
+        "message_meta",
+        "read_states",
+        "bookmarks",
+        "threads",
+        "polls",
+        "poll_votes",
+        "events",
+        "emojis",
+        "bans",
+        "timeouts",
+        "channel_cfg",
+        "server_nicknames",
+        "group_owners",
+        "mentions",
+        "hidden",
+    ] {
+        obj.remove(key);
+    }
+    obj.get_mut("meta")
+        .and_then(|m| m.as_object_mut())
+        .unwrap()
+        .remove("data_version");
+    let v1: stormvault::StormVaultData = serde_json::from_value(json).unwrap();
+    assert_eq!(v1.meta.data_version, 1);
+    assert!(v1.profiles.is_empty());
+
+    let sealed = stormvault::seal_with_password(&v1, "senha-12345").unwrap();
+    let h = stormvault::read_header(&sealed).unwrap();
+    assert_eq!(h.v, 1, "container não pode mudar de versão (AAD)");
+    let b = Store::open_in_memory().unwrap();
+    let report = stormvault::import_with_password(&b, &sealed, "senha-12345").unwrap();
+    assert_eq!(report.data_version, 1);
+    assert_eq!(report.messages_merged, 1);
+}
+
+#[test]
+fn identidade_trocada_no_payload_recusada() {
+    let (a, kp) = mk_account("alice");
+    let (outra, kp_outra) = mk_account("mallory");
+    seed_conversation(&a, &kp, "b0b0b0b0b0b0", &["oi"]);
+    let _ = outra;
+
+    // 1) fingerprint inventado, pubkey de outra pessoa.
+    let mut data = stormvault::collect(&a, Some(kp.secret_hex()), None).unwrap();
+    data.identity.pubkey_hex = kp_outra.public_hex();
+    let sealed = stormvault::seal_with_password(&data, "senha-12345").unwrap();
+    let err = stormvault::open_with_password(&sealed, "senha-12345").unwrap_err();
+    assert!(
+        err.to_string().contains("não corresponde à pubkey"),
+        "erro: {err}"
+    );
+    assert!(stormvault::import_with_password(
+        &Store::open_in_memory().unwrap(),
+        &sealed,
+        "senha-12345"
+    )
+    .is_err());
+
+    // 2) fingerprint alheio (header e payload coerentes com a pubkey alheia),
+    //    mas segredo é o do dono original → segredo não deriva a pubkey.
+    let mut data2 = stormvault::collect(&outra, Some(kp_outra.secret_hex()), None).unwrap();
+    data2.identity = kp_outra.identity("mallory");
+    data2.secret_hex = Some(kp.secret_hex());
+    let sealed2 = stormvault::seal_with_password(&data2, "senha-12345").unwrap();
+    let err2 = stormvault::open_with_password(&sealed2, "senha-12345").unwrap_err();
+    assert!(
+        err2.to_string().contains("chave privada não corresponde"),
+        "erro: {err2}"
+    );
+
+    // 3) header com fp divergente do payload (AAD válido, conteúdo coerente).
+    let data3 = stormvault::collect(&a, Some(kp.secret_hex()), None).unwrap();
+    let sealed3 = stormvault::seal_with_password(&data3, "senha-12345").unwrap();
+    let mut hdr = stormvault::read_header(&sealed3).unwrap();
+    hdr.fp = kp_outra.fingerprint();
+    assert_ne!(hdr.fp, data3.identity.fingerprint);
+    // Simula o leitor recebendo um header trocado (payload autêntico).
+    let mut data4 = data3.clone();
+    assert!(stormvault::import_merge_only(&Store::open_in_memory().unwrap(), &data4).is_err());
+    // `import_merge_only` valida o binding interno; o header é checado no open.
+    data4.identity.fingerprint = kp_outra.fingerprint();
+    assert!(stormvault::import_merge_only(&Store::open_in_memory().unwrap(), &data4).is_err());
+}
+
+#[test]
+fn mesclar_nao_aceita_segredo_de_outra_conta() {
+    let (a, kp) = mk_account("alice");
+    let (b, kp_b) = mk_account("bob");
+    seed_conversation(&a, &kp, "b0b0b0b0b0b0", &["oi"]);
+    let mut data = stormvault::collect(&a, Some(kp.secret_hex()), None).unwrap();
+    // O payload pertence a Alice; o segredo é de Bob (tentativa de vitrine).
+    data.secret_hex = Some(kp_b.secret_hex());
+    let err = stormvault::import_merge_only(&b, &data).unwrap_err();
+    assert!(
+        err.to_string().contains("chave privada não corresponde"),
+        "erro: {err}"
+    );
+    let _ = b;
+}

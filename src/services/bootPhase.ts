@@ -3,6 +3,8 @@ export type BootPhase = 'loading' | 'create' | 'lock' | 'app'
 export interface VaultStatusView {
   has_identity: boolean
   has_vault: boolean
+  /** Tem identidade, mas o keyring sumiu e não há cofre por senha. */
+  locked?: boolean
 }
 
 /**
@@ -24,5 +26,10 @@ export function resolveBootPhase(input: {
   if (!input.vault) return 'create'
   if (!input.vault.has_identity) return 'create'
   if (input.vault.has_vault) return input.unlocked ? 'app' : 'lock'
+  // Identidade sem segredo recuperável (pasta copiada para outro PC sem o
+  // keyring): a tela de bloqueio é o único caminho honesto — ela explica que
+  // é preciso importar um .stormvault com senha. "Criar conta" mentiria
+  // porque `identity_create` recusa com identidade já existente.
+  if (input.vault.locked) return 'lock'
   return input.identity ? 'app' : 'create'
 }

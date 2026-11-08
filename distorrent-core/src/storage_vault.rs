@@ -200,6 +200,7 @@ impl Store {
         let identity = self.load_identity().ok_or_else(|| {
             crate::DistorrentError::Protocol("sem identidade para exportar".into())
         })?;
+        let my_fp = identity.fingerprint.clone();
 
         let conversations = self.list_conversations()?;
         let total_msgs = self.count_messages().unwrap_or(0);
@@ -231,8 +232,10 @@ impl Store {
         let truncated = (messages.len() as i64) < total_msgs;
 
         let friends = self.with_conn(|conn| {
-            let mut st =
-                conn.prepare("SELECT fp,nickname,status,added_at FROM friends ORDER BY added_at")?;
+            let mut st = conn.prepare(
+                "SELECT fp,nickname,status,added_at,requested_by,requested_at,blocked_at
+                 FROM friends ORDER BY added_at",
+            )?;
             let rows = st
                 .query_map([], |r| {
                     Ok(crate::stormvault::FriendRow {
@@ -240,6 +243,9 @@ impl Store {
                         nickname: r.get(1)?,
                         status: r.get(2)?,
                         added_at: r.get(3)?,
+                        requested_by: r.get(4)?,
+                        requested_at: r.get(5)?,
+                        blocked_at: r.get(6)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -253,7 +259,7 @@ impl Store {
         for (id, name, owner) in self.list_communities()? {
             let channels = self.channel_rows(&id)?;
             let roles = self.roles_list(&id)?;
-            let bots = self.with_conn(|conn| {
+            let mut bots = self.with_conn(|conn| {
                 let mut st = conn.prepare(
                     "SELECT id,community_id,name,discriminator,avatar,role_id,token,online,owner_fp,created_at,config,perms,webhook_secret
                      FROM bots WHERE community_id=?1 ORDER BY created_at",
@@ -263,6 +269,12 @@ impl Store {
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(rows)
             })?;
+            // Token e segredo de webhook são credenciais do dono, presas a ESTE
+            // aparelho. Não viajam no cofre: quem restaura regenera o token.
+            for b in bots.iter_mut() {
+                b.token.clear();
+                b.webhook_secret.clear();
+            }
             let members = self.list_members(&id)?;
             let mut member_roles = Vec::new();
             for (fp, _, _) in &members {
@@ -389,7 +401,421 @@ impl Store {
             meta: crate::stormvault::StormVaultMeta {
                 app_version: option_env!("CARGO_PKG_VERSION").map(|s| s.to_string()),
                 messages_truncated: truncated,
+                data_version: crate::stormvault::DATA_VERSION,
             },
+            profiles: self.collect_profiles()?,
+            presence: self.collect_own_presence()?,
+            reactions: self.collect_reactions()?,
+            message_meta: self.collect_message_meta()?,
+            read_states: self.collect_read_states()?,
+            bookmarks: self.collect_bookmarks()?,
+            threads: self.collect_threads()?,
+            polls: self.collect_polls()?,
+            poll_votes: self.collect_poll_votes()?,
+            events: self.collect_events()?,
+            emojis: self.collect_emojis()?,
+            bans: self.collect_bans()?,
+            timeouts: self.collect_timeouts()?,
+            channel_cfg: self.collect_channel_cfg()?,
+            server_nicknames: self.collect_server_nicknames()?,
+            group_owners: self.collect_group_owners()?,
+            mentions: self.collect_mentions(&my_fp)?,
+            hidden: self.collect_hidden()?,
+        })
+    }
+
+    fn collect_profiles(&self) -> Result<Vec<crate::social::ProfileView>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT fp,display_name,about,avatar_b64,banner_b64,accent,updated_at,rev,content_hash
+                 FROM profiles ORDER BY updated_at",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::social::ProfileView {
+                        fp: r.get(0)?,
+                        display_name: r.get(1)?,
+                        about: r.get(2)?,
+                        avatar_b64: r.get(3)?,
+                        banner_b64: r.get(4)?,
+                        accent: r.get(5)?,
+                        updated_at: r.get(6)?,
+                        rev: r.get(7)?,
+                        content_hash: r.get(8)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Presença de TERCEIROS é efêmera (TTL de 90 s): só o próprio status
+    /// escolhido pelo usuário faz sentido migrar.
+    fn collect_own_presence(&self) -> Result<Vec<crate::social::PresenceView>> {
+        let me = self
+            .load_identity()
+            .map(|i| i.fingerprint)
+            .ok_or_else(|| crate::DistorrentError::Protocol("sem identidade".into()))?;
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT fp,status,custom,custom_emoji,updated_at FROM presence WHERE fp=?1",
+            )?;
+            let rows = st
+                .query_map(params![me], |r| {
+                    Ok(crate::social::PresenceView {
+                        fp: r.get(0)?,
+                        status: r.get(1)?,
+                        custom: r.get(2)?,
+                        custom_emoji: r.get(3)?,
+                        updated_at: r.get(4)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_reactions(&self) -> Result<Vec<crate::social::ReactionRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT msg_id,conv_id,emoji,reactor_fp,created_at FROM msg_reactions ORDER BY created_at",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::social::ReactionRow {
+                        msg_id: r.get(0)?,
+                        conv_id: r.get(1)?,
+                        emoji: r.get(2)?,
+                        reactor_fp: r.get(3)?,
+                        created_at: r.get(4)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_message_meta(&self) -> Result<Vec<crate::social::MsgMetaView>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT msg_id,conv_id,reply_to,forwarded_from,edited_body,edited_at,deleted,pinned,pinned_by,mentioned
+                 FROM msg_meta ORDER BY conv_id",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::social::MsgMetaView {
+                        msg_id: r.get(0)?,
+                        conv_id: r.get(1)?,
+                        reply_to: r.get(2)?,
+                        forwarded_from: r.get(3)?,
+                        edited_body: r.get(4)?,
+                        edited_at: r.get(5)?,
+                        deleted: r.get::<_, i64>(6)? != 0,
+                        pinned: r.get::<_, i64>(7)? != 0,
+                        pinned_by: r.get(8)?,
+                        mentioned: r.get::<_, i64>(9)? != 0,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Cursores de leitura: os DO usuário (por membro) e o legado global. Os de
+    /// terceiros são cache — re-chegam pelos recibos de leitura.
+    fn collect_read_states(&self) -> Result<Vec<crate::stormvault::ReadStateRow>> {
+        let me = self
+            .load_identity()
+            .map(|i| i.fingerprint)
+            .ok_or_else(|| crate::DistorrentError::Protocol("sem identidade".into()))?;
+        self.with_conn(|conn| {
+            let mut out = Vec::new();
+            let mut st =
+                conn.prepare("SELECT conv_id,last_read_ts,updated_at FROM conv_read WHERE fp=?1")?;
+            let rows = st.query_map(params![me], |r| {
+                Ok(crate::stormvault::ReadStateRow {
+                    conv_id: r.get(0)?,
+                    fp: me.clone(),
+                    last_read_ts: r.get(1)?,
+                    updated_at: r.get(2)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+            let mut st2 =
+                conn.prepare("SELECT conv_id,last_read_ts,updated_at FROM read_cursors")?;
+            let rows2 = st2.query_map([], |r| {
+                Ok(crate::stormvault::ReadStateRow {
+                    conv_id: r.get(0)?,
+                    fp: String::new(),
+                    last_read_ts: r.get(1)?,
+                    updated_at: r.get(2)?,
+                })
+            })?;
+            for row in rows2 {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn collect_bookmarks(&self) -> Result<Vec<crate::stormvault::BookmarkRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare("SELECT conv_id,name,payload,created_at FROM bookmarks")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::BookmarkRow {
+                        conv_id: r.get(0)?,
+                        name: r.get(1)?,
+                        payload: r.get(2)?,
+                        created_at: r.get(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_threads(&self) -> Result<Vec<crate::social::ThreadRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT id,community_id,parent_channel,name,author_fp,created_at,archived,kind,tags
+                 FROM threads ORDER BY created_at",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::social::ThreadRow {
+                        id: r.get(0)?,
+                        community_id: r.get(1)?,
+                        parent_channel: r.get(2)?,
+                        name: r.get(3)?,
+                        author_fp: r.get(4)?,
+                        created_at: r.get(5)?,
+                        archived: r.get::<_, i64>(6)? != 0,
+                        kind: r.get(7)?,
+                        tags: r.get(8)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_polls(&self) -> Result<Vec<crate::social::PollRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT id,community_id,channel_id,question,options,multi,author_fp,created_at,ends_at,closed
+                 FROM polls ORDER BY created_at",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    let options: String = r.get(4)?;
+                    Ok(crate::social::PollRow {
+                        id: r.get(0)?,
+                        community_id: r.get(1)?,
+                        channel_id: r.get(2)?,
+                        question: r.get(3)?,
+                        options: Self::parse_json_list(&options),
+                        multi: r.get::<_, i64>(5)? != 0,
+                        author_fp: r.get(6)?,
+                        created_at: r.get(7)?,
+                        ends_at: r.get(8)?,
+                        closed: r.get::<_, i64>(9)? != 0,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_poll_votes(&self) -> Result<Vec<crate::stormvault::PollVoteRow>> {
+        self.with_conn(|conn| {
+            let mut st =
+                conn.prepare("SELECT poll_id,voter_fp,option_idx,voted_at FROM poll_votes")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::PollVoteRow {
+                        poll_id: r.get(0)?,
+                        voter_fp: r.get(1)?,
+                        option_idx: r.get(2)?,
+                        voted_at: r.get(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_events(&self) -> Result<Vec<crate::social::EventRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT id,community_id,name,description,location,starts_at,ends_at,channel_id,entity_fp,status,interested
+                 FROM scheduled_events ORDER BY starts_at",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    let interested: String = r.get(10)?;
+                    Ok(crate::social::EventRow {
+                        id: r.get(0)?,
+                        community_id: r.get(1)?,
+                        name: r.get(2)?,
+                        description: r.get(3)?,
+                        location: r.get(4)?,
+                        starts_at: r.get(5)?,
+                        ends_at: r.get(6)?,
+                        channel_id: r.get(7)?,
+                        entity_fp: r.get(8)?,
+                        status: r.get(9)?,
+                        interested: Self::parse_json_list(&interested),
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_emojis(&self) -> Result<Vec<crate::social::EmojiRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT id,community_id,name,char,created_at FROM custom_emojis ORDER BY created_at",
+            )?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::social::EmojiRow {
+                        id: r.get(0)?,
+                        community_id: r.get(1)?,
+                        name: r.get(2)?,
+                        char: r.get(3)?,
+                        created_at: r.get(4)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_bans(&self) -> Result<Vec<crate::stormvault::CommunitySanctionRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn
+                .prepare("SELECT community_id,fp,reason,actor_fp,created_at,until_ms FROM bans")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::CommunitySanctionRow {
+                        community_id: r.get(0)?,
+                        fp: r.get(1)?,
+                        reason: r.get(2)?,
+                        actor_fp: r.get(3)?,
+                        created_at: r.get(4)?,
+                        until_ms: r.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_timeouts(&self) -> Result<Vec<crate::stormvault::CommunitySanctionRow>> {
+        self.with_conn(|conn| {
+            let mut st =
+                conn.prepare("SELECT community_id,fp,reason,until_ms,actor_fp,0 FROM timeouts")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::CommunitySanctionRow {
+                        community_id: r.get(0)?,
+                        fp: r.get(1)?,
+                        reason: r.get(2)?,
+                        until_ms: r.get(3)?,
+                        actor_fp: r.get(4)?,
+                        created_at: r.get(5)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_channel_cfg(&self) -> Result<Vec<crate::stormvault::ChannelCfgRow>> {
+        self.with_conn(|conn| {
+            let mut st =
+                conn.prepare("SELECT channel_id,slowmode_secs,nsfw,topic_locked FROM channel_cfg")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::ChannelCfgRow {
+                        channel_id: r.get(0)?,
+                        slowmode_secs: r.get(1)?,
+                        nsfw: r.get::<_, i64>(2)? != 0,
+                        topic_locked: r.get::<_, i64>(3)? != 0,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_server_nicknames(&self) -> Result<Vec<crate::stormvault::ServerNicknameRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare("SELECT community_id,fp,nickname FROM server_nicknames")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::ServerNicknameRow {
+                        community_id: r.get(0)?,
+                        fp: r.get(1)?,
+                        nickname: r.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_group_owners(&self) -> Result<Vec<crate::stormvault::GroupOwnerRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare("SELECT conv_id,owner_fp FROM group_owners")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::GroupOwnerRow {
+                        conv_id: r.get(0)?,
+                        owner_fp: r.get(1)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_mentions(&self, me: &str) -> Result<Vec<crate::stormvault::MentionRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare(
+                "SELECT msg_id,conv_id,target_fp,created_at FROM mentions WHERE target_fp=?1",
+            )?;
+            let rows = st
+                .query_map(params![me], |r| {
+                    Ok(crate::stormvault::MentionRow {
+                        msg_id: r.get(0)?,
+                        conv_id: r.get(1)?,
+                        target_fp: r.get(2)?,
+                        created_at: r.get(3)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    fn collect_hidden(&self) -> Result<Vec<crate::stormvault::HiddenRow>> {
+        self.with_conn(|conn| {
+            let mut st = conn.prepare("SELECT msg_id,conv_id,hidden_at FROM local_hidden")?;
+            let rows = st
+                .query_map([], |r| {
+                    Ok(crate::stormvault::HiddenRow {
+                        msg_id: r.get(0)?,
+                        conv_id: r.get(1)?,
+                        hidden_at: r.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
         })
     }
 
@@ -456,29 +882,42 @@ impl Store {
         }
 
         for f in &data.friends {
-            let existing: Option<(String, i64)> = tx
+            let existing: Option<(String, i64, i64)> = tx
                 .query_row(
-                    "SELECT status,added_at FROM friends WHERE fp=?1",
+                    "SELECT status,added_at,blocked_at FROM friends WHERE fp=?1",
                     params![f.fp],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
             match existing {
                 None => {
                     if tx.execute(
-                        "INSERT INTO friends(fp,nickname,status,added_at) VALUES(?1,?2,?3,?4)",
-                        params![f.fp, f.nickname, f.status, f.added_at],
+                        "INSERT INTO friends(fp,nickname,status,added_at,requested_by,requested_at,blocked_at)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                        params![
+                            f.fp,
+                            f.nickname,
+                            f.status,
+                            f.added_at,
+                            f.requested_by,
+                            f.requested_at,
+                            f.blocked_at
+                        ],
                     )? > 0
                     {
                         report.friends_merged += 1;
                     }
                 }
-                Some((status, added_at)) => {
+                Some((status, added_at, blocked_at)) => {
+                    // Bloqueio é decisão do usuário: o cofre nunca o remove.
                     let take =
                         f.added_at >= added_at && !(f.status.is_empty() && !status.is_empty());
                     if take
                         && tx.execute(
-                            "UPDATE friends SET nickname=?2, status=?3 WHERE fp=?1",
+                            "UPDATE friends SET nickname=?2, status=?3,
+                               requested_by=?4, requested_at=?5,
+                               blocked_at=MAX(blocked_at, ?6)
+                             WHERE fp=?1",
                             params![
                                 f.fp,
                                 if f.nickname.is_empty() {
@@ -494,7 +933,10 @@ impl Store {
                                     status
                                 } else {
                                     f.status.clone()
-                                }
+                                },
+                                f.requested_by,
+                                f.requested_at,
+                                f.blocked_at.max(blocked_at),
                             ],
                         )? > 0
                     {
@@ -657,7 +1099,334 @@ impl Store {
             }
         }
 
+        let (profiles_merged, social_merged) = merge_social_rows(&tx, data)?;
+        report.profiles_merged += profiles_merged;
+        report.social_merged += social_merged;
+        report.data_version = data.meta.data_version;
+
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Mescla o conteúdo v2 preservando o que é LOCAL por natureza (presença
+/// efêmera, pins, silenciamentos e endereço). Devolve (perfis, demais linhas).
+fn merge_social_rows(
+    tx: &rusqlite::Transaction<'_>,
+    data: &crate::stormvault::StormVaultData,
+) -> Result<(usize, usize)> {
+    let mut n = 0usize;
+    let mut profiles = 0usize;
+
+    // Perfil: vence a revisão maior; empate usa o hash canônico (determinístico
+    // entre dispositivos, sem depender de relógio).
+    for p in &data.profiles {
+        if p.fp.trim().is_empty() {
+            continue;
+        }
+        let cur: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT rev,content_hash FROM profiles WHERE fp=?1",
+                params![p.fp],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let take = match cur {
+            None => true,
+            Some((rev, hash)) => {
+                p.rev > rev || (p.rev == rev && !hash.is_empty() && p.content_hash > hash)
+            }
+        };
+        if !take {
+            continue;
+        }
+        let hash = if p.content_hash.is_empty() {
+            crate::social::profile_content_hash(
+                &p.display_name,
+                &p.about,
+                &p.avatar_b64,
+                &p.banner_b64,
+                &p.accent,
+            )
+        } else {
+            p.content_hash.clone()
+        };
+        tx.execute(
+            "INSERT INTO profiles(fp,display_name,about,avatar_b64,banner_b64,accent,updated_at,rev,content_hash)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(fp) DO UPDATE SET display_name=excluded.display_name, about=excluded.about,
+               avatar_b64=excluded.avatar_b64, banner_b64=excluded.banner_b64,
+               accent=excluded.accent, updated_at=excluded.updated_at,
+               rev=excluded.rev, content_hash=excluded.content_hash",
+            params![
+                p.fp,
+                p.display_name,
+                p.about,
+                p.avatar_b64,
+                p.banner_b64,
+                p.accent,
+                p.updated_at,
+                p.rev,
+                hash
+            ],
+        )?;
+        profiles += 1;
+    }
+    // Presença de terceiro é dado vivo (TTL de 90 s); só a do próprio usuário
+    // faz sentido migrar, senão o app mostraria "online" para quem está offline.
+    for pr in &data.presence {
+        if pr.fp != data.identity.fingerprint {
+            continue;
+        }
+        // `since` não é exportado (é a hora de início da sessão local).
+        tx.execute(
+            "INSERT INTO presence(fp,status,custom,custom_emoji,updated_at)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(fp) DO UPDATE SET status=excluded.status, custom=excluded.custom,
+               custom_emoji=excluded.custom_emoji, updated_at=excluded.updated_at",
+            params![pr.fp, pr.status, pr.custom, pr.custom_emoji, pr.updated_at],
+        )?;
+        n += 1;
+    }
+
+    for r in &data.reactions {
+        if tx.execute(
+            "INSERT OR IGNORE INTO msg_reactions(msg_id,conv_id,emoji,reactor_fp,created_at)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![r.msg_id, r.conv_id, r.emoji, r.reactor_fp, r.created_at],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for m in &data.message_meta {
+        // Metadados de edição/delete/reply vêm do autor e são imutáveis. O pin
+        // entra só quando a linha não existe: pin é estado do servidor e um
+        // cofre antigo não deve "despinar" o que o host fixou depois.
+        if tx.execute(
+            "INSERT OR IGNORE INTO msg_meta(msg_id,conv_id,reply_to,forwarded_from,edited_body,edited_at,deleted,pinned,pinned_at,pinned_by,mentioned)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,'',?9)",
+            params![
+                m.msg_id,
+                m.conv_id,
+                m.reply_to,
+                m.forwarded_from,
+                m.edited_body,
+                m.edited_at,
+                if m.deleted { 1 } else { 0 },
+                if m.pinned { 1 } else { 0 },
+                if m.mentioned { 1 } else { 0 }
+            ],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for rs in &data.read_states {
+        if rs.fp.is_empty() {
+            // Cursor legado: não regride.
+            tx.execute(
+                "INSERT INTO read_cursors(conv_id,last_read_ts,updated_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(conv_id) DO UPDATE SET
+                   last_read_ts=MAX(read_cursors.last_read_ts, excluded.last_read_ts)",
+                params![rs.conv_id, rs.last_read_ts, rs.updated_at],
+            )?;
+        } else if rs.fp == data.identity.fingerprint {
+            tx.execute(
+                "INSERT INTO conv_read(conv_id,fp,last_read_ts,updated_at) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(conv_id,fp) DO UPDATE SET
+                   last_read_ts=MAX(conv_read.last_read_ts, excluded.last_read_ts)",
+                params![rs.conv_id, rs.fp, rs.last_read_ts, rs.updated_at],
+            )?;
+        } else {
+            continue;
+        }
+        n += 1;
+    }
+
+    for b in &data.bookmarks {
+        if tx.execute(
+            "INSERT OR IGNORE INTO bookmarks(conv_id,name,payload,created_at) VALUES(?1,?2,?3,?4)",
+            params![b.conv_id, b.name, b.payload, b.created_at],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for t in &data.threads {
+        if tx.execute(
+            "INSERT OR IGNORE INTO threads(id,community_id,parent_channel,name,author_fp,created_at,archived,kind,tags)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                t.id,
+                t.community_id,
+                t.parent_channel,
+                t.name,
+                t.author_fp,
+                t.created_at,
+                if t.archived { 1 } else { 0 },
+                t.kind,
+                t.tags
+            ],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for p in &data.polls {
+        if tx.execute(
+            "INSERT OR IGNORE INTO polls(id,community_id,channel_id,question,options,multi,author_fp,created_at,ends_at,closed)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                p.id,
+                p.community_id,
+                p.channel_id,
+                p.question,
+                serde_json::to_string(&p.options).unwrap_or_else(|_| "[]".into()),
+                if p.multi { 1 } else { 0 },
+                p.author_fp,
+                p.created_at,
+                p.ends_at,
+                if p.closed { 1 } else { 0 }
+            ],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+    for v in &data.poll_votes {
+        if tx.execute(
+            "INSERT OR IGNORE INTO poll_votes(poll_id,voter_fp,option_idx,voted_at) VALUES(?1,?2,?3,?4)",
+            params![v.poll_id, v.voter_fp, v.option_idx, v.voted_at],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for e in &data.events {
+        if tx.execute(
+            "INSERT OR IGNORE INTO scheduled_events(id,community_id,name,description,location,starts_at,ends_at,channel_id,entity_fp,status,interested)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                e.id,
+                e.community_id,
+                e.name,
+                e.description,
+                e.location,
+                e.starts_at,
+                e.ends_at,
+                e.channel_id,
+                e.entity_fp,
+                e.status,
+                serde_json::to_string(&e.interested).unwrap_or_else(|_| "[]".into())
+            ],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for e in &data.emojis {
+        if tx.execute(
+            "INSERT OR IGNORE INTO custom_emojis(id,community_id,name,char,created_at)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![e.id, e.community_id, e.name, e.char, e.created_at],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    // Sanções são fatos do servidor. O cofre só ADICIONA: um cofre velho não
+    // pode desbanir ninguém.
+    for b in &data.bans {
+        if tx.execute(
+            "INSERT OR IGNORE INTO bans(community_id,fp,reason,actor_fp,created_at,until_ms)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                b.community_id,
+                b.fp,
+                b.reason,
+                b.actor_fp,
+                b.created_at,
+                b.until_ms
+            ],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+    for t in &data.timeouts {
+        if tx.execute(
+            "INSERT OR IGNORE INTO timeouts(community_id,fp,reason,until_ms,actor_fp)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![t.community_id, t.fp, t.reason, t.until_ms, t.actor_fp],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for c in &data.channel_cfg {
+        if tx.execute(
+            "INSERT OR IGNORE INTO channel_cfg(channel_id,slowmode_secs,nsfw,topic_locked)
+             VALUES(?1,?2,?3,?4)",
+            params![
+                c.channel_id,
+                c.slowmode_secs,
+                if c.nsfw { 1 } else { 0 },
+                if c.topic_locked { 1 } else { 0 }
+            ],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for sn in &data.server_nicknames {
+        if tx.execute(
+            "INSERT OR IGNORE INTO server_nicknames(community_id,fp,nickname) VALUES(?1,?2,?3)",
+            params![sn.community_id, sn.fp, sn.nickname],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for g in &data.group_owners {
+        if tx.execute(
+            "INSERT OR IGNORE INTO group_owners(conv_id,owner_fp) VALUES(?1,?2)",
+            params![g.conv_id, g.owner_fp],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for m in &data.mentions {
+        if tx.execute(
+            "INSERT OR IGNORE INTO mentions(msg_id,conv_id,target_fp,created_at) VALUES(?1,?2,?3,?4)",
+            params![m.msg_id, m.conv_id, m.target_fp, m.created_at],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    for h in &data.hidden {
+        if tx.execute(
+            "INSERT OR IGNORE INTO local_hidden(msg_id,conv_id,hidden_at) VALUES(?1,?2,?3)",
+            params![h.msg_id, h.conv_id, h.hidden_at],
+        )? > 0
+        {
+            n += 1;
+        }
+    }
+
+    Ok((profiles, n))
 }

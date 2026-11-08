@@ -1,6 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { downloadButtonLabel, formatSpeed, type FileCardProgress } from '../src/components/fileCardRules.ts'
+import {
+  downloadButtonLabel,
+  downloadButtonState,
+  formatSpeed,
+  type FileCardProgress,
+} from '../src/components/fileCardRules.ts'
 
 function prog(over: Partial<FileCardProgress> = {}): FileCardProgress {
   return { pct: 0, speed: 0, status: 'idle', ...over }
@@ -19,32 +24,51 @@ test('formatSpeed: unidades legíveis e com 1 decimal abaixo de 10', () => {
   assert.equal(formatSpeed(2.5 * 1024 * 1024), '2.5 MB/s')
 })
 
-test('botão: sem anúncio é "Baixar" e o card não promete progresso', () => {
-  assert.equal(downloadButtonLabel(false, false, undefined, false), 'Baixar')
+test('sem anúncio é azul "Baixar" e o botão não é clicável', () => {
+  const st = downloadButtonState(false, false, undefined)
+  assert.equal(st.label, 'Baixar')
+  assert.equal(st.tone, 'idle')
+  assert.equal(st.clickable, false)
+  assert.equal(downloadButtonLabel(false, false, undefined), 'Baixar')
 })
 
-test('botão: completo mostra ação de salvar (com prévia) ou baixar de novo', () => {
-  const done = prog({ pct: 100, status: 'completed' })
-  assert.equal(downloadButtonLabel(true, true, done, true), 'Salvar')
-  assert.equal(downloadButtonLabel(true, true, done, false), 'Baixar de novo')
+test('baixando vira AMARELO com spinner e percentual real', () => {
+  const st = downloadButtonState(true, false, prog({ pct: 43, status: 'downloading' }))
+  assert.equal(st.label, 'Baixando 43%')
+  assert.equal(st.tone, 'busy')
+  assert.equal(st.spinning, true)
+  assert.equal(st.clickable, false)
+  const zero = downloadButtonState(true, false, prog({ pct: 0, status: 'downloading' }))
+  assert.equal(zero.label, 'Baixando…')
+  assert.equal(zero.tone, 'busy')
 })
 
-test('botão: baixando mostra o percentual REAL (não "Baixar")', () => {
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 43, status: 'downloading' }), false), 'Baixando 43%')
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 0, status: 'downloading' }), false), 'Conectando…')
+test('concluído vira VERDE "Baixado" e só libera o re-download pelo botão vermelho', () => {
+  const st = downloadButtonState(true, true, prog({ pct: 100, status: 'completed' }))
+  assert.equal(st.label, 'Baixado')
+  assert.equal(st.tone, 'done')
+  assert.equal(st.icon, 'check')
+  assert.equal(st.clickable, false)
+  assert.equal(st.showRedownload, true)
+  assert.equal(downloadButtonLabel(true, true, prog({ pct: 100, status: 'completed' }), true), 'Salvar')
 })
 
-test('botão: conferir e salvar têm rótulo próprio', () => {
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 100, status: 'verifying' }), false), 'Conferindo integridade…')
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 100, status: 'saving' }), false), 'Salvando…')
+test('falha vira VERMELHO e pede nova tentativa', () => {
+  const st = downloadButtonState(true, false, prog({ pct: 40, status: 'failed' }))
+  assert.equal(st.label, 'Tentar de novo')
+  assert.equal(st.tone, 'failed')
+  assert.equal(st.clickable, true)
+  assert.equal(st.showRedownload, false)
 })
 
-test('botão: pausado e com falha pedem a ação certa', () => {
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 40, status: 'paused' }), false), 'Retomar')
-  assert.equal(downloadButtonLabel(true, false, prog({ pct: 40, status: 'failed' }), false), 'Tentar de novo')
+test('pausado retoma; verificando e salvando têm rótulo próprio', () => {
+  assert.equal(downloadButtonState(true, false, prog({ pct: 40, status: 'paused' })).label, 'Retomar')
+  assert.equal(downloadButtonState(true, false, prog({ pct: 100, status: 'verifying' })).label, 'Conferindo…')
+  assert.equal(downloadButtonState(true, false, prog({ pct: 100, status: 'saving' })).label, 'Salvando…')
 })
 
-test('botão: status queued (na fila) não anuncia percentual falso', () => {
-  const queued = prog({ pct: 0, status: 'queued' })
-  assert.equal(downloadButtonLabel(true, false, queued, false), 'Baixar')
+test('na fila não anuncia percentual falso', () => {
+  const st = downloadButtonState(true, false, prog({ pct: 0, status: 'queued' }))
+  assert.equal(st.label, 'Na fila…')
+  assert.equal(st.tone, 'busy')
 })

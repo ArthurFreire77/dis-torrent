@@ -54,7 +54,7 @@ export const tauriServices: DisTorrentServices = {
   identityCreate: (nickname, password) =>
     invoke<Identity>('identity_create', { nickname, password: password ?? null }),
 
-  vaultStatus: () => invoke<{ has_identity: boolean; has_vault: boolean }>('vault_status'),
+  vaultStatus: () => invoke<{ has_identity: boolean; has_vault: boolean; locked?: boolean }>('vault_status'),
 
   vaultUnlock: (password) => invoke<Identity>('vault_unlock', { password }),
 
@@ -367,6 +367,30 @@ export const tauriServices: DisTorrentServices = {
   fileAnnounce: (fid, name, size, chunks, hash, chunkHashes?: string[]) => invoke<void>('file_announce', { fileId: fid, name, size, chunks, hash, chunkHashes: chunkHashes ?? null }),
   fileRequestChunk: (fid,idx,holder) => invoke<void>('file_request_chunk', { fileId: fid, index: idx, holderFp: holder }),
   fileSendChunk: (target,fid,idx,b64) => invoke<void>('file_send_chunk', { targetFp: target, fileId: fid, index: idx, dataB64: b64 }),
+  spoolBegin: (fid, size, name) => invoke<{ have: number; bitmap_b64: string; dir: string }>('spool_begin', { fileId: fid, size, name }),
+  spoolPut: (fid, idx, dataB64, size) => invoke<number>('spool_put', { fileId: fid, index: idx, dataB64, size }),
+  spoolPutBatch: (fid, size, entries) => invoke<number>('spool_put_batch', { fileId: fid, size, entries }),
+  spoolGet: (fid, idx, size) => invoke<string | null>('spool_get', { fileId: fid, index: idx, size }),
+  spoolBitmap: (fid, size) => invoke<{ have: number; bitmap_b64: string; dir: string }>('spool_bitmap', { fileId: fid, size }),
+  spoolFinish: (fid, name, size, expectBlake3) =>
+    invoke<string>('spool_finish', { fileId: fid, name, size, expectBlake3: expectBlake3 ?? null }),
+  spoolDiscard: (fid) => invoke<void>('spool_discard', { fileId: fid }),
+  spoolStats: () => invoke<{ bytes: number; entries: number }>('spool_stats'),
+  spoolGc: () => invoke<number>('spool_gc'),
+  downloadDirGet: () => invoke<import('./models').DownloadDirView>('download_dir_get'),
+  downloadDirSet: (path) => invoke<import('./models').DownloadDirView>('download_dir_set', { path }),
+  downloadDirReset: () => invoke<import('./models').DownloadDirView>('download_dir_reset'),
+  downloadDirBrowse: (path) => invoke<import('./models').DownloadBrowseView>('download_dir_browse', { path: path ?? null }),
+  downloadDirOpen: (path) => invoke<void>('download_dir_open', { path: path ?? null }),
+  downloadDirSpace: (path) =>
+    invoke<{ free_bytes: number; total_bytes: number }>('download_dir_space', { path: path ?? null }),
+  seedRegister: (fileId, name, size, hash, path) =>
+    invoke<import('./models').SeedEntryView>('seed_register', { fileId, name, size, hash, path }),
+  seedUnregister: (fileId) => invoke<void>('seed_unregister', { fileId }),
+  seedList: () => invoke<import('./models').SeedEntryView[]>('seed_list'),
+  seedReadChunk: (fileId, index, size) => invoke<string | null>('seed_read_chunk', { fileId, index, size }),
+  cacheGetTtl: () => invoke<number>('cache_get_ttl'),
+  cacheSetTtl: (days) => invoke<void>('cache_set_ttl', { days }),
 
   serverRulesGet: (cid) => invoke<ServerRules>('server_rules_get', { communityId: cid }),
   serverRulesSet: (rules) => invoke<void>('server_rules_set', { rules }),

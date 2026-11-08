@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   validateAnnounce, MAX_FILE_SIZE, MAX_CHUNKS, formatFileSize,
   isImageName, isVideoName, isMediaName,
-  mediaAutoFetchCap, spoolKey,
+  mediaAutoFetchCap, mediaCacheLimit, shouldCacheMedia, chunkHashesForAnnounce, spoolKey,
 } from '../src/services/fileRules.ts'
 import { parseFileBody, encodeFileMeta } from '../src/services/fileBody.ts'
 import { FILE_MARKER } from '../src/services/fileRules.ts'
@@ -75,10 +75,27 @@ test('detecção de mídia por nome', () => {
   assert.equal(isImageName('arquivo.exe'), false)
 })
 
-test('teto de auto-prévia: imagem menor que vídeo', () => {
+test('teto de auto-prévia: imagem 7 MB menor que vídeo 250 MB', () => {
   assert.ok(mediaAutoFetchCap('a.jpg') < mediaAutoFetchCap('a.mp4'))
-  assert.equal(mediaAutoFetchCap('a.jpg'), 12 * 1024 * 1024)
+  assert.equal(mediaAutoFetchCap('a.jpg'), 7 * 1024 * 1024)
   assert.equal(mediaAutoFetchCap('a.mp4'), 40 * 1024 * 1024)
+})
+
+test('cache de prévia: imagem até 7 MB e vídeo até 250 MB, só isso guarda', () => {
+  assert.equal(mediaCacheLimit('foto.png'), 7 * 1024 * 1024)
+  assert.equal(mediaCacheLimit('clipe.mp4'), 250 * 1024 * 1024)
+  assert.equal(mediaCacheLimit('doc.pdf'), 0)
+  assert.equal(shouldCacheMedia('foto.jpg', 7 * 1024 * 1024), true)
+  assert.equal(shouldCacheMedia('foto.jpg', 7 * 1024 * 1024 + 1), false)
+  assert.equal(shouldCacheMedia('filme.mkv', 250 * 1024 * 1024), true)
+  assert.equal(shouldCacheMedia('filme.mkv', 2 * 1024 * 1024 * 1024), false, '2 GB não entra no cache sozinho')
+  assert.equal(shouldCacheMedia('backup.zip', 1024), false, 'arquivo que não é mídia não vai para o cache')
+})
+
+test('anúncio de 2 milhões de blocos não tenta mandar todos os hashes', () => {
+  assert.equal(chunkHashesForAnnounce(4096), true)
+  assert.equal(chunkHashesForAnnounce(4097), false)
+  assert.equal(chunkHashesForAnnounce(2_000_000), false, 'frame tem teto de 1 MB')
 })
 
 test('formatFileSize é legível e não perde a unidade', () => {

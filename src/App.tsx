@@ -1,6 +1,7 @@
 import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useLocation } from 'react-router-dom'
 import { NotificationPrompt } from './components/NotificationPrompt'
+import { DownloadDirPrompt } from './components/DownloadDirPrompt'
 import { initAppState } from './services/appState'
 import { initNotifications } from './services/notifications'
 import { offerInvite, tokenFromInviteUrl } from './services/deepLink'
@@ -206,6 +207,7 @@ export default function App(){
       <AppRoutes />
       {}
       <NotificationPrompt />
+      <DownloadDirPrompt />
     </BrowserRouter>
   )
 }

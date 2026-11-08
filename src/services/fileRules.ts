@@ -10,7 +10,8 @@ const MAX_FILE_MB = (() => {
     } catch { return undefined }
   })()
   const n = Number(raw)
-  return Number.isFinite(n) && n > 0 ? n : 51200
+  // 500 GiB: o teto anterior (50 GB) recusava arquivos grandes no anúncio.
+  return Number.isFinite(n) && n > 0 ? n : 512000
 })()
 
 export const MAX_FILE_SIZE = MAX_FILE_MB * 1024 * 1024
@@ -74,8 +75,36 @@ export function isVideoName(name: string): boolean {
 export function isMediaName(name: string): boolean {
   return isImageName(name) || isVideoName(name)
 }
+
+/** Cache de prévias: só imagem pequena e vídeo curto ficam no disco. */
+export const MEDIA_CACHE_IMAGE_MAX = 7 * 1024 * 1024
+export const MEDIA_CACHE_VIDEO_MAX = 250 * 1024 * 1024
+export const MEDIA_CACHE_TTL_DAYS = 7
+
+export function mediaCacheLimit(name: string): number {
+  if (isImageName(name)) return MEDIA_CACHE_IMAGE_MAX
+  if (isVideoName(name)) return MEDIA_CACHE_VIDEO_MAX
+  return 0
+}
+
+/** Arquivo que vale a pena guardar no cache (imagem ≤7 MB, vídeo ≤250 MB). */
+export function shouldCacheMedia(name: string, size: number): boolean {
+  const cap = mediaCacheLimit(name)
+  return cap > 0 && Number.isFinite(size) && size > 0 && size <= cap
+}
+
+/** Bloco em memória só para montar a prévia; acima disso a mídia vai para o spool. */
 export function mediaAutoFetchCap(name: string): number {
-  return isVideoName(name) ? 40 * 1024 * 1024 : 12 * 1024 * 1024
+  if (isVideoName(name)) return 40 * 1024 * 1024
+  if (isImageName(name)) return MEDIA_CACHE_IMAGE_MAX
+  return 0
+}
+
+/** `chunk_hashes` de 2 milhões de blocos estouraria o frame de 1 MB do protocolo. */
+export const MAX_ANNOUNCED_CHUNK_HASHES = 4096
+
+export function chunkHashesForAnnounce(count: number): boolean {
+  return count > 0 && count <= MAX_ANNOUNCED_CHUNK_HASHES
 }
 
 export function spoolKey(file_id: string, index: number): string {
