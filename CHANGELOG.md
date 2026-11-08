@@ -1,5 +1,82 @@
 # CHANGELOG
 
+## [1.1.65-pre-alpha] - 2026-11-07
+
+### Downloads grandes, cache de prévia, cofre e identidade
+
+**Imagem e vídeo baixados ficam uma semana no cache.** A prévia de mídia agora
+tem teto explícito: imagem até **7 MB** e vídeo até **250 MB**, guardados por
+**7 dias** (configurável de 1 a 30). Acima disso o app não baixa sozinho — o
+usuário decide no botão. O `DiskLru` passou a expirar por TTL além do teto de
+tamanho, e a remoção do que venceu acontece antes da remoção por espaço.
+
+**O botão do arquivo conta a verdade em três cores.** Azul "Baixar" (ainda não
+começou) → amarelo "Baixando 43%" com spinner e barra animada → verde
+"Baixado ✓". Depois de verde, o único caminho para outra cópia é o botão
+**vermelho "Baixar novamente"** que aparece ao lado. Falha fica vermelha com
+"Tentar de novo"; pausa fica amarela com "Retomar".
+
+**Fechar e reabrir não perde mais nada.** A fila de downloads era restaurada,
+mas o arquivo que você estava **semeando** não: o anúncio continuava no ar e o
+bloco nunca chegava ao outro lado. Agora o caminho do arquivo fica no SQLite
+(`seed.meta.<file_id>`) e o boot re-registra a semeadura (`seed_list`), lendo
+cada bloco do disco na hora do pedido. A fila de download também reidrata e
+retoma sozinha.
+
+**Arquivos de até 500 GiB.** O teto era 50 GB. Subiu para 500 GiB no core
+(`MAX_ANNOUNCED_FILE_BYTES`), no `save_file_stream` e no frontend. Anúncio de
+2 milhões de blocos não cabe no frame de 1 MB, então acima de 4096 blocos os
+`chunk_hashes` são omitidos e a integridade fica no hash do arquivo inteiro
+(conferido em streaming).
+
+**Arquivo grande não vai mais para a memória.** Acima de **64 MB** cada bloco é
+gravado direto no `.part` da pasta de destino, num offset; a memória guarda só o
+bitmap de blocos (`ChunkSet`, ~2 MB para 2 milhões de blocos). O `.part` é
+pré-alocado com `set_len` (escrever no offset 400 GB de um arquivo vazio faria o
+NTFS materializar centenas de GB de zeros) e o salvamento final é um `rename`
+sem copiar bytes.
+
+**Perguntar onde salvar.** Acima de **512 MB** o download abre o modal "Onde
+salvar?" com a pasta atual e o espaço livre real (`GetDiskFreeSpaceExW`).
+Cancelar **não baixa nada**. A pasta escolhida é testada com escrita antes de
+ser aceita e vale para os próximos downloads; se sumir, volta para Downloads.
+Há navegador de pastas com unidades, e a pasta atual abre pelo botão "Abrir".
+
+**Velocidade: rápida, mas com teto.** O limite de 200 pedidos de bloco por 10 s
+por peer (≈5 MB/s) era o gargalo real — passou para 2000, com bytes em 512 MB/10 s
+(≈50 MB/s) e frames em 3000/10 s, mantendo `frames_kill`/`bytes_kill` 4× acima
+para matar flood. Os blocos vão ao disco em **lote** (até 16 por chamada de IPC)
+e a janela subiu para 64 blocos em voo. Nas Configurações há teto **opcional**
+por download (5/10/20/50/100 MB/s ou sem teto), que diminui a janela de verdade
+em vez de só contornar.
+
+**Ordem invertida corrigida no progresso.** O bloco era marcado como recebido
+**antes** do disco confirmar; agora só entra em `have` depois do `then`, e um
+bloco com escrita em voo não é pedido de novo. Sem isso a barra dizia 100% com
+bloco faltando e o retry nunca pedia aquele bloco.
+
+**Cofre: exportar leva a conta inteira.** O `.stormvault` passou a incluir
+perfis (avatar/banner/status), presença própria, reações, edições/pins/replies,
+read states, bookmarks, threads, enquetes e votos, eventos, emojis, bans e
+timeouts, nicknames por servidor e 19 chaves de configuração. **Não** saem
+credenciais de bot (`token`/`webhook_secret`), presença nem cursores de leitura
+de terceiros, e mídia baixada. Arquivos v1 antigos continuam abrindo.
+
+**Cofre: não dá mais para falsificar a identidade.** A importação recusa quando
+o fingerprint não é `blake3(pubkey)`, quando o header diverge do payload, ou
+quando o `secret_hex` não deriva a pubkey/fingerprint declarados. O handshake
+recusa pubkey diferente para o mesmo fingerprint.
+
+**A chave privada saiu do SQLite no desktop.** Antes ia em texto claro em
+`identity.secret` e `identity.secret.backup`, então copiar
+`%APPDATA%\com.distorrent.app` era virar o dono da conta. Agora o segredo vive
+só no keyring do SO (DPAPI no Windows, Secret Service no Linux, Keychain no
+macOS); instalações antigas migram no primeiro boot e o texto claro é apagado.
+Sem keyring, a conta exige senha do cofre — o app pede em vez de cair para
+banco em texto claro. **Android continua com o segredo no SQLite do sandbox**
+(sem Keystore nesta versão), documentado como limitação em
+`THREAT_MODEL.md`, com `allowBackup=false`.
+
 ## [1.1.64-pre-alpha] - 2026-11-07
 
 ### Arquivos: imagem e vídeo em tela cheia, e um código bem menor
