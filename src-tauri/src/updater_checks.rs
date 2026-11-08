@@ -15,6 +15,7 @@ pub fn current_version(app: &tauri::AppHandle) -> String {
 pub async fn update_check(
     app: tauri::AppHandle,
     force: Option<bool>,
+    boot: Option<bool>,
 ) -> Result<UpdateInfo, String> {
     let current = current_version(&app);
     let store = open_store(&app)?;
@@ -31,14 +32,15 @@ pub async fn update_check(
         .kv_get(KV_BACKOFF)
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
+    // Regra do dono: "sempre que o app abrir, atualiza". O boot e o botão
+    // "Verificar agora" IGNORAM o intervalo e o backoff; só a checagem de
+    // rotina (a cada 30 min com o app aberto) respeita a janela para não
+    // martelar o GitHub.
+    let forcar = force.unwrap_or(false) || boot.unwrap_or(false);
     let espera = MIN_CHECK_INTERVAL_MS.max(backoff);
-    // `force` = pedido explícito (botão "Verificar agora"). O intervalo existe
-    // para não martelar o GitHub em checagens de rotina, não para esconder uma
-    // release recém-publicada quando o usuário pede.
-    let forcar = force.unwrap_or(false);
     let dentro_da_janela = !forcar && last > 0 && now.saturating_sub(last) < espera;
     if dentro_da_janela {
-        // Ainda dentro da janela: se o cache já aponta uma versão MAIOR que a
+        // Dentro da janela: se o cache já aponta uma versão MAIOR que a
         // instalada, responde na hora (não gasta rede). Se o cache diz "nada
         // novo" ou não existe, cai na checagem real abaixo — era esse o bug do
         // "reabri e não atualizou": o cache congelava a resposta por 6 h.

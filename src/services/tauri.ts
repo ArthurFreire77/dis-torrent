@@ -72,8 +72,9 @@ export const tauriServices: DisTorrentServices = {
   openFirewallConsole: () => invoke<import('./models').FirewallStatus>('network_firmware_open_firewall'),
   webrtcReport: (info: string) => invoke('webrtc_report', { info }),
 
-  updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check', { force: false }),
-  updateCheckForce: () => invoke<import('./updater').UpdateInfo>('update_check', { force: true }),
+  updateCheck: () => invoke<import('./updater').UpdateInfo>('update_check', { force: false, boot: false }),
+  updateCheckForce: () => invoke<import('./updater').UpdateInfo>('update_check', { force: true, boot: false }),
+  updateCheckBoot: () => invoke<import('./updater').UpdateInfo>('update_check', { force: false, boot: true }),
   updateDownload: (name) => invoke<string>('update_download', { name }),
   updateApply: (path) => invoke<void>('update_apply', { path }),
   updateVerifyReady: (path: string) =>

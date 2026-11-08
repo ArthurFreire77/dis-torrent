@@ -618,6 +618,8 @@ export interface DisTorrentServices {
   updateCheck(): Promise<import('./updater').UpdateInfo>
   /** `force` ignora o intervalo de checagem (botão "verificar agora"). */
   updateCheckForce?(): Promise<import('./updater').UpdateInfo>
+  /** `boot` = abriu o app: ignora cache e ETag e consulta o GitHub de verdade. */
+  updateCheckBoot?(): Promise<import('./updater').UpdateInfo>
   updateDownload(name: string): Promise<string>
   updateApply(path: string): Promise<void>
   updateVerifyReady(path: string): Promise<import('./updater').PendingUpdate>

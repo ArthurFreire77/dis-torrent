@@ -34,6 +34,20 @@ test('existe verificação forçada ("Verificar agora")', () => {
   assert.match(box, /checkNow\(\)/, 'o botão usa o caminho forçado')
 })
 
+test('TODA abertura consulta o GitHub de verdade (boot ignora cache e ETag)', () => {
+  assert.match(checks, /boot: Option<bool>/, 'comando aceita boot')
+  assert.match(checks, /force\.unwrap_or\(false\) \|\| boot\.unwrap_or\(false\)/, 'boot força a consulta')
+  assert.match(tauri, /updateCheckBoot: .*boot: true/, 'existe comando de boot')
+  assert.match(models, /updateCheckBoot\?\(\)/, 'contrato de boot exposto')
+  assert.match(gate, /boot: true/, 'o gate usa boot no primeiro run')
+  const updaterTs = readFileSync('src/services/updater.ts', 'utf8')
+  assert.match(updaterTs, /checkBoot/, 'as deps expõem checkBoot')
+  const rules = readFileSync('src/services/updateRules.ts', 'utf8')
+  assert.match(rules, /opts\.boot && deps\.checkBoot \? await deps\.checkBoot\(\)/, 'runUpdateFlow usa checkBoot')
+  // Falha da sessão anterior não impede nova tentativa no boot.
+  assert.match(rules, /!falhaExpirada\(failedFlag\) && !opts\.boot/, 'boot não herda falha antiga')
+})
+
 test('intervalo de rotina caiu de 6 h para 30 min', () => {
   assert.match(updater, /MIN_CHECK_INTERVAL_MS: i64 = 30 \* 60 \* 1000/)
   assert.doesNotMatch(updater, /6 \* 60 \* 60 \* 1000/)

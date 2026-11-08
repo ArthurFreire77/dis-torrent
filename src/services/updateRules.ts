@@ -135,6 +135,8 @@ export type UpdateOutcome =
 
 export interface UpdateDeps {
   check: () => Promise<UpdateInfo>
+  /** No boot: consulta o GitHub de verdade (sem cache/ETag). */
+  checkBoot?: () => Promise<UpdateInfo>
   download: (info: UpdateInfo) => Promise<string>
   apply: (path: string) => Promise<void>
   quit: () => Promise<void>
@@ -159,11 +161,11 @@ export const REINICIAR_SINAL = 'ATUALIZADO_E_REINICIADO'
 
 export async function runUpdateFlow(
   deps: UpdateDeps,
-  opts: { autoApply: boolean },
+  opts: { autoApply: boolean; boot?: boolean },
 ): Promise<UpdateOutcome> {
   let info: UpdateInfo
   try {
-    info = await deps.check()
+    info = opts.boot && deps.checkBoot ? await deps.checkBoot() : await deps.check()
   } catch (e) {
     return { kind: 'error', message: String((e as Error)?.message ?? e) }
   }
@@ -189,7 +191,9 @@ export async function runUpdateFlow(
 
   const failedFlag = (await deps.getFlag(FLAG_FAILED)) ?? ''
   const failedBefore = !!failedFlag && (failedFlag === info.latest || failedFlag.startsWith(`${info.latest}|`))
-  if (failedBefore && !falhaExpirada(failedFlag)) return { kind: 'later', info }
+  // No boot, uma falha da sessão anterior NÃO bloqueia: o dono quer que abrir o
+  // app seja a tentativa de atualizar. Se falhar de novo, a marca é reescrita.
+  if (failedBefore && !falhaExpirada(failedFlag) && !opts.boot) return { kind: 'later', info }
   if (!opts.autoApply) return { kind: 'later', info }
 
   let path: string

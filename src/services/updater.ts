@@ -71,8 +71,10 @@ export function nativeUpdateDeps(): UpdateDeps | null {
     appQuit: () => Promise<void>
   }
   if (!s.updateCheck || !s.updateDownload || !s.updateApply) return null
+  const sBoot = s as unknown as { updateCheckBoot?: () => Promise<UpdateInfo> }
   return {
     check: () => s.updateCheck!(),
+    checkBoot: sBoot.updateCheckBoot ? () => sBoot.updateCheckBoot!() : () => s.updateCheck!(),
     download: (info) => s.updateDownload!(info.asset_name),
     apply: async (path) => {
       if (/android/i.test(navigator.userAgent ?? '')) {

@@ -80,13 +80,13 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
   }, [])
 
   const run = React.useCallback(
-    async (opts: { autoApply: boolean; auto: boolean }): Promise<UpdateOutcome | null> => {
+    async (opts: { autoApply: boolean; auto: boolean; boot?: boolean }): Promise<UpdateOutcome | null> => {
       const deps = depsRef.current
       if (!deps) return null
       set({ phase: 'checking', message: 'verificando se há versão nova…' })
       let outcome: UpdateOutcome
       try {
-        outcome = await runUpdateFlow(deps, { autoApply: opts.autoApply })
+        outcome = await runUpdateFlow(deps, { autoApply: opts.autoApply, boot: opts.boot })
       } catch (e) {
         if (!mounted.current) return { kind: 'error', message: String((e as Error)?.message ?? e) }
         setState({ ...IDLE, phase: 'error', message: String((e as Error)?.message ?? e) })
@@ -148,19 +148,25 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       return
     }
     void (async () => {
-      let auto = false
-      try {
-        auto = await services.updateAutoGet()
-      } catch {
-        auto = false
+      // Lê a preferência ANTES de cada checagem: marcar o checkbox nas
+      // Configurações precisa valer no próximo ciclo, sem reabrir o app.
+      const lerAuto = async () => {
+        try {
+          return await services.updateAutoGet()
+        } catch {
+          return false
+        }
       }
+      let auto = await lerAuto()
       setAutoState(auto)
 
-      let outcome = await run({ autoApply: auto, auto })
+      // boot: true — no boot ignora cache, ETag e a marca de falha anterior.
+      let outcome = await run({ autoApply: auto, auto, boot: true })
       for (let tentativa = 1; tentativa <= 3 && outcome?.kind === 'error'; tentativa++) {
         await new Promise((r) => setTimeout(r, 4000 * tentativa))
         if (!mounted.current) return
-        outcome = await run({ autoApply: auto, auto })
+        auto = await lerAuto()
+        outcome = await run({ autoApply: auto, auto, boot: true })
       }
 
       if (mounted.current && stateRef.current.phase === 'checking') {
@@ -171,8 +177,12 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
         if (!mounted.current) return
         const p = stateRef.current.phase
         if (p !== 'idle' && p !== 'checking') return
-        void run({ autoApply: auto, auto })
-      }, 6 * 60 * 60 * 1000)
+        void (async () => {
+          const atual = await lerAuto()
+          setAutoState(atual)
+          void run({ autoApply: atual, auto: atual })
+        })()
+      }, 30 * 60 * 1000)
       intervalRef.current = intervalo
     })()
   }, [enabled, run])
