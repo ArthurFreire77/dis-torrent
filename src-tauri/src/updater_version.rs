@@ -226,7 +226,11 @@ pub async fn escolher(
                 continue;
             }
         }
-        if signed.body.version != release.tag_name.trim_start_matches('v') {
+        // O manifesto declara `1.1.65-pre-alpha`; a tag é `v1.1.65`. Comparar
+        // por IGUALDADE recusava TODA release ("divergência de versão") e o
+        // auto-update nunca funcionou. A tag é só onde o arquivo está
+        // hospedado: o que vale é o núcleo N.N.N bater.
+        if !mesma_versao(&signed.body.version, &release.tag_name) {
             ultimo_erro = format!(
                 "manifesto da release {} declara versão {} — divergência recusada",
                 release.tag_name, signed.body.version
@@ -254,6 +258,25 @@ pub async fn escolher(
         });
     }
     Err(ultimo_erro)
+}
+
+/// Compara versão do manifesto com a tag do GitHub pelo NÚCLEO (`N.N.N`).
+///
+/// A tag é limpa (`v1.1.65`) e o manifesto carrega o sufixo
+/// (`1.1.65-pre-alpha`); exigir igualdade exata recusava todas as releases.
+/// Também aceita `1.1.65-pre-alpha` × `1.1.65-pre-alpha` e diferenças de `v`.
+pub fn mesma_versao(manifesto: &str, tag: &str) -> bool {
+    fn nucleo(v: &str) -> String {
+        v.trim()
+            .trim_start_matches(['v', 'V'])
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+    let a = nucleo(manifesto);
+    !a.is_empty() && a == nucleo(tag)
 }
 
 pub fn releases_all(store: &Arc<Store>) -> Vec<GhRelease> {

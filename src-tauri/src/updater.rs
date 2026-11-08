@@ -623,6 +623,7 @@ pub fn update_cleanup(app: tauri::AppHandle) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::updater::updater_version::compare_version_strings;
 
     fn asset(name: &str) -> GhAsset {
         GhAsset {
@@ -642,6 +643,24 @@ mod tests {
             sha256: "a".repeat(64),
             url: format!("{DOWNLOAD_PREFIX}v1.2.3/{name}"),
         }
+    }
+
+    #[test]
+    fn tag_limpa_casa_com_manifesto_com_sufixo() {
+        // O bug que impediu TODO auto-update: manifesto `1.1.65-pre-alpha`
+        // comparado por igualdade com a tag `v1.1.65` nunca batia, e a release
+        // era recusada como "divergência de versão".
+        use updater_version::mesma_versao;
+        assert!(mesma_versao("1.1.65-pre-alpha", "v1.1.65"));
+        assert!(mesma_versao("1.1.65-pre-alpha", "1.1.65"));
+        assert!(mesma_versao("1.1.65", "v1.1.65"));
+        assert!(mesma_versao("v1.1.65", "v1.1.65"));
+        assert!(mesma_versao("1.1.65-alpha", "v1.1.65"));
+        // Versões diferentes continuam sendo divergência.
+        assert!(!mesma_versao("1.1.64-pre-alpha", "v1.1.65"));
+        assert!(!mesma_versao("1.1.6", "v1.1.65"));
+        assert!(!mesma_versao("", "v1.1.65"));
+        assert!(!mesma_versao("1.1.65", ""));
     }
 
     #[test]
