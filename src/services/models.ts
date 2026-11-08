@@ -616,6 +616,8 @@ export interface DisTorrentServices {
   webrtcReport(info: string): Promise<void>
 
   updateCheck(): Promise<import('./updater').UpdateInfo>
+  /** `force` ignora o intervalo de checagem (botão "verificar agora"). */
+  updateCheckForce?(): Promise<import('./updater').UpdateInfo>
   updateDownload(name: string): Promise<string>
   updateApply(path: string): Promise<void>
   updateVerifyReady(path: string): Promise<import('./updater').PendingUpdate>

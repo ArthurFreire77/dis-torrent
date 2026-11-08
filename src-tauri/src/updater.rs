@@ -37,7 +37,7 @@ pub const KV_PENDING: &str = "release.update_pending";
 pub const KV_ETAG: &str = "update.releases_etag";
 pub const KV_LAST_CHECK: &str = "update.last_check_ms";
 pub const KV_BACKOFF: &str = "update.backoff_ms";
-const MIN_CHECK_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;
+const MIN_CHECK_INTERVAL_MS: i64 = 30 * 60 * 1000;
 const MAX_MANIFEST_DOWNLOAD: u64 = 128 * 1024;
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 

@@ -1,7 +1,9 @@
 import React from 'react'
 import { services } from '../services'
 import {
+  FLAG_APPLIED,
   FLAG_SKIP,
+  compareVersions,
   formatBytes,
   isNewer,
   shortNotes,
@@ -35,6 +37,10 @@ export interface UpdateGateApi extends UpdateGateState {
   skip: () => void
   dismiss: () => void
   openPage: () => void
+  /** Verifica agora, ignorando o intervalo de 30 min (botão nas Configurações). */
+  checkNow: () => Promise<UpdateInfo | null>
+  auto: boolean
+  setAuto: (enabled: boolean) => void
 }
 
 const IDLE: UpdateGateState = {
@@ -53,6 +59,11 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
   const stateRef = React.useRef(state)
   stateRef.current = state
   const intervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+  const [auto, setAutoState] = React.useState(false)
+  const setAuto = React.useCallback((enabled: boolean) => {
+    setAutoState(enabled)
+    void services.updateAutoSet(enabled).catch(() => {})
+  }, [])
 
   React.useEffect(() => {
     mounted.current = true
@@ -143,6 +154,7 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       } catch {
         auto = false
       }
+      setAutoState(auto)
 
       let outcome = await run({ autoApply: auto, auto })
       for (let tentativa = 1; tentativa <= 3 && outcome?.kind === 'error'; tentativa++) {
@@ -195,6 +207,33 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
     void services.openReleasePage(url).catch(() => {})
   }, [state.info])
 
+  const checkNow = React.useCallback(async (): Promise<UpdateInfo | null> => {
+    const deps = depsRef.current
+    if (!deps) return null
+    set({ phase: 'checking', message: 'verificando se há versão nova…' })
+    let info: UpdateInfo | null = null
+    try {
+      info = await services.updateCheckForce!()
+    } catch (e) {
+      setState({ ...IDLE, phase: 'error', message: String((e as Error)?.message ?? e) })
+      return null
+    }
+    if (!info) return null
+    // Aplica o estado na UI a partir do resultado forçado, sem refazer a
+    // checagem (que devolveria o cache e mostraria "nada novo" de novo).
+    if (!isNewer(info.current, info.latest)) {
+      setState({ ...IDLE, info, current: info.current })
+      return info
+    }
+    const jaAplicada = (await deps.getFlag(FLAG_APPLIED).catch(() => null)) === info.latest
+    if (jaAplicada && compareVersions(info.current, info.latest) < 0) {
+      setState({ phase: 'stalled', info, current: info.current, message: '', progress: null })
+      return info
+    }
+    setState({ phase: 'later', info, current: info.current, message: '', progress: null })
+    return info
+  }, [set])
+
   return {
     ...state,
     show: () => set({ phase: 'later' }),
@@ -202,6 +241,9 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
     skip,
     dismiss: () => setState(IDLE),
     openPage,
+    checkNow,
+    auto,
+    setAuto,
   }
 }
 

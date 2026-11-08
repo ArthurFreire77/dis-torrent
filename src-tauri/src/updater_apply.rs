@@ -76,18 +76,6 @@ pub fn update_apply(app: tauri::AppHandle, path: String) -> Result<(), String> {
         if !lower.ends_with(".exe") {
             return Err("só instalador .exe é executado no Windows".into());
         }
-        match instalação_por_usuario() {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(
-                    "esta instalação está em uma pasta do sistema (Program Files). \
-                     A atualização automática sem administrador não é possível — \
-                     baixe o instalador e execute manualmente."
-                        .into(),
-                )
-            }
-            Err(e) => return Err(e),
-        }
         match pre_update_snapshot(&app) {
             Ok(Some(arquivo)) => {
                 tracing::info!(?arquivo, "backup pré-atualização criado")
@@ -99,16 +87,24 @@ pub fn update_apply(app: tauri::AppHandle, path: String) -> Result<(), String> {
                 );
             }
         }
-        std::process::Command::new(&p)
-            .args([
-                "/SILENT",
-                "/SUPPRESSMSGBOXES",
-                "/CLOSEAPPLICATIONS",
-                "/RESTARTAPPLICATIONS",
-            ])
-            .current_dir(p.parent().unwrap_or(std::path::Path::new(".")))
-            .spawn()
-            .map_err(|e| format!("não consegui iniciar o instalador: {e}"))?;
+        // Instalação em Program Files precisa de elevação. Antes o app RECUSAVA
+        // e mandava baixar o instalador do GitHub na mão — era isso que prendia
+        // quem tinha instalado "para todos os usuários" na versão antiga.
+        // `runas` mostra o UAC e, negado, devolve erro claro (não trava).
+        if instalação_por_usuario()? {
+            std::process::Command::new(&p)
+                .args([
+                    "/SILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/CLOSEAPPLICATIONS",
+                    "/RESTARTAPPLICATIONS",
+                ])
+                .current_dir(p.parent().unwrap_or(std::path::Path::new(".")))
+                .spawn()
+                .map_err(|e| format!("não consegui iniciar o instalador: {e}"))?;
+        } else {
+            run_elevated(&p)?;
+        }
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
@@ -155,6 +151,48 @@ pub fn update_apply(app: tauri::AppHandle, path: String) -> Result<(), String> {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         let _ = pending;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_elevated(installer: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+    let op = wide(std::ffi::OsStr::new("runas"));
+    let file = wide(installer.as_os_str());
+    let params = wide(std::ffi::OsStr::new(
+        "/SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+    ));
+    let dir = installer.parent().unwrap_or(std::path::Path::new("."));
+    let cwd = wide(dir.as_os_str());
+    // SAFETY: as quatro strings são NUL-terminadas e vivem até o fim da chamada;
+    // hwnd e show são valores documentados para uso interativo.
+    let rc = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            cwd.as_ptr(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // <= 32 é erro (a API não usa GetLastError). 5 = acesso negado = UAC negado.
+    if (rc as isize) <= 32 {
+        let code = rc as isize;
+        return Err(if code == 5 {
+            "a atualização precisa de administrador e o pedido do Windows foi negado — \
+             abra o instalador e permita a elevação"
+                .into()
+        } else {
+            format!("não consegui abrir o instalador com elevação (código {code})")
+        });
     }
     Ok(())
 }

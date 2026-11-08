@@ -1,7 +1,7 @@
 // Updater checks: parte de updater.rs.
 // Irmao do updater.rs; usa os tipos la declarados via super::*.
 
-use super::updater_version::{escolher, releases_all};
+use super::updater_version::{compare_version_strings, escolher, releases_all};
 use super::*;
 
 pub fn current_version(app: &tauri::AppHandle) -> String {
@@ -12,7 +12,10 @@ pub fn current_version(app: &tauri::AppHandle) -> String {
 }
 
 #[tauri::command]
-pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
+pub async fn update_check(
+    app: tauri::AppHandle,
+    force: Option<bool>,
+) -> Result<UpdateInfo, String> {
     let current = current_version(&app);
     let store = open_store(&app)?;
     let mut trust = load_trust(&store);
@@ -29,9 +32,26 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
     let espera = MIN_CHECK_INTERVAL_MS.max(backoff);
-    if last > 0 && now.saturating_sub(last) < espera {
+    // `force` = pedido explícito (botão "Verificar agora"). O intervalo existe
+    // para não martelar o GitHub em checagens de rotina, não para esconder uma
+    // release recém-publicada quando o usuário pede.
+    let forcar = force.unwrap_or(false);
+    let dentro_da_janela = !forcar && last > 0 && now.saturating_sub(last) < espera;
+    if dentro_da_janela {
+        // Ainda dentro da janela: se o cache já aponta uma versão MAIOR que a
+        // instalada, responde na hora (não gasta rede). Se o cache diz "nada
+        // novo" ou não existe, cai na checagem real abaixo — era esse o bug do
+        // "reabri e não atualizou": o cache congelava a resposta por 6 h.
         let cached = releases_all(&store);
-        if !cached.is_empty() {
+        let cache_tem_nova = cached
+            .iter()
+            .filter(|r| !r.draft)
+            .filter_map(|r| {
+                let v = r.tag_name.trim_start_matches('v');
+                (compare_version_strings(v, &current) == std::cmp::Ordering::Greater).then_some(v)
+            })
+            .max_by(|a, b| compare_version_strings(a, b));
+        if cache_tem_nova.is_some() {
             return completar(
                 &app, &store, &mut trust, cached, &current, platform, arch, true,
             )
@@ -44,7 +64,7 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateInfo, String> {
         .get(RELEASES_API)
         .header("Accept", "application/vnd.github+json");
     if let Some(etag) = store.kv_get(KV_ETAG) {
-        if !etag.is_empty() {
+        if !etag.is_empty() && !forcar {
             req = req.header("If-None-Match", etag);
         }
     }

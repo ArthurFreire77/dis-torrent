@@ -21,6 +21,7 @@ import { downloadManager } from '../services/downloadManager'
 import { startDownload } from '../services/downloadAction'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
+import { UpdateSettingsBox } from '../components/UpdateSettingsBox'
 import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { pastedImages } from '../shared/clipboardImage'
 import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
@@ -2886,6 +2887,10 @@ export default function MobileShell() {
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>MENSAGENS</div>
               <MessageRetentionSettings inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} accent={t.accent} />
+            </div>
+            <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>ATUALIZAÇÕES</div>
+              <UpdateSettingsBox api={updateGate} />
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>COFRE &amp; BACKUP</div>

@@ -66,6 +66,7 @@ import { downloadManager } from '../services/downloadManager'
 import { startDownload } from '../services/downloadAction'
 import { botRuntime } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
+import { UpdateSettingsBox } from '../components/UpdateSettingsBox'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
 import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
 import CallSettingsPanel from '../components/calls/CallSettingsPanel'
@@ -3867,6 +3868,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </div>
               </>
             )}
+
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>ATUALIZAÇÕES</div>
+            <div style={{ marginBottom: 24 }}>
+              <UpdateSettingsBox api={updateGate} />
+            </div>
 
             <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, color: muted, marginBottom: 8 }}>COFRE & BACKUP (.STORMVAULT)</div>
             <div style={{ marginBottom: 24 }}>

@@ -1000,6 +1000,7 @@ export const browserServices: DisTorrentServices = {
   openFirewallConsole: () => Promise.reject(new Error('firewall só existe no app nativo')),
 
   updateCheck: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
+  updateCheckForce: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
   updateDownload: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
   updateApply: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
   updateVerifyReady: () => Promise.reject(new Error('atualização automática só existe no app nativo')),
