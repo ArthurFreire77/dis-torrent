@@ -232,8 +232,8 @@ export class FileSwarm {
     return sf
   }
 
-  /** Primeiro bloco deste download já reservou o `.part` na pasta de destino. */
-  private spoolReady = new Set<string>()
+  /** Reserva do `.part` por arquivo: a escrita só começa depois que ela resolve. */
+  private spoolReady = new Map<string, Promise<void>>()
   /** Fila de escrita em lote por arquivo: vários blocos numa única chamada de IPC. */
   private spoolQueues = new Map<string, {
     entries: [number, string][]
@@ -454,18 +454,22 @@ export class FileSwarm {
       // A marca de recebido só entra DEPOIS do disco confirmar: marcar antes
       // fazia a UI dizer 100% com bloco faltando e o retry nunca pedia de novo.
       sf.onDisk = true
-      if (!this.spoolReady.has(file_id)) {
-        // Primeiro bloco deste download: reserva o `.part` (set_len, sem copiar).
-        this.spoolReady.add(file_id)
-        void services.spoolBegin(file_id, sf.size, sf.name).catch((e) => {
-          this.spoolReady.delete(file_id)
-          this.failChunk(sf, index, from_fp, `chunk ${index}: não consegui reservar o arquivo (${String((e as Error)?.message ?? e)})`)
+      // A reserva do `.part` é assíncrona e a escrita NÃO pode sair antes dela:
+      // `spool_put` sem meta responde "download não iniciado" e o bloco se
+      // perderia. A promessa fica no mapa e é reaproveitada por todos os blocos.
+      let pronto = this.spoolReady.get(file_id)
+      if (!pronto) {
+        pronto = services.spoolBegin(file_id, sf.size, sf.name).then(() => undefined)
+        this.spoolReady.set(file_id, pronto)
+        pronto.catch(() => {
+          if (this.spoolReady.get(file_id) === pronto) this.spoolReady.delete(file_id)
         })
       }
       sf.pendingWrites = (sf.pendingWrites ?? 0) + 1
       if (!sf.writing) sf.writing = new Set()
       sf.writing.add(index)
-      this.enqueueSpoolWrite(file_id, index, b64data, sf.size)
+      pronto
+        .then(() => this.enqueueSpoolWrite(file_id, index, b64data, sf.size))
         .then(() => {
           sf.have.add(index)
           sf.seeders.add(from_fp)
@@ -917,6 +921,8 @@ export class FileSwarm {
     sf.data.clear()
     sf.completed = false
     this.hydratedFiles.delete(file_id)
+    // O `.part` foi descartado: a próxima escrita precisa reservar de novo.
+    this.spoolReady.delete(file_id)
     if (sf.onDisk) void services.spoolDiscard(file_id).catch(() => {  })
     this.onChange?.()
   }
@@ -951,6 +957,7 @@ export class FileSwarm {
     this.clearFileTimers(file_id)
     sf.data.clear()
     sf.have.clear()
+    this.spoolReady.delete(file_id)
     if (sf.onDisk && !this.sourceFiles.has(file_id)) void services.spoolDiscard(file_id).catch(() => {  })
     if (services.kind === 'native') {
       for (let i = 0; i < sf.chunks; i++) {
@@ -971,6 +978,7 @@ export class FileSwarm {
     this.pausedFiles.delete(file_id)
     this.hydratedFiles.delete(file_id)
     this.sourceFiles.delete(file_id)
+    this.spoolReady.delete(file_id)
     if (sf?.onDisk) void services.spoolDiscard(file_id).catch(() => {  })
     if (sf && services.kind === 'native') {
       for (let i = 0; i < sf.chunks; i++) {

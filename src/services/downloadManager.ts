@@ -166,9 +166,7 @@ class DownloadManager {
     this.cancelled.delete(fileId)
     this.persist()
     this.emit()
-  }
-
-  /**
+  }  /**
    * Baixar de novo um arquivo concluído: o vermelho só aparece depois do verde,
    * e é o ÚNICO caminho que reinicia uma transferência já terminada.
    */

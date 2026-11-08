@@ -101,6 +101,18 @@ test('velocidade tem teto configurável e limites de motor coerentes', () => {
   assert.match(netlimit, /frames_kill_per_peer_10s/, 'flood continua sendo morto')
 })
 
+test('reserva do .part acontece ANTES da primeira escrita', () => {
+  // Sem isto o `spool_put` respondia "download não iniciado" e o bloco sumia.
+  const trecho = swarm.slice(swarm.indexOf('let pronto = this.spoolReady.get(file_id)'))
+  assert.match(trecho.slice(0, 400), /services\.spoolBegin/, 'reserva o arquivo primeiro')
+  assert.match(trecho.slice(0, 1400), /pronto\s*\.then\(\(\) => this\.enqueueSpoolWrite/, 'só escreve depois da reserva')
+})
+
+test('re-download limpa a reserva para não reusar .part apagado', () => {
+  assert.match(swarm, /this\.spoolReady\.delete\(file_id\)/, 'descarte/release limpa a promessa')
+  assert.match(swarm, /private spoolReady = new Map<string, Promise<void>>/, 'guarda a promessa, não só um booleano')
+})
+
 test('fechar e reabrir: fila retoma e semeadura por caminho volta', () => {
   assert.match(manager, /rehydrateStatus/, 'estado no meio do caminho vira fila')
   assert.match(manager, /restoreSeeds\(\)/, 'o boot restaura semeadura')
