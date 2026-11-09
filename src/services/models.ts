@@ -655,6 +655,9 @@ export interface DisTorrentServices {
   friendRemove(peerFp: string): Promise<void>
   friendBlock(peerFp: string): Promise<void>
   friendUnblock(peerFp: string): Promise<void>
+  /** Solicitações de amizade aceitas pelo usuário (não bloqueia; só ignora pedidos). */
+  friendRequestsEnabled(): Promise<boolean>
+  friendRequestsSet(enabled: boolean): Promise<void>
   vaultChange(oldPass: string, newPass: string): Promise<void>
   communitiesList(): Promise<CommunityView[]>
   communityMembers(communityId: string): Promise<MemberPairing[]>

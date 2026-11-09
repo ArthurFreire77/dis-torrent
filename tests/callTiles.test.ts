@@ -149,6 +149,24 @@ test('volume da TELA é independente da voz (chaves diferentes)', () => {
   assert.notEqual(person.audioKey, shared.audioKey, 'cada transmissão tem seu próprio controle')
 })
 
+test('com stream único, o card da PESSOA controla o mesmo áudio que a tela', () => {
+  const only = fakeStream()
+  const tiles = buildCallTiles({
+    participants: [{ fp: PEER, nickname: 'Bob', stream: only, sharing: true }],
+    myFp: ME,
+    local: { stream: fakeStream(), cameraOn: false },
+  })
+  const person = tiles.find((t) => t.kind === 'participant' && t.fp === PEER)!
+  const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
+  assert.equal(shared.audioKey, `s:${PEER}`)
+  assert.equal(
+    person.audioKey,
+    `s:${PEER}`,
+    'o card da pessoa sem áudio próprio precisa mirar o áudio da tela (era o "volume não desce")',
+  )
+  assert.equal(person.hasAudio, true, 'o controle continua disponível no card da pessoa')
+})
+
 test('com stream único, a chave do áudio acompanha o tile que toca', () => {
   const only = fakeStream()
   const tiles = buildCallTiles({

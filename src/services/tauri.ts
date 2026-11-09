@@ -115,6 +115,10 @@ export const tauriServices: DisTorrentServices = {
 
   friendUnblock: (peerFp) => invoke<void>('friend_unblock', { peerFp }),
 
+  friendRequestsEnabled: () => invoke<boolean>('friend_requests_enabled'),
+
+  friendRequestsSet: (enabled) => invoke<void>('friend_requests_set', { enabled }),
+
   vaultChange: (oldPass, newPass) => invoke<void>('vault_change', { old: oldPass, new: newPass }),
 
   communitiesList: () => invoke<import('./models').CommunityView[]>('communities_list'),

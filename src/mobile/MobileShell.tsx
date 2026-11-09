@@ -57,6 +57,7 @@ import { RichText, type InlineCtx } from '../shared/richText'
 import { useSocialWindow, useMessageActions, usePresence, useReadState } from '../app/useSocial'
 import { BookmarksPanel } from '../components/social/Social'
 import { introState, relationOf, effectivePresence } from '../services/socialRules'
+import { resolveContactName } from '../services/contactNames'
 import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
 import { GroupLeaveDialog } from '../components/social/GroupLeaveDialog'
@@ -127,7 +128,7 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
   onOpen: (c: Conversation) => void
   onDelete: (id: string, title: string, isSelected: boolean) => void
   room?: CallRoomView | null
-  onJoinRoom?: (c: Conversation, room: CallRoomView) => void
+  onJoinRoom?: (c: Conversation | null, room: CallRoomView) => void
 }) {
   return (
     <div className="m-row" onClick={() => onOpen(c)}>
@@ -277,6 +278,7 @@ export default function MobileShell() {
   const [showMembers, setShowMembers] = useState(false)
   const [friendsTab, setFriendsTab] = useState<'online' | 'todos' | 'pendentes' | 'bloqueados' | 'adicionar'>('online')
   const [friendRequests, setFriendRequests] = useState<{ fp: string, nickname: string }[]>([])
+  const [friendRequestsAllowed, setFriendRequestsAllowed] = useState(true)
   const [friendsAccepted, setFriendsAccepted] = useState<{ fp: string, nickname: string }[]>([])
   const [friendsBlocked, setFriendsBlocked] = useState<{ fp: string, nickname: string }[]>([])
   const [pendingOut, setPendingOut] = useState<{ fp: string, nickname: string }[]>([])
@@ -696,7 +698,7 @@ export default function MobileShell() {
     } catch { setTurnMsg('não foi possível salvar neste aparelho.') }
   }
 
-  const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []) } catch {  } }, [])
+  const refreshFriendsImpl = useCallback(async () => { try { const [a, b, c, d, ok] = await Promise.all([services.friendsList('pending_in').catch(() => [] as any), services.friendsList('accepted').catch(() => [] as any), services.friendsList('pending_out').catch(() => [] as any), services.friendsList('blocked').catch(() => [] as any), services.friendRequestsEnabled().catch(() => true)]); setFriendRequests(a ?? []); setFriendsAccepted(b ?? []); setPendingOut(c ?? []); setFriendsBlocked(d ?? []); setFriendRequestsAllowed(ok !== false) } catch {  } }, [])
   const refreshFriends = useMemo(() => coalesceAsyncRefresh(refreshFriendsImpl, 5000), [refreshFriendsImpl])
   async function refreshCommunities() { try { setCommunities(await services.communitiesList() ?? []) } catch {  } }
   useEffect(() => { if (phase !== 'app') return; refreshFriends(); refreshCommunities(); const id = window.setInterval(() => { if (!document.hidden) refreshFriends() }, 30000); return () => window.clearInterval(id) }, [phase, refreshFriends])
@@ -922,8 +924,10 @@ export default function MobileShell() {
     const un = services.subscribe((ev: any) => { if (ev?.type === 'call_room') callRooms.apply(ev) })
     return () => { try { un() } catch {  } }
   }, [])
-  const joinRoom = useCallback(async (c: Conversation, room: CallRoomView) => {
+  const joinRoom = useCallback(async (c: Conversation | null, room: CallRoomView) => {
     if (callActionBusy) return
+    if (!c) { setError('conversa da chamada não encontrada — abra a conversa e tente de novo'); return }
+    if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
     if (callIsActive(activeCall)) { setError('já existe uma chamada em andamento'); return }
     setCallActionBusy(true)
     try {
@@ -1464,13 +1468,14 @@ export default function MobileShell() {
   }, [])
   const resolveMemberName = useCallback((fp: string): string => {
     if (!fp) return ''
-    if (fp === identity?.fingerprint) return identity?.nickname ?? ''
-    return (
-      memberNicks[fp]
-      || profilesByFp[fp]?.display_name
-      || peers.find((p) => p.fp === fp)?.nickname
-      || ''
-    )
+    return resolveContactName({
+      fp,
+      myFp: identity?.fingerprint,
+      myNickname: identity?.nickname,
+      serverNickname: memberNicks[fp],
+      profileName: profilesByFp[fp]?.display_name,
+      knownNickname: peers.find((p) => p.fp === fp)?.nickname,
+    })
   }, [memberNicks, profilesByFp, peers, identity])
   const myFp = identity?.fingerprint ?? ''
   const mobileCallAvatars = useMemo<Record<string, string | undefined>>(() => {
@@ -2026,7 +2031,7 @@ export default function MobileShell() {
                   title={`Entrar na chamada em andamento (${selConvRoom.participants.length || 1} na sala)`}
                   aria-busy={callActionBusy || undefined}
                   disabled={callActionBusy}
-                  onClick={() => { if (selConv && !callActionBusy) void joinRoom(selConvObj!, selConvRoom) }}
+                  onClick={() => { if (selConv && !callActionBusy) void joinRoom(selConvObj, selConvRoom) }}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, background: t.accent, color: '#fff', border: 'none', borderRadius: 99, padding: '7px 12px', fontSize: 12, fontWeight: 800, cursor: callActionBusy ? 'wait' : 'pointer', whiteSpace: 'nowrap', opacity: callActionBusy ? 0.7 : 1 }}
                 >
                   <Icon d={Icons.phone} size={13} /> {callActionBusy ? 'entrando…' : 'Entrar'}
@@ -2173,9 +2178,9 @@ export default function MobileShell() {
               {}
               {(privacyMode === 'proxy' || privacyMode === 'full') && (
                 <span
-                  title="A mÃ­dia (Ã¡udio/vÃ­deo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes veem seu IP real. Mensagens e arquivos seguem protegidos."
+                  title="A mídia (áudio/vídeo/tela) usa sockets UDP diretos do WebRTC, fora do proxy/Tor do app. Os participantes veem seu IP real. Mensagens e arquivos seguem protegidos."
                   style={{ fontSize: 9, fontWeight: 800, background: `${t.yellow}22`, color: t.yellow, padding: '2px 7px', borderRadius: 99, whiteSpace: 'nowrap', cursor: 'help', flexShrink: 0 }}
-                >nÃ£o anÃ´nima</span>
+                >não anônima</span>
               )}
               {}
               <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} ringing={activeCall.ringing} />
@@ -2759,6 +2764,25 @@ export default function MobileShell() {
               >{addingFriend ? 'Enviando…' : 'Enviar solicitação'}</button>
               {friendErr && <div style={{ marginTop: 10, color: t.red, fontSize: 12, lineHeight: 1.5 }}>{friendErr}</div>}
               {friendSuccess && <div className="m-ok" style={{ marginTop: 12 }}>{friendSuccess}</div>}
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 14, padding: '10px 12px', background: t.input, border: `1px solid ${t.border}`, borderRadius: 10 }}>
+                <input
+                  type="checkbox"
+                  checked={friendRequestsAllowed}
+                  onChange={async e => {
+                    const ligado = e.target.checked
+                    setFriendRequestsAllowed(ligado)
+                    try { await services.friendRequestsSet(ligado) }
+                    catch (err: any) { setFriendRequestsAllowed(!ligado); setError(String(err?.message ?? err)) }
+                  }}
+                  style={{ marginTop: 2, accentColor: t.accent }}
+                />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: 'block', fontSize: 12.5, fontWeight: 700, color: t.text }}>Aceitar solicitações de amizade</span>
+                  <span style={{ display: 'block', fontSize: 11, color: t.muted, marginTop: 2, lineHeight: 1.5 }}>
+                    Desligado, ninguém consegue te enviar pedido novo. Quem já é amigo continua amigo.
+                  </span>
+                </span>
+              </label>
               {pendingOut.length > 0 && (
                 <div style={{ marginTop: 16 }}>
                   <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, color: t.muted, marginBottom: 8 }}>ENVIADAS ({pendingOut.length}) — aguardando</div>
@@ -2778,7 +2802,11 @@ export default function MobileShell() {
             </div>
           ) : friendsTab === 'pendentes' ? (
             friendRequests.length === 0 ? (
-              <EmptyBlock msg="Não há solicitações pendentes. Que pena." />
+              <EmptyBlock
+                msg={friendRequestsAllowed
+                  ? 'Não há solicitações pendentes. Que pena.'
+                  : 'Solicitações de amizade estão desligadas. Ninguém consegue te enviar pedido novo.'}
+              />
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 {friendRequests.map(r => (
@@ -2969,14 +2997,14 @@ export default function MobileShell() {
             {}
             <div style={{ background: t.input, border: `1px solid ${t.border}`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: t.muted }}>
-                {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE â€” relay desligado (fail-closed)') : 'Proxy: Desativado'}
+                {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE — relay desligado (fail-closed)') : 'Proxy: Desativado'}
               </div>
               <div style={{ fontSize: 11, color: t.muted, marginTop: 2 }}>
                 {(privacyMode === 'proxy' || privacyMode === 'full')
                   ? (privacyProxyEffective
-                      ? `relay saindo por ${proxyAddr || 'â€”'} (SOCKS5 â€” sem ntfy, sem HTTP externo)`
-                      : 'o proxy nÃ£o respondeu ou Ã© invÃ¡lido: o relay fica DESLIGADO atÃ© ele voltar (fail-closed, sem fallback direto)')
-                  : 'nenhuma conexÃ£o passa por proxy â€” relay MQTT direto dos brokers pÃºblicos'}
+                      ? `relay saindo por ${proxyAddr || '—'} (SOCKS5 — sem ntfy, sem HTTP externo)`
+                      : 'o proxy não respondeu ou o endereço é inválido: o relay fica DESLIGADO até ele voltar (fail-closed, sem fallback direto)')
+                  : 'nenhuma conexão passa por proxy — relay MQTT direto dos brokers públicos'}
               </div>
             </div>
 

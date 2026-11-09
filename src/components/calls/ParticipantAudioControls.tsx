@@ -3,6 +3,7 @@ import {
   applyMountedParticipantPlayback,
   getParticipantPlaybackSettings,
   saveParticipantPlaybackSettings,
+  MAX_PARTICIPANT_VOLUME,
 } from '../../services/callPlayback'
 
 export function ParticipantAudioControls({
@@ -82,17 +83,27 @@ export function ParticipantAudioControls({
           >{settings.muted ? 'Ativar áudio para mim' : 'Silenciar para mim'}</button>
 
           <label style={{ display: 'block', marginTop: 9, fontSize: 11 }}>
-            Volume local: {settings.volume}%
+            Volume local: {settings.volume}%{settings.volume > 100 ? ' (amplificado)' : ''}
             <input
               type="range"
               min={0}
-              max={100}
-              step={1}
+              max={MAX_PARTICIPANT_VOLUME}
+              step={5}
               value={settings.volume}
               aria-label={`Volume de ${label}`}
               onChange={(event) => update({ volume: Number(event.target.value) })}
               style={{ display: 'block', width: '100%', marginTop: 6, accentColor: '#5865f2' }}
             />
+            <span style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9.5, color: '#9aa0aa', marginTop: 2 }}>
+              <span>0%</span>
+              <span>100%</span>
+              <span>{MAX_PARTICIPANT_VOLUME}%</span>
+            </span>
+            {settings.volume > 100 && (
+              <span style={{ display: 'block', fontSize: 10, color: '#f0b232', marginTop: 5, lineHeight: 1.4 }}>
+                Acima de 100% o som é amplificado e pode distorcer.
+              </span>
+            )}
           </label>
 
           {callDeafened && (

@@ -32,6 +32,12 @@ export function SoundboardPanel({ open, onClose, palette }: {
     const t = setTimeout(() => setAviso(null), 3200)
     return () => clearTimeout(t)
   }, [aviso])
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose() } }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open, onClose])
 
   if (!open) return null
 
@@ -98,16 +104,19 @@ export function SoundboardPanel({ open, onClose, palette }: {
   const head: React.CSSProperties = { fontSize: 10, fontWeight: 800, letterSpacing: 1, color: palette.muted, marginBottom: 6 }
 
   return (
-    <div
-      role="dialog"
-      aria-label="Efeitos sonoros da chamada"
-      style={{
-        position: 'absolute', bottom: '100%', right: 0, marginBottom: 8, zIndex: 90,
-        width: 330, maxWidth: '92vw', maxHeight: '60vh', overflowY: 'auto',
-        background: palette.panel, border: `1px solid ${palette.border}`, borderRadius: 10,
-        padding: 12, boxShadow: '0 12px 36px rgba(0,0,0,.55)',
-      }}
-    >
+    <>
+      {/* Backdrop clicável: o painel é fixed e sem isto ficaria impossível fechar fora do X. */}
+      <div onClick={onClose} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 199 }} />
+      <div
+        role="dialog"
+        aria-label="Efeitos sonoros da chamada"
+        style={{
+          position: 'fixed', bottom: 96, right: 24, zIndex: 200,
+          width: 330, maxWidth: '92vw', maxHeight: '60vh', overflowY: 'auto',
+          background: palette.panel, border: `1px solid ${palette.border}`, borderRadius: 10,
+          padding: 12, boxShadow: '0 12px 36px rgba(0,0,0,.55)',
+        }}
+      >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
         <span style={{ ...head, margin: 0 }}>EFEITOS DA CHAMADA</span>
         <button onClick={onClose} aria-label="Fechar efeitos" style={{ background: 'transparent', border: 'none', color: palette.muted, cursor: 'pointer', display: 'flex' }}><Ic name="x" size={14} /></button>
@@ -182,6 +191,7 @@ export function SoundboardPanel({ open, onClose, palette }: {
           ))}
         </div>
       )}
-    </div>
+      </div>
+    </>
   )
 }

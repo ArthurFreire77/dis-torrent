@@ -72,4 +72,22 @@ describe('soundboard: UI presente nos dois shells', () => {
     assert.match(mobile, /SoundboardPanel/)
     assert.match(mobile, /mobile-soundboard/)
   })
+
+  test('o painel flutua na tela (não fica preso dentro de um popover escondido)', () => {
+    assert.match(panel, /position: 'fixed'/, 'o painel antigo usava absolute dentro de uma div sem posição')
+    assert.match(panel, /Escape/, 'Esc fecha o painel')
+    assert.match(panel, /zIndex: 199/, 'backdrop clicável fecha ao clicar fora')
+    assert.match(panel, /onClose/, 'o backdrop usa o onClose recebido')
+  })
+
+  test('o botão de efeitos não é mais embrulhado em div position:relative', () => {
+    const antes = shell.indexOf('Efeitos</button>')
+    assert.ok(antes > 0, 'o botão existe')
+    const trecho = shell.slice(Math.max(0, antes - 1200), antes)
+    assert.doesNotMatch(
+      trecho,
+      /<div style=\{\{ position: 'relative' \}\}>\s*<button[^>]*setShowSoundboard/,
+      'o wrapper relativo é o que escondia o painel',
+    )
+  })
 })

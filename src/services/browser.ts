@@ -603,6 +603,13 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve()
   },
 
+  friendRequestsEnabled: () => Promise.resolve(getNamespaced<boolean>('friends:requests') !== false),
+
+  friendRequestsSet: (enabled) => {
+    setNamespaced('friends:requests', !!enabled)
+    return Promise.resolve()
+  },
+
   vaultChange: () =>
     Promise.reject(new Error('cofre disponível no app nativo')),
 

@@ -408,6 +408,67 @@ fn desbloquear_nao_recria_amizade() {
     );
 }
 
+/// O retry automático reenvia o MESMO perfil de pedido. Tratar todo
+/// `pending_in` como "pedido cruzado" fazia a amizade nascer sem ninguém
+/// clicar em Aceitar — era o bug relatado ("aceitou sozinho").
+#[test]
+fn pedido_repetido_nao_vira_amizade_sem_aceite() {
+    let (e, _d) = mk_engine("pedido-repetido");
+    let peer = peer_hex(0xab);
+
+    for _ in 0..5 {
+        perfil_block_on(frames::handle_frame(
+            &e,
+            &peer,
+            "pk",
+            "peer",
+            SecureFrame::FriendRequest {
+                nickname: "peer".into(),
+            },
+        ))
+        .unwrap();
+    }
+
+    assert_eq!(
+        e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+        Some("pending_in".into()),
+        "pedido repetido continua PENDENTE: quem aceita é o usuário"
+    );
+    assert!(
+        e.friends(Some("pending_in")).iter().any(|f| f.fp == peer),
+        "o pedido continua visível na lista de pendentes"
+    );
+}
+
+/// Desligar solicitações não pode criar amizade nem revelar bloqueio.
+#[test]
+fn pedido_ignorado_com_solicitacoes_desligadas() {
+    let (e, _d) = mk_engine("pedidos-desligados");
+    let peer = peer_hex(0xcd);
+    e.set_friend_requests_enabled(false).unwrap();
+    assert!(!e.friend_requests_enabled());
+
+    perfil_block_on(frames::handle_frame(
+        &e,
+        &peer,
+        "pk",
+        "peer",
+        SecureFrame::FriendRequest {
+            nickname: "peer".into(),
+        },
+    ))
+    .unwrap();
+
+    assert_eq!(
+        e.store.get_friend(&peer).unwrap().map(|(_, s)| s),
+        None,
+        "com pedidos desligados não nasce nem solicitação pendente"
+    );
+
+    e.set_friend_requests_enabled(true).unwrap();
+    assert!(e.friend_requests_enabled(), "a opção volta a ligar");
+}
+
 #[test]
 fn pedido_vencido_some_das_listas() {
     let (e, d) = mk_engine("pedido-vencido");

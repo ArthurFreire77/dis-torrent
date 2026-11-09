@@ -46,6 +46,8 @@ export interface CallTile {
   disconnected: boolean
   cameraOn: boolean
   localPreviewUnavailable: boolean
+  /** Este quadrado realmente toca áudio remoto (há `<audio>` montado). */
+  hasAudio: boolean
 }
 
 export function participantTileId(fp: string): string {
@@ -160,6 +162,16 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         ? undefined
         : pickString(p.videoUrl)
 
+    const participantAudioStream = isLocal || audioOwnerIsScreen
+      ? undefined
+      : (remoteCameraStream ?? cameraStream ?? undefined)
+    // Com um único stream (tela carregando o áudio), o controle do card da
+    // pessoa precisa mirar o MESMO áudio do card da tela; senão ele mexe num
+    // elemento que não existe e o volume "não desce" por ali.
+    const participantAudioKey = audioOwnerIsScreen
+      ? screenTileId(p.fp)
+      : participantTileId(p.fp)
+
     tiles.push({
       id: participantTileId(p.fp),
       kind: 'participant',
@@ -167,10 +179,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       nickname,
       label: nickname,
       stream: participantStream ?? undefined,
-      audioStream: isLocal || audioOwnerIsScreen
-        ? undefined
-        : (remoteCameraStream ?? cameraStream ?? undefined) ?? undefined,
-      audioKey: participantTileId(p.fp),
+      audioStream: participantAudioStream ?? undefined,
+      audioKey: participantAudioKey,
       videoUrl: participantVideoUrl,
       isLocal,
       sharing,
@@ -179,9 +189,13 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       disconnected: p.disconnected === true && !isLocal,
       cameraOn,
       localPreviewUnavailable: isLocal && !participantStream && !participantVideoUrl && !!local?.nativeMedia && cameraOn,
+      // Pessoa remota sempre tem controle: a chave aponta para o elemento que
+      // realmente toca o áudio (o da tela, quando é ela que carrega o som).
+      hasAudio: !isLocal,
     })
 
     if (sharing) {
+      const screenAudioStream = audioOwnerIsScreen ? screenStream : null
       tiles.push({
         id: screenTileId(p.fp),
         kind: 'screen',
@@ -190,7 +204,7 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         label: screenTileLabel(nickname, isLocal),
         stream: screenStream ?? undefined,
         videoUrl: screenVideoUrl,
-        audioStream: audioOwnerIsScreen ? (screenStream ?? undefined) : undefined,
+        audioStream: screenAudioStream ?? undefined,
         audioKey: screenTileId(p.fp),
         isLocal,
         sharing: true,
@@ -199,6 +213,7 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         disconnected: p.disconnected === true && !isLocal,
         cameraOn,
         localPreviewUnavailable: isLocal && !screenStream && !screenVideoUrl && !!local?.nativeMedia,
+        hasAudio: !isLocal && !!screenAudioStream,
       })
     }
   }

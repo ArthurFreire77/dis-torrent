@@ -39,6 +39,18 @@ pub(crate) fn friend_unblock(peer_fp: String, state: State<AppState>) -> Result<
 }
 
 #[tauri::command]
+pub(crate) fn friend_requests_enabled(state: State<AppState>) -> Result<bool, String> {
+    Ok(engine(&state)?.friend_requests_enabled())
+}
+
+#[tauri::command]
+pub(crate) fn friend_requests_set(enabled: bool, state: State<AppState>) -> Result<(), String> {
+    engine(&state)?
+        .set_friend_requests_enabled(enabled)
+        .map_err(err)
+}
+
+#[tauri::command]
 pub(crate) fn messages_list(
     conv_id: String,
     state: State<AppState>,

@@ -52,6 +52,7 @@ import {
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
 import { contactBadge, effectivePresence, introState, relationOf } from '../services/socialRules'
+import { resolveContactName } from '../services/contactNames'
 import { Modal, Notice, Button } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
 import { GroupPanel } from '../components/social/GroupPanel'
@@ -341,6 +342,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [friendsAccepted, setFriendsAccepted] = useState<{fp:string,nickname:string}[]>([])
   const [friendsBlocked, setFriendsBlocked] = useState<{fp:string,nickname:string}[]>([])
   const [pendingOut, setPendingOut] = useState<{fp:string,nickname:string}[]>([])
+  const [friendRequestsAllowed, setFriendRequestsAllowed] = useState(true)
   const [showProfile, setShowProfile] = useState(false)
   const [extraChannels, setExtraChannels] = useState<ChannelMeta[]>([])
   const [roles, setRoles] = useState<RoleView[]>([])
@@ -355,6 +357,11 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [pendingCategory, setPendingCategory] = useState<string | null>(null)
   const [memberRolesCache, setMemberRolesCache] = useState<Record<string, string[]>>({})
   const [activeCall, setActiveCall] = useState<any>(null)
+  /** Canal de voz/vídeo atual, derivado do callId — nunca de estado paralelo. */
+  const voiceChannel = useMemo(
+    () => parseVoiceCallId(activeCall?.callId, activeCall?.convId),
+    [activeCall?.callId, activeCall?.convId],
+  )
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null)
   const [callActionBusy, setCallActionBusy] = useState(false)
   const peerNickCacheRef = useRef<Record<string, string>>({})
@@ -394,7 +401,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [groupMemberCount, setGroupMemberCount] = useState(0)
   const [groupTitle, setGroupTitle] = useState('')
   const [groupPick, setGroupPick] = useState<Set<string>>(new Set())
-  const [voiceChannel, setVoiceChannel] = useState<{ communityId: string; channelId: string } | null>(null)
   const [voiceStates, setVoiceStates] = useState<[string,boolean,boolean][]>([])
   const [isMuted, setIsMuted] = useState(false)
   const [isDeafened, setIsDeafened] = useState(false)
@@ -469,16 +475,18 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   async function refreshFriends() {
     try {
-      const [inReq, acc, outReq, blk] = await Promise.all([
+      const [inReq, acc, outReq, blk, reqOk] = await Promise.all([
         services.friendsList('pending_in').catch(()=>[] as any),
         services.friendsList('accepted').catch(()=>[] as any),
         services.friendsList('pending_out').catch(()=>[] as any),
         services.friendsList('blocked').catch(()=>[] as any),
+        services.friendRequestsEnabled().catch(() => true),
       ])
       setFriendRequests(inReq ?? [])
       setFriendsAccepted(acc ?? [])
       setPendingOut(outReq ?? [])
       setFriendsBlocked(blk ?? [])
+      setFriendRequestsAllowed(reqOk !== false)
     } catch {  }
   }
 
@@ -519,7 +527,6 @@ export default function ThemeShell({ designId }: {designId:string}){
   useEffect(() => {
     callManager.bind((s: any) => {
       setActiveCall(s)
-      if (!s || !String(s.callId ?? '').startsWith('voice-')) setVoiceChannel(null)
       if (s) {
         setIsMuted(!!s.muted)
         setIsDeafened(!!s.deafened)
@@ -733,17 +740,20 @@ export default function ThemeShell({ designId }: {designId:string}){
     swarmNotifyRef.current = notify
     const prev = fileSwarm.onChange
     fileSwarm.onChange = notify
-    const onVoice = () => {
+    const ler = () => {
       if (voiceChannel) services.voiceStates(voiceChannel.communityId, voiceChannel.channelId).then(setVoiceStates).catch(()=>{})
     }
-    window.addEventListener('distorrent:voice_changed', onVoice)
+    // Entrar pela tela da chamada não passa pela sidebar: reler quando o
+    // canal muda é o que mantém a lista de quem está na voz correta.
+    ler()
+    window.addEventListener('distorrent:voice_changed', ler)
     return () => {
       notify.cancel()
       swarmNotifyRef.current = () => {}
       fileSwarm.onChange = prev
-      window.removeEventListener('distorrent:voice_changed', onVoice)
+      window.removeEventListener('distorrent:voice_changed', ler)
     }
-  }, [voiceChannel])
+  }, [voiceChannel?.communityId, voiceChannel?.channelId])
 
   useEffect(() => {
     const un = downloadManager.subscribe((items) => {
@@ -1633,14 +1643,15 @@ export default function ThemeShell({ designId }: {designId:string}){
   }, [activeComm?.members])
 
   const nameOfFp = (fp: string): string => {
-    if (fp === identity?.fingerprint) return identity?.nickname ?? 'você'
-    const sn = serverNicks[fp]
-    if (sn) return sn
-    const c = communities.find(x => x.owner_fp === fp)
-    if (c) return c.name
     const f = peers.find(p => p.fp === fp)
-    const nick = f?.nickname || (socialProfiles[fp]?.display_name ?? '')
-    return nick || String(fp).slice(0, 8)
+    return resolveContactName({
+      fp,
+      myFp: identity?.fingerprint,
+      myNickname: identity?.nickname,
+      serverNickname: serverNicks[fp],
+      profileName: socialProfiles[fp]?.display_name,
+      knownNickname: f?.nickname,
+    })
   }
 
   const channelCallPeers = useMemo(() => {
@@ -2054,13 +2065,12 @@ export default function ThemeShell({ designId }: {designId:string}){
                                         try {
                                           await callManager.leaveVoice(canalDaChamada.communityId, ch.id)
                                         } catch (e: any) { setError(String(e?.message ?? e)) }
-                                        setVoiceChannel(null); setVoiceStates([])
+                                        setVoiceStates([])
                                       } else {
                                         setSelConv(ch.id)
                                         try {
                                           await callManager.joinVoice(selCommunity!, ch.id)
-                                        } catch (e: any) { setError(String(e?.message ?? e)); setVoiceChannel(null); setCallActionBusy(false); return }
-                                        setVoiceChannel({ communityId: selCommunity!, channelId: ch.id })
+                                        } catch (e: any) { setError(String(e?.message ?? e)); setCallActionBusy(false); return }
                                         services.voiceStates(selCommunity!, ch.id).then(setVoiceStates).catch(()=>{})
                                       }
                                       setCallActionBusy(false)
@@ -2202,7 +2212,7 @@ export default function ThemeShell({ designId }: {designId:string}){
               <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={() => { const nm=!isMuted; setIsMuted(nm); callManager.toggleMute(); services.voiceState(canalDaChamada.communityId, canalDaChamada.channelId, nm, isDeafened).catch(()=>{}) }} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ flex: 1, background: isMuted ? t.red : inputBg, color: isMuted ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={13} /> : <Icon d={Icons.mic} size={13} />}</button>
                 <button onClick={() => { const nd=!isDeafened; setIsDeafened(nd); if(nd) setIsMuted(true); callManager.toggleDeafen(); services.voiceState(canalDaChamada.communityId, canalDaChamada.channelId, isMuted || nd, nd).catch(()=>{}) }} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ flex: 1, background: isDeafened ? t.red : inputBg, color: isDeafened ? '#fff' : text, border: 'none', padding: '6px 0', borderRadius: 6, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={13} /> : <Icon d={Icons.headphones} size={13} />}</button>
-                <button onClick={async () => { try { await callManager.leaveVoice(canalDaChamada.communityId, canalDaChamada.channelId) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceChannel(null); setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
+                <button onClick={async () => { try { await callManager.leaveVoice(canalDaChamada.communityId, canalDaChamada.channelId) } catch (e: any) { setError(String(e?.message ?? e)) } setVoiceStates([]) }} style={{ background: t.red, color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 800 }}>Sair</button>
               </div>
               {channelCallPeers.length>0 && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{channelCallPeers.map((p) => <span key={p.fp} title={p.nome} style={{ fontSize: 10, background: inputBg, border: `1px solid ${borderColor}`, padding: '2px 6px', borderRadius: 99, color: p.muted? t.red : p.deafened? t.yellow : t.green }}>{p.eu ? 'você' : p.nome} {p.muted ? <Icon d={Icons.micOff} size={10} /> : p.deafened ? <Icon d={Icons.volumeX} size={10} /> : <Icon d={Icons.mic} size={10} />}</span>)}</div>}
             </div>
@@ -2473,6 +2483,26 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <button onClick={addFriend} className="add-btn" style={{ opacity: friendFpInput.trim() ? 1 : 0.5, cursor: friendFpInput.trim() ? 'pointer' : 'not-allowed' }}>Enviar solicitação</button>
                   </div>
                   {friendSuccess && <div style={{ marginTop: 12, background: '#1a3329', border: `1px solid ${t.green}55`, color: '#8cf5b8', fontSize: 12, padding: '8px 12px', borderRadius: 8 }}>{friendSuccess}</div>}
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 16, padding: '10px 12px', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 8, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={friendRequestsAllowed}
+                      onChange={async e => {
+                        const ligado = e.target.checked
+                        setFriendRequestsAllowed(ligado)
+                        try { await services.friendRequestsSet(ligado) }
+                        catch (err: any) { setFriendRequestsAllowed(!ligado); setError(String(err?.message ?? err)) }
+                      }}
+                      style={{ marginTop: 2, accentColor: t.accent }}
+                    />
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: 'block', fontSize: 12.5, fontWeight: 700, color: text }}>Aceitar solicitações de amizade</span>
+                      <span style={{ display: 'block', fontSize: 11, color: muted, marginTop: 2, lineHeight: 1.5 }}>
+                        Desligado, ninguém consegue te enviar pedido novo — quem já é amigo continua amigo.
+                        Você ainda pode adicionar outras pessoas.
+                      </span>
+                    </span>
+                  </label>
                   {services.kind === 'browser' && (
                     <div style={{ marginTop: 12, background: '#2a1f0a', border: `1px solid ${t.yellow}55`, color: '#ffcc66', fontSize: 11, padding: '8px 12px', borderRadius: 8, lineHeight: 1.5 }}>
                       Modo navegador (LOCAL): só funciona entre abas do <b>mesmo PC</b> via BroadcastChannel. Para testar com celular, use o <b>app nativo Tauri</b> nos dois aparelhos na mesma Wi-Fi (descoberta LAN automática) ou use <b>Configurações → Avançado → digitar IP manual</b>.
@@ -2509,7 +2539,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                 </div>
               ) : friendsTab === 'pendentes' ? (
                 friendRequests.length === 0 && pendingOut.length === 0 ? (
-                  <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>Não há solicitações pendentes. Que pena.</div>
+                  <div style={{ padding: 32, textAlign: 'center', color: muted, fontSize: 13 }}>
+                    {friendRequestsAllowed
+                      ? 'Não há solicitações pendentes. Que pena.'
+                      : 'Solicitações de amizade estão desligadas. Ninguém consegue te enviar pedido novo.'}
+                  </div>
                 ) : (
                   <>
                     {friendRequests.map(r => (
@@ -2707,24 +2741,22 @@ export default function ThemeShell({ designId }: {designId:string}){
                       onClick={() => fileInputRef.current?.click()}
                       style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
                     ><Icon d={Icons.attach} size={12} /> Arquivo</button>
-                    <div style={{ position: 'relative' }}>
-                      <button
-                        type="button"
-                        onClick={() => setShowSoundboard(v => !v)}
-                        aria-expanded={showSoundboard}
-                        title="Efeitos sonoros: envie ou baixe sons de até 10s"
-                        aria-label="Efeitos sonoros"
-                        style={{ background: showSoundboard ? t.accent : inputBg, border: `1px solid ${borderColor}`, color: showSoundboard ? '#fff' : text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
-                      ><Icon d={Icons.headphones} size={12} /> Efeitos</button>
-                      {showSoundboard && (
-                        <SoundboardPanel
-                          open
-                          onClose={() => setShowSoundboard(false)}
-                          palette={{ input: inputBg, border: borderColor, text, muted, accent: t.accent, panel: t.panel }}
-                        />
-                      )}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowSoundboard(v => !v)}
+                      aria-expanded={showSoundboard}
+                      title="Efeitos sonoros: envie ou baixe sons de até 10s"
+                      aria-label="Efeitos sonoros"
+                      style={{ background: showSoundboard ? t.accent : inputBg, border: `1px solid ${borderColor}`, color: showSoundboard ? '#fff' : text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                    ><Icon d={Icons.headphones} size={12} /> Efeitos</button>
                   </div>
+                  {showSoundboard && (
+                    <SoundboardPanel
+                      open
+                      onClose={() => setShowSoundboard(false)}
+                      palette={{ input: inputBg, border: borderColor, text, muted, accent: t.accent, panel: t.panel }}
+                    />
+                  )}
                   {((activeCall?.qualityNotice as string | undefined) || qualityError) && (
                     <div role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow, lineHeight: 1.5 }}>
                       {qualityError ?? (activeCall?.qualityNotice as string)}
@@ -3988,14 +4020,14 @@ export default function ThemeShell({ designId }: {designId:string}){
             {}
             <div style={{ background: t.rail, border: `1px solid ${t.border}`, borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
               <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, color: muted }}>
-                {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE â€” relay desligado (fail-closed)') : 'Proxy: Desativado'}
+                {(privacyMode === 'proxy' || privacyMode === 'full') ? (privacyProxyEffective ? 'PROXY: ATIVADO (efetivo)' : 'PROXY: OFFLINE — relay desligado (fail-closed)') : 'Proxy: Desativado'}
               </div>
               <div style={{ fontSize: 11, color: muted, marginTop: 2 }}>
                 {(privacyMode === 'proxy' || privacyMode === 'full')
                   ? (privacyProxyEffective
-                      ? `trÃ¡fego do relay saindo por ${proxyAddr || 'â€”'} (SOCKS5 â€” sem ntfy, sem HTTP externo)`
-                      : 'o proxy nÃ£o respondeu ou o endereÃ§o Ã© invÃ¡lido: o relay fica DESLIGADO atÃ© ele voltar (fail-closed, sem fallback direto)')
-                  : 'nenhuma conexÃ£o passa por proxy â€” relay MQTT direto dos brokers pÃºblicos'}
+                      ? `tráfego do relay saindo por ${proxyAddr || '—'} (SOCKS5 — sem ntfy, sem HTTP externo)`
+                      : 'o proxy não respondeu ou o endereço é inválido: o relay fica DESLIGADO até ele voltar (fail-closed, sem fallback direto)')
+                  : 'nenhuma conexão passa por proxy — relay MQTT direto dos brokers públicos'}
               </div>
             </div>
 

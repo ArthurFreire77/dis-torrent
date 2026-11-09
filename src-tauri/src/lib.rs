@@ -1368,6 +1368,8 @@ fn main() {
             commands_social::friend_remove,
             commands_social::friend_block,
             commands_social::friend_unblock,
+            commands_social::friend_requests_enabled,
+            commands_social::friend_requests_set,
             commands_net::conversations_list,
             commands_net::conversations_overview,
             commands_net::dm_open,

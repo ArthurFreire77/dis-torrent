@@ -22,7 +22,13 @@ pub(super) async fn handle_friends(
             }
             let nick = cap_str(&nickname, 64);
             let state = engine.store.friend_state(peer_fp)?;
-            match state.as_ref().map(|s| s.status.as_str()) {
+            let status = state.as_ref().map(|s| s.status.as_str());
+            if !engine.friend_requests_enabled() && status != Some("accepted") {
+                // Silêncio deliberado: desligar pedidos não pode virar um
+                // sinal de "estou bloqueando" para quem tentou.
+                return Ok(());
+            }
+            match status {
                 Some("accepted") => {
                     // Já somos amigos (o outro lado perdeu o estado): basta reconfirmar. Não recria linha nem "re-aceita".
                     engine
@@ -35,10 +41,11 @@ pub(super) async fn handle_friends(
                         ))
                         .ok();
                 }
-                // Pedido cruzado: os dois pediram. Aceitar aqui é o único
-                // desfecho simétrico; sem isto um lado ficava pendente para
-                // sempre enquanto o outro recebia FriendAccept.
-                Some("pending_out") | Some("pending_in") => {
+                // Só `pending_out` é pedido cruzado de verdade (este lado
+                // também pediu). `pending_in` é o MESMO pedido reenviado
+                // pelo retry automático; aceitar ali criava amizade sem
+                // ninguém tocar em "Aceitar".
+                Some("pending_out") => {
                     engine.store.accept_friend(peer_fp, &nick)?;
                     engine.reset_dm_intro_for_peer(peer_fp);
                     engine
@@ -54,6 +61,16 @@ pub(super) async fn handle_friends(
                         fp: peer_fp.into(),
                         nickname: nick,
                     });
+                }
+                Some("pending_in") => {
+                    let mudou = state.as_ref().map(|s| s.nickname != nick).unwrap_or(true);
+                    engine.store.set_friend_request_in(peer_fp, &nick)?;
+                    if mudou {
+                        let _ = engine.events.send(EngineEvent::FriendRequestIn {
+                            fp: peer_fp.into(),
+                            nickname: nick,
+                        });
+                    }
                 }
                 _ => {
                     // `rejected`/`removed` voltam a ser pendentes, mas o carimbo de quando o pedido chegou é renovado.

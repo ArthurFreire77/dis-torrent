@@ -92,6 +92,7 @@ export default function MobileCallStage({
       touch
       onPin={onPin}
       onExpand={onExpand}
+      showAudioControls={!thumbnail}
       callDeafened={deafened}
       palette={palette}
       minHeight={altura}

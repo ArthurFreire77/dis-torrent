@@ -13,6 +13,17 @@ impl NetworkEngine {
         matches!(self.store.get_friend(peer_fp).ok().flatten(), Some((_, s)) if s == "blocked")
     }
 
+    /// Pedidos de amizade podem ser desligados sem bloquear ninguém: quem
+    /// tenta recebe silêncio, e amizades já aceitas continuam se reconfirmando.
+    pub fn friend_requests_enabled(&self) -> bool {
+        self.store.kv_get("friends.requests_enabled").as_deref() != Some("0")
+    }
+
+    pub fn set_friend_requests_enabled(&self, enabled: bool) -> Result<()> {
+        self.store
+            .kv_set("friends.requests_enabled", if enabled { "1" } else { "0" })
+    }
+
     /// Normaliza um identificador de peer digitado/colado.
     /// Aceita os dois formatos que a UI oferece para copiar: o fingerprint de 12
     /// hex e a chave pública de 64 hex. Recusar o formato longo fazia quem

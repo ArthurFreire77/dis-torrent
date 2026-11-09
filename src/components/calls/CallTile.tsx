@@ -410,7 +410,7 @@ export function CallTile({
 
       {
 }
-      {showAudioControls && !tile.isLocal && (
+      {showAudioControls && !tile.isLocal && tile.hasAudio && (
         <ParticipantAudioControls
           fp={audioKey}
           nickname={isScreen ? `${tile.nickname} (tela)` : tile.nickname}
