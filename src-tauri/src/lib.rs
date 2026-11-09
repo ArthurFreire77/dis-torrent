@@ -19,6 +19,7 @@ pub mod commands_misc;
 pub mod commands_net;
 pub mod commands_server;
 pub mod commands_social;
+pub mod commands_sound;
 pub mod commands_voice;
 mod download_spool;
 mod download_target;
@@ -1356,6 +1357,11 @@ fn main() {
             commands_net::disconnect_peer,
             commands_files::save_file_stream,
             commands_files::save_public_copy,
+            commands_sound::sound_list,
+            commands_sound::sound_save,
+            commands_sound::sound_delete,
+            commands_sound::sound_read,
+            commands_sound::sound_download,
             commands_net::friends_list,
             commands_social::friend_request,
             commands_social::friend_respond,

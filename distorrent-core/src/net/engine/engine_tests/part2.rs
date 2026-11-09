@@ -260,6 +260,9 @@ fn profile_set_nao_cria_amizade() {
             accent: String::new(),
             rev: 1,
             content_hash: String::new(),
+            profile_theme: String::new(),
+            avatar_effect: String::new(),
+            decoration: String::new(),
         },
     ))
     .unwrap();

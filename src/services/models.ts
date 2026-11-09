@@ -452,7 +452,11 @@ export interface ReactionSummary {
   count: number
   reactors: string[]
   mine: boolean
-}export interface MsgMetaView {
+  /** Quantas dessas reações são "super" (efeito de brilho na UI). */
+  super_count?: number
+}
+
+export interface MsgMetaView {
   msg_id: string
   conv_id: string
   reply_to: string
@@ -486,6 +490,12 @@ export interface ProfileView {
   updated_at: number
   rev?: number
   content_hash?: string
+  /** Gradiente do perfil: '' | 'aurora' | 'sunset' | 'ocean' | 'neon' | 'forest'. */
+  profile_theme?: string
+  /** Aura do avatar: '' | 'glow' | 'pulse' | 'rainbow' | 'sparkle'. */
+  avatar_effect?: string
+  /** Emoji de decoração exibido ao lado do nome. */
+  decoration?: string
 }
 
 export interface ProfilePatch {
@@ -496,6 +506,9 @@ export interface ProfilePatch {
   accent: string
   remove_avatar?: boolean
   remove_banner?: boolean
+  profile_theme?: string
+  avatar_effect?: string
+  decoration?: string
 }
 
 export interface ThreadView {
@@ -856,7 +869,7 @@ export interface DisTorrentServices {
   voiceMicTestStop(testId: number): Promise<void>
   voiceMicName(): Promise<string>
 
-  react(convId: string, msgId: string, emoji: string): Promise<boolean>
+  react(convId: string, msgId: string, emoji: string, superReact?: boolean): Promise<boolean>
   reactions(msgId: string): Promise<ReactionSummary[]>
   reactionsBulk(msgIds: string[]): Promise<ReactionSummary[]>
   reply(convId: string, msgId: string, replyTo: string): Promise<void>

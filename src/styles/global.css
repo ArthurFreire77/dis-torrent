@@ -109,6 +109,25 @@ button{ touch-action:manipulation; user-select:none }
 @keyframes dl-pop { 0%{ transform:scale(.82) } 60%{ transform:scale(1.06) } 100%{ transform:scale(1) } }
 .dl-pop{ animation: dl-pop .28s ease-out }
 
+/* Aura do avatar (perfil decorado). O anel fica atrás da imagem e não
+   intercepta clique: o wrapper é que recebe o posicionamento. */
+.pfx-wrap{ position:relative; display:inline-flex }
+.pfx-wrap::before{
+  content:''; position:absolute; inset:-3px; border-radius:50%;
+  pointer-events:none; z-index:0;
+}
+.pfx-wrap > img, .pfx-wrap > span{ position:relative; z-index:1 }
+.pfx-glow::before{ box-shadow:0 0 0 2px #5865f2, 0 0 12px 2px #5865f2aa }
+.pfx-pulse::before{ box-shadow:0 0 0 2px #5865f2; animation: pfx-pulse 1.8s ease-in-out infinite }
+.pfx-rainbow::before{ background:conic-gradient(from 0deg, #ff5757, #ffb703, #23a55a, #00a8fc, #5865f2, #eb459e, #ff5757); animation: pfx-spin 3s linear infinite }
+.pfx-sparkle::before{ box-shadow:0 0 0 1px #ffe066, 0 0 10px 3px #ffe06699; animation: pfx-pulse 1.4s ease-in-out infinite }
+@keyframes pfx-pulse { 0%,100%{ opacity:.45; transform:scale(1) } 50%{ opacity:1; transform:scale(1.06) } }
+@keyframes pfx-spin { to{ transform:rotate(360deg) } }
+
+/* Super reação: brilho curto no pill, sem mudar o layout. */
+@keyframes super-pop { 0%{ transform:scale(1) } 40%{ transform:scale(1.18) } 100%{ transform:scale(1) } }
+.rx-super{ animation: super-pop .45s ease-out; box-shadow:0 0 0 1px #ffd93d, 0 0 10px 2px #ffd93d66 }
+
 .tooltip-desktop-only { }
 @media (hover: none), (pointer: coarse) {
   .tooltip-desktop-only { display: none !important; }

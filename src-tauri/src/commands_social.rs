@@ -71,11 +71,16 @@ pub(crate) fn social_react(
     conv_id: String,
     msg_id: String,
     emoji: String,
+    super_react: Option<bool>,
     state: State<AppState>,
 ) -> Result<bool, String> {
-    engine(&state)?
-        .social_react(&conv_id, &msg_id, &emoji)
-        .map_err(err)
+    let eng = engine(&state)?;
+    if super_react.unwrap_or(false) {
+        eng.social_react_super(&conv_id, &msg_id, &emoji)
+            .map_err(err)
+    } else {
+        eng.social_react(&conv_id, &msg_id, &emoji).map_err(err)
+    }
 }
 
 #[tauri::command]
@@ -245,6 +250,9 @@ pub(crate) fn profile_set(
     accent: String,
     remove_avatar: Option<bool>,
     remove_banner: Option<bool>,
+    profile_theme: Option<String>,
+    avatar_effect: Option<String>,
+    decoration: Option<String>,
     state: State<AppState>,
 ) -> Result<distorrent_core::social::ProfileView, String> {
     engine(&state)?
@@ -256,6 +264,9 @@ pub(crate) fn profile_set(
             &accent,
             remove_avatar.unwrap_or(false),
             remove_banner.unwrap_or(false),
+            &profile_theme.unwrap_or_default(),
+            &avatar_effect.unwrap_or_default(),
+            &decoration.unwrap_or_default(),
         )
         .map_err(err)
 }

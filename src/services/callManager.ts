@@ -153,6 +153,8 @@ export { applyOfferInStable } from './callSdpTuning'
 import { applyOfferInStable } from './callSdpTuning'
 import { AUDIO_CONSTRAINTS } from './callMediaGate'
 import { newPeerConnection, createTunedOffer, createTunedAnswer } from './callPeer'
+import { soundboard } from './soundboard'
+import type { SoundMeta } from './soundboardRules'
 
 export const CALLS_UNAVAILABLE_MSG = 'chamadas de voz/vídeo indisponíveis neste aparelho'
 export const SCREEN_UNAVAILABLE_MSG = 'este aparelho não expõe captura de tela (o Android só libera em WebViews recentes — atualize o Android System WebView; no iPhone/iPad não existe mesmo)';
@@ -707,6 +709,11 @@ export class CallManager {
   private relayRecorder: MediaRecorder | null = null
   private relayRecStream: MediaStream | null = null
   private relayAudioCtx: AudioContext | null = null
+  /** Contexto de mixagem do soundboard (separado do relay). */
+  private sfxCtx: AudioContext | null = null
+  private sfxDestination: MediaStreamAudioDestinationNode | null = null
+  /** Sender de áudio ao qual o soundboard está ligado (o da track do mic). */
+  private sfxSender: RTCRtpSender | null = null
   private relayQueues = new Map<string, { nextSeq: number; nextTime: number; pending: Map<number, { buf: AudioBuffer; ts: number }> }>()
   private relayBc: BroadcastChannel | null = null
   private iceRecoveredOff: (() => void) | null = null
@@ -1498,6 +1505,7 @@ export class CallManager {
     if (!this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
       this.scheduleMicRecovery(callId)
     }
+    try { this.ensureSoundboardSink() } catch {  }
 
     this.resetRelayForNewCall()
     this.state = {
@@ -1632,6 +1640,7 @@ export class CallManager {
     if (!this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
       this.scheduleMicRecovery(callId)
     }
+    try { this.ensureSoundboardSink() } catch {  }
     this.state = {
       callId,
       kind: 'voice',
@@ -2160,6 +2169,66 @@ export class CallManager {
       void this.playRelayChunk(fromFp, chunk)
     } catch {  }
   }
+  /** Nó de mixagem do soundboard; sem track de mic viva não há o que mixar. */
+  private ensureSoundboardSink(): void {
+    try {
+      if (this.sfxDestination) return
+      const mic = this.localStream?.getAudioTracks().find(t => t.readyState === 'live') ?? null
+      if (!mic) return
+      const AC: any = typeof AudioContext !== 'undefined' ? AudioContext : (typeof window !== 'undefined' ? (window as any).webkitAudioContext : null)
+      if (!AC) return
+      this.sfxCtx = this.sfxCtx && this.sfxCtx.state !== 'closed' ? this.sfxCtx : new AC()
+      const ctx = this.sfxCtx
+      if (!ctx || ctx.state === 'closed') return
+      try { if (ctx.state === 'suspended') void ctx.resume().catch(() => {}) } catch {  }
+      this.sfxDestination = ctx.createMediaStreamDestination()
+      try {
+        const src = ctx.createMediaStreamSource(new MediaStream([mic]))
+        src.connect(this.sfxDestination)
+      } catch {  }
+      this.mixSoundboardIntoPeers()
+      soundboard.attach({ ctx, destination: this.sfxDestination })
+    } catch {  }
+  }
+
+  /** Troca a track enviada pela mixada (mic+efeitos) sem renegociar o SDP. */
+  private mixSoundboardIntoPeers(): void {
+    const mixed = this.sfxDestination?.stream.getAudioTracks()[0] ?? null
+    if (!mixed) return
+    for (const pc of this.pcs.values()) {
+      try {
+        if (pc.signalingState === 'closed') continue
+        const sender = pc.getSenders().find(s => s.track?.kind === 'audio') ?? null
+        if (!sender || sender.track === mixed) continue
+        if (this.screenAudioSenders.get(pc) === sender) continue
+        void sender.replaceTrack(mixed).catch(() => {  })
+        this.sfxSender = sender
+      } catch {  }
+    }
+  }
+
+  private stopSoundboard(): void {
+    try { soundboard.stop() } catch {  }
+    try { soundboard.detach() } catch {  }
+    this.sfxSender = null
+    try { if (this.sfxCtx && this.sfxCtx.state !== 'closed') void this.sfxCtx.close().catch(() => {}) } catch {  }
+    this.sfxCtx = null
+    this.sfxDestination = null
+  }
+
+  /** Toca um efeito do soundboard. `toPeers=false` = só local (prévia). */
+  async playSound(meta: SoundMeta, toPeers = true): Promise<boolean> {
+    if (!toPeers) {
+      return soundboard.play(meta, false)
+    }
+    this.ensureSoundboardSink()
+    return soundboard.play(meta, !!this.sfxDestination)
+  }
+
+  soundboardLive(): boolean {
+    return !!this.sfxDestination
+  }
+
   private ensureAudioCtx(): AudioContext | null {
     try {
       if (this.relayAudioCtx) {
@@ -4808,6 +4877,7 @@ export class CallManager {
     try { this.lastNativeStats = null } catch {  }
     this.clearRelayFallbackTimer()
     try { this.stopRelayFull() } catch {  }
+    try { this.stopSoundboard() } catch {  }
     this.badWindows = 0
     this.prevLost.clear()
     this.pendingIce.clear()

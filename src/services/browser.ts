@@ -1515,7 +1515,7 @@ export const browserServices: DisTorrentServices = {
   voiceMicTestStop: () => Promise.resolve(),
   voiceMicName: () => Promise.resolve(''),
 
-  react: async (convId, msgId, emoji) => {
+  react: async (convId, msgId, emoji, superReact) => {
     const all = loadAll<ReactionSummary[]>(RX_BASE)
     let list = all[msgId] ?? []
     const mineIdx = list.findIndex(r => r.emoji === emoji && r.reactors.includes(meFp()))
@@ -1524,11 +1524,19 @@ export const browserServices: DisTorrentServices = {
       r.reactors = r.reactors.filter(f => f !== meFp())
       r.count = r.reactors.length
       r.mine = false
+      if (superReact && (r.super_count ?? 0) > 0) r.super_count = (r.super_count ?? 0) - 1
       if (r.count === 0) list = list.filter((_, i) => i !== mineIdx)
     } else {
       const hit = list.find(r => r.emoji === emoji)
-      if (hit) { hit.count++; hit.mine = true; hit.reactors.push(meFp()) }
-      else list.push({ msg_id: msgId, emoji, count: 1, reactors: [meFp()], mine: true })
+      if (hit) {
+        hit.count++; hit.mine = true; hit.reactors.push(meFp())
+        if (superReact) hit.super_count = (hit.super_count ?? 0) + 1
+      } else {
+        list.push({
+          msg_id: msgId, emoji, count: 1, reactors: [meFp()], mine: true,
+          super_count: superReact ? 1 : 0,
+        })
+      }
     }
     all[msgId] = list
     saveAll(RX_BASE, all)
@@ -1723,6 +1731,9 @@ export const browserServices: DisTorrentServices = {
       accent: patch.accent,
       updated_at: Date.now(),
       rev: (cur.rev ?? 0) + 1,
+      profile_theme: patch.profile_theme ?? cur.profile_theme ?? '',
+      avatar_effect: patch.avatar_effect ?? cur.avatar_effect ?? '',
+      decoration: patch.decoration ?? cur.decoration ?? '',
     }
     next.content_hash = profileContentHash(next)
     all[me] = next

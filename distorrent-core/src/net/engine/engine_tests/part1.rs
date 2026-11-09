@@ -46,6 +46,7 @@ async fn reacoes_rejeitadas_nao_persistem_nem_sao_ecoada() {
                 emoji: "🔥".into(),
                 add: true,
                 reactor_fp: "vitima-falsificada".into(),
+                is_super: false,
             },
         )
         .await
@@ -63,6 +64,7 @@ async fn reacoes_rejeitadas_nao_persistem_nem_sao_ecoada() {
             emoji: "🔥".into(),
             add: true,
             reactor_fp: "vitima-falsificada".into(),
+            is_super: false,
         },
     )
     .await
@@ -79,6 +81,7 @@ async fn reacoes_rejeitadas_nao_persistem_nem_sao_ecoada() {
             emoji: "🔥".into(),
             add: true,
             reactor_fp: "vitima-falsificada".into(),
+            is_super: false,
         },
     )
     .await
@@ -95,6 +98,7 @@ async fn reacoes_rejeitadas_nao_persistem_nem_sao_ecoada() {
             emoji: "🔥".into(),
             add: true,
             reactor_fp: "vitima-falsificada".into(),
+            is_super: false,
         },
     )
     .await
@@ -705,6 +709,9 @@ fn profile_set_remoto_emite_evento_quando_muda() {
                 "",
                 "#ff0000",
             ),
+            profile_theme: String::new(),
+            avatar_effect: String::new(),
+            decoration: String::new(),
         },
     ));
     assert!(r.is_ok(), "frame rejeitado: {r:?}");
@@ -738,6 +745,9 @@ fn profile_set_remoto_revisao_antiga_nao_emite_nem_sobrescreve() {
                 accent: String::new(),
                 rev,
                 content_hash: String::new(),
+                profile_theme: String::new(),
+                avatar_effect: String::new(),
+                decoration: String::new(),
             },
         ));
     }
@@ -763,6 +773,9 @@ fn profile_set_com_hash_divergente_e_rejeitado() {
             accent: String::new(),
             rev: 1,
             content_hash: "0".repeat(32),
+            profile_theme: String::new(),
+            avatar_effect: String::new(),
+            decoration: String::new(),
         },
     ));
     assert!(r.is_err(), "hash divergente tem que ser rejeitado");
@@ -794,6 +807,9 @@ fn profile_set_de_peer_bloqueado_e_ignorado() {
             accent: String::new(),
             rev: 99,
             content_hash: String::new(),
+            profile_theme: String::new(),
+            avatar_effect: String::new(),
+            decoration: String::new(),
         },
     ));
     assert!(r.is_ok(), "frame de bloqueado não derruba a sessão");
@@ -883,13 +899,33 @@ fn profile_query_leva_a_revisao_do_peer_e_nao_a_minha() {
     let peer = "peer-alvo".to_string();
 
     for i in 0..3 {
-        let _ = e
-            .store
-            .profile_set_local(&me, "eu", &format!("bio {i}"), "", "", "", false, false);
+        let _ = e.store.profile_set_local(
+            &me,
+            "eu",
+            &format!("bio {i}"),
+            "",
+            "",
+            "",
+            false,
+            false,
+            "",
+            "",
+            "",
+        );
     }
-    let _ = e
-        .store
-        .profile_set_local(&peer, "amigo", "bio do amigo", "", "", "", false, false);
+    let _ = e.store.profile_set_local(
+        &peer,
+        "amigo",
+        "bio do amigo",
+        "",
+        "",
+        "",
+        false,
+        false,
+        "",
+        "",
+        "",
+    );
     assert_eq!(e.store.profile_get(&me).unwrap().rev, 3);
     assert_eq!(e.store.profile_get(&peer).unwrap().rev, 1);
 

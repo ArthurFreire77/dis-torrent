@@ -41,39 +41,47 @@ export function ReactionWhoPopover({ r, resolve, onClose }: {
   )
 }
 
-export function ReactionBar({ reactions, onToggle, onHoverList, resolveName, onAdd }: {
+export function ReactionBar({ reactions, onToggle, onHoverList, resolveName, onAdd, onToggleSuper }: {
   reactions: ReactionSummary[]
   onToggle: (emoji: string) => void
   onHoverList?: (r: ReactionSummary) => void
   resolveName?: ReactorNameFn
   onAdd?: () => void
+  /** Reação "super": mesmo emoji, com efeito de brilho. */
+  onToggleSuper?: (emoji: string) => void
 }) {
   const [who, setWho] = useState<{ emoji: string; r: ReactionSummary } | null>(null)
   if (reactions.length === 0) return null
   const shown = who ? reactions.find(r => r.emoji === who.emoji) ?? null : null
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-      {reactions.map((r) => (
+      {reactions.map((r) => {
+        const superCount = r.super_count ?? 0
+        const isSuper = superCount > 0
+        return (
         <div key={r.emoji} style={{ position: 'relative' }}>
           <button
-            onClick={() => onToggle(r.emoji)}
+            onClick={(e) => { if (e.shiftKey && onToggleSuper) onToggleSuper(r.emoji); else onToggle(r.emoji) }}
+            onContextMenu={(e) => { if (!onToggleSuper) return; e.preventDefault(); onToggleSuper(r.emoji) }}
             onMouseEnter={() => { setWho({ emoji: r.emoji, r }); onHoverList?.(r) }}
-            title={`${r.count} · ${r.reactors.join(', ')}`}
-            aria-label={`${r.emoji}, ${r.count} reações. Ver quem reagiu`}
+            title={`${r.count} · ${r.reactors.join(', ')}${isSuper ? ` · ${superCount} super` : ''}${onToggleSuper ? ' — Shift+clique para super' : ''}`}
+            aria-label={`${r.emoji}, ${r.count} reações${isSuper ? `, ${superCount} super` : ''}. Ver quem reagiu`}
+            className={isSuper ? 'rx-super' : undefined}
             style={{
               display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px', borderRadius: 8,
               background: r.mine ? 'rgba(88,101,242,.25)' : T.input,
-              border: `1px solid ${r.mine ? T.accent : 'transparent'}`,
+              border: `1px solid ${r.mine ? T.accent : isSuper ? '#ffd93d' : 'transparent'}`,
               color: T.text, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
             }}>
-            <span style={{ fontSize: 15 }}>{r.emoji}</span>
+            <span style={{ fontSize: 15, filter: isSuper ? 'drop-shadow(0 0 4px #ffd93d)' : undefined }}>{r.emoji}</span>
             <span style={{ color: r.mine ? '#c9cdfb' : T.muted }}>{r.count}</span>
           </button>
           {shown && resolveName && (
             <ReactionWhoPopover r={shown} resolve={resolveName} onClose={() => setWho(null)} />
           )}
         </div>
-      ))}
+        )
+      })}
       {onAdd && (
         <button
           onClick={onAdd}

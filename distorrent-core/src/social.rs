@@ -250,15 +250,40 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_mentions_target ON mentions(target_fp, conv_id);",
     )?;
 
-    for column in ["rev", "content_hash"] {
+    for column in [
+        "rev",
+        "content_hash",
+        "profile_theme",
+        "avatar_effect",
+        "decoration",
+    ] {
         if !column_exists(conn, "profiles", column) {
-            let ddl = if column == "rev" {
-                "ALTER TABLE profiles ADD COLUMN rev INTEGER NOT NULL DEFAULT 0;"
-            } else {
-                "ALTER TABLE profiles ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';"
+            let ddl = match column {
+                "rev" => "ALTER TABLE profiles ADD COLUMN rev INTEGER NOT NULL DEFAULT 0;",
+                "content_hash" => {
+                    "ALTER TABLE profiles ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';"
+                }
+                "profile_theme" => {
+                    "ALTER TABLE profiles ADD COLUMN profile_theme TEXT NOT NULL DEFAULT '';"
+                }
+                "avatar_effect" => {
+                    "ALTER TABLE profiles ADD COLUMN avatar_effect TEXT NOT NULL DEFAULT '';"
+                }
+                _ => "ALTER TABLE profiles ADD COLUMN decoration TEXT NOT NULL DEFAULT '';",
             };
             conn.execute_batch(ddl)?;
         }
+    }
+
+    if !column_exists(conn, "msg_reactions", "is_super") {
+        conn.execute_batch(
+            "ALTER TABLE msg_reactions ADD COLUMN is_super INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    if !column_exists(conn, "pending_reacts", "is_super") {
+        conn.execute_batch(
+            "ALTER TABLE pending_reacts ADD COLUMN is_super INTEGER NOT NULL DEFAULT 0;",
+        )?;
     }
 
     for column in ["requested_by", "requested_at", "blocked_at"] {
@@ -289,6 +314,9 @@ pub struct ReactionRow {
     pub emoji: String,
     pub reactor_fp: String,
     pub created_at: i64,
+    /// Reação "super": a UI desenha com brilho/ondas. Mesmo custo de rede.
+    #[serde(default)]
+    pub is_super: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -298,6 +326,8 @@ pub struct ReactionSummary {
     pub count: i64,
     pub reactors: Vec<String>,
     pub mine: bool,
+    #[serde(default)]
+    pub super_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -336,6 +366,22 @@ pub struct ProfileView {
     pub rev: i64,
     #[serde(default)]
     pub content_hash: String,
+    /// Gradiente do perfil (`none`, `aurora`, `sunset`, `ocean`, `neon`).
+    /// Fora do hash v1 de propósito: frames antigos continuam válidos.
+    #[serde(default)]
+    pub profile_theme: String,
+    /// Aura ao redor do avatar (`none`, `glow`, `pulse`, `rainbow`).
+    #[serde(default)]
+    pub avatar_effect: String,
+    /// Emoji/ícone de decoração do perfil, exibido ao lado do nome.
+    #[serde(default)]
+    pub decoration: String,
+}
+
+/// Chave de desempate das customizações que não entram no hash v1.
+/// Mantém a convergência determinística entre dispositivos com a mesma `rev`.
+pub fn profile_style_key(theme: &str, avatar_effect: &str, decoration: &str) -> String {
+    format!("{theme}\u{1f}{avatar_effect}\u{1f}{decoration}")
 }
 
 pub fn profile_content_hash(

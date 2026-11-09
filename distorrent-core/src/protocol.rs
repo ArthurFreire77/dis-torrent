@@ -359,6 +359,9 @@ pub enum SecureFrame {
         add: bool,
         #[serde(default)]
         reactor_fp: String,
+        /// Reação "super" (efeito visual na UI). Ausente em frames antigos.
+        #[serde(default)]
+        is_super: bool,
     },
     Reply {
         #[serde(default)]
@@ -401,6 +404,14 @@ pub enum SecureFrame {
         rev: i64,
         #[serde(default)]
         content_hash: String,
+        /// Customizações visuais. Fora do `content_hash` v1 para não invalidar
+        /// frames antigos; convergem por `profile_style_key`.
+        #[serde(default)]
+        profile_theme: String,
+        #[serde(default)]
+        avatar_effect: String,
+        #[serde(default)]
+        decoration: String,
     },
     ThreadCreate {
         community_id: String,

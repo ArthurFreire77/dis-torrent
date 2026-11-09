@@ -10,6 +10,17 @@ impl crate::storage::Store {
         emoji: &str,
         reactor_fp: &str,
     ) -> Result<bool, String> {
+        self.reaction_toggle_full(msg_id, conv_id, emoji, reactor_fp, false)
+    }
+
+    pub fn reaction_toggle_full(
+        &self,
+        msg_id: &str,
+        conv_id: &str,
+        emoji: &str,
+        reactor_fp: &str,
+        is_super: bool,
+    ) -> Result<bool, String> {
         let conn = self.locked();
         let existing: Option<i64> = conn
             .query_row(
@@ -22,9 +33,16 @@ impl crate::storage::Store {
         let added = existing.is_none();
         if added {
             conn.execute(
-                "INSERT OR REPLACE INTO msg_reactions (msg_id, conv_id, emoji, reactor_fp, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![msg_id, conv_id, emoji, reactor_fp, crate::identity::now_ms()],
+                "INSERT OR REPLACE INTO msg_reactions (msg_id, conv_id, emoji, reactor_fp, created_at, is_super)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    msg_id,
+                    conv_id,
+                    emoji,
+                    reactor_fp,
+                    crate::identity::now_ms(),
+                    is_super as i32
+                ],
             )
             .map_err(|e| e.to_string())?;
         } else {
@@ -41,20 +59,27 @@ impl crate::storage::Store {
         let conn = self.locked();
         let mut stmt = conn
             .prepare(
-                "SELECT emoji, reactor_fp FROM msg_reactions WHERE msg_id=?1 ORDER BY emoji ASC, created_at ASC",
+                "SELECT emoji, reactor_fp, is_super FROM msg_reactions WHERE msg_id=?1 ORDER BY emoji ASC, created_at ASC",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![msg_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i32>(2)? != 0,
+                ))
             })
             .map_err(|e| e.to_string())?;
         let mut out: Vec<ReactionSummary> = Vec::new();
         for r in rows {
-            let (emoji, reactor) = r.map_err(|e| e.to_string())?;
+            let (emoji, reactor, is_super) = r.map_err(|e| e.to_string())?;
             if let Some(last) = out.last_mut() {
                 if last.emoji == emoji {
                     last.count += 1;
+                    if is_super {
+                        last.super_count += 1;
+                    }
                     last.reactors.push(reactor);
                     continue;
                 }
@@ -65,6 +90,7 @@ impl crate::storage::Store {
                 count: 1,
                 reactors: vec![reactor],
                 mine: false,
+                super_count: if is_super { 1 } else { 0 },
             });
         }
         Ok(out)
@@ -80,7 +106,7 @@ impl crate::storage::Store {
         let conn = self.locked();
         let placeholders = vec!["?"; msg_ids.len()].join(",");
         let sql = format!(
-            "SELECT msg_id, emoji, reactor_fp FROM msg_reactions
+            "SELECT msg_id, emoji, reactor_fp, is_super FROM msg_reactions
               WHERE msg_id IN ({placeholders})
               ORDER BY msg_id, emoji, created_at ASC"
         );
@@ -93,16 +119,20 @@ impl crate::storage::Store {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, i32>(3)? != 0,
                 ))
             })
             .map_err(|e| e.to_string())?;
 
         let mut out: Vec<ReactionSummary> = Vec::new();
         for r in rows {
-            let (msg_id, emoji, reactor) = r.map_err(|e| e.to_string())?;
+            let (msg_id, emoji, reactor, is_super) = r.map_err(|e| e.to_string())?;
             match out.last_mut() {
                 Some(last) if last.msg_id == msg_id && last.emoji == emoji => {
                     last.count += 1;
+                    if is_super {
+                        last.super_count += 1;
+                    }
                     last.reactors.push(reactor);
                 }
                 _ => out.push(ReactionSummary {
@@ -111,6 +141,7 @@ impl crate::storage::Store {
                     count: 1,
                     reactors: vec![reactor],
                     mine: false,
+                    super_count: if is_super { 1 } else { 0 },
                 }),
             }
         }
@@ -136,12 +167,31 @@ impl crate::storage::Store {
         reactor_fp: &str,
         add: bool,
     ) -> Result<bool, String> {
+        self.reaction_apply_full(msg_id, conv_id, emoji, reactor_fp, add, false)
+    }
+
+    pub fn reaction_apply_full(
+        &self,
+        msg_id: &str,
+        conv_id: &str,
+        emoji: &str,
+        reactor_fp: &str,
+        add: bool,
+        is_super: bool,
+    ) -> Result<bool, String> {
         let conn = self.locked();
         if add {
             conn.execute(
-                "INSERT OR IGNORE INTO msg_reactions (msg_id, conv_id, emoji, reactor_fp, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![msg_id, conv_id, emoji, reactor_fp, crate::identity::now_ms()],
+                "INSERT OR IGNORE INTO msg_reactions (msg_id, conv_id, emoji, reactor_fp, created_at, is_super)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    msg_id,
+                    conv_id,
+                    emoji,
+                    reactor_fp,
+                    crate::identity::now_ms(),
+                    is_super as i32
+                ],
             )
             .map_err(|e| e.to_string())?;
             Ok(true)
@@ -163,11 +213,31 @@ impl crate::storage::Store {
         emoji: &str,
         add: bool,
     ) -> Result<(), String> {
+        self.queue_pending_react_full(peer_fp, conv_id, msg_id, emoji, add, false)
+    }
+
+    pub fn queue_pending_react_full(
+        &self,
+        peer_fp: &str,
+        conv_id: &str,
+        msg_id: &str,
+        emoji: &str,
+        add: bool,
+        is_super: bool,
+    ) -> Result<(), String> {
         let conn = self.locked();
         conn.execute(
-            "INSERT OR REPLACE INTO pending_reacts (peer_fp, msg_id, conv_id, emoji, is_add, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![peer_fp, msg_id, conv_id, emoji, add as i32, crate::identity::now_ms()],
+            "INSERT OR REPLACE INTO pending_reacts (peer_fp, msg_id, conv_id, emoji, is_add, created_at, is_super)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                peer_fp,
+                msg_id,
+                conv_id,
+                emoji,
+                add as i32,
+                crate::identity::now_ms(),
+                is_super as i32
+            ],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -182,11 +252,11 @@ impl crate::storage::Store {
     pub fn take_pending_reacts(
         &self,
         peer_fp: &str,
-    ) -> Result<Vec<(String, String, String, bool)>, String> {
+    ) -> Result<Vec<(String, String, String, bool, bool)>, String> {
         let conn = self.locked();
         let mut stmt = conn
             .prepare(
-                "SELECT conv_id, msg_id, emoji, is_add FROM pending_reacts
+                "SELECT conv_id, msg_id, emoji, is_add, is_super FROM pending_reacts
                  WHERE peer_fp=?1 ORDER BY created_at ASC LIMIT 200",
             )
             .map_err(|e| e.to_string())?;
@@ -197,6 +267,7 @@ impl crate::storage::Store {
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i32>(3)? != 0,
+                    r.get::<_, i32>(4)? != 0,
                 ))
             })
             .map_err(|e| e.to_string())?;

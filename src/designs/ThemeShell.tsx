@@ -70,6 +70,7 @@ import { UpdateSettingsBox } from '../components/UpdateSettingsBox'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
 import { callManager, setCallIdentity, supportsScreenShare, diagnoseCallsSupport, detectNativeVoice, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
 import CallSettingsPanel from '../components/calls/CallSettingsPanel'
+import { SoundboardPanel } from '../components/calls/SoundboardPanel'
 import { fileSwarm, encodeFileBody, parseFileBody } from '../services/fileSwarm'
 import { isMediaName } from '../services/fileRules'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
@@ -87,6 +88,7 @@ import { VoiceDeviceSettings } from '../components/prefs/VoiceDeviceSettings'
 import { MessageRetentionSettings } from '../components/prefs/MessageRetentionSettings'
 import { usePrivacySettings } from '../services/usePrivacySettings'
 import { Avatar, PeerDot } from '../shared/avatarView'
+import { bannerBackground } from '../shared/profileStyle'
 import { avatarColor } from '../shared/theme'
 import { BootScreen, CreateAccount, LockScreen } from './auth/AuthScreens'
 
@@ -404,6 +406,7 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
   const [showCallDiag, setShowCallDiag] = useState(false)
+  const [showSoundboard, setShowSoundboard] = useState(false)
   const [fileList, setFileList] = useState<any[]>([])
   const [dlByFile, setDlByFile] = useState<Record<string, { pct: number; speed: number; status: string; error?: string }>>({})
   const [previews, setPreviews] = useState<Record<string, string>>({})
@@ -1274,7 +1277,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       .then(list => {
         if (!alive) return
         const m: Record<string, string> = {}
-        for (const e of (list as any[])) m[e.name] = e.emoji || e.glyph || e.ch || '❔'
+        for (const e of (list as any[])) m[e.name] = e.char || e.emoji || e.glyph || e.ch || '❔'
         setServerEmojiMap(m)
       })
       .catch(() => {})
@@ -2213,7 +2216,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                   const presenceColors: Record<string, string> = { online: '#23a559', idle: '#f0b232', dnd: '#f23f42', invisible: '#80848e', offline: '#80848e' }
                   return (
                     <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-                      <Avatar name={meProfile?.display_name || identity.nickname} fp={identity.fingerprint} size={36} avatarB64={meProfile?.avatar_b64} accent={meProfile?.accent || undefined} />
+                      <Avatar name={meProfile?.display_name || identity.nickname} fp={identity.fingerprint} size={36} avatarB64={meProfile?.avatar_b64} accent={meProfile?.accent || undefined} effect={meProfile?.avatar_effect || undefined} />
                       <span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, borderRadius: '50%', background: presenceColors[mePresence] || '#80848e', border: '3px solid var(--sidebar)' }} />
                     </span>
                   )
@@ -2704,6 +2707,23 @@ export default function ThemeShell({ designId }: {designId:string}){
                       onClick={() => fileInputRef.current?.click()}
                       style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
                     ><Icon d={Icons.attach} size={12} /> Arquivo</button>
+                    <div style={{ position: 'relative' }}>
+                      <button
+                        type="button"
+                        onClick={() => setShowSoundboard(v => !v)}
+                        aria-expanded={showSoundboard}
+                        title="Efeitos sonoros: envie ou baixe sons de até 10s"
+                        aria-label="Efeitos sonoros"
+                        style={{ background: showSoundboard ? t.accent : inputBg, border: `1px solid ${borderColor}`, color: showSoundboard ? '#fff' : text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                      ><Icon d={Icons.headphones} size={12} /> Efeitos</button>
+                      {showSoundboard && (
+                        <SoundboardPanel
+                          open
+                          onClose={() => setShowSoundboard(false)}
+                          palette={{ input: inputBg, border: borderColor, text, muted, accent: t.accent, panel: t.panel }}
+                        />
+                      )}
+                    </div>
                   </div>
                   {((activeCall?.qualityNotice as string | undefined) || qualityError) && (
                     <div role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow, lineHeight: 1.5 }}>
@@ -3048,9 +3068,11 @@ export default function ThemeShell({ designId }: {designId:string}){
                     onClick={() => setProfileFp(fp)}
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setProfileFp(fp) }}
                   >
-                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
+                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} effect={socialProfiles[fp]?.avatar_effect || undefined} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nick || fp}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {nick || fp}{socialProfiles[fp]?.decoration ? <span aria-hidden="true" style={{ marginLeft: 4 }}>{socialProfiles[fp]?.decoration}</span> : null}
+                      </div>
                       <div style={{ fontSize: 10, color: muted }}>{online ? 'Online' : 'Offline'}</div>
                     </div>
                   </div>
@@ -3702,13 +3724,17 @@ export default function ThemeShell({ designId }: {designId:string}){
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 80 }} onClick={() => setShowProfile(false)}>
           <div style={{ background: t.panel, border: `1px solid ${borderColor}`, borderRadius: 12, padding: 0, width: 480, maxHeight: '85vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
             <div style={{
-              backgroundImage: socialProfiles[identity.fingerprint]?.banner_b64 ? `url(data:image/jpeg;base64,${socialProfiles[identity.fingerprint].banner_b64})` : `linear-gradient(135deg, ${(socialProfiles[identity.fingerprint]?.accent || t.accent)}33, ${(socialProfiles[identity.fingerprint]?.accent || t.accent)}11)`,
+              backgroundImage: bannerBackground(
+                socialProfiles[identity.fingerprint]?.profile_theme,
+                socialProfiles[identity.fingerprint]?.accent || t.accent,
+                socialProfiles[identity.fingerprint]?.banner_b64 || '',
+              ),
               backgroundSize: 'cover', backgroundPosition: 'center', borderRadius: '12px 12px 0 0', padding: '24px 20px 16px', position: 'relative',
             }}>
               <button onClick={() => setShowProfile(false)} style={{ position: 'absolute', top: 12, right: 12, background: 'rgba(0,0,0,0.4)', border: 'none', color: '#fff', cursor: 'pointer', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>x</button>
               <div style={{ display: 'flex', alignItems: 'flex-end', gap: 16 }}>
                 <div style={{ position: 'relative' }}>
-                  <Avatar name={socialProfiles[identity.fingerprint]?.display_name || identity.nickname} fp={identity.fingerprint} size={80} avatarB64={socialProfiles[identity.fingerprint]?.avatar_b64} accent={socialProfiles[identity.fingerprint]?.accent || undefined} />
+                  <Avatar name={socialProfiles[identity.fingerprint]?.display_name || identity.nickname} fp={identity.fingerprint} size={80} avatarB64={socialProfiles[identity.fingerprint]?.avatar_b64} accent={socialProfiles[identity.fingerprint]?.accent || undefined} effect={socialProfiles[identity.fingerprint]?.avatar_effect || undefined} />
                   <div style={{ position: 'absolute', bottom: -2, right: -2, width: 20, height: 20, borderRadius: '50%', background: t.green, border: `3px solid ${t.panel}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
                   </div>

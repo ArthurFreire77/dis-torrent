@@ -460,7 +460,8 @@ export const tauriServices: DisTorrentServices = {
   voiceMicTestLevel: (testId) => invoke<number>('voice_mic_test_level', { testId }),
   voiceMicTestStop: (testId) => invoke<void>('voice_mic_test_stop', { testId }),
   voiceMicName: () => invoke<string>('voice_mic_name'),
-  react: (convId, msgId, emoji) => invoke<boolean>('social_react', { convId, msgId, emoji }),
+  react: (convId, msgId, emoji, superReact) =>
+    invoke<boolean>('social_react', { convId, msgId, emoji, superReact: !!superReact }),
   reactions: (msgId) => invoke<ReactionSummary[]>('social_reactions', { msgId }),
   reactionsBulk: (msgIds) => invoke<ReactionSummary[]>('social_reactions_bulk', { msgIds }),
   reply: (convId, msgId, replyTo) => invoke<void>('social_reply', { convId, msgId, replyTo }),

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PresenceStatus } from '../../services/models'
 import { Markdown } from '../../shared/markdown'
 import { getNote, setNote } from '../../shared/prefs'
+import { effectClass } from '../../shared/profileStyle'
 import { T, PRESENCE_COLOR, PRESENCE_LABEL } from './socialTheme'
 
 const EMOJI_SHORT: Record<string, string> = {
@@ -15,10 +16,13 @@ export function RichText({
   body,
   highlight,
   onMention,
+  serverEmojis,
 }: {
   body: string
   highlight?: string
   onMention?: (fp: string) => void
+  /** Emojis do servidor (`nome -> glifo`) resolvidos em `:nome:`. */
+  serverEmojis?: Record<string, string>
 }) {
   const [revealed, setRevealed] = useState<Set<string>>(new Set())
   const toggle = useCallback((key: string) => {
@@ -57,7 +61,7 @@ export function RichText({
         return null
       }}
       onMentionClick={(hit) => { if (hit.fp) onMention?.(hit.fp) }}
-      resolveEmoji={(name) => EMOJI_SHORT[name.toLowerCase()] ?? null}
+      resolveEmoji={(name) => serverEmojis?.[name] ?? EMOJI_SHORT[name.toLowerCase()] ?? null}
       theme={{ text: T.text, link: '#00a8fc' }}
     />
   )
@@ -113,29 +117,38 @@ export function StatusPicker({ value, onChange }: { value: PresenceStatus; onCha
   )
 }
 
-export function Avatar({ name, fp, size = 40, avatarB64, ring }: {
+export function Avatar({ name, fp, size = 40, avatarB64, ring, effect }: {
   name: string
   fp: string
   size?: number
   avatarB64?: string
   ring?: string
+  effect?: string
 }) {
   const [err, setErr] = useState(false)
-  if (avatarB64 && !err) {
-    return <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
+  const aura = effectClass(effect)
+  const inner = avatarB64 && !err
+    ? <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
       style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring ? `2px solid ${ring}` : 'none' }} />
-  }
-  const h = Array.from(fp || name).reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7)
-  const hue = h % 360
-  const initial = (name || fp || '?').trim().charAt(0).toUpperCase() || '?'
+    : (() => {
+      const h = Array.from(fp || name).reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7)
+      const hue = h % 360
+      const initial = (name || fp || '?').trim().charAt(0).toUpperCase() || '?'
+      return (
+        <span style={{
+          width: size, height: size, borderRadius: '50%', flexShrink: 0,
+          background: `hsl(${hue} 45% 32%)`,
+          color: '#fff', fontWeight: 800, fontSize: size * 0.42,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          border: ring ? `2px solid ${ring}` : 'none', userSelect: 'none',
+        }}>{initial}</span>
+      )
+    })()
+  if (!aura) return inner
   return (
-    <span style={{
-      width: size, height: size, borderRadius: '50%', flexShrink: 0,
-      background: `hsl(${hue} 45% 32%)`,
-      color: '#fff', fontWeight: 800, fontSize: size * 0.42,
-      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      border: ring ? `2px solid ${ring}` : 'none', userSelect: 'none',
-    }}>{initial}</span>
+    <span className={`${aura} pfx-wrap`} style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+      {inner}
+    </span>
   )
 }
 

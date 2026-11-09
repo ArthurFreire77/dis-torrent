@@ -45,6 +45,7 @@ fn q(text: &str) -> SearchQuery {
         has: String::new(),
         before: 0,
         limit: 50,
+        me: String::new(),
     }
 }
 
@@ -285,16 +286,22 @@ fn citacao_para_mensagem_inexistente_nao_deixa_lixo() {
 #[test]
 fn fixar_e_listar() {
     let (e, _d) = engine("ana");
-    let m = env(&Keypair::generate(), "dm-1", "fixa-me");
+    let eu = e.identity().fingerprint.clone();
+    let peer = "b0b0b0b0b0b0";
+    let conv = e
+        .store_ref()
+        .ensure_dm_conversation(&eu, peer, "par")
+        .unwrap();
+    let m = env(&Keypair::generate(), &conv.id, "fixa-me");
     put(&e, &m);
-    e.social_pin("dm-1", &m.id, true).unwrap();
-    let pins = e.store_ref().pins_list("dm-1").unwrap();
+    e.social_pin(&conv.id, &m.id, true).unwrap();
+    let pins = e.store_ref().pins_list(&conv.id).unwrap();
     assert_eq!(pins.len(), 1);
     assert_eq!(pins[0].msg_id, m.id);
-    assert!(!pins[0].pinned_by.is_empty(), "quem fixou fica registrado");
+    assert_eq!(pins[0].pinned_by, eu, "quem fixou fica registrado");
 
-    e.social_pin("dm-1", &m.id, false).unwrap();
-    assert!(e.store_ref().pins_list("dm-1").unwrap().is_empty());
+    e.social_pin(&conv.id, &m.id, false).unwrap();
+    assert!(e.store_ref().pins_list(&conv.id).unwrap().is_empty());
 }
 
 #[test]
@@ -634,6 +641,9 @@ fn mencao_e_contabilizada() {
     let m = env(&Keypair::generate(), "c1", &format!("olá <@{meu}>"));
     put(&e, &m);
     e.store_ref().msg_set_mentioned(&m.id, "c1", true).unwrap();
+    e.store_ref()
+        .mention_add(&m.id, "c1", meu)
+        .expect("menção registrada");
     assert!(e.store_ref().msg_meta(&m.id).unwrap().unwrap().mentioned);
     assert_eq!(e.store_ref().unread_mentions(meu).unwrap(), 1);
 }
@@ -708,6 +718,86 @@ fn perfil_edicao_efetiva_incrementa_revisao_e_repeticao_nao() {
 }
 
 #[test]
+fn perfil_customizacao_visual_muda_a_revisao_e_normaliza_valores() {
+    let (e, _d) = engine("ana");
+    let eu = e.identity().fingerprint.clone();
+    let base = e
+        .social_profile_set_full("Ana", "bio", "", "", "", false, false, "", "", "")
+        .unwrap();
+    assert_eq!(base.profile_theme, "");
+    assert_eq!(base.avatar_effect, "");
+    assert_eq!(base.decoration, "");
+
+    // Tema/efeito/decoração aceitos entram no perfil e incrementam a revisão,
+    // mesmo com o conteúdo (nome/bio/cor) idêntico.
+    let decorado = e
+        .social_profile_set_full(
+            "Ana", "bio", "", "", "", false, false, "aurora", "pulse", "🌸",
+        )
+        .unwrap();
+    assert_eq!(decorado.profile_theme, "aurora");
+    assert_eq!(decorado.avatar_effect, "pulse");
+    assert_eq!(decorado.decoration, "🌸");
+    assert_eq!(decorado.rev, base.rev + 1);
+    assert_eq!(
+        decorado.content_hash, base.content_hash,
+        "customização não altera o hash v1 (frames antigos seguem válidos)"
+    );
+    assert_eq!(
+        e.store_ref().profile_get(&eu).unwrap().profile_theme,
+        "aurora"
+    );
+
+    // Valor desconhecido não é renderizado: vira vazio em vez de CSS arbitrário.
+    let invalido = e
+        .social_profile_set_full(
+            "Ana",
+            "bio",
+            "",
+            "",
+            "",
+            false,
+            false,
+            "javascript:alert(1)",
+            "explode",
+            "",
+        )
+        .unwrap();
+    assert_eq!(invalido.profile_theme, "");
+    assert_eq!(invalido.avatar_effect, "");
+    // Reenviar exatamente o mesmo estilo não deve inflar a revisão.
+    let repetido = e
+        .social_profile_set_full("Ana", "bio", "", "", "", false, false, "", "", "")
+        .unwrap();
+    assert_eq!(repetido.rev, invalido.rev);
+}
+
+#[test]
+fn reacao_super_e_persistida_e_contada_a_parte() {
+    let s = Store::open_in_memory().unwrap();
+    let kp = Keypair::generate();
+    let env = env(&kp, "c1", "oi");
+    s.insert_message(&env, "out", "ok").unwrap();
+
+    assert!(s
+        .reaction_toggle_full(&env.id, "c1", "🔥", "aaa", true)
+        .unwrap());
+    assert!(s
+        .reaction_toggle_full(&env.id, "c1", "🔥", "bbb", false)
+        .unwrap());
+
+    let resumo = s.reactions_for_msg(&env.id).unwrap();
+    assert_eq!(resumo.len(), 1);
+    assert_eq!(resumo[0].count, 2);
+    assert_eq!(
+        resumo[0].super_count, 1,
+        "só a reação super conta no efeito"
+    );
+    assert!(resumo[0].reactors.contains(&"aaa".to_string()));
+    assert!(resumo[0].reactors.contains(&"bbb".to_string()));
+}
+
+#[test]
 fn perfil_revisao_antiga_nao_sobrescreve_a_nova() {
     let s = Store::open_in_memory().unwrap();
     let a = Keypair::generate().fingerprint();
@@ -767,7 +857,7 @@ fn perfil_remove_avatar_com_flag_explicita() {
     assert_eq!(e.store_ref().profile_get(&eu).unwrap().avatar_b64, "QUJD");
     e.social_profile_set("Ana", "", "", "", "").unwrap();
     assert_eq!(e.store_ref().profile_get(&eu).unwrap().avatar_b64, "QUJD");
-    e.social_profile_set_full("Ana", "", "", "", "", true, false)
+    e.social_profile_set_full("Ana", "", "", "", "", true, false, "", "", "")
         .unwrap();
     assert!(e
         .store_ref()

@@ -169,10 +169,24 @@ impl NetworkEngine {
     }
 
     pub fn social_react(&self, conv_id: &str, msg_id: &str, emoji: &str) -> Result<bool> {
+        self.social_react_full(conv_id, msg_id, emoji, false)
+    }
+
+    pub fn social_react_super(&self, conv_id: &str, msg_id: &str, emoji: &str) -> Result<bool> {
+        self.social_react_full(conv_id, msg_id, emoji, true)
+    }
+
+    fn social_react_full(
+        &self,
+        conv_id: &str,
+        msg_id: &str,
+        emoji: &str,
+        is_super: bool,
+    ) -> Result<bool> {
         let me = self.identity.fingerprint.clone();
         let added = self
             .store
-            .reaction_toggle(msg_id, conv_id, emoji, &me)
+            .reaction_toggle_full(msg_id, conv_id, emoji, &me, is_super)
             .unwrap_or(false);
         self.events
             .send(EngineEvent::ReactionChanged {
@@ -181,6 +195,7 @@ impl NetworkEngine {
                 emoji: emoji.into(),
                 add: added,
                 reactor_fp: me.clone(),
+                is_super,
             })
             .ok();
         self.to_social_peers(
@@ -191,13 +206,14 @@ impl NetworkEngine {
                 emoji: emoji.into(),
                 add: added,
                 reactor_fp: me.clone(),
+                is_super,
             },
         );
         for fp in self.social_peers_of(conv_id) {
             if self.link_tx(&fp).is_none() {
                 let _ = self
                     .store
-                    .queue_pending_react(&fp, conv_id, msg_id, emoji, added);
+                    .queue_pending_react_full(&fp, conv_id, msg_id, emoji, added, is_super);
             }
         }
         Ok(added)
@@ -418,6 +434,9 @@ impl NetworkEngine {
             accent,
             false,
             false,
+            "",
+            "",
+            "",
         )
     }
 
@@ -430,6 +449,9 @@ impl NetworkEngine {
         accent: &str,
         clear_avatar: bool,
         clear_banner: bool,
+        profile_theme: &str,
+        avatar_effect: &str,
+        decoration: &str,
     ) -> Result<crate::social::ProfileView> {
         let me = self.identity.fingerprint.clone();
         let dn = cap_str(display_name, 48);
@@ -437,6 +459,10 @@ impl NetworkEngine {
         let ac = normalize_accent(accent);
         let av = cap_b64(avatar_b64, PROFILE_IMG_B64_MAX);
         let bn = cap_b64(banner_b64, PROFILE_BANNER_B64_MAX);
+        let theme = normalize_style(profile_theme, PROFILE_THEMES);
+        let effect = normalize_style(avatar_effect, AVATAR_EFFECTS);
+        // Decoração é limitada em bytes (emoji composto ainda cabe em 8).
+        let deco = cap_style(decoration, 32);
 
         let changed = self.store.profile_set_local(
             &me,
@@ -447,6 +473,9 @@ impl NetworkEngine {
             &ac,
             clear_avatar,
             clear_banner,
+            &theme,
+            &effect,
+            &deco,
         )?;
         let profile = self.store.profile_get(&me)?;
         self.events
@@ -947,7 +976,7 @@ impl NetworkEngine {
             return;
         }
         let me = self.identity.fingerprint.clone();
-        for (conv_id, msg_id, emoji, add) in pending {
+        for (conv_id, msg_id, emoji, add, is_super) in pending {
             self.cmd_tx
                 .send(EngineCmd::SendToPeer(
                     peer_fp.into(),
@@ -957,6 +986,7 @@ impl NetworkEngine {
                         emoji,
                         add,
                         reactor_fp: me.clone(),
+                        is_super,
                     },
                 ))
                 .ok();

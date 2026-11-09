@@ -427,7 +427,8 @@ impl Store {
     fn collect_profiles(&self) -> Result<Vec<crate::social::ProfileView>> {
         self.with_conn(|conn| {
             let mut st = conn.prepare(
-                "SELECT fp,display_name,about,avatar_b64,banner_b64,accent,updated_at,rev,content_hash
+                "SELECT fp,display_name,about,avatar_b64,banner_b64,accent,updated_at,rev,content_hash,
+                        profile_theme,avatar_effect,decoration
                  FROM profiles ORDER BY updated_at",
             )?;
             let rows = st
@@ -442,6 +443,9 @@ impl Store {
                         updated_at: r.get(6)?,
                         rev: r.get(7)?,
                         content_hash: r.get(8)?,
+                        profile_theme: r.get(9)?,
+                        avatar_effect: r.get(10)?,
+                        decoration: r.get(11)?,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -478,7 +482,7 @@ impl Store {
     fn collect_reactions(&self) -> Result<Vec<crate::social::ReactionRow>> {
         self.with_conn(|conn| {
             let mut st = conn.prepare(
-                "SELECT msg_id,conv_id,emoji,reactor_fp,created_at FROM msg_reactions ORDER BY created_at",
+                "SELECT msg_id,conv_id,emoji,reactor_fp,created_at,is_super FROM msg_reactions ORDER BY created_at",
             )?;
             let rows = st
                 .query_map([], |r| {
@@ -488,6 +492,7 @@ impl Store {
                         emoji: r.get(2)?,
                         reactor_fp: r.get(3)?,
                         created_at: r.get(4)?,
+                        is_super: r.get::<_, i32>(5)? != 0,
                     })
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1152,12 +1157,14 @@ fn merge_social_rows(
             p.content_hash.clone()
         };
         tx.execute(
-            "INSERT INTO profiles(fp,display_name,about,avatar_b64,banner_b64,accent,updated_at,rev,content_hash)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+            "INSERT INTO profiles(fp,display_name,about,avatar_b64,banner_b64,accent,updated_at,rev,content_hash,profile_theme,avatar_effect,decoration)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(fp) DO UPDATE SET display_name=excluded.display_name, about=excluded.about,
                avatar_b64=excluded.avatar_b64, banner_b64=excluded.banner_b64,
                accent=excluded.accent, updated_at=excluded.updated_at,
-               rev=excluded.rev, content_hash=excluded.content_hash",
+               rev=excluded.rev, content_hash=excluded.content_hash,
+               profile_theme=excluded.profile_theme, avatar_effect=excluded.avatar_effect,
+               decoration=excluded.decoration",
             params![
                 p.fp,
                 p.display_name,
@@ -1167,7 +1174,10 @@ fn merge_social_rows(
                 p.accent,
                 p.updated_at,
                 p.rev,
-                hash
+                hash,
+                p.profile_theme,
+                p.avatar_effect,
+                p.decoration
             ],
         )?;
         profiles += 1;
@@ -1191,9 +1201,16 @@ fn merge_social_rows(
 
     for r in &data.reactions {
         if tx.execute(
-            "INSERT OR IGNORE INTO msg_reactions(msg_id,conv_id,emoji,reactor_fp,created_at)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![r.msg_id, r.conv_id, r.emoji, r.reactor_fp, r.created_at],
+            "INSERT OR IGNORE INTO msg_reactions(msg_id,conv_id,emoji,reactor_fp,created_at,is_super)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                r.msg_id,
+                r.conv_id,
+                r.emoji,
+                r.reactor_fp,
+                r.created_at,
+                r.is_super as i32
+            ],
         )? > 0
         {
             n += 1;

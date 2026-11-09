@@ -257,6 +257,8 @@ pub enum EngineEvent {
         emoji: String,
         add: bool,
         reactor_fp: String,
+        #[allow(dead_code)]
+        is_super: bool,
     },
     MessageEdited {
         msg_id: String,
@@ -1785,6 +1787,33 @@ fn normalize_accent(accent: &str) -> String {
     }
 }
 
+/// Temas de perfil aceitos. Lista fechada: o receptor não renderiza CSS arbitrário.
+pub const PROFILE_THEMES: &[&str] = &["none", "aurora", "sunset", "ocean", "neon", "forest"];
+
+/// Efeitos de avatar aceitos. Qualquer outro valor vira vazio (= sem efeito).
+pub const AVATAR_EFFECTS: &[&str] = &["none", "glow", "pulse", "rainbow", "sparkle"];
+
+fn normalize_style(value: &str, allowed: &[&str]) -> String {
+    let v = value.trim().to_ascii_lowercase();
+    if v.is_empty() || v == "none" {
+        return String::new();
+    }
+    if allowed.contains(&v.as_str()) {
+        v
+    } else {
+        String::new()
+    }
+}
+
+fn cap_style(value: &str, max_bytes: usize) -> String {
+    let v: String = value.trim().chars().take(16).collect();
+    if v.len() <= max_bytes {
+        v
+    } else {
+        String::new()
+    }
+}
+
 fn profile_frame(p: &crate::social::ProfileView) -> SecureFrame {
     SecureFrame::ProfileSet {
         display_name: p.display_name.clone(),
@@ -1794,6 +1823,9 @@ fn profile_frame(p: &crate::social::ProfileView) -> SecureFrame {
         accent: p.accent.clone(),
         rev: p.rev,
         content_hash: p.content_hash.clone(),
+        profile_theme: p.profile_theme.clone(),
+        avatar_effect: p.avatar_effect.clone(),
+        decoration: p.decoration.clone(),
     }
 }
 
@@ -1859,6 +1891,7 @@ fn receive_reaction(
     msg_id: &str,
     emoji: &str,
     add_from_peer: bool,
+    is_super: bool,
     now: std::time::Instant,
 ) -> Result<()> {
     if engine.is_blocked(peer_fp) {
@@ -1945,7 +1978,7 @@ fn receive_reaction(
 
     let applied = engine
         .store
-        .reaction_apply(msg_id, conv_id, emoji, peer_fp, add_from_peer)
+        .reaction_apply_full(msg_id, conv_id, emoji, peer_fp, add_from_peer, is_super)
         .map_err(reaction_storage_error)?;
     drop(limiter);
 
@@ -1955,6 +1988,7 @@ fn receive_reaction(
         emoji: emoji.to_string(),
         add: applied,
         reactor_fp: peer_fp.to_string(),
+        is_super,
     });
     for fp in engine.social_peers_of(conv_id) {
         if fp != peer_fp {
@@ -1968,6 +2002,7 @@ fn receive_reaction(
                         emoji: emoji.to_string(),
                         add: applied,
                         reactor_fp: peer_fp.to_string(),
+                        is_super,
                     },
                 ))
                 .ok();

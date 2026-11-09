@@ -86,6 +86,11 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   useImperativeHandle(ref, () => ({ reloadPolls: () => setPollNonce(n => n + 1) }))
   const [tallies, setTallies] = useState<Record<string, PollTally>>({})
   const [emojis, setEmojis] = useState<EmojiView[]>([])
+  const emojiMap = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const e of emojis) if (e.name) m[e.name] = e.char
+    return m
+  }, [emojis])
   const [unreadBefore, setUnreadBefore] = useState<number | null>(null)
   const [picker, setPicker] = useState<string | null>(null)
   const [whoReagiu, setWhoReagiu] = useState<string | null>(null)
@@ -172,9 +177,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     return () => document.removeEventListener('click', close)
   }, [])
 
-  async function toggleReact(msgId: string, emoji: string) {
+  async function toggleReact(msgId: string, emoji: string, superReact = false) {
     try {
-      await services.react(convId, msgId, emoji)
+      await services.react(convId, msgId, emoji, superReact)
       const r = await services.reactions(msgId)
       setReactions(s => ({ ...s, [msgId]: r }))
     } catch (e: any) { onToast(String(e?.message ?? e)) }
@@ -278,7 +283,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono', flexShrink: 0, paddingTop: 2 }}>{fmtClock(m.ts)}</span>
               ) : grouped ? <span style={{ width: 40, flexShrink: 0 }} /> : (
                 <span style={{ position: 'relative', flexShrink: 0, cursor: 'pointer' }} onClick={() => onProfile(authorFp)}>
-                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} />
+                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} effect={profiles[authorFp]?.avatar_effect || undefined} />
                   {pres && <PresenceDot status={pres} size={12} ring={T_MAIN} />}
                 </span>
               )}
@@ -287,10 +292,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   <div style={{ fontSize: 14 * fs, color: T_TEXT, lineHeight: 1.4 }}>
                     <span style={{ fontWeight: 700, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
                       onClick={() => onProfile(authorFp)}>{authorName}</span>
+                    {profiles[authorFp]?.decoration ? (
+                      <span aria-hidden="true" style={{ fontSize: 12, marginRight: 4 }}>{profiles[authorFp]?.decoration}</span>
+                    ) : null}
                     {!isFile && (
                       <>
                         <span style={{ color: T_MUTED }}>  </span>
-                        <span style={{ overflowWrap: 'anywhere' }}><RichText body={body} onMention={onProfile} /></span>
+                        <span style={{ overflowWrap: 'anywhere' }}><RichText body={body} onMention={onProfile} serverEmojis={emojiMap} /></span>
                       </>
                     )}
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }}> (editado)</span> : null}
@@ -301,6 +309,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
                     <span style={{ fontWeight: 700, fontSize: 14 * fs, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
                       onClick={() => onProfile(authorFp)}>{authorName}</span>
+                    {profiles[authorFp]?.decoration ? (
+                      <span aria-hidden="true" title="decoração do perfil" style={{ fontSize: 13, marginLeft: -4 }}>{profiles[authorFp]?.decoration}</span>
+                    ) : null}
                     <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono' }}>{authorFp.slice(0, 12)}</span>
                     <span style={{ fontSize: 11, color: T_MUTED }}>{fmtClock(m.ts)}</span>
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }} title={new Date(meta.edited_at).toLocaleString('pt-BR')}>(editado)</span> : null}
@@ -335,7 +346,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 ) : isFile && renderFile ? renderFile(m, grouped) : compact ? null : (
                   <>
                     <div style={{ fontSize: 14 * fs, color: T_TEXT, marginTop: grouped ? 0 : 2 }}>
-                      <RichText body={body} onMention={onProfile} />
+                      <RichText body={body} onMention={onProfile} serverEmojis={emojiMap} />
                     </div>
                     {wantsUnfurl && <LinkUnfurl body={body} />}
                   </>
@@ -350,18 +361,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                         <div key={r.emoji} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
                           {}
                           <button
-                            onClick={() => toggleReact(m.id, r.emoji)}
-                            aria-label={`${r.emoji}, ${r.count} reações. Clique para alternar a sua`}
-                            title={r.reactors.length ? r.reactors.join(', ') : undefined}
+                            onClick={(e) => { if (e.shiftKey) toggleReact(m.id, r.emoji, true); else toggleReact(m.id, r.emoji) }}
+                            onContextMenu={(e) => { e.preventDefault(); toggleReact(m.id, r.emoji, true) }}
+                            aria-label={`${r.emoji}, ${r.count} reações${(r.super_count ?? 0) > 0 ? `, ${r.super_count} super` : ''}. Clique para alternar a sua; Shift+clique para super`}
+                            title={`${r.reactors.length ? r.reactors.join(', ') : ''}${(r.super_count ?? 0) > 0 ? ` · ${r.super_count} super` : ''} — Shift+clique envia super`}
+                            className={(r.super_count ?? 0) > 0 ? 'rx-super' : undefined}
                             style={{
                               display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 13,
                               background: r.mine ? 'rgba(88,101,242,0.22)' : T_INPUT,
-                              border: `1px solid ${r.mine ? T_ACCENT : T_BORDER}`,
+                              border: `1px solid ${r.mine ? T_ACCENT : (r.super_count ?? 0) > 0 ? '#ffd93d' : T_BORDER}`,
                               color: r.mine ? '#f2f3f5' : T_TEXT, borderRadius: 8, padding: '3px 8px',
                               cursor: 'pointer', fontWeight: 700,
                             }}
                           >
-                            <span style={{ fontSize: 14 }}>{r.emoji}</span>
+                            <span style={{ fontSize: 14, filter: (r.super_count ?? 0) > 0 ? 'drop-shadow(0 0 4px #ffd93d)' : undefined }}>{r.emoji}</span>
                             <span style={{ fontSize: 12 }}>{r.count}</span>
                           </button>
                           {}

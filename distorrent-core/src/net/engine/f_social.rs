@@ -16,6 +16,7 @@ pub(super) async fn handle_social(
             emoji,
             add: add_from_peer,
             reactor_fp: _,
+            is_super,
         } => {
             receive_reaction(
                 engine,
@@ -24,6 +25,7 @@ pub(super) async fn handle_social(
                 &msg_id,
                 &emoji,
                 add_from_peer,
+                is_super,
                 std::time::Instant::now(),
             )?;
         }
@@ -337,6 +339,9 @@ pub(super) async fn handle_social(
             accent,
             rev,
             content_hash,
+            profile_theme,
+            avatar_effect,
+            decoration,
         } => {
             if engine.is_blocked(peer_fp) {
                 return Ok(());
@@ -346,6 +351,9 @@ pub(super) async fn handle_social(
             let av = cap_b64(&avatar_b64, PROFILE_IMG_B64_MAX);
             let bn = cap_b64(&banner_b64, PROFILE_BANNER_B64_MAX);
             let ac = normalize_accent(&accent);
+            let theme = normalize_style(&profile_theme, PROFILE_THEMES);
+            let effect = normalize_style(&avatar_effect, AVATAR_EFFECTS);
+            let deco = cap_style(&decoration, 32);
 
             let calculado = crate::social::profile_content_hash(&dn, &ab, &av, &bn, &ac);
             if !content_hash.is_empty() && content_hash != calculado {
@@ -359,9 +367,9 @@ pub(super) async fn handle_social(
                     "ProfileSet com rev negativo".into(),
                 ));
             }
-            let applied = engine
-                .store
-                .profile_apply_remote(peer_fp, &dn, &ab, &av, &bn, &ac, rev)?;
+            let applied = engine.store.profile_apply_remote_full(
+                peer_fp, &dn, &ab, &av, &bn, &ac, rev, &theme, &effect, &deco,
+            )?;
             if !applied {
                 return Ok(());
             }

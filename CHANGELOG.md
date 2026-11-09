@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## [1.1.67-pre-alpha] - 2026-11-09
+
+### Perfil decorado, super-reações, efeitos sonoros e emojis do servidor
+
+**Perfil com identidade visual própria.** O perfil ganhou três opções novas,
+todas viajando pelo P2P junto com o resto do perfil: **tema do banner**
+(Aurora, Pôr do sol, Oceano, Neon, Floresta), **efeito do avatar** (Brilho,
+Pulsar, Arco-íris, Brilhos) e **decoração ao lado do nome** (um emoji).
+A lista é fechada nos dois lados — o receptor valida contra um allowlist, então
+um peer não consegue injetar CSS arbitrário no seu app. As customizações ficam
+fora do `content_hash` v1 (frames antigos continuam válidos) e convergem pela
+revisão do perfil com desempate determinístico.
+
+**Super-reações.** Shift+clique (ou botão direito) numa reação envia uma
+**super reação**: mesmo emoji, com brilho e contagem própria. O flag viaja no
+frame `React` como campo opcional, então peers antigos continuam entendendo a
+reação normal.
+
+**Efeitos sonoros na chamada (soundboard).** Envie um áudio de até **10 s e
+2 MB**, ou cole um link https direto. O efeito toca para você **e** é misturado
+na track do microfone por Web Audio + `replaceTrack` — sem track extra e sem
+renegociar SDP. Com o microfone fechado, o painel avisa que o som tocou só para
+você (estado honesto). Upload e download são revalidados por magic bytes no
+Rust: um `.exe` renomeado para `.mp3` é recusado.
+
+**Emojis do servidor aparecem nas mensagens.** O mapa lia `e.emoji`/`e.glyph`/
+`e.ch`, mas o campo real é `e.char` — todo emoji customizado virava `❔`.
+
+### Travas de release
+
+Teste novo garante que a publicação continua **fail-closed**: threshold 2-de-3
+no `trust.rs`, raiz de confiança compilada (sem override por env), comparação de
+versão por núcleo `N.N.N` e `package.json`/`tauri.conf.json` na mesma versão.
+Assim a versão só sobe assinada e o auto-update continua aceitando o manifesto.
+
+
 ## [1.1.66-pre-alpha] - 2026-11-08
 
 ### Atualização que finalmente chega, mídia automática e cache que cresce

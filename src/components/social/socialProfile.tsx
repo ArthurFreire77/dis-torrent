@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import type { PresenceStatus, PresenceView, ProfileView } from '../../services/models'
 import { Ic, type IconName } from '../../shared/icons'
 import { compressAvatar, compressBanner } from '../../shared/avatar'
+import { bannerBackground, DECORATION_CHOICES, EFFECT_CHOICES, THEME_CHOICES, themeGradient } from '../../shared/profileStyle'
 import { PRESENCE_COLOR, PRESENCE_LABEL, T } from './socialTheme'
 import {
   Avatar, Field, Modal, PresenceDot, ProfileNote, StatusPicker,
@@ -33,6 +34,9 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   const [status, setStatus] = useState<PresenceStatus>('online')
   const [custom, setCustom] = useState('')
   const [customEmoji, setCustomEmoji] = useState('')
+  const [theme, setTheme] = useState('none')
+  const [effect, setEffect] = useState('none')
+  const [decoration, setDecoration] = useState('')
   const [memberSince, setMemberSince] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -63,6 +67,9 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
         setStatus(pr.status === 'offline' ? 'online' : pr.status)
         setCustom(pr.custom)
         setCustomEmoji((pr as { custom_emoji?: string }).custom_emoji ?? '')
+        setTheme(p.profile_theme || 'none')
+        setEffect(p.avatar_effect || 'none')
+        setDecoration(p.decoration || '')
       })
       .catch(() => { if (alive) setProfile({ fp, display_name: nickname, about: '', avatar_b64: '', banner_b64: '', accent: '', updated_at: 0 }) })
     if (isMe) {
@@ -79,7 +86,16 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   async function save() {
     setBusy(true); setErr(null)
     try {
-      const p = await services.profileSet({ display_name: displayName, about, avatar_b64: avatar, banner_b64: banner, accent })
+      const p = await services.profileSet({
+        display_name: displayName,
+        about,
+        avatar_b64: avatar,
+        banner_b64: banner,
+        accent,
+        profile_theme: theme === 'none' ? '' : theme,
+        avatar_effect: effect === 'none' ? '' : effect,
+        decoration,
+      })
       setProfile(p)
       setAvatar(p.avatar_b64)
       setBanner(p.banner_b64)
@@ -110,9 +126,10 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
   const shownAbout = previewing ? about : (profile?.about ?? '')
   const shownAccent = previewing ? accent : (profile?.accent || T.accent)
   const shownAvatar = previewing ? (avatar || profile?.avatar_b64) : profile?.avatar_b64
-  const bannerUrl = (previewing ? banner : (profile?.banner_b64 ?? banner))
-    ? `url(data:image/jpeg;base64,${previewing ? banner : profile?.banner_b64})`
-    : `linear-gradient(135deg, ${shownAccent} 0%, #1e1f22 130%)`
+  const shownTheme = previewing ? theme : (profile?.profile_theme || 'none')
+  const shownEffect = previewing ? effect : (profile?.avatar_effect || 'none')
+  const shownDecoration = previewing ? decoration : (profile?.decoration || '')
+  const bannerUrl = bannerBackground(shownTheme, shownAccent, previewing ? banner : (profile?.banner_b64 ?? banner))
   const tabs = [{ id: 'sobre', label: 'Sobre' }, ...(communityId ? [{ id: 'servidor', label: 'Servidor' }] : []), { id: 'p2p', label: 'P2P' }] as const
   const activeTab = tab === 'servidor' && !communityId ? 'sobre' : tab
   return (
@@ -130,7 +147,7 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
         <div style={{ position: 'relative' }}>
           <label style={{ display: 'block', cursor: editing && isMe ? 'pointer' : 'default' }} title={editing && isMe ? 'Trocar avatar' : undefined}>
             <span style={{ display: 'block', borderRadius: '50%', border: '6px solid #313338', lineHeight: 0, boxShadow: `0 0 0 2px ${shownAccent}` }}>
-              <Avatar name={name} fp={fp} size={88} avatarB64={shownAvatar} />
+              <Avatar name={name} fp={fp} size={88} avatarB64={shownAvatar} effect={shownEffect} />
             </span>
             {editing && isMe && (
               <input type="file" accept="image/*" aria-label="Escolher avatar" hidden onChange={async e => { const f = e.target.files?.[0]; if (!f) return; try { setErr(null); setAvatar(await readAvatar(f)) } catch (err: any) { setErr(String(err?.message ?? err)) } }} />
@@ -145,7 +162,9 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
             <span style={{ width: 10, height: 10, borderRadius: '50%', background: shownAccent, flexShrink: 0 }} />
             <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1, color: T.muted }}>PERFIL</span>
           </div>
-          <div style={{ fontSize: 22, fontWeight: 900, color: T.heading, lineHeight: 1.15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+          <div style={{ fontSize: 22, fontWeight: 900, color: T.heading, lineHeight: 1.15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {name}{shownDecoration ? <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 18 }}>{shownDecoration}</span> : null}
+          </div>
           <div style={{ fontSize: 12, color: T.muted }}>@{fp.slice(0, 8)} · {PRESENCE_LABEL[shownStatus]}</div>
         </div>
         {editing && isMe && (
@@ -244,6 +263,54 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
               ))}
               {customEmoji && !statusIconName(customEmoji) && <span style={{ fontSize: 11, color: T.muted }}>Ícone antigo: {customEmoji}</span>}
               {customEmoji && <button type="button" onClick={() => setCustomEmoji('')} style={{ ...btnGhost, padding: '4px 10px', fontSize: 11 }}>Limpar</button>}
+            </div>
+          </Field>
+          <Field label="Tema do perfil" hint="Pinta o fundo do banner quando você não tem capa.">
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+              {THEME_CHOICES.map(c => {
+                const g = themeGradient(c.id, accent)
+                const active = theme === c.id
+                return (
+                  <button key={c.id} type="button" onClick={() => setTheme(c.id)} title={c.detail} aria-pressed={active}
+                    style={{
+                      background: c.id === 'none' ? T.input : `linear-gradient(135deg, ${g.from}, ${g.to})`,
+                      border: `2px solid ${active ? '#fff' : T.border}`, borderRadius: 8, padding: '10px 6px',
+                      cursor: 'pointer', color: c.id === 'none' ? T.text : '#fff', fontSize: 11, fontWeight: 800,
+                    }}>{c.label}</button>
+                )
+              })}
+            </div>
+          </Field>
+          <Field label="Efeito do avatar" hint="Anel ou brilho ao redor da foto — visível para todos.">
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {EFFECT_CHOICES.map(c => (
+                <button key={c.id} type="button" onClick={() => setEffect(c.id)} title={c.detail} aria-pressed={effect === c.id}
+                  style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, padding: '8px 10px',
+                    background: effect === c.id ? `${T.accent}22` : 'transparent',
+                    border: `1px solid ${effect === c.id ? T.accent : T.border}`, borderRadius: 8,
+                    cursor: 'pointer', color: T.text, fontSize: 11, fontWeight: 700, minWidth: 62,
+                  }}>
+                  <Avatar name={displayName || 'A'} fp={fp} size={30} avatarB64={avatar} effect={c.id} />
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Decoração do nome" hint="Um emoji ao lado do seu nome. Vazio = sem decoração.">
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {DECORATION_CHOICES.map(d => {
+                const active = decoration === d
+                return (
+                  <button key={d || 'none'} type="button" onClick={() => setDecoration(d)} aria-pressed={active}
+                    aria-label={d ? `Decoração ${d}` : 'Sem decoração'}
+                    style={{
+                      width: 38, height: 38, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: active ? `${T.accent}33` : 'transparent', border: `1px solid ${active ? T.accent : T.border}`,
+                      borderRadius: 8, cursor: 'pointer', color: T.muted, fontSize: 17,
+                    }}>{d || '∅'}</button>
+                )
+              })}
             </div>
           </Field>
           <div style={{ fontSize: 11, color: T.muted, marginBottom: 12, lineHeight: 1.5 }}>Dica: toque na capa ou no avatar lá em cima para trocar a imagem. Tudo é comprimido no aparelho antes de ir ao P2P.</div>

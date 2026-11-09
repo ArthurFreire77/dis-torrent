@@ -369,6 +369,7 @@ fn frames_sociais_resserializam() {
             emoji: "🔥".into(),
             add: true,
             reactor_fp: "f".into(),
+            is_super: false,
         },
         SecureFrame::MsgEdit {
             conv_id: "c".into(),

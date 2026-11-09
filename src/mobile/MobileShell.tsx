@@ -26,6 +26,7 @@ import { coalesceAsyncRefresh, throttleTrailing } from '../shared/perf'
 import { pastedImages } from '../shared/clipboardImage'
 import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../services/fileSwarm'
 import ScreenSharePicker from '../components/ScreenSharePicker'
+import { SoundboardPanel } from '../components/calls/SoundboardPanel'
 import { callIsActive, callMediaLive } from '../services/callUiState'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
@@ -375,6 +376,7 @@ export default function MobileShell() {
   const [callQuality, setCallQuality] = useState<CallQuality>(() => getStoredQuality())
   const [qualityError, setQualityError] = useState<string | null>(null)
   const [showCallDiag, setShowCallDiag] = useState(false)
+  const [showSoundboardMobile, setShowSoundboardMobile] = useState(false)
   const [callMediaPrefsState, setCallMediaPrefsState] = useState(() => getCallMediaPrefs())
   const [turnInput, setTurnInput] = useState(() => getTurnUrl())
   const [turnMsg, setTurnMsg] = useState<string | null>(null)
@@ -1375,7 +1377,7 @@ export default function MobileShell() {
       .then(list => {
         if (!alive) return
         const m: Record<string, string> = {}
-        for (const e of (list as any[])) m[e.name] = e.emoji || e.glyph || e.ch || '❔'
+        for (const e of (list as any[])) m[e.name] = e.char || e.emoji || e.glyph || e.ch || '❔'
         setServerEmojiMap(m)
       })
       .catch(() => {})
@@ -2207,6 +2209,16 @@ export default function MobileShell() {
               )}
               {}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
+              <div style={{ position: 'relative', display: 'inline-flex' }}>
+                <button onClick={() => setShowSoundboardMobile(v => !v)} data-testid="mobile-soundboard" aria-expanded={showSoundboardMobile} title="Efeitos sonoros da chamada (até 10s)" aria-label="Efeitos sonoros" style={{ background: showSoundboardMobile ? t.accent : t.input, border: `1px solid ${t.border}`, color: showSoundboardMobile ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.headphones} size={12} /> efeitos</button>
+                {showSoundboardMobile && (
+                  <SoundboardPanel
+                    open
+                    onClose={() => setShowSoundboardMobile(false)}
+                    palette={{ input: t.input, border: t.border, text: t.text, muted: t.muted, accent: t.accent, panel: t.sidebar }}
+                  />
+                )}
+              </div>
             </div>}
             {}
             {renderCallTilesMobile(callPanelSize === 'compact', true)}

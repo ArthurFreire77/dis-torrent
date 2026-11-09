@@ -267,6 +267,9 @@ fn perfil_react_pin_read_e_bookmark_viajam_no_cofre() {
         "#5865f2",
         false,
         false,
+        "",
+        "",
+        "",
     )
     .unwrap();
     let conv = a.list_conversations().unwrap()[0].clone();
