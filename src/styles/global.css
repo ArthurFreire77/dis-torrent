@@ -117,8 +117,8 @@ button{ touch-action:manipulation; user-select:none }
   pointer-events:none; z-index:0;
 }
 .pfx-wrap > img, .pfx-wrap > span{ position:relative; z-index:1 }
-.pfx-glow::before{ box-shadow:0 0 0 2px #5865f2, 0 0 12px 2px #5865f2aa }
-.pfx-pulse::before{ box-shadow:0 0 0 2px #5865f2; animation: pfx-pulse 1.8s ease-in-out infinite }
+.pfx-glow::before{ box-shadow:0 0 0 2px var(--pfx-aura, #5865f2), 0 0 12px 2px color-mix(in srgb, var(--pfx-aura, #5865f2) 67%, transparent) }
+.pfx-pulse::before{ box-shadow:0 0 0 2px var(--pfx-aura, #5865f2); animation: pfx-pulse 1.8s ease-in-out infinite }
 .pfx-rainbow::before{ background:conic-gradient(from 0deg, #ff5757, #ffb703, #23a55a, #00a8fc, #5865f2, #eb459e, #ff5757); animation: pfx-spin 3s linear infinite }
 .pfx-sparkle::before{ box-shadow:0 0 0 1px #ffe066, 0 0 10px 3px #ffe06699; animation: pfx-pulse 1.4s ease-in-out infinite }
 @keyframes pfx-pulse { 0%,100%{ opacity:.45; transform:scale(1) } 50%{ opacity:1; transform:scale(1.06) } }

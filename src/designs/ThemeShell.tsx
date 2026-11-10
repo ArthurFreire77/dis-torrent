@@ -3111,7 +3111,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                     onClick={() => setProfileFp(fp)}
                     onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setProfileFp(fp) }}
                   >
-                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} effect={socialProfiles[fp]?.avatar_effect || undefined} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
+                    <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}><Avatar name={nick || fp} fp={fp} size={28} avatarB64={socialProfiles[fp]?.avatar_b64} effect={socialProfiles[fp]?.avatar_effect || undefined} accent={socialProfiles[fp]?.accent || undefined} /><span style={{ position: 'absolute', right: -2, bottom: -2, width: 10, height: 10, background: online ? t.green : '#80848e', border: `2px solid ${sidebarBg}`, borderRadius: '50%' }} /></span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 600, color: text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {nick || fp}{socialProfiles[fp]?.decoration ? <span aria-hidden="true" style={{ marginLeft: 4 }}>{socialProfiles[fp]?.decoration}</span> : null}
@@ -4107,6 +4107,8 @@ export default function ThemeShell({ designId }: {designId:string}){
           fp={profileFp}
           nickname={nameOfFp(profileFp)}
           myFp={identity?.fingerprint ?? ''}
+          communityId={view === 'servidores' && selCommunity ? selCommunity : undefined}
+          communityName={activeComm?.name}
           onClose={() => setProfileFp(null)}
           onMessage={fp => { setProfileFp(null); void openDm({ fp }) }}
           onSaved={p => setSocialProfiles(prev => ({ ...prev, [p.fp]: p }))}

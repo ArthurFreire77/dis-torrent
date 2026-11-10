@@ -283,7 +283,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono', flexShrink: 0, paddingTop: 2 }}>{fmtClock(m.ts)}</span>
               ) : grouped ? <span style={{ width: 40, flexShrink: 0 }} /> : (
                 <span style={{ position: 'relative', flexShrink: 0, cursor: 'pointer' }} onClick={() => onProfile(authorFp)}>
-                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} effect={profiles[authorFp]?.avatar_effect || undefined} />
+                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} effect={profiles[authorFp]?.avatar_effect || undefined} accent={profiles[authorFp]?.accent || undefined} />
                   {pres && <PresenceDot status={pres} size={12} ring={T_MAIN} />}
                 </span>
               )}

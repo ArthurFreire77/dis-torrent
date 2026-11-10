@@ -147,7 +147,7 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
         <div style={{ position: 'relative' }}>
           <label style={{ display: 'block', cursor: editing && isMe ? 'pointer' : 'default' }} title={editing && isMe ? 'Trocar avatar' : undefined}>
             <span style={{ display: 'block', borderRadius: '50%', border: '6px solid #313338', lineHeight: 0, boxShadow: `0 0 0 2px ${shownAccent}` }}>
-              <Avatar name={name} fp={fp} size={88} avatarB64={shownAvatar} effect={shownEffect} />
+              <Avatar name={name} fp={fp} size={88} avatarB64={shownAvatar} effect={shownEffect} accent={shownAccent} />
             </span>
             {editing && isMe && (
               <input type="file" accept="image/*" aria-label="Escolher avatar" hidden onChange={async e => { const f = e.target.files?.[0]; if (!f) return; try { setErr(null); setAvatar(await readAvatar(f)) } catch (err: any) { setErr(String(err?.message ?? err)) } }} />
@@ -291,7 +291,7 @@ export function ProfileModal({ fp, nickname, myFp, onClose, onMessage, community
                     border: `1px solid ${effect === c.id ? T.accent : T.border}`, borderRadius: 8,
                     cursor: 'pointer', color: T.text, fontSize: 11, fontWeight: 700, minWidth: 62,
                   }}>
-                  <Avatar name={displayName || 'A'} fp={fp} size={30} avatarB64={avatar} effect={c.id} />
+                  <Avatar name={displayName || 'A'} fp={fp} size={30} avatarB64={avatar} effect={c.id} accent={accent || undefined} />
                   {c.label}
                 </button>
               ))}

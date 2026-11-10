@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PresenceStatus } from '../../services/models'
 import { Markdown } from '../../shared/markdown'
 import { getNote, setNote } from '../../shared/prefs'
-import { effectClass } from '../../shared/profileStyle'
+import { Avatar as AvatarView } from '../../shared/avatarView'
 import { T, PRESENCE_COLOR, PRESENCE_LABEL } from './socialTheme'
 
 const EMOJI_SHORT: Record<string, string> = {
@@ -117,39 +117,17 @@ export function StatusPicker({ value, onChange }: { value: PresenceStatus; onCha
   )
 }
 
-export function Avatar({ name, fp, size = 40, avatarB64, ring, effect }: {
+export function Avatar({ name, fp, size = 40, avatarB64, ring, effect, accent }: {
   name: string
   fp: string
   size?: number
   avatarB64?: string
   ring?: string
   effect?: string
+  /** Cor de destaque do perfil; a aura usa esta cor. */
+  accent?: string
 }) {
-  const [err, setErr] = useState(false)
-  const aura = effectClass(effect)
-  const inner = avatarB64 && !err
-    ? <img src={`data:image/jpeg;base64,${avatarB64}`} onError={() => setErr(true)} alt={name}
-      style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border: ring ? `2px solid ${ring}` : 'none' }} />
-    : (() => {
-      const h = Array.from(fp || name).reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7)
-      const hue = h % 360
-      const initial = (name || fp || '?').trim().charAt(0).toUpperCase() || '?'
-      return (
-        <span style={{
-          width: size, height: size, borderRadius: '50%', flexShrink: 0,
-          background: `hsl(${hue} 45% 32%)`,
-          color: '#fff', fontWeight: 800, fontSize: size * 0.42,
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          border: ring ? `2px solid ${ring}` : 'none', userSelect: 'none',
-        }}>{initial}</span>
-      )
-    })()
-  if (!aura) return inner
-  return (
-    <span className={`${aura} pfx-wrap`} style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
-      {inner}
-    </span>
-  )
+  return <AvatarView name={name} fp={fp} size={size} avatarB64={avatarB64} ring={ring} effect={effect} accent={accent} />
 }
 
 export function Modal({ title, onClose, children, width = 520, footer }: {

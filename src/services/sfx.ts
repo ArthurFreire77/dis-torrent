@@ -5,9 +5,19 @@ let ringToken = 0
 let ringUnlisten: (() => void) | null = null
 
 import { isTauriAndroid, isTauriRuntime } from '../shared/runtime.ts'
+import { getPrefs } from '../shared/prefs.ts'
 
 export function setSfxMuted(m: boolean) { muted = m }
 export function isSfxMuted(): boolean { return muted }
+
+/** Preferência do usuário manda: o botão "Som de mensagem" não pode ser decorativo. */
+function somDeMensagemLigado(): boolean {
+  try { return getPrefs().notifySounds !== false } catch { return true }
+}
+
+function somDeChamadaLigado(): boolean {
+  try { return getPrefs().notifyCallSounds !== false } catch { return true }
+}
 
 function ensure(): AudioContext | null {
   try {
@@ -43,6 +53,7 @@ function tone(freq: number, start: number, dur: number, type: OscillatorType = '
 }
 
 export function sfxMessage() {
+  if (!somDeMensagemLigado()) return
   if (!ensure()) return
   tone(880, 0, 0.09, 'sine', 0.12)
   tone(1320, 0.06, 0.10, 'sine', 0.10)
@@ -69,6 +80,7 @@ function isAndroidRuntimeSfx(): boolean {
 }
 
 function ringBeep() {
+  if (!somDeChamadaLigado()) return
   if (!ensure()) return
   tone(880, 0, 0.35, 'sine', 0.14)
   tone(660, 0.18, 0.35, 'sine', 0.12)
@@ -116,6 +128,7 @@ function stopNativeRing() {
 
 export function sfxRingStart() {
   stopLocalRing()
+  if (!somDeChamadaLigado()) return
   if (!ensure()) return
   const token = ringToken
   if (isTauriRuntime()) {

@@ -1,4 +1,5 @@
 // Customizações do perfil com lista fechada; espelha o allowlist do core.
+import type React from 'react'
 
 export const PROFILE_THEMES = ['none', 'aurora', 'sunset', 'ocean', 'neon', 'forest'] as const
 export type ProfileTheme = (typeof PROFILE_THEMES)[number]
@@ -62,6 +63,18 @@ export function effectColor(effect: string | null | undefined, accent: string): 
 export function effectClass(effect: string | null | undefined): string {
   const e = normalizeAvatarEffect(effect)
   return e === 'none' ? '' : `pfx pfx-${e}`
+}
+
+/**
+ * Variável CSS da aura com a cor do perfil. O CSS usa `var(--pfx-aura, #5865f2)`,
+ * então o anel deixa de ser sempre azul quando a pessoa escolhe outra cor.
+ */
+export function effectStyle(effect: string | null | undefined, accent: string): React.CSSProperties | undefined {
+  const e = normalizeAvatarEffect(effect)
+  if (e === 'none' || e === 'rainbow' || e === 'sparkle') return undefined
+  const cor = (accent || '').trim()
+  if (!cor) return undefined
+  return { ['--pfx-aura' as string]: cor } as React.CSSProperties
 }
 
 /** Decoração: até 3 grafemas, sem letras — texto comum viraria apelido não moderado. */

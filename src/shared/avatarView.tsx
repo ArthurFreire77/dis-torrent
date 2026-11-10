@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { NetworkState } from '../services/models'
 import { avatarColor } from './theme'
-import { effectClass } from './profileStyle'
+import { effectClass, effectStyle } from './profileStyle'
 
 export function Avatar({ name, fp, size = 40, avatarB64, accent, ring, effect }: {
   name: string
@@ -35,7 +35,11 @@ export function Avatar({ name, fp, size = 40, avatarB64, accent, ring, effect }:
 
   if (!aura) return inner
   return (
-    <span className={`${aura} pfx-wrap`} style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+    <span
+      className={`${aura} pfx-wrap`}
+      data-pfx={effect ?? ''}
+      style={{ position: 'relative', display: 'inline-flex', flexShrink: 0, ...effectStyle(effect, accent ?? '') }}
+    >
       {inner}
     </span>
   )
