@@ -20,6 +20,7 @@ pub mod commands_net;
 pub mod commands_server;
 pub mod commands_social;
 pub mod commands_sound;
+pub mod sound_builtin;
 pub mod commands_voice;
 mod download_spool;
 mod download_target;
@@ -28,6 +29,7 @@ mod seed_files;
 mod botbridge;
 mod botmusic;
 mod botplugin;
+mod botzip;
 mod firewall;
 mod sharebar;
 mod updater;
@@ -1521,6 +1523,8 @@ fn main() {
             commands_bot::bot_bridge_status,
             commands_bot::bot_bridge_list,
             commands_bot::bot_folder_read,
+            commands_bot::bot_zip_read,
+            commands_bot::bot_zip_save,
             commands_bot::bot_plugin_start,
             commands_bot::bot_plugin_stop,
             commands_bot::bot_plugin_status,
