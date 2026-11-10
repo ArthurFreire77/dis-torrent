@@ -106,3 +106,14 @@ export function roomSummary(room: CallRoomView | null, nameOf: (fp: string) => s
     .join(', ')
   return `${n} ${n === 1 ? 'pessoa' : 'pessoas'} na chamada — ${quem}${n > 2 ? ` +${n - 2}` : ''}`
 }
+
+/**
+ * Tem alguém além de mim para entrar? Sem isso o botão verde "Entrar" aparece
+ * numa sala só comigo, tenta parear e fica preso em "entrando…".
+ */
+export function salaTemAlguemParaEntrar(room: CallRoomView | null, myFp: string | null | undefined): boolean {
+  if (!room) return false
+  const me = typeof myFp === 'string' ? myFp : ''
+  if (room.participants.some((fp) => fp && fp !== me)) return true
+  return !!room.hostFp && room.hostFp !== me
+}

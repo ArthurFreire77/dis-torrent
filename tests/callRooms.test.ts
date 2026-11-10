@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { CallRoomStore, roomSummary } from '../src/services/callRooms.ts'
+import { CallRoomStore, roomSummary, salaTemAlguemParaEntrar } from '../src/services/callRooms.ts'
 import { isCollectiveRoom, leaveOutcome } from '../src/services/callRoomRules.ts'
 
 test('cinco pessoas, duas saidas, a sala continua viva', () => {
@@ -109,4 +109,19 @@ test('resumo da sala é honesto com 1 e com várias pessoas', () => {
     roomSummary({ convId: 'x', callId: 'c', kind: 'voice', hostFp: 'a', participants: [] }, nome),
     'chamada em andamento',
   )
+})
+
+test('botão Entrar só existe quando há alguém além de mim na sala', () => {
+  const soComigo = { convId: 'x', callId: 'c', kind: 'voice' as const, hostFp: 'eu', participants: ['eu'] }
+  assert.equal(
+    salaTemAlguemParaEntrar(soComigo, 'eu'),
+    false,
+    'entrar numa sala só comigo ficava preso em "entrando…"',
+  )
+  assert.equal(salaTemAlguemParaEntrar(soComigo, null), true, 'sem identidade não dá para afirmar vazio')
+  const comOutro = { ...soComigo, participants: ['eu', 'outro'] }
+  assert.equal(salaTemAlguemParaEntrar(comOutro, 'eu'), true)
+  const hostEstranho = { ...soComigo, hostFp: 'outro', participants: ['eu'] }
+  assert.equal(salaTemAlguemParaEntrar(hostEstranho, 'eu'), true, 'o host anuncia a sala')
+  assert.equal(salaTemAlguemParaEntrar(null, 'eu'), false)
 })

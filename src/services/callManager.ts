@@ -714,6 +714,8 @@ export class CallManager {
   private sfxDestination: MediaStreamAudioDestinationNode | null = null
   /** Sender de áudio ao qual o soundboard está ligado (o da track do mic). */
   private sfxSender: RTCRtpSender | null = null
+  /** Track de microfone usada pelo sink atual (revalida troca de dispositivo). */
+  private sfxMicTrack: MediaStreamTrack | null = null
   private relayQueues = new Map<string, { nextSeq: number; nextTime: number; pending: Map<number, { buf: AudioBuffer; ts: number }> }>()
   private relayBc: BroadcastChannel | null = null
   private iceRecoveredOff: (() => void) | null = null
@@ -1632,6 +1634,9 @@ export class CallManager {
       }
       this.startRosterReconcile(callId, communityId, channelId)
       this.startNativeVoiceMonitor(callId)
+      if ((this.state?.participants ?? []).filter((p: any) => p.fp && p.fp !== me.fingerprint).length === 0) {
+        this.applyPhase('media-connected')
+      }
       this.onUpdate({ ...this.state })
       return this.state
     }
@@ -1683,6 +1688,11 @@ export class CallManager {
     }
     this.startRosterReconcile(callId, communityId, channelId)
     this.catchUpVoiceRoster(callId, communityId, channelId)
+    // Sozinho no canal não há par para negociar: ficar em `connecting` era o
+    // "Conectando…" eterno do botão verde.
+    if ((this.state?.participants ?? []).filter((p: any) => p.fp && p.fp !== me.fingerprint).length === 0) {
+      this.applyPhase('media-connected')
+    }
     try {
       for (const fp of [...this.pendingOffers.keys()]) {
         const pend = this.pendingOffers.get(fp)
@@ -2172,9 +2182,13 @@ export class CallManager {
   /** Nó de mixagem do soundboard; sem track de mic viva não há o que mixar. */
   private ensureSoundboardSink(): void {
     try {
-      if (this.sfxDestination) return
       const mic = this.localStream?.getAudioTracks().find(t => t.readyState === 'live') ?? null
+      // O sink antigo pode estar apontando para um microfone morto/trocado
+      // (recuperação de mic, troca de dispositivo). Sem revalidar, o efeito
+      // continuava "tocando" num grafo que ninguém enviava.
+      if (this.sfxDestination && this.sfxMicTrack === mic) return
       if (!mic) return
+      if (this.sfxDestination) this.stopSoundboard()
       const AC: any = typeof AudioContext !== 'undefined' ? AudioContext : (typeof window !== 'undefined' ? (window as any).webkitAudioContext : null)
       if (!AC) return
       this.sfxCtx = this.sfxCtx && this.sfxCtx.state !== 'closed' ? this.sfxCtx : new AC()
@@ -2186,6 +2200,7 @@ export class CallManager {
         const src = ctx.createMediaStreamSource(new MediaStream([mic]))
         src.connect(this.sfxDestination)
       } catch {  }
+      this.sfxMicTrack = mic
       this.mixSoundboardIntoPeers()
       soundboard.attach({ ctx, destination: this.sfxDestination })
     } catch {  }
@@ -2211,6 +2226,7 @@ export class CallManager {
     try { soundboard.stop() } catch {  }
     try { soundboard.detach() } catch {  }
     this.sfxSender = null
+    this.sfxMicTrack = null
     try { if (this.sfxCtx && this.sfxCtx.state !== 'closed') void this.sfxCtx.close().catch(() => {}) } catch {  }
     this.sfxCtx = null
     this.sfxDestination = null
@@ -4752,7 +4768,13 @@ export class CallManager {
     }
     await detectNativeVoice(true)
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
-    const [callId, alvos] = await services.callRoomJoin(convId, kind)
+    let [callId, alvos] = await services.callRoomJoin(convId, kind)
+    if (!alvos.length) {
+      // O anúncio pode ter chegado depois do último sync: revalidar antes de
+      // dizer "ninguém na sala" evita o botão verde morrer em "entrando…".
+      try { await new Promise<void>((ok) => setTimeout(ok, 350)) } catch {  }
+      ;[callId, alvos] = await services.callRoomJoin(convId, kind)
+    }
     if (!alvos.length) throw new Error('a chamada encerrou — ninguém mais está na sala')
     try { void services.groupPairNow?.(convId)?.catch(() => {  }) } catch {  }
     this.endedCalls.delete(callId)

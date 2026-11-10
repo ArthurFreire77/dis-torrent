@@ -11,7 +11,7 @@ import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import ScreenStage from '../components/calls/ScreenStage'
 import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
-import { callRooms, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
+import { callRooms, salaTemAlguemParaEntrar, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
 import { FileCard } from '../components/FileCard'
 import DownloadsPanel from '../components/DownloadsPanel'
 import CallPhaseBadge from '../components/CallPhaseBadge'
@@ -28,6 +28,7 @@ import { fileSwarm, encodeFileBody, parseFileBody, type FileMsgMeta } from '../s
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import { SoundboardPanel } from '../components/calls/SoundboardPanel'
 import { callIsActive, callMediaLive } from '../services/callUiState'
+import { faseExibida } from '../services/voiceCallPhase'
 import MobileServerPanel from './MobileServerPanel'
 import MobileCallChannel from './MobileCallChannel'
 import MobileCallStage from './MobileCallStage'
@@ -120,11 +121,12 @@ const PeerDot = memo(function PeerDot({ on, ring }: { on: boolean; ring?: string
   return <ViewPeerDot s={on ? 'CONNECTED' : 'DISCONNECTED'} ring={ring} />
 })
 
-const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, onDelete, room, onJoinRoom }: {
+const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, myFp, onOpen, onDelete, room, onJoinRoom }: {
   c: Conversation
   online: boolean
   selected: boolean
   avatarB64?: string
+  myFp?: string
   onOpen: (c: Conversation) => void
   onDelete: (id: string, title: string, isSelected: boolean) => void
   room?: CallRoomView | null
@@ -144,8 +146,7 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, onOpen, 
         <div style={{ fontSize: 12, color: t.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 2 }}>{(c as any).last_body || 'Toque para conversar'}</div>
       </div>
       {((c as any).unread_count ?? 0) > 0 && <span className="m-badge">{(c as any).unread_count > 9 ? '9+' : (c as any).unread_count}</span>}
-      {room && onJoinRoom && (
-        <button
+      {room && onJoinRoom && salaTemAlguemParaEntrar(room, myFp) && (        <button
           type="button"
           title={`Entrar na chamada — ${room.participants.length || 1} na sala`}
           aria-label={`Entrar na chamada de ${c.title}`}
@@ -929,13 +930,21 @@ export default function MobileShell() {
     if (!c) { setError('conversa da chamada não encontrada — abra a conversa e tente de novo'); return }
     if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
     if (callIsActive(activeCall)) { setError('já existe uma chamada em andamento'); return }
+    if (!salaTemAlguemParaEntrar(room, identity?.fingerprint)) {
+      setError('a chamada encerrou — ninguém mais está na sala')
+      void syncCallRooms(() => services.callRoomsList())
+      return
+    }
     setCallActionBusy(true)
     try {
       setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp)
       await callManager.enterRoom(c.id, room.kind)
-    } catch (e: any) { setError(String(e?.message ?? e)) }
+    } catch (e: any) {
+      setError(String(e?.message ?? e))
+      void syncCallRooms(() => services.callRoomsList())
+    }
     finally { setCallActionBusy(false) }
-  }, [activeCall, callActionBusy])
+  }, [activeCall, callActionBusy, identity?.fingerprint])
   const enterCallChannel = useCallback(async (communityId: string, channelId: string) => {
     if (callActionBusy) return
     const support = getCallsSupport()
@@ -1929,7 +1938,8 @@ export default function MobileShell() {
     if (selCallChannel) {
       const st: any = activeCall
       const dentro = !!inCallChannelId && inCallChannelId === selCallChannel.id
-      const ligando = dentro && (st?.phase === 'connecting' || st?.phase === 'outgoing' || st?.phase === 'reconnecting')
+      const faseMotor = faseExibida({ callId: st?.callId, phase: st?.phase, participants: st?.participants, myFp: identity?.fingerprint })
+      const ligando = dentro && (faseMotor === 'connecting' || faseMotor === 'outgoing' || faseMotor === 'reconnecting')
       const porFp = new Map<string, { fp: string; nickname?: string; muted?: boolean; deafened?: boolean }>()
       const estadoMotor = new Map<string, { muted: boolean; deafened: boolean }>()
       for (const [fp, muted, deafened] of voiceStates) {
@@ -1991,7 +2001,18 @@ export default function MobileShell() {
           onToggleMute={() => { const nm = !isMuted; setIsMuted(nm); callManager.toggleMute() }}
           onToggleDeafen={() => { const nd = !isDeafened; setIsDeafened(nd); if (nd) setIsMuted(true); callManager.toggleDeafen() }}
           onToggleCamera={() => { void callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e))) }}
+          onSoundboard={() => setShowSoundboardMobile((v) => !v)}
+          soundboardOpen={showSoundboardMobile}
         />
+        {/* O botão de efeitos vive na barra do microfone: o painel precisa ser
+            montado no mesmo `return`, senão o clique some (igual ao picker). */}
+        {dentro && showSoundboardMobile && (
+          <SoundboardPanel
+            open
+            onClose={() => setShowSoundboardMobile(false)}
+            palette={{ input: t.input, border: t.border, text: t.text, muted: t.muted, accent: t.accent, panel: t.sidebar }}
+          />
+        )}
         {/* A vista do canal faz `return` antes do rodapé do shell: sem este
             picker aqui, "compartilhar tela" no canal só mudava estado. */}
         <ScreenSharePicker open={showScreenPicker} onClose={() => setShowScreenPicker(false)} onError={setError} />
@@ -2023,7 +2044,7 @@ export default function MobileShell() {
             <>
               {
 }
-              {selConvRoom && !callIsActive(activeCall) && (
+              {selConvRoom && !callIsActive(activeCall) && salaTemAlguemParaEntrar(selConvRoom, identity?.fingerprint) && (
                 <button
                   type="button"
                   data-testid="mobile-header-join-room"
@@ -2183,7 +2204,7 @@ export default function MobileShell() {
                 >não anônima</span>
               )}
               {}
-              <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} ringing={activeCall.ringing} />
+              <CallPhaseBadge phase={faseExibida({ callId: activeCall.callId, phase: activeCall.phase, participants: activeCall.participants, myFp: identity?.fingerprint }) as any} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLiveMobile} ringing={activeCall.ringing} />
               {mostrarTrocaCameraMobile && (
                 <button type="button" data-testid="call-camera-switch" aria-label={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} title={cameraSwitchLabelMobile ? `Trocar de câmera (${cameraSwitchLabelMobile})` : 'Trocar de câmera'} onClick={() => { void trocarCameraMobile() }} style={{ width: 38, height: 38, borderRadius: 8, border: `1px solid ${t.border}`, background: t.input, color: t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={Icons.cameraSwitch} size={17} /></button>
               )}
@@ -2215,7 +2236,7 @@ export default function MobileShell() {
               {}
               <button onClick={() => { if ((activeCall as any)?.sharing) { callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return } if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return } setShowScreenPicker(true) }} data-testid="mobile-screen-share" title={supportsScreenShare() ? 'Compartilhar tela (escolher fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG)} aria-label="Compartilhar tela" style={{ background: (activeCall as any)?.sharing ? t.green : t.input, border: `1px solid ${t.border}`, color: (activeCall as any)?.sharing ? '#fff' : t.text, opacity: supportsScreenShare() || (activeCall as any)?.sharing ? 1 : 0.5, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.screen} size={12} /> {(activeCall as any)?.sharing ? 'compartilhando' : 'tela'}</button>
               <div style={{ position: 'relative', display: 'inline-flex' }}>
-                <button onClick={() => setShowSoundboardMobile(v => !v)} data-testid="mobile-soundboard" aria-expanded={showSoundboardMobile} title="Efeitos sonoros da chamada (até 10s)" aria-label="Efeitos sonoros" style={{ background: showSoundboardMobile ? t.accent : t.input, border: `1px solid ${t.border}`, color: showSoundboardMobile ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.headphones} size={12} /> efeitos</button>
+                <button onClick={() => setShowSoundboardMobile(v => !v)} data-testid="mobile-soundboard" aria-expanded={showSoundboardMobile} title="Efeitos sonoros da chamada (até 10s)" aria-label="Efeitos sonoros" style={{ background: showSoundboardMobile ? t.accent : t.input, border: `1px solid ${t.border}`, color: showSoundboardMobile ? '#fff' : t.text, borderRadius: 8, padding: '6px 10px', fontSize: 11, fontWeight: 800, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon d={Icons.music} size={12} /> efeitos</button>
                 {showSoundboardMobile && (
                   <SoundboardPanel
                     open
@@ -2577,7 +2598,7 @@ export default function MobileShell() {
           <Section variant="mobile" title="CONVERSAS RECENTES" maxVisible={5}>
             {filteredConvs.length === 0
               ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
-              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={effectivePresence({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status }) !== 'offline'} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={effectivePresence({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status }) !== 'offline'} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} myFp={identity?.fingerprint} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
           </Section>
 
           <Section variant="mobile" title={`SEUS SERVIDORES — ${filteredComms.length}`} maxVisible={6}>

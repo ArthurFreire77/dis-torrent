@@ -90,6 +90,8 @@ export default function MobileCallChannel({
   onToggleDeafen,
   onToggleCamera,
   onSwitchCamera,
+  onSoundboard,
+  soundboardOpen = false,
   joining,
 }: {
   channelName: string
@@ -116,6 +118,8 @@ export default function MobileCallChannel({
   onToggleDeafen: () => void
   onToggleCamera: () => void
   onSwitchCamera?: () => void
+  onSoundboard?: () => void
+  soundboardOpen?: boolean
   joining?: boolean
 }) {
   const titulo = kind === 'video' ? 'Canal de vídeo' : 'Canal de voz'
@@ -211,6 +215,14 @@ export default function MobileCallChannel({
             danger={muted}
             onClick={onToggleMute}
           />
+          {onSoundboard && (
+            <Botao
+              label={soundboardOpen ? 'Fechar efeitos sonoros' : 'Efeitos sonoros (até 10s)'}
+              icon="music"
+              on={soundboardOpen}
+              onClick={onSoundboard}
+            />
+          )}
           <Botao
             label={deafened ? 'Ativar áudio' : 'Ensurdecer'}
             icon={deafened ? 'volumeX' : 'headphones'}

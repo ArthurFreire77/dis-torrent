@@ -65,6 +65,11 @@ export interface VoiceStageProps {
   cameraSwitchDisabled?: boolean
   onOpenSettings?: () => void
   settings?: ReactNode
+  /** Abre o painel de efeitos sonoros (fica ao lado do microfone). */
+  onSoundboard?: () => void
+  soundboardOpen?: boolean
+  /** Conteúdo do painel de efeitos (renderizado fora do popover de pessoas). */
+  soundboard?: ReactNode
   compact?: boolean
 }
 
@@ -165,6 +170,9 @@ export function VoiceStage({
   cameraSwitchDisabled = false,
   onOpenSettings,
   settings,
+  onSoundboard,
+  soundboardOpen = false,
+  soundboard,
   compact = false,
 }: VoiceStageProps) {
   const entrar = joinButtonState({
@@ -236,6 +244,15 @@ export function VoiceStage({
             danger={muted}
             onClick={onToggleMute}
           />
+          {onSoundboard && (
+            <ControlButton
+              label={soundboardOpen ? 'Fechar efeitos sonoros' : 'Efeitos sonoros (até 10s)'}
+              icon={Icons.music}
+              on={soundboardOpen}
+              danger={false}
+              onClick={onSoundboard}
+            />
+          )}
           <ControlButton
             label={deafened ? 'Ativar áudio' : 'Ensurdecer'}
             icon={deafened ? Icons.volumeX : Icons.headphones}
@@ -615,6 +632,7 @@ export function VoiceStage({
       </div>
       {compact && inCall && controles}
       {painelPessoas}
+      {soundboard}
       {settings}
     </div>
   )

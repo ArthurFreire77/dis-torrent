@@ -32,6 +32,15 @@ describe('soundboard: mixagem na chamada', () => {
     assert.match(callManager, /try \{ this\.stopSoundboard\(\) \}/, 'cleanup chama stopSoundboard')
   })
 
+  test('sink é revalidado quando o microfone morre ou é trocado', () => {
+    assert.match(
+      callManager,
+      /this\.sfxDestination && this\.sfxMicTrack === mic\) return/,
+      'sem revalidar, o efeito tocava num grafo que ninguém enviava',
+    )
+    assert.match(callManager, /this\.sfxMicTrack = mic/, 'guarda a track usada pelo sink')
+  })
+
   test('sem mic o som toca só local (a UI avisa, não mente)', () => {
     assert.match(callManager, /soundboardLive\(\)/, 'expõe o estado real do sink')
     assert.match(panel, /microfone fechado/, 'avisa que tocou só para você')
@@ -73,21 +82,48 @@ describe('soundboard: UI presente nos dois shells', () => {
     assert.match(mobile, /mobile-soundboard/)
   })
 
+  test('no celular o botão também fica na barra do microfone', () => {
+    const canal = readFileSync(new URL('../src/mobile/MobileCallChannel.tsx', import.meta.url), 'utf8')
+    const barra = canal.slice(canal.indexOf('if (inCall) {'))
+    const mic = barra.indexOf('onClick={onToggleMute}')
+    const efeitos = barra.indexOf('onClick={onSoundboard}')
+    assert.ok(mic > 0, 'o microfone existe na barra')
+    assert.ok(efeitos > mic, 'efeitos vêm depois do microfone')
+    assert.match(barra, /icon="music"/)
+  })
+
   test('o painel flutua na tela (não fica preso dentro de um popover escondido)', () => {
     assert.match(panel, /position: 'fixed'/, 'o painel antigo usava absolute dentro de uma div sem posição')
     assert.match(panel, /Escape/, 'Esc fecha o painel')
-    assert.match(panel, /zIndex: 199/, 'backdrop clicável fecha ao clicar fora')
+    assert.match(panel, /zIndex: 199/, 'camada de clique-fora fecha ao clicar fora')
     assert.match(panel, /onClose/, 'o backdrop usa o onClose recebido')
   })
 
-  test('o botão de efeitos não é mais embrulhado em div position:relative', () => {
-    const antes = shell.indexOf('Efeitos</button>')
-    assert.ok(antes > 0, 'o botão existe')
-    const trecho = shell.slice(Math.max(0, antes - 1200), antes)
-    assert.doesNotMatch(
-      trecho,
-      /<div style=\{\{ position: 'relative' \}\}>\s*<button[^>]*setShowSoundboard/,
-      'o wrapper relativo é o que escondia o painel',
+  test('fechar ao clicar fora não escurece nem bloqueia a chamada', () => {
+    const backdrop = panel.slice(panel.indexOf('zIndex: 199'))
+    assert.match(backdrop.slice(0, 200), /background: 'transparent'/, 'sem fundo escuro sobre a chamada')
+  })
+
+  test('o botão de efeitos vive na barra de controles, junto do microfone', () => {
+    const stage = readFileSync(new URL('../src/components/calls/VoiceStage.tsx', import.meta.url), 'utf8')
+    const barra = stage.slice(stage.indexOf('{inCall ? ('))
+    const mic = barra.indexOf('onClick={onToggleMute}')
+    const efeitos = barra.indexOf('onClick={onSoundboard}')
+    assert.ok(mic > 0, 'o botão de microfone existe na barra')
+    assert.ok(efeitos > 0, 'o botão de efeitos existe na barra')
+    assert.ok(
+      efeitos > mic,
+      'os efeitos vêm depois do microfone na mesma barra de controles',
     )
+    assert.match(barra, /Icons\.music/, 'usa o ícone de música, não fones')
+  })
+
+  test('o botão de efeitos NÃO fica mais escondido no painel de extras', () => {
+    assert.doesNotMatch(
+      shell,
+      /Efeitos<\/button>/,
+      'o botão antigo (no painel de extras, que ficava oculto) foi removido',
+    )
+    assert.match(shell, /onSoundboard=/, 'o shell passa o botão para a barra da chamada')
   })
 })

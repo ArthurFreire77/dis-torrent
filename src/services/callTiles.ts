@@ -75,6 +75,18 @@ export function streamHasLiveVideo(stream: MediaStream | null | undefined): bool
   }
 }
 
+/** O stream tem trilha de áudio viva (é o que decide quem toca o som). */
+export function streamHasLiveAudio(stream: MediaStream | null | undefined): boolean {
+  try {
+    if (!stream || typeof stream.getAudioTracks !== 'function') return false
+    return stream.getAudioTracks().some(
+      (t) => t.readyState === 'live' && (t as MediaStreamTrack & { muted?: boolean }).muted !== true,
+    )
+  } catch {
+    return false
+  }
+}
+
 function pickBoolean(...values: Array<boolean | undefined>): boolean {
   for (const v of values) {
     if (typeof v === 'boolean') return v
@@ -162,15 +174,19 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         ? undefined
         : pickString(p.videoUrl)
 
-    const participantAudioStream = isLocal || audioOwnerIsScreen
-      ? undefined
-      : (remoteCameraStream ?? cameraStream ?? undefined)
-    // Com um único stream (tela carregando o áudio), o controle do card da
-    // pessoa precisa mirar o MESMO áudio do card da tela; senão ele mexe num
-    // elemento que não existe e o volume "não desce" por ali.
-    const participantAudioKey = audioOwnerIsScreen
-      ? screenTileId(p.fp)
-      : participantTileId(p.fp)
+    // Áudio da PESSOA (microfone) e áudio da TELA (som do sistema) são
+    // transmissões diferentes e precisam de controles diferentes. Só no
+    // fallback de stream único um card carrega o áudio do outro.
+    const personAudioStream = isLocal
+      ? null
+      : (audioOwnerIsScreen ? null : (remoteCameraStream ?? cameraStream ?? null))
+    const screenAudioStream = isLocal
+      ? null
+      : (remoteScreenStream && streamHasLiveAudio(remoteScreenStream)
+          ? remoteScreenStream
+          : audioOwnerIsScreen
+            ? screenStream
+            : null)
 
     tiles.push({
       id: participantTileId(p.fp),
@@ -179,8 +195,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       nickname,
       label: nickname,
       stream: participantStream ?? undefined,
-      audioStream: participantAudioStream ?? undefined,
-      audioKey: participantAudioKey,
+      audioStream: personAudioStream ?? undefined,
+      audioKey: participantTileId(p.fp),
       videoUrl: participantVideoUrl,
       isLocal,
       sharing,
@@ -189,13 +205,10 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       disconnected: p.disconnected === true && !isLocal,
       cameraOn,
       localPreviewUnavailable: isLocal && !participantStream && !participantVideoUrl && !!local?.nativeMedia && cameraOn,
-      // Pessoa remota sempre tem controle: a chave aponta para o elemento que
-      // realmente toca o áudio (o da tela, quando é ela que carrega o som).
-      hasAudio: !isLocal,
+      hasAudio: !isLocal && !!personAudioStream,
     })
 
     if (sharing) {
-      const screenAudioStream = audioOwnerIsScreen ? screenStream : null
       tiles.push({
         id: screenTileId(p.fp),
         kind: 'screen',

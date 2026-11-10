@@ -28,6 +28,7 @@ import {
   type CallPanelSize,
 } from '../services/voiceLayout'
 import { parseVoiceCallId } from '../services/voiceChannelRef'
+import { faseExibida } from '../services/voiceCallPhase'
 import { resolveBootPhase } from '../services/bootPhase'
 import { windowMembers, LIMITE_MEMBROS } from '../services/memberWindow'
 import ScreenStage from '../components/calls/ScreenStage'
@@ -35,7 +36,7 @@ import { buildCallTiles, sortTilesForPin } from '../services/callTiles'
 import { callIsActive, callMediaLive } from '../services/callUiState'
 import { cameraCycleLabel, shouldShowCameraSwitch } from '../services/callCameras'
 import { useCallCameras } from '../services/useCallCameras'
-import { callRooms, roomSummary, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
+import { callRooms, roomSummary, salaTemAlguemParaEntrar, syncCallRooms, ROOM_SYNC_MS, type CallRoomView } from '../services/callRooms'
 import ScreenSharePicker from '../components/ScreenSharePicker'
 import DownloadsPanel from '../components/DownloadsPanel'
 import { FileCard } from '../components/FileCard'
@@ -1610,16 +1611,20 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (callActionBusy) return
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     if (callViva) { setError('já existe uma chamada em andamento'); return }
+    if (!convId || typeof convId !== 'string') { setError('conversa da chamada não encontrada'); return }
     setCallActionBusy(true)
     try {
       const conv = conversations.find((c) => c.id === convId)
       setSelConv(convId)
       if (conv?.peer_fp) setSelPeerFp(conv.peer_fp)
-      await callManager.enterRoom(convId, sala.kind)
+      const entrou = await callManager.enterRoom(convId, sala.kind)
+      if (!entrou) throw new Error('a chamada não abriu — tente de novo')
       sfxCallConnect()
       setNotice(`entrou na chamada de ${nome(sala.hostFp) || conv?.title || 'grupo'}`)
     } catch (e: any) {
       setError(String(e?.message ?? e))
+      // Não deixa "entrando…" preso: a sala é revalidada no próximo sync.
+      void syncCallRooms(() => services.callRoomsList())
     } finally {
       setCallActionBusy(false)
     }
@@ -2129,7 +2134,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                         <Avatar name={c.title} fp={c.peer_fp} size={28} avatarB64={socialProfiles[c.peer_fp]?.avatar_b64} />
                       </span>
                       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{c.title}</span>
-                      {sala && (
+                      {sala && salaTemAlguemParaEntrar(sala, identity?.fingerprint) && (
                         <button
                           type="button"
                           title={roomSummary(sala, nameOfFp) ?? 'Entrar na chamada'}
@@ -2345,7 +2350,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                     <span style={{ width: 7, height: 7, borderRadius: '50%', background: t.green, boxShadow: `0 0 6px ${t.green}`, flexShrink: 0 }} />
                     {selRoom.participants.length || 1}{viewportWidth >= 1080 ? ' na chamada' : ''}
                   </button>
-                  {!callViva && (
+                  {!callViva && salaTemAlguemParaEntrar(selRoom, identity?.fingerprint) && (
                     <button
                       type="button"
                       onClick={() => void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp)}
@@ -2631,7 +2636,12 @@ export default function ThemeShell({ designId }: {designId:string}){
               }
               kind={selCallChannel.kind === 'video' ? 'video' : 'voice'}
               inCall={inThisCall}
-              phase={(activeCall?.phase ?? 'idle') as any}
+              phase={faseExibida({
+                callId: activeCall?.callId,
+                phase: activeCall?.phase,
+                participants: activeCall?.participants,
+                myFp: identity?.fingerprint,
+              }) as any}
               startAt={activeCall?.startAt ?? Date.now()}
               nowMs={nowMs}
               mediaLive={mediaLive}
@@ -2686,6 +2696,15 @@ export default function ThemeShell({ designId }: {designId:string}){
                 if (nd) setIsMuted(true)
                 callManager.toggleDeafen()
               }}
+              onSoundboard={() => setShowSoundboard((v) => !v)}
+              soundboardOpen={showSoundboard}
+              soundboard={showSoundboard ? (
+                <SoundboardPanel
+                  open
+                  onClose={() => setShowSoundboard(false)}
+                  palette={{ input: inputBg, border: borderColor, text, muted, accent: t.accent, panel: t.panel }}
+                />
+              ) : undefined}
               onToggleCamera={() => { void callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e))) }}
               onToggleScreen={() => {
                 if (activeCall?.sharing) { void callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return }
@@ -2741,14 +2760,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                       onClick={() => fileInputRef.current?.click()}
                       style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
                     ><Icon d={Icons.attach} size={12} /> Arquivo</button>
-                    <button
-                      type="button"
-                      onClick={() => setShowSoundboard(v => !v)}
-                      aria-expanded={showSoundboard}
-                      title="Efeitos sonoros: envie ou baixe sons de até 10s"
-                      aria-label="Efeitos sonoros"
-                      style={{ background: showSoundboard ? t.accent : inputBg, border: `1px solid ${borderColor}`, color: showSoundboard ? '#fff' : text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
-                    ><Icon d={Icons.headphones} size={12} /> Efeitos</button>
                   </div>
                   {showSoundboard && (
                     <SoundboardPanel
@@ -3390,7 +3401,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <span style={{ display: 'block', fontWeight: 800, color: t.heading, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{conversations.find(c=>c.id===activeCall.convId)?.title ?? peerTitle ?? 'Chamada'}</span>
                 {}
                 <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2, flexWrap: 'wrap' }}>
-                  <CallPhaseBadge phase={activeCall.phase} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} ringing={activeCall.ringing} />
+                  <CallPhaseBadge phase={faseExibida({ callId: activeCall.callId, phase: activeCall.phase, participants: activeCall.participants, myFp: identity?.fingerprint }) as any} startAt={activeCall.startAt} nowMs={nowMs} mediaLive={mediaLive} ringing={activeCall.ringing} />
                 {}
                   <span style={{ fontSize: 11, color: muted, fontFamily: 'JetBrains Mono', fontWeight: 600 }}>{fmtDuration(callDuration)}</span>
                 </span>
@@ -3654,7 +3665,7 @@ export default function ThemeShell({ designId }: {designId:string}){
             ))}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
               <Button onClick={() => setShowRoomMembers(false)}>Fechar</Button>
-              {!callViva && (
+              {!callViva && salaTemAlguemParaEntrar(selRoom, identity?.fingerprint) && (
                 <Button variant="success" icon="phone" busy={callActionBusy} disabled={callActionBusy || !callsOk} onClick={() => { setShowRoomMembers(false); if (selRoom) void enterRoomFromList(selConv ?? selRoom.convId, selRoom, nameOfFp) }}>
                   Entrar na chamada
                 </Button>

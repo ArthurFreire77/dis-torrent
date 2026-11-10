@@ -149,7 +149,7 @@ test('volume da TELA é independente da voz (chaves diferentes)', () => {
   assert.notEqual(person.audioKey, shared.audioKey, 'cada transmissão tem seu próprio controle')
 })
 
-test('com stream único, o card da PESSOA controla o mesmo áudio que a tela', () => {
+test('com stream único, o áudio fica no card da TELA e a pessoa não finge tê-lo', () => {
   const only = fakeStream()
   const tiles = buildCallTiles({
     participants: [{ fp: PEER, nickname: 'Bob', stream: only, sharing: true }],
@@ -159,12 +159,12 @@ test('com stream único, o card da PESSOA controla o mesmo áudio que a tela', (
   const person = tiles.find((t) => t.kind === 'participant' && t.fp === PEER)!
   const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
   assert.equal(shared.audioKey, `s:${PEER}`)
+  assert.equal(shared.hasAudio, true, 'o card que carrega o som tem o controle')
   assert.equal(
-    person.audioKey,
-    `s:${PEER}`,
-    'o card da pessoa sem áudio próprio precisa mirar o áudio da tela (era o "volume não desce")',
+    person.hasAudio,
+    false,
+    'sem áudio próprio não há controle: antes ele mexia num elemento que não existia',
   )
-  assert.equal(person.hasAudio, true, 'o controle continua disponível no card da pessoa')
 })
 
 test('com stream único, a chave do áudio acompanha o tile que toca', () => {
@@ -179,7 +179,7 @@ test('com stream único, a chave do áudio acompanha o tile que toca', () => {
   assert.equal(shared.audioKey, `s:${PEER}`)
 })
 
-test('com streams separados, a voz fica no tile da pessoa e a tela não duplica', () => {
+test('com streams separados, a voz fica no tile da pessoa e o som do sistema na tela', () => {
   const cam = fakeStream()
   const screen = fakeStream()
   const tiles = buildCallTiles({
@@ -190,7 +190,13 @@ test('com streams separados, a voz fica no tile da pessoa e a tela não duplica'
   const person = tiles.find((t) => t.kind === 'participant' && t.fp === PEER)!
   const shared = tiles.find((t) => t.kind === 'screen' && t.fp === PEER)!
   assert.equal(person.audioStream, cam, 'a voz do peer sai no tile da pessoa')
-  assert.equal(shared.audioStream, undefined, 'a tela não duplica o mesmo áudio')
+  assert.equal(
+    shared.audioStream,
+    screen,
+    'o som do sistema vem no stream da TELA e não pode ser descartado',
+  )
+  assert.equal(person.audioKey, `p:${PEER}`, 'volume da voz é independente')
+  assert.equal(shared.audioKey, `s:${PEER}`, 'volume da tela é independente')
 })
 
 test('câmera e tela remotos em streams separados ocupam quadrados separados', () => {

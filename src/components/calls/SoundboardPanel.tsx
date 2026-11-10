@@ -105,14 +105,19 @@ export function SoundboardPanel({ open, onClose, palette }: {
 
   return (
     <>
-      {/* Backdrop clicável: o painel é fixed e sem isto ficaria impossível fechar fora do X. */}
-      <div onClick={onClose} aria-hidden style={{ position: 'fixed', inset: 0, zIndex: 199 }} />
+      {/* Fundo transparente só para capturar o clique de fora. `pointer-events`
+          fica no próprio painel, então a chamada continua utilizável. */}
+      <div
+        onMouseDown={onClose}
+        aria-hidden
+        style={{ position: 'fixed', inset: 0, zIndex: 199, background: 'transparent' }}
+      />
       <div
         role="dialog"
         aria-label="Efeitos sonoros da chamada"
         style={{
           position: 'fixed', bottom: 96, right: 24, zIndex: 200,
-          width: 330, maxWidth: '92vw', maxHeight: '60vh', overflowY: 'auto',
+          width: 330, maxWidth: '92vw', maxHeight: 'min(60vh, 460px)', overflowY: 'auto',
           background: palette.panel, border: `1px solid ${palette.border}`, borderRadius: 10,
           padding: 12, boxShadow: '0 12px 36px rgba(0,0,0,.55)',
         }}
