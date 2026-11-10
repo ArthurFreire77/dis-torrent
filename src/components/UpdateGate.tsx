@@ -142,11 +142,13 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
 
   React.useEffect(() => {
     if (!enabled || started.current) return
-    started.current = true
     const deps = depsRef.current
     if (!deps) {
+      // `deps` pode ser null antes dos comandos nativos estarem prontos. Marcar
+      // `started` aqui travava a checagem para sempre ("às vezes não atualiza").
       return
     }
+    started.current = true
     void (async () => {
       // Lê a preferência ANTES de cada checagem: marcar o checkbox nas
       // Configurações precisa valer no próximo ciclo, sem reabrir o app.

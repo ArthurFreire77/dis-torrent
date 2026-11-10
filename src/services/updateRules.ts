@@ -200,6 +200,9 @@ export async function runUpdateFlow(
   try {
     path = await deps.download(info)
   } catch (e) {
+    // Grava a falha do DOWNLOAD também: antes só a falha do apply era marcada,
+    // então um download quebrado era retentado a cada ciclo sem ninguém saber.
+    await deps.setFlag(FLAG_FAILED, `${info.latest}|${Date.now()}`).catch(() => {})
     return { kind: 'error', message: String((e as Error)?.message ?? e) }
   }
 
