@@ -11,6 +11,7 @@ Arquivos que mandam (nesta ordem de autoridade):
 | Core | `distorrent-core/src/moderation.rs` | registro único das ações (`BOT_ACTIONS`) e bits de permissão |
 | Core | `distorrent-core/src/net/engine.rs` | `bot_create`, `bot_action_in`, `bot_replace_config`, logs, variáveis |
 | Casca | `src-tauri/src/botbridge.rs` | ponte `127.0.0.1` (rotas, rate limit, idempotência, eventos) |
+| `src-tauri/src/botzip.rs` | extração do `.zip` de importação com guarda anti zip-slip |
 | Casca | `src-tauri/src/botplugin.rs` | execução do código do bot como processo filho |
 | App | `src/services/botCommands.ts` | modelo do editor, migração v1/v2, `permAllows`, guarda de URL |
 | App | `src/services/botEngine.ts` | runtime declarativo (comandos, DSL, eventos, webhook) |
@@ -158,10 +159,11 @@ parser e falhava ao salvar, sem a UI mostrar o limite real.
 | `args` | até **8** `{ name, required, rest }`; guardado, sem validação de obrigatoriedade no runtime. |
 | `method` | `GET` (qualquer coisa ≠ POST) ou `POST`. |
 | `url` | até 2048; precisa ser http(s) com host quando `exec=http`. |
-| `headers` | até 16 pares; chave ≤64, valor ≤1024. |
-| `body` | até 8192; usado no POST. |
+| `headers` | até 16 pares; chave ≤64, valor ≤1024. Preencha no painel (aba Comandos) para mandar `Authorization` a APIs de IA. |
+| `body` | até 8192; usado no POST. `{{jsonargs}}` coloca o texto do usuário escapado para JSON. |
 | `responsePath` | até 128; caminho pontilhado no JSON da resposta. |
 | `template` | até 1900; renderizado com os placeholders. |
+| `timeoutMs` | 1000..90000; timeout HTTP do comando. Padrão 10 s — aumente para APIs de IA (LLM). |
 | `reply` | até 1900; só `exec=reply`. |
 | `script` | até 200 × 160 chars; só `exec=script`. |
 | `admin` | nome de ação do registro (§8); só `exec=admin`. |
@@ -245,11 +247,30 @@ cortado em **1900** caracteres.
 }
 ```
 
+Exemplo com API de IA (POST com a pergunta do usuário e chave no header):
+
+```json
+{
+  "name": "ia",
+  "exec": "http",
+  "method": "POST",
+  "url": "https://api.exemplo.com/v1/chat",
+  "headers": { "authorization": "Bearer SUA-CHAVE" },
+  "body": "{\"prompt\": \"{{jsonargs}}\"}",
+  "timeoutMs": 60000,
+  "responsePath": "answer",
+  "template": "{{value}}"
+}
+```
+
 1. URL passa pela guarda de destino e pela allowlist (§14).
-2. Timeout de **10 s** no runtime; teto de **15 s** no `http_fetch` da casca.
-3. `responsePath` inexistente ⇒ **não responde** (não inventa texto).
-4. Status ≥400 ⇒ só log (`warn`), sem resposta no canal.
-5. Corpo de resposta limitado a 256 KB no `http_fetch`.
+2. Timeout de **10 s** por padrão; `timeoutMs` sobe até **90 s** (use para LLM). O
+   teto do `http_fetch` da casca é 90 s.
+3. `headers` do comando são enviados (até 16; `Authorization: Bearer …` para
+   APIs de IA).
+4. `responsePath` inexistente ⇒ **não responde** (não inventa texto).
+5. Status ≥400 ⇒ só log (`warn`), sem resposta no canal.
+6. Corpo de resposta limitado a 256 KB no `http_fetch`.
 
 ### 5.3 `script` — DSL sem `eval`
 
@@ -298,6 +319,8 @@ do servidor. Toda ação que muda estado vira `audit_log` com `bot:<ação>` e o
 | `{{query}}` | argumentos separados por `+`, URL-encoded |
 | `{{arg0}}`, `{{arg1}}`… | argumento N, URL-encoded |
 | `{{raw.args}}` | argumentos crus separados por espaço (não use em URL) |
+| `{{jsonargs}}` | argumentos crus **escapados para JSON** — use no corpo POST para mandar o texto do usuário sem quebrar o JSON (pergunta com aspas, barra invertida ou quebra de linha) |
+| `{{author}}` | nome do autor do comando |
 | `{{value}}` | valor do `responsePath` |
 | `{{json}}` | corpo inteiro da resposta |
 | `{{json.caminho}}` | caminho pontilhado (`data.temp`, `items[0].name`) |
@@ -844,6 +867,24 @@ Regras da importação (`botbridge::read_bot_folder`):
   comando de execução é digitado na aba **Ponte e plugin**. `requires` é só
   informativo.
 
+### Importar de um `.zip`
+
+**Adicionar bot existente** aceita pasta, `bot.json` direto ou um arquivo `.zip`.
+O `.zip` passa por `botzip::extract_bot_zip` na casca (`bot_zip_read`):
+
+| Guarda | Limite real |
+|---|---|
+| Extensão + assinatura | precisa terminar em `.zip` e começar com `PK\x03\x04` |
+| Caminho de cada entrada | só componentes normais: `..`, absoluto, prefixo de unidade e `:` são recusados (zip-slip) |
+| Link simbólico | qualquer entrada symlink recusa o ZIP inteiro |
+| Destino | conferido com `canonicalize` + `starts_with` na pasta de importação |
+| Tamanho | até **1000** entradas, **8 MB** por arquivo e **32 MB** no total |
+| Destino no disco | `<app_data>/bot-imports/<12 bytes hex>` — a pasta **fica** para o plugin rodar dela (importações antigas não são apagadas) |
+
+Depois de extrair, o app reusa `read_bot_folder` — o `bot.json` passa pelo mesmo
+parser do core. Se algo é recusado, a pasta temporária é apagada. O `.zip` **não
+executa nada**: importar é ler config; o código só roda em **Iniciar plugin**.
+
 ### Variáveis de ambiente entregues ao processo
 
 | Variável | Valor |
@@ -969,13 +1010,13 @@ Abas reais do painel do bot (`BotPanel.tsx`):
 | **Console** | `bot_logs` + saída do plugin, com Limpar |
 
 Botões da lista (`BotManager.tsx`): **Criar bot**, **Adicionar bot existente**
-(lê a pasta e cria), **Baixar documentação (.md)**, e por bot: configurar,
-ligar/desligar, copiar token, remover.
+(lê a pasta ou o `.zip` e cria), **Baixar documentação (.md)**, e por bot:
+configurar, ligar/desligar, copiar token, remover.
 
-**O que o painel NÃO tem hoje:** exportar `bot.json`, importar arquivo (só
-pasta) e "testar comando" no painel atual. A validação sem gravar existe como
-comando de casca (`bot_config_validate`, exposto em `services.botConfigValidate`),
-mas nenhuma tela o chama hoje.
+**O que o painel NÃO tem hoje:** exportar `bot.json` e "testar comando" no
+painel atual. A validação sem gravar existe como comando de casca
+(`bot_config_validate`, exposto em `services.botConfigValidate`), mas nenhuma
+tela o chama hoje.
 
 `BotsApp`/`/bots` tem o botão **Abrir em janela**, que invoca `open_bots_window`
 (registrado em `generate_handler!`, janela `bots` declarada em `tauri.conf.json`
@@ -999,7 +1040,8 @@ celular o comando devolve erro dizendo que ali a tela é a própria rota `/bots`
 | "domínio fora da allowlist" | `http.allowDomains` preenchida | ajuste a lista na aba **Modo e primitivas** |
 | "runtime `wasm` ainda não existe" | `runtime: "wasm"` | use `process` ou `declarative` |
 | "pasta do bot não existe" | caminho inválido | selecione a pasta que tem `bot.json` |
-| "bot.json não encontrado" | apontou o arquivo, não a pasta | importe a **pasta** |
+| "bot.json não encontrado" | apontou o arquivo, não a pasta | importe a **pasta** (ou o `.zip` do bot) |
+| "arquivo não é um ZIP" / "caminho fora da pasta de importação" | `.zip` corrompido ou com entrada `..`/absoluta | reempacote o bot com caminhos relativos |
 | "o bot não faz nada" | config sem `commands`, `events` nem `webhook` | adicione ao menos um |
 | "programa não encontrado na pasta do bot" | `run` aponta para fora | coloque o código dentro da pasta |
 | "abra a ponte local do bot antes de iniciar o plugin" | plugin precisa da URL | aba **Ponte e plugin** → Abrir ponte |
@@ -1071,6 +1113,7 @@ Testes Rust (onde há toolchain):
 cd distorrent-core && cargo test --test bots_exec
 cd distorrent-core && cargo test bots::
 cd src-tauri && cargo test botbridge
+cd src-tauri && cargo test botzip
 cd src-tauri && cargo test botplugin
 ```
 
@@ -1081,6 +1124,7 @@ Suítes que travam o comportamento:
 | `distorrent-core/src/bots.rs` (18 testes) | parser, migração, DSL, guarda de URL, primitivas |
 | `distorrent-core/tests/bots_exec.rs` (21) | permissões, montar servidor, config própria, logs, variáveis, `perm_can_grant` |
 | `src-tauri/src/botbridge.rs` (17) | segredo no caminho, loopback, eventos, idempotência, health/limits |
+| `src-tauri/src/botzip.rs` (7) | extensão/assinatura, zip-slip (`..`, absoluto, `:`), symlink, pasta aninhada |
 | `src-tauri/src/botplugin.rs` (4) | argv sem shell, pasta, programa dentro da pasta |
 | `tests/botCommands.test.ts` (38) | modelo, parser, aliases, serialização |
 | `tests/botRuntime.test.ts` (18) | comandos, cooldown, rate limit, script, eventos |
@@ -1093,7 +1137,7 @@ Suítes que travam o comportamento:
 ## 20. Exemplos de `bot.json`
 
 Os exemplos **não vêm no repositório**: são publicados como plugins no GitHub.
-Para usar um, baixe a pasta e use **Adicionar bot existente**.
+Para usar um, baixe a pasta (ou o `.zip`) e use **Adicionar bot existente**.
 
 UtilityBot (CEP, sem código externo):
 
