@@ -26,6 +26,21 @@ test('o frontend avisa DEPOIS do primeiro frame e tenta de novo se falhar', () =
   assert.match(main, /tentativas < 5/, 'um único aviso perdido deixaria o app invisível')
 })
 
+test('a preferência "iniciar minimizado" vale em qualquer abertura', () => {
+  // Antes só `--minimized` (autostart) escondia: abrir pelo atalho com a opção
+  // ligada mostrava a janela. A regra agora é só a preferência + bandeja.
+  const i = bg.indexOf('let quer_minimizado')
+  const corpo = bg.slice(i, i + 900)
+  assert.match(corpo, /start_minimized/, 'a decisão vem da preferência salva')
+  assert.match(corpo, /deve_minimizar = quer_minimizado && tem_bandeja/, 'sem bandeja não pode ficar invisível')
+  assert.doesNotMatch(corpo, /pediu_minimizado/, 'não pode voltar a exigir a flag do autostart')
+
+  const j = bg.indexOf('pub fn app_ui_ready')
+  const uiReady = bg.slice(j, j + 1800)
+  assert.doesNotMatch(uiReady, /--minimized/, 'app_ui_ready não depende mais da flag')
+  assert.match(uiReady, /pediu_bandeja/, 'a rede de segurança respeita a preferência')
+})
+
 test('o autostart continua passando --minimized', () => {
-  assert.match(lib, /"--minimized"/, 'é o sinal que distingue login de abertura manual')
+  assert.match(lib, /"--minimized"/, 'o plugin do autostart mantém o argumento histórico')
 })

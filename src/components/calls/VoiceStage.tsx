@@ -92,6 +92,7 @@ function ControlButton({
   onClick,
   size = 46,
   children,
+  ariaExpanded,
 }: {
   label: string
   icon?: string
@@ -101,6 +102,7 @@ function ControlButton({
   onClick: () => void
   size?: number
   children?: ReactNode
+  ariaExpanded?: boolean
 }) {
   const ativo = !!on
   return (
@@ -109,6 +111,7 @@ function ControlButton({
       aria-label={label}
       title={label}
       aria-pressed={ativo}
+      aria-expanded={ariaExpanded}
       disabled={disabled}
       onClick={onClick}
       style={{
@@ -128,6 +131,40 @@ function ControlButton({
       }}
     >
       {children ?? (icon ? <Icon d={icon} size={Math.round(size * 0.44)} /> : null)}
+    </button>
+  )
+}
+
+function MenuItem({
+  label,
+  disabled,
+  onClick,
+}: {
+  label: string
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        textAlign: 'left',
+        background: 'transparent',
+        border: 'none',
+        color: '#fff',
+        opacity: disabled ? 0.45 : 1,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        padding: '9px 10px',
+        borderRadius: 7,
+        fontSize: 12.5,
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {label}
     </button>
   )
 }
@@ -183,6 +220,8 @@ export function VoiceStage({
   const entrarBloqueado = entrar.disabled
   const duracao = inCall ? fmtDuracao(Math.max(0, nowMs - startAt)) : ''
   const [painelAberto, setPainelAberto] = useState(false)
+  // Menu "Mais": trocar câmera e configurações saem da fileira principal.
+  const [menuAberto, setMenuAberto] = useState(false)
 
   const listaPeers = (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
@@ -272,16 +311,6 @@ export function VoiceStage({
             disabled={cameraDisabled}
             onClick={onToggleCamera}
           />
-          {onSwitchCamera && !compact && (
-            <ControlButton
-              label={cameraSwitchLabel ?? 'Trocar de câmera'}
-              icon={Icons.cameraSwitch}
-              on={false}
-              danger={false}
-              disabled={cameraSwitchDisabled}
-              onClick={onSwitchCamera}
-            />
-          )}
           {onToggleScreen && !compact && (
             <ControlButton
               label={
@@ -298,14 +327,61 @@ export function VoiceStage({
               onClick={onToggleScreen}
             />
           )}
-          {onOpenSettings && !compact && (
-            <ControlButton
-              label="Configurações da chamada (mic, câmera, resolução, FPS)"
-              icon={Icons.gear}
-              on={false}
-              danger={false}
-              onClick={onOpenSettings}
-            />
+          {/* Extras num menu: com 8 botões seguidos a barra virava uma fileira
+              ilegível e empurrava o "Sair" para fora em janela estreita. */}
+          {(onSwitchCamera || onOpenSettings) && !compact && (
+            <div style={{ position: 'relative', flexShrink: 0 }}>
+              <ControlButton
+                label="Mais opções da chamada"
+                icon={Icons.chevronRight}
+                on={menuAberto}
+                danger={false}
+                ariaExpanded={menuAberto}
+                onClick={() => setMenuAberto((v) => !v)}
+              />
+              {menuAberto && (
+                <div
+                  role="menu"
+                  aria-label="Mais opções da chamada"
+                  style={{
+                    position: 'absolute',
+                    bottom: 'calc(100% + 8px)',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    background: c.panel,
+                    border: `1px solid ${c.border}`,
+                    borderRadius: 10,
+                    padding: 6,
+                    minWidth: 220,
+                    boxShadow: '0 10px 30px rgba(0,0,0,.5)',
+                    zIndex: 5,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 2,
+                  }}
+                >
+                  {onSwitchCamera && (
+                    <MenuItem
+                      label={cameraSwitchLabel ?? 'Trocar de câmera'}
+                      disabled={cameraSwitchDisabled}
+                      onClick={() => {
+                        setMenuAberto(false)
+                        onSwitchCamera()
+                      }}
+                    />
+                  )}
+                  {onOpenSettings && (
+                    <MenuItem
+                      label="Configurações (mic, câmera, resolução)"
+                      onClick={() => {
+                        setMenuAberto(false)
+                        onOpenSettings()
+                      }}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
           )}
           <span style={{ width: 1, height: 32, background: c.border, margin: '0 2px' }} />
           <button

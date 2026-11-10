@@ -211,7 +211,7 @@ export function SystemNotificationSettings({ T, inputBg, borderColor, text, mute
               Iniciar minimizado na bandeja
               <span style={{ display: 'block', fontWeight: 400, fontSize: 11, color: muted, marginTop: 2 }}>
                 {tray
-                  ? 'ao ligar o PC, o app começa escondido e abre pelo ícone da bandeja'
+                  ? 'em QUALQUER abertura, o app começa escondido e aparece pelo ícone da bandeja'
                   : 'precisa da bandeja: sem ela a janela escondida não teria como voltar'}
               </span>
             </span>

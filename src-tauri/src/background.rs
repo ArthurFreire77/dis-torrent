@@ -128,13 +128,12 @@ pub fn app_ui_ready(app: AppHandle) {
     if visivel {
         return;
     }
-    let iniciou_minimizado = std::env::args().any(|a| a == "--minimized");
     let pediu_bandeja = app
         .try_state::<Background>()
         .map(|b| b.start_minimized.load(Ordering::Relaxed))
         .unwrap_or(false);
-    if iniciou_minimizado && pediu_bandeja && tray_available(app.state::<Background>().inner()) {
-        return; // veio do login e a pessoa quer escondido
+    if pediu_bandeja && tray_available(app.state::<Background>().inner()) {
+        return; // a preferência é abrir escondido: não força a janela na tela
     }
     let _ = w.show();
     #[cfg(desktop)]
@@ -694,7 +693,9 @@ pub fn init(app: &AppHandle) {
         }
     });
 
-    let pediu_minimizado = std::env::args().any(|a| a == "--minimized");
+    // A preferência "iniciar minimizado" vale em QUALQUER abertura, não só no
+    // login: antes só `--minimized` escondia, e abrir pelo atalho com a opção
+    // ligada jogava a janela na cara do usuário.
     let quer_minimizado = app
         .try_state::<Background>()
         .map(|b| b.start_minimized.load(Ordering::Relaxed))
@@ -703,7 +704,7 @@ pub fn init(app: &AppHandle) {
         .try_state::<Background>()
         .map(|b| tray_available(b.inner()))
         .unwrap_or(false);
-    let deve_minimizar = pediu_minimizado && quer_minimizado && tem_bandeja;
+    let deve_minimizar = quer_minimizado && tem_bandeja;
     if let Some(w) = app.get_webview_window("main") {
         if deve_minimizar {
             let _ = w.hide();
