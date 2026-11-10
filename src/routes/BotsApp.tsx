@@ -162,6 +162,19 @@ export default function BotsApp() {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Button
               variant="secondary"
+              icon="chevronLeft"
+              title="Volta para o app (conversas e canais)"
+              onClick={() => {
+                // Rota de tela cheia não tem shell: sem este botão o usuário
+                // fica preso aqui (não há histórico para o voltar do navegador).
+                if (window.history.length > 1) window.history.back()
+                else window.location.assign('/d/distorrent')
+              }}
+            >
+              Voltar ao app
+            </Button>
+            <Button
+              variant="secondary"
               icon="externalLink"
               disabled={!podeAbrirJanela || abrindoJanela}
               busy={abrindoJanela}
@@ -305,6 +318,22 @@ export default function BotsApp() {
                           avatar: info.avatar,
                         })
                         await services.botUpdate(selId, id, { config: info.config })
+                        setConfigBotId(id)
+                        await carregarServidor(selId)
+                        return info.name
+                      }
+                    : undefined
+                }
+                onImportZip={
+                  services.botZipRead
+                    ? async (zipPath) => {
+                        const info = await services.botZipRead!(zipPath)
+                        const id = await services.botCreate(selId, {
+                          name: info.name,
+                          avatar: info.avatar,
+                        })
+                        await services.botUpdate(selId, id, { config: info.config })
+                        setConfigBotId(id)
                         await carregarServidor(selId)
                         return info.name
                       }

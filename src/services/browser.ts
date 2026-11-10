@@ -939,6 +939,13 @@ export const browserServices: DisTorrentServices = {
   botVarGet: () => Promise.resolve(null),
   botVarSet: () => Promise.resolve(),
   botVarsList: () => Promise.resolve([]),
+  botMusicSave: () =>
+    Promise.reject(new Error('guardar faixa de música só existe no app nativo')),
+  botMusicRead: () =>
+    Promise.reject(new Error('ler faixa de música só existe no app nativo')),
+  botMusicDelete: () => Promise.resolve(false),
+  botZipSave: () =>
+    Promise.reject(new Error('importar .zip só existe no app nativo')),
   botConfigValidate: async (config) => {
     const cfg = parseBotConfig(config)
     if (!cfg) throw new Error('config de bot inválida')
@@ -952,6 +959,8 @@ export const browserServices: DisTorrentServices = {
   botBridgeList: () => Promise.resolve([]),
   botFolderRead: () =>
     Promise.reject(new Error('importar pasta de bot só existe no app nativo')),
+  botZipRead: () =>
+    Promise.reject(new Error('importar arquivo .zip de bot só existe no app nativo')),
   botPluginStart: () =>
     Promise.reject(new Error('executar código de bot só existe no app nativo')),
   botPluginStop: () => Promise.resolve(false),

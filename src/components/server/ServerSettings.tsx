@@ -73,6 +73,8 @@ export interface ServerSettingsProps {
   onConfigBot: (botId: string | null) => void
   /** Importa a pasta de um bot existente (bot.json) e devolve o nome criado. */
   onImportBotFolder?: (dir: string) => Promise<string>
+  /** Importa um bot empacotado em .zip e devolve o nome criado. */
+  onImportBotZip?: (zipPath: string) => Promise<string>
   onMakeInvite: () => Promise<string>
   onRefresh: () => void
   error?: string | null
@@ -485,6 +487,7 @@ export default function ServerSettings(props: ServerSettingsProps) {
                 onDelete={props.onBotDelete}
                 onConfigure={props.onConfigBot}
                 onImportFolder={props.onImportBotFolder}
+                onImportZip={props.onImportBotZip}
               />
             )}
 

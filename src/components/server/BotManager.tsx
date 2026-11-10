@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { BotView, RoleView } from '../../services/models'
+import { services } from '../../services'
+import { bytesToBase64 } from '../../shared/base64'
 import { Tooltip } from '../../shared/Tooltip'
 import { validateBotEntryName } from './botModel'
 import { BotDocsAccordion } from './BotDocsAccordion'
@@ -30,6 +32,11 @@ export function validateBotName(
   return validateBotEntryName(nome, outros)
 }
 
+/** O mesmo campo importa pasta ou .zip; quem decide é a extensão. */
+export function botImportKind(caminho: string): 'zip' | 'folder' {
+  return /\.zip$/i.test(caminho.trim()) ? 'zip' : 'folder'
+}
+
 export function BotManager({
   bots,
   roles,
@@ -39,6 +46,7 @@ export function BotManager({
   onDelete,
   onConfigure,
   onImportFolder,
+  onImportZip,
 }: {
   bots: BotView[]
   roles: RoleView[]
@@ -50,16 +58,66 @@ export function BotManager({
   onConfigure: (botId: string | null) => void
   /** Importa uma pasta de bot (`bot.json`): cria o bot com a config e permissões. */
   onImportFolder?: (dir: string) => Promise<string>
+  /** Importa um bot empacotado em `.zip` (extraído numa pasta privada do app). */
+  onImportZip?: (zipPath: string) => Promise<string>
 }) {
   const [criando, setCriando] = useState(false)
   const [importando, setImportando] = useState(false)
   const [importDir, setImportDir] = useState('')
   const [importBusy, setImportBusy] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
+  const [importZipFile, setImportZipFile] = useState<File | null>(null)
+  const zipInputRef = useRef<HTMLInputElement | null>(null)
   const [editandoId, setEditandoId] = useState<string | null>(null)
   const [paraRemover, setParaRemover] = useState<BotView | null>(null)
   const [copiado, setCopiado] = useState<string | null>(null)
   const [falhaDownload, setFalhaDownload] = useState(false)
+
+  /** Importa de uma vez: o arquivo escolhido vai para o disco e o .zip é lido. */
+  async function importarZip(file: File) {
+    setImportError(null)
+    if (!onImportZip) {
+      setImportError('importar .zip só existe no app nativo')
+      return
+    }
+    if (!services.botZipSave) {
+      setImportError('salvar o .zip só existe no app nativo')
+      return
+    }
+    setImportBusy(true)
+    setImportZipFile(file)
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const salvo = await services.botZipSave(file.name, bytesToBase64(bytes))
+      const nome = await onImportZip(salvo)
+      setImportando(false)
+      setImportDir('')
+      setImportZipFile(null)
+      setEditandoId(null)
+      void nome
+    } catch (e: unknown) {
+      setImportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  async function executarImport(caminho: string, importar: (p: string) => Promise<string>) {
+    setImportBusy(true)
+    setImportError(null)
+    try {
+      const nome = await importar(caminho)
+      setImportando(false)
+      setImportDir('')
+      setImportZipFile(null)
+      setEditandoId(null)
+      void nome
+    } catch (e: unknown) {
+      setImportError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setImportBusy(false)
+    }
+  }
 
   function copiar(id: string, token: string) {
     navigator.clipboard
@@ -112,13 +170,13 @@ export function BotManager({
           <Button variant="success" icon="plus" onClick={() => setCriando(true)}>
             Criar bot
           </Button>
-          {onImportFolder && (
+          {(onImportFolder || onImportZip) && (
             <Button variant="secondary" icon="download" onClick={() => setImportando(true)}>
               Adicionar bot existente
             </Button>
           )}
           <span style={{ fontSize: 11.5, color: ui.muted }}>
-            “Adicionar” lê a pasta de um bot (bot.json + código) e cria no servidor.
+            “Adicionar” lê a pasta de um bot (bot.json + código) ou um arquivo .zip e cria no servidor.
           </span>
         </div>
       )}
@@ -180,7 +238,7 @@ export function BotManager({
         open={importando}
         onClose={() => setImportando(false)}
         title="Adicionar bot existente"
-        subtitle="Informe a pasta que contém o bot.json do bot."
+        subtitle="Escolha o arquivo .zip do bot (ou a pasta com o bot.json)."
         width={WIDTHS.md}
         footer={
           <>
@@ -192,25 +250,33 @@ export function BotManager({
               variant="success"
               icon="check"
               busy={importBusy}
+              disabled={!importDir.trim() && !importZipFile}
               onClick={async () => {
-                if (!onImportFolder) return
-                setImportBusy(true)
                 setImportError(null)
-                try {
-                  const nome = await onImportFolder(importDir.trim())
-                  setImportando(false)
-                  setImportDir('')
-                  setEditandoId(null)
-                  void nome
-                } catch (e: unknown) {
-                  setImportError(e instanceof Error ? e.message : String(e))
-                } finally {
-                  setImportBusy(false)
+                if (importZipFile) {
+                  await importarZip(importZipFile)
+                  return
                 }
+                const caminho = importDir.trim()
+                if (!caminho) {
+                  setImportError('Escolha o arquivo .zip ou a pasta do bot.')
+                  return
+                }
+                const importar = botImportKind(caminho) === 'zip' ? onImportZip : onImportFolder
+                if (!importar) {
+                  setImportError(
+                    botImportKind(caminho) === 'zip'
+                      ? 'importar .zip só existe no app nativo'
+                      : 'importar pasta só existe no app nativo',
+                  )
+                  return
+                }
+                await executarImport(caminho, importar)
               }}
             >
-              Importar pasta
-            </Button>          </>
+              Importar bot
+            </Button>
+          </>
         }
       >
         {importError && (
@@ -218,19 +284,91 @@ export function BotManager({
             <Notice tone="danger">{importError}</Notice>
           </div>
         )}
-        <TextField
-          label="Pasta do bot"
-          value={importDir}
-          mono
-          autoFocus
-          ariaLabel="Pasta do bot a importar"
-          placeholder="C:\\bots\\freirebot"
-          hint="A pasta precisa ter um bot.json com name e config. Nada roda sem você confirmar."
-          onChange={setImportDir}
-        />
+
+        {/* O caminho principal: um clique escolhe o arquivo e importa sozinho.
+            Digitar caminho à mão era a parte que travava todo mundo. */}
+        <div
+          style={{
+            border: `1px dashed ${ui.borderStrong}`,
+            borderRadius: ui.radius,
+            padding: ui.lg,
+            textAlign: 'center',
+            background: ui.input,
+            marginBottom: ui.lg,
+          }}
+        >
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: ui.heading, marginBottom: 4 }}>
+            {importZipFile ? importZipFile.name : 'Escolher o bot (.zip ou pasta)'}
+          </div>
+          <div style={{ fontSize: 11.5, color: ui.muted, marginBottom: ui.md }}>
+            O bot.json e o código vão juntos. Um clique importa e configura tudo.
+          </div>
+          <div style={{ display: 'flex', gap: ui.sm, justifyContent: 'center', flexWrap: 'wrap' }}>
+            <Button
+              icon="folder"
+              disabled={importBusy}
+              onClick={() => {
+                const inp = zipInputRef.current
+                if (!inp) return
+                // `.zip` primeiro: é o formato que quase todo bot publicado usa.
+                inp.accept = '.zip,application/zip'
+                inp.removeAttribute('webkitdirectory')
+                inp.click()
+              }}
+            >
+              Escolher .zip
+            </Button>
+            <Button
+              icon="folder"
+              disabled={importBusy}
+              onClick={() => {
+                const inp = zipInputRef.current
+                if (!inp || !onImportFolder) return
+                inp.accept = ''
+                inp.setAttribute('webkitdirectory', '')
+                inp.click()
+              }}
+            >
+              Escolher pasta
+            </Button>
+          </div>
+          <input
+            ref={zipInputRef}
+            type="file"
+            hidden
+            aria-label="Arquivo ou pasta do bot"
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              e.target.value = ''
+              if (!f) return
+              void importarZip(f)
+            }}
+          />
+        </div>
+
+        <details style={{ marginBottom: ui.lg }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12, color: ui.muted }}>
+            Preferir digitar o caminho
+          </summary>
+          <div style={{ marginTop: ui.md }}>
+            <TextField
+              label="Pasta ou arquivo do bot"
+              value={importDir}
+              mono
+              ariaLabel="Pasta, bot.json ou arquivo .zip do bot a importar"
+              placeholder="C:\bots\freirebot (ou C:\bots\freirebot.zip)"
+              hint="Aceita a pasta, o bot.json exportado ou um pacote .zip."
+              onChange={setImportDir}
+            />
+          </div>
+        </details>
+
         <Notice tone="info" icon="info">
-          A importação só cria o bot e a configuração. O token é gerado pelo servidor e o código só roda
-          quando você iniciar o plugin no painel do bot.
+          A importação cria o bot, aplica a configuração e deixa o código pronto. O token é gerado
+          pelo servidor; o plugin só começa quando você clicar em <b>Iniciar</b> no painel do bot.
+          {botImportKind(importDir) === 'zip' && (
+            <> O .zip é extraído para uma pasta privada do app; nada é gravado fora dela.</>
+          )}
         </Notice>
         <Notice tone="warning" icon="shield">
           Permissões declaradas no <b>bot.json</b> são um <b>pedido</b>, não uma concessão: o bot importado

@@ -291,6 +291,15 @@ export const tauriServices: DisTorrentServices = {
     invoke<void>('bot_var_set', { communityId: cid, botId, key, value }),
   botVarsList: (cid, botId) =>
     invoke<[string, string][]>('bot_vars_list', { communityId: cid, botId }),
+  botMusicSave: (cid, botId, name, bytesB64) =>
+    invoke<{ id: string; name: string; bytes: number; ext: string }>('bot_music_save', {
+      communityId: cid,
+      botId,
+      name,
+      bytesB64,
+    }),
+  botMusicRead: (id) => invoke<string>('bot_music_read', { id }),
+  botMusicDelete: (id) => invoke<boolean>('bot_music_delete', { id }),
   botConfigValidate: (config) => invoke<Record<string, unknown>>('bot_config_validate', { config }),
   botWarningsList: (cid, fp) => invoke<WarnView[]>('bot_warnings_list', { communityId: cid, fp }),
   botBridgeStart: (cid, botId, port) =>
@@ -314,6 +323,9 @@ export const tauriServices: DisTorrentServices = {
   botAudioClose: (cid, botId) =>
     invoke<boolean>('bot_audio_close', { communityId: cid, botId }),
   botFolderRead: (dir) => invoke<BotFolderInfo>('bot_folder_read', { dir }),
+  botZipRead: (zipPath) => invoke<BotFolderInfo>('bot_zip_read', { zipPath }),
+  botZipSave: (fileName, bytesB64) =>
+    invoke<string>('bot_zip_save', { fileName, bytesB64 }),
   botPluginStart: (cid, botId, dir, run) =>
     invoke<BotPluginStatus>('bot_plugin_start', { communityId: cid, botId, dir, run }),
   botPluginStop: (cid, botId) => invoke<boolean>('bot_plugin_stop', { communityId: cid, botId }),

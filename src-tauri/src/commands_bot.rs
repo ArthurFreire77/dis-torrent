@@ -360,6 +360,79 @@ pub(crate) fn bot_folder_read(dir: String) -> Result<botbridge::ImportedFolder, 
     botbridge::read_bot_folder(std::path::Path::new(dir.trim()))
 }
 
+/// Importa um bot empacotado em `.zip`. Extrai numa pasta privada do app (a
+/// pasta fica lá: o plugin roda dela) e reusa `read_bot_folder`.
+#[tauri::command]
+pub(crate) fn bot_zip_save(
+    app: AppHandle,
+    file_name: String,
+    bytes_b64: String,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_b64.as_bytes())
+        .map_err(|_| "o arquivo não está em base64 válido".to_string())?;
+    if bytes.is_empty() {
+        return Err("arquivo vazio".into());
+    }
+    if bytes.len() as u64 > botzip::MAX_TOTAL_BYTES {
+        return Err(format!(
+            "pacote grande demais ({} MB, máximo {} MB)",
+            bytes.len() / (1024 * 1024),
+            botzip::MAX_TOTAL_BYTES / (1024 * 1024)
+        ));
+    }
+    // Só a extensão do nome escolhido é usada; o nome em si é gerado aqui para
+    // o caminho nunca vir do cliente (nada de `..` ou nome absoluto).
+    let base_name = file_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("bot")
+        .to_ascii_lowercase();
+    if !base_name.ends_with(".zip") {
+        return Err("o arquivo escolhido precisa ser um .zip".into());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .or_else(|_| app.path().app_local_data_dir())
+        .map_err(|e| format!("pasta do app indisponível: {e}"))?
+        .join("bot-uploads");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("não consegui criar {dir:?}: {e}"))?;
+    let path = dir.join(format!("{}.zip", distorrent_core::bots::random_secret(12)));
+    std::fs::write(&path, &bytes).map_err(|e| format!("gravar o .zip: {e}"))?;
+    Ok(path.display().to_string())
+}
+
+#[tauri::command]
+pub(crate) fn bot_zip_read(
+    app: AppHandle,
+    zip_path: String,
+) -> Result<botbridge::ImportedFolder, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .or_else(|_| app.path().app_local_data_dir())
+        .map_err(|e| format!("pasta do app indisponível: {e}"))?;
+    let dest = base
+        .join("bot-imports")
+        .join(distorrent_core::bots::random_secret(12));
+    let root = match botzip::extract_bot_zip(std::path::Path::new(zip_path.trim()), &dest) {
+        Ok(root) => root,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dest);
+            return Err(e);
+        }
+    };
+    match botbridge::read_bot_folder(&root) {
+        Ok(info) => Ok(info),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dest);
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) fn bot_plugin_start(
     community_id: String,

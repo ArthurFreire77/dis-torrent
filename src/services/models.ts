@@ -726,6 +726,15 @@ export interface DisTorrentServices {
   botLogsClear?(communityId: string, botId: string): Promise<number>
   botVarGet?(communityId: string, botId: string, key: string): Promise<string | null>
   botVarSet?(communityId: string, botId: string, key: string, value: string): Promise<void>
+  /** Guarda uma faixa de música em disco; o kv do bot tem só 2 KB. */
+  botMusicSave?(
+    communityId: string,
+    botId: string,
+    name: string,
+    bytesB64: string,
+  ): Promise<{ id: string; name: string; bytes: number; ext: string }>
+  botMusicRead?(id: string): Promise<string>
+  botMusicDelete?(id: string): Promise<boolean>
   botVarsList?(communityId: string, botId: string): Promise<[string, string][]>
   botConfigValidate?(config: string): Promise<Record<string, unknown>>
   botWarningsList?(communityId: string, fp: string): Promise<WarnView[]>
@@ -755,6 +764,10 @@ export interface DisTorrentServices {
   botAudioClose?(communityId: string, botId: string): Promise<boolean>
   /** Lê uma pasta de bot (`bot.json`) sem gravar. */
   botFolderRead?(dir: string): Promise<BotFolderInfo>
+  /** Lê um bot empacotado em `.zip` (extrai numa pasta privada do app). */
+  botZipRead?(zipPath: string): Promise<BotFolderInfo>
+  /** Grava o .zip escolhido pelo usuário e devolve o caminho (pasta do app). */
+  botZipSave?(fileName: string, bytesB64: string): Promise<string>
   /** Executa o código do bot (plugin) com a ponte já aberta. */
   botPluginStart?(communityId: string, botId: string, dir: string, run: string): Promise<BotPluginStatus>
   botPluginStop?(communityId: string, botId: string): Promise<boolean>
