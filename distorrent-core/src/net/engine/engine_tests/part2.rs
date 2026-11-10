@@ -186,7 +186,8 @@ async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
 }
 
 #[test]
-fn sair_do_grupo_marca_como_dispensado() {    let (e, _d) = mk_engine("sair-dispensa");
+fn sair_do_grupo_marca_como_dispensado() {
+    let (e, _d) = mk_engine("sair-dispensa");
     let criador = "c0c0c0c00005";
     let eu = e.identity.fingerprint.clone();
     let conv = e
@@ -291,7 +292,8 @@ fn apagar_so_para_mim_funciona_para_quem_nao_e_dono() {
 }
 
 #[test]
-fn call_invite_registra_o_chamador_como_participante() {    let (e, _d) = mk_engine("call-invite-parte");
+fn call_invite_registra_o_chamador_como_participante() {
+    let (e, _d) = mk_engine("call-invite-parte");
     let me = e.identity.fingerprint.clone();
     let call_id = e.call_invite("peer-alvo", "voice").unwrap();
     assert!(
