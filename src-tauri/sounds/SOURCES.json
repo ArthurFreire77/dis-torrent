@@ -1,0 +1,47 @@
+[
+    {
+        "file":  "applause.ogg",
+        "title":  "File:Applause i.ogg",
+        "url":  "https://upload.wikimedia.org/wikipedia/commons/5/5b/Applause_i.ogg?utm_source=commons.wikimedia.org\u0026utm_campaign=imageinfo\u0026utm_content=original",
+        "page":  "https://commons.wikimedia.org/wiki/File:Applause_i.ogg",
+        "license":  "Public domain",
+        "artist":  "thore",
+        "bytes":  545571
+    },
+    {
+        "file":  "clapping.ogg",
+        "title":  "File:Clapping hurray.ogg",
+        "url":  "https://upload.wikimedia.org/wikipedia/commons/a/a8/Clapping_hurray.ogg?utm_source=commons.wikimedia.org\u0026utm_campaign=imageinfo\u0026utm_content=original",
+        "page":  "https://commons.wikimedia.org/wiki/File:Clapping_hurray.ogg",
+        "license":  "Public domain",
+        "artist":  "starlite",
+        "bytes":  228677
+    },
+    {
+        "file":  "rimshot.wav",
+        "title":  "File:Kevin MacLeod assorted rimshots - Bah-dum.wav",
+        "url":  "https://upload.wikimedia.org/wikipedia/commons/0/0f/Kevin_MacLeod_assorted_rimshots_-_Bah-dum.wav?utm_source=commons.wikimedia.org\u0026utm_campaign=imageinfo\u0026utm_content=original",
+        "page":  "https://commons.wikimedia.org/wiki/File:Kevin_MacLeod_assorted_rimshots_-_Bah-dum.wav",
+        "license":  "CC BY 3.0",
+        "artist":  "Kevin MacLeod",
+        "bytes":  1411004
+    },
+    {
+        "file":  "coin.mp3",
+        "title":  "File:Coins 1 (Gravity Sound).mp3",
+        "url":  "https://upload.wikimedia.org/wikipedia/commons/8/83/Coins_1_%28Gravity_Sound%29.mp3?utm_source=commons.wikimedia.org\u0026utm_campaign=imageinfo\u0026utm_content=original",
+        "page":  "https://commons.wikimedia.org/wiki/File:Coins_1_(Gravity_Sound).mp3",
+        "license":  "CC BY 4.0",
+        "artist":  "Gravity Sound",
+        "bytes":  13605
+    },
+    {
+        "file":  "airhorn.ogg",
+        "title":  "File:Sound of American Train Horn Nathan Airchime K5LA.ogg",
+        "url":  "https://upload.wikimedia.org/wikipedia/commons/a/ab/Sound_of_American_Train_Horn_Nathan_Airchime_K5LA.ogg?utm_source=commons.wikimedia.org\u0026utm_campaign=imageinfo\u0026utm_content=original",
+        "page":  "https://commons.wikimedia.org/wiki/File:Sound_of_American_Train_Horn_Nathan_Airchime_K5LA.ogg",
+        "license":  "CC BY 4.0",
+        "artist":  "WeenyBeany",
+        "bytes":  387810
+    }
+]

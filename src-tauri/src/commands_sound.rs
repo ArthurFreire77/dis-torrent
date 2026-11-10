@@ -132,7 +132,22 @@ pub(crate) fn sound_list(app: AppHandle) -> Result<Vec<SoundView>, String> {
     let dir = sounds_dir(&app)?;
     // Arquivo apagado por fora some do índice em vez de virar erro ao tocar.
     list.retain(|s| dir.join(format!("{}.{}", s.id, s.ext)).is_file());
-    Ok(list)
+    // Embutidos primeiro: todo mundo tem os mesmos, sem instalar nada.
+    let mut all: Vec<SoundView> = crate::sound_builtin::BUILTINS
+        .iter()
+        .map(|b| SoundView {
+            id: b.id.to_string(),
+            name: b.name.to_string(),
+            ext: b.ext.to_string(),
+            bytes: b.bytes.len() as u64,
+            // A duração real é medida pelo Web Audio na primeira reprodução.
+            seconds: 0.0,
+            source: format!("embutido · {}", b.license),
+            created_at: 0,
+        })
+        .collect();
+    all.append(&mut list);
+    Ok(all)
 }
 
 #[tauri::command]
@@ -202,6 +217,9 @@ pub(crate) fn sound_save(
 
 #[tauri::command]
 pub(crate) fn sound_delete(app: AppHandle, id: String) -> Result<(), String> {
+    if crate::sound_builtin::is_builtin(&id) {
+        return Err("efeito embutido não pode ser apagado".into());
+    }
     if id.trim().is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("id de som inválido".into());
     }
@@ -219,6 +237,19 @@ pub(crate) fn sound_delete(app: AppHandle, id: String) -> Result<(), String> {
 /// Bytes em base64 para o frontend montar o AudioBuffer (sem `asset:` no CSP).
 #[tauri::command]
 pub(crate) fn sound_read(app: AppHandle, id: String) -> Result<SoundData, String> {
+    // Embutido não passa por validação de id de arquivo: vem do binário.
+    if crate::sound_builtin::is_builtin(&id) {
+        let meta = crate::sound_builtin::find(&id)
+            .ok_or_else(|| "efeito embutido desconhecido".to_string())?;
+        let b64 = crate::sound_builtin::bytes_b64(&id)
+            .ok_or_else(|| "não consegui ler o efeito embutido".to_string())?;
+        return Ok(SoundData {
+            name: meta.name.to_string(),
+            ext: meta.ext.to_string(),
+            bytes_b64: b64,
+            seconds: 0.0,
+        });
+    }
     if id.trim().is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("id de som inválido".into());
     }

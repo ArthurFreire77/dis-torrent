@@ -1,5 +1,5 @@
 // Soundboard: toca local e mistura na track do mic via Web Audio (sem renegociar).
-import { checkSoundUpload, type SoundMeta } from './soundboardRules'
+import { checkSoundUpload, playableSeconds, type SoundMeta } from './soundboardRules'
 import { base64ToBytes, bytesToBase64 } from '../shared/base64'
 
 interface SoundSink {
@@ -63,6 +63,18 @@ export const soundboard = {
     buffers = new Map()
   },
 
+  /**
+   * Decodifica e guarda em memória. O primeiro clique de um som decodifica
+   * (200–600 ms); pré-carregar os usados troca isso por zero no meio da call.
+   */
+  async preload(meta: SoundMeta): Promise<boolean> {
+    if (buffers.has(meta.id)) return true
+    const buf = await decode(meta, await soundRead(meta.id).then(base64ToBytes).catch(() => new Uint8Array(0)))
+    if (!buf) return false
+    buffers.set(meta.id, buf)
+    return true
+  },
+
   /** Toca um som; com chamada viva o efeito também vai para os peers. */
   async play(meta: SoundMeta, toPeers = true): Promise<boolean> {
     const ctx = ac()
@@ -96,7 +108,7 @@ export const soundboard = {
         rg.gain.value = 0.85
         remote.connect(rg)
         rg.connect(sink.destination)
-        remote.start()
+        remote.start(0, 0, playableSeconds(meta.seconds))
       } catch {  }
     } else if (toPeers && sink.destination) {
       try {
@@ -106,10 +118,10 @@ export const soundboard = {
         rg.gain.value = 0.85
         remote.connect(rg)
         rg.connect(sink.destination)
-        remote.start()
+        remote.start(0, 0, playableSeconds(meta.seconds))
       } catch {  }
     }
-    try { src.start() } catch { return false }
+    try { src.start(0, 0, playableSeconds(meta.seconds)) } catch { return false }
     playing = src
     playingId = meta.id
     src.onended = () => { if (playing === src) { playing = null; playingId = null } }

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Ic } from '../../shared/icons'
 import { callManager } from '../../services/callManager'
 import {
-  SOUND_MAX_BYTES, SOUND_MAX_SECONDS, SOUND_SUGGESTIONS,
+  SOUND_MAX_BYTES, SOUND_MAX_SECONDS,
   isDownloadableSoundUrl, type SoundMeta, soundMime, soundNameSlug,
 } from '../../services/soundboardRules'
 import {
@@ -22,9 +22,17 @@ export function SoundboardPanel({ open, onClose, palette }: {
   const [aviso, setAviso] = useState<string | null>(null)
   const [url, setUrl] = useState('')
   const [tocando, setTocando] = useState<string | null>(null)
+  const [busca, setBusca] = useState('')
   const fileRef = useRef<HTMLInputElement | null>(null)
 
-  const recarregar = () => { void soundList().then(setSons).catch(() => setSons([])) }
+  // A lista não muda sozinha: recarregar a cada abertura era um IPC à toa.
+  const recarregar = (forcar = false) => {
+    void soundList()
+      .then((l) => setSons(l))
+      .catch(() => {
+        if (forcar) setSons([])
+      })
+  }
 
   useEffect(() => { if (open) recarregar() }, [open])
   useEffect(() => {
@@ -52,6 +60,18 @@ export function SoundboardPanel({ open, onClose, palette }: {
       }
     } catch (e: any) { setErro(String(e?.message ?? e)) }
     setTimeout(() => setTocando(t => (t === meta.id ? null : t)), 400)
+  }
+
+  /** Prepara todos os sons em memória para o próximo clique ser instantâneo. */
+  async function preaquecer() {
+    setBusy('warm')
+    try {
+      let ok = 0
+      for (const s of filtrados.slice(0, 40)) {
+        if (await soundboard.preload(s)) ok += 1
+      }
+      setAviso(`pré-carregados: ${ok} de ${Math.min(filtrados.length, 40)}`)
+    } finally { setBusy(null) }
   }
 
   async function subir(file: File) {
@@ -102,6 +122,12 @@ export function SoundboardPanel({ open, onClose, palette }: {
   }
 
   const head: React.CSSProperties = { fontSize: 10, fontWeight: 800, letterSpacing: 1, color: palette.muted, marginBottom: 6 }
+  // Filtrar 120 sons a cada tecla é barato, mas o memo evita refazer no hover.
+  const filtrados = React.useMemo(() => {
+    const q = busca.trim().toLowerCase()
+    if (!q) return sons
+    return sons.filter((s) => s.name.toLowerCase().includes(q))
+  }, [sons, busca])
 
   return (
     <>
@@ -138,6 +164,14 @@ export function SoundboardPanel({ open, onClose, palette }: {
           aria-label="Escolher arquivo de som"
           onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void subir(f) }}
         />
+        {sons.length > 0 && (
+          <button
+            onClick={() => void preaquecer()}
+            disabled={busy !== null}
+            title="Decodifica os sons agora, para tocar sem atraso na chamada"
+            style={{ background: palette.input, border: `1px solid ${palette.border}`, color: palette.text, borderRadius: 8, padding: '8px 10px', fontSize: 11.5, fontWeight: 700, cursor: busy ? 'progress' : 'pointer', opacity: busy ? 0.6 : 1 }}
+          >{busy === 'warm' ? '…' : 'Pré-carregar'}</button>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
@@ -157,43 +191,47 @@ export function SoundboardPanel({ open, onClose, palette }: {
       </div>
 
       <div style={{ fontSize: 10.5, color: palette.muted, lineHeight: 1.45, marginBottom: 10 }}>
-        Até {SOUND_MAX_SECONDS}s e {SOUND_MAX_BYTES / 1024 / 1024} MB. Arquivos do PC ou link https direto de um áudio.
-        {SOUND_SUGGESTIONS.length > 0 && (
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 }}>
-            {SOUND_SUGGESTIONS.map(s => (
-              <button
-                key={s.label}
-                type="button"
-                title={`${s.detail} — pesquise "${s.query}"`}
-                onClick={() => { setUrl(''); setAviso(`Procure "${s.query}" e cole aqui o link https do áudio`) }}
-                style={{ background: palette.input, border: `1px solid ${palette.border}`, color: palette.muted, borderRadius: 99, padding: '2px 8px', fontSize: 10.5, cursor: 'pointer' }}
-              >{s.label}</button>
-            ))}
-          </div>
-        )}
+        Até {SOUND_MAX_SECONDS}s e {SOUND_MAX_BYTES / 1024 / 1024} MB. Os efeitos prontos já vêm com o app;
+        envie um arquivo do PC ou um link https direto de áudio para adicionar os seus.
       </div>
 
       {erro && <div style={{ color: '#ff9c9c', fontSize: 11.5, marginBottom: 8 }}>{erro}</div>}
       {aviso && <div style={{ color: '#9be7b0', fontSize: 11.5, marginBottom: 8 }}>{aviso}</div>}
 
-      <div style={head}>SEUS SONS · {sons.length}</div>
+      <div style={head}>SEUS SONS · {filtrados.length}{busca ? ` de ${sons.length}` : ''}</div>
+      {sons.length > 6 && (
+        <input
+          value={busca}
+          onChange={(e) => setBusca(e.target.value)}
+          placeholder="Buscar efeito…"
+          aria-label="Buscar efeito sonoro"
+          style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8, background: palette.input, border: `1px solid ${palette.border}`, borderRadius: 6, padding: '6px 9px', color: palette.text, fontSize: 12, outline: 'none' }}
+        />
+      )}
       {sons.length === 0 ? (
         <div style={{ fontSize: 11.5, color: palette.muted, padding: '6px 0' }}>Nada ainda. Envie um arquivo curto ou baixe de um link.</div>
+      ) : filtrados.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: palette.muted, padding: '6px 0' }}>Nenhum efeito com “{busca}”.</div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-          {sons.map(s => (
+          {filtrados.map(s => {
+            const embutido = s.id.startsWith('builtin:')
+            return (
             <div key={s.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, background: palette.input, border: `1px solid ${palette.border}`, borderRadius: 8, padding: 6 }}>
               <button
                 onClick={() => void tocar(s)}
-                title={`${s.name} · ${s.seconds ? `${s.seconds.toFixed(1)}s` : s.ext}`}
+                title={`${s.name}${s.seconds ? ` · ${s.seconds.toFixed(1)}s` : ''}`}
                 style={{ background: tocando === s.id ? palette.accent : 'transparent', border: 'none', color: tocando === s.id ? '#fff' : palette.text, borderRadius: 6, padding: '6px 4px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
               >▶ {s.name}</button>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 9.5, color: palette.muted }}>
-                <span>{s.seconds ? `${s.seconds.toFixed(1)}s` : s.ext}</span>
-                <button onClick={() => void apagar(s)} aria-label={`Apagar ${s.name}`} title="Apagar" style={{ background: 'transparent', border: 'none', color: palette.muted, cursor: 'pointer', fontSize: 12, padding: 0 }}>×</button>
+                <span title={s.source}>{embutido ? 'embutido' : (s.seconds ? `${s.seconds.toFixed(1)}s` : s.ext)}</span>
+                {embutido ? null : (
+                  <button onClick={() => void apagar(s)} aria-label={`Apagar ${s.name}`} title="Apagar" style={{ background: 'transparent', border: 'none', color: palette.muted, cursor: 'pointer', fontSize: 12, padding: 0 }}>×</button>
+                )}
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
       </div>

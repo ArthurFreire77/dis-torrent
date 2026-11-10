@@ -4,6 +4,15 @@ export const SOUND_MAX_SECONDS = 10
 export const SOUND_MAX_BYTES = 2 * 1024 * 1024
 export const SOUND_MAX_SLOTS = 120
 
+/**
+ * Efeito embutido pode ser mais longo que o teto de upload: ele é cortado na
+ * reprodução em vez de recusado (o usuário não escolheu a duração dele).
+ */
+export function playableSeconds(seconds: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0) return SOUND_MAX_SECONDS
+  return Math.min(seconds, SOUND_MAX_SECONDS)
+}
+
 export type SoundExt = 'wav' | 'ogg' | 'flac' | 'm4a' | 'mp3'
 
 export interface SoundMeta {
