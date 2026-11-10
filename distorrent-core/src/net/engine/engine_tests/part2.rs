@@ -186,8 +186,7 @@ async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
 }
 
 #[test]
-fn sair_do_grupo_marca_como_dispensado() {
-    let (e, _d) = mk_engine("sair-dispensa");
+fn sair_do_grupo_marca_como_dispensado() {    let (e, _d) = mk_engine("sair-dispensa");
     let criador = "c0c0c0c00005";
     let eu = e.identity.fingerprint.clone();
     let conv = e
@@ -211,9 +210,88 @@ fn sair_do_grupo_marca_como_dispensado() {
     while commands.try_recv().is_ok() {}
 }
 
+/// O dono do grupo vem da tabela `group_owners`, não do primeiro membro da
+/// lista. A UI adivinhava pelo primeiro membro e mostrava "Sair" para quem é
+/// dono — o botão de apagar grupo nunca aparecia.
 #[test]
-fn call_invite_registra_o_chamador_como_participante() {
-    let (e, _d) = mk_engine("call-invite-parte");
+fn dono_do_grupo_vem_do_registro_e_nao_do_primeiro_membro() {
+    let (e, _d) = mk_engine("dono-grupo");
+    let eu = e.identity.fingerprint.clone();
+    let outro = "bbbbbbbbbbbb".to_string();
+    let conv = e
+        .store
+        .create_group_dm(&eu, &[outro.clone()], "Nosso grupo")
+        .unwrap();
+
+    // Registro explícito diverge da ordem da lista de membros.
+    e.store.group_owner_set(&conv.id, &outro).unwrap();
+    assert_eq!(
+        e.group_dono(&conv.id).unwrap().as_deref(),
+        Some(outro.as_str()),
+        "o registro manda, mesmo que eu seja o primeiro membro"
+    );
+
+    // Sem registro, cai na convenção do primeiro membro (compatibilidade).
+    let conv2 = e
+        .store
+        .create_group_dm(&eu, &["cccccccccccc".to_string()], "Outro")
+        .unwrap();
+    assert_eq!(
+        e.group_dono(&conv2.id).unwrap().as_deref(),
+        Some(eu.as_str()),
+        "sem registro, o primeiro membro é o dono"
+    );
+}
+
+/// Só o dono apaga para todos. Quem não é dono precisa receber o erro certo em
+/// vez de a ação "não fazer nada".
+#[test]
+fn so_o_dono_apaga_para_todos() {
+    let (e, _d) = mk_engine("apagar-grupo");
+    let eu = e.identity.fingerprint.clone();
+    let dono = "d0d0d0d00007".to_string();
+    let conv = e
+        .store
+        .create_group_dm(&eu, &[dono.clone()], "Grupo do dono")
+        .unwrap();
+    e.store.group_owner_set(&conv.id, &dono).unwrap();
+
+    let erro = e.group_delete(&conv.id).unwrap_err().to_string();
+    assert!(
+        erro.contains("só quem criou"),
+        "não-dono não pode apagar para todos: {erro}"
+    );
+    assert!(
+        e.store.get_conversation(&conv.id).unwrap().is_some(),
+        "a recusa não pode apagar a conversa local"
+    );
+}
+
+/// Apagar "só para mim" funciona para qualquer membro e some localmente.
+#[test]
+fn apagar_so_para_mim_funciona_para_quem_nao_e_dono() {
+    let (e, _d) = mk_engine("apagar-local");
+    let eu = e.identity.fingerprint.clone();
+    let dono = "e0e0e0e00008".to_string();
+    let conv = e
+        .store
+        .create_group_dm(&eu, &[dono.clone()], "Grupo")
+        .unwrap();
+    e.store.group_owner_set(&conv.id, &dono).unwrap();
+
+    e.group_delete_local(&conv.id).unwrap();
+    assert!(
+        e.store.get_conversation(&conv.id).unwrap().is_none(),
+        "apagar só para mim tira a conversa deste aparelho"
+    );
+    assert!(
+        crate::group_trash::is_dismissed(&e.store, &conv.id),
+        "sem dispensar, o sync do dono recriava o grupo"
+    );
+}
+
+#[test]
+fn call_invite_registra_o_chamador_como_participante() {    let (e, _d) = mk_engine("call-invite-parte");
     let me = e.identity.fingerprint.clone();
     let call_id = e.call_invite("peer-alvo", "voice").unwrap();
     assert!(

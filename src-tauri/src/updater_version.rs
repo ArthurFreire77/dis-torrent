@@ -251,6 +251,18 @@ pub async fn escolher(
             );
             continue;
         }
+        // A URL precisa apontar para a release que está sendo verificada. Na
+        // 1.1.68 o manifesto usava a tag `v1.1.68-pre-alpha` e a tag real era
+        // `v1.1.68`: `url_allowed` só olha host e prefixo de caminho, então a
+        // escolha passava e o download morria em 404 (o app marcava falha e
+        // ficava 6h sem tentar de novo).
+        if !url_na_tag(&chosen.url, &release.tag_name) {
+            ultimo_erro = format!(
+                "o manifesto {} aponta o instalador para outra tag (esperado {}): não será usado",
+                signed.body.version, release.tag_name
+            );
+            continue;
+        }
         return Ok(Escolha {
             release,
             verified,
@@ -258,6 +270,18 @@ pub async fn escolher(
         });
     }
     Err(ultimo_erro)
+}
+
+/// A URL do asset precisa estar sob `/releases/download/<tag>/` da release que
+/// foi verificada, com a tag EXATA (não só o núcleo).
+pub fn url_na_tag(url: &str, tag: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(rest) = parsed.path().split("/releases/download/").nth(1) else {
+        return false;
+    };
+    rest.split('/').next() == Some(tag)
 }
 
 /// Compara versão do manifesto com a tag do GitHub pelo NÚCLEO (`N.N.N`).

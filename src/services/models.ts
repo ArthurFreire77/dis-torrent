@@ -766,6 +766,8 @@ export interface DisTorrentServices {
 
   createGroup(title: string, members: string[]): Promise<Conversation>
   groupMembers(convId: string): Promise<[string,string][]>
+  /** Dono real do grupo (fonte: core), para decidir entre sair e apagar. */
+  groupOwner(convId: string): Promise<string | null>
   groupPairNow?(convId: string): Promise<void>
   communityPairNow?(communityId: string): Promise<void>
   communitySyncNow?(communityId: string): Promise<void>

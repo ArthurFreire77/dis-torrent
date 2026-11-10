@@ -149,6 +149,13 @@ impl NetworkEngine {
         self.store.list_group_members(conv_id).unwrap_or_default()
     }
 
+    /// Dono real do grupo, como o core decide (tabela `group_owners`, caindo no
+    /// primeiro membro só quando não há registro). A UI não pode adivinhar:
+    /// adivinhar pelo primeiro membro mostrava "Sair" para quem é dono.
+    pub fn group_dono(&self, conv_id: &str) -> Result<Option<String>> {
+        self.store.group_owner(conv_id)
+    }
+
     pub fn group_add(&self, conv_id: &str, fp: &str) -> Result<()> {
         self.require_group_owner(conv_id)?;
         let fp = Self::normalize_peer_id(fp)?;

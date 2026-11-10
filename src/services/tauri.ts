@@ -339,6 +339,8 @@ export const tauriServices: DisTorrentServices = {
 
   createGroup: (title, members) => invoke<Conversation>('create_group', { title, members }),
   groupMembers: (cid) => invoke<[string, string][]>('group_members', { convId: cid }),
+
+  groupOwner: (cid) => invoke<string | null>('group_owner', { convId: cid }),
   groupPairNow: (cid) => invoke<void>('group_pair_now', { convId: cid }),
   communityPairNow: (cid) => invoke<void>('community_pair_now', { communityId: cid }),
   communitySyncNow: (cid) => invoke<void>('community_sync_now', { communityId: cid }),

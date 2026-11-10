@@ -617,6 +617,14 @@ pub(crate) fn group_rename(
 }
 
 #[tauri::command]
+pub(crate) fn group_owner(
+    conv_id: String,
+    state: State<AppState>,
+) -> Result<Option<String>, String> {
+    engine(&state)?.group_dono(&conv_id).map_err(err)
+}
+
+#[tauri::command]
 pub(crate) fn group_leave(conv_id: String, state: State<AppState>) -> Result<(), String> {
     engine(&state)?.group_leave(&conv_id).map_err(err)
 }

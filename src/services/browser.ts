@@ -959,7 +959,8 @@ export const browserServices: DisTorrentServices = {
   botPluginList: () => Promise.resolve([]),
   httpFetch: async (url, method, headers, body, timeoutMs) => {
     const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), Math.max(1000, Math.min(timeoutMs, 15000)))
+    // Mesmo teto do app nativo (90s): LLM responde devagar.
+    const timer = setTimeout(() => ctrl.abort(), Math.max(1000, Math.min(timeoutMs, 90_000)))
     try {
       const res = await fetch(url, {
         method,
@@ -1110,6 +1111,15 @@ export const browserServices: DisTorrentServices = {
   groupMembers: (cid) => {
     try { const v = localStorage.getItem(`distorrent:extras:group_members:${cid}`); if (v) return Promise.resolve(JSON.parse(v)) } catch {  }
     return Promise.resolve([])
+  },
+  groupOwner: (cid) => {
+    // No navegador o dono é o primeiro membro (mesma convenção do core quando
+    // não há registro explícito).
+    try {
+      const v = localStorage.getItem(`distorrent:extras:group_members:${cid}`)
+      const mems = v ? JSON.parse(v) as [string, string][] : []
+      return Promise.resolve(mems.length > 0 ? mems[0][0] : null)
+    } catch { return Promise.resolve(null) }
   },
   groupPairNow: () => Promise.resolve(),
   communityPairNow: () => Promise.resolve(),

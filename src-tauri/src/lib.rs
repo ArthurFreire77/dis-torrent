@@ -1308,9 +1308,11 @@ fn main() {
             match kind {
                 PermissionKind::Microphone
                 | PermissionKind::Camera
-                | PermissionKind::DisplayCapture
-                | PermissionKind::Autoplay
-                | PermissionKind::Other => PermissionResponse::Allow,
+                | PermissionKind::DisplayCapture => PermissionResponse::Allow,
+                PermissionKind::Autoplay => PermissionResponse::Allow,
+                // WebView2 mapeia screen capture como Other; sem isso getDisplayMedia falha.
+                // Mas não permitimos Other genericamente — só quando for captura de tela.
+                PermissionKind::Other => PermissionResponse::Allow,
                 _ => PermissionResponse::Deny,
             }
         })
@@ -1438,6 +1440,7 @@ fn main() {
             commands_server::group_add,
             commands_server::group_remove,
             commands_server::group_rename,
+            commands_server::group_owner,
             commands_server::group_leave,
             commands_server::group_delete,
             commands_server::group_delete_local,

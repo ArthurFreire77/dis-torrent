@@ -663,6 +663,34 @@ mod tests {
         assert!(!mesma_versao("1.1.65", ""));
     }
 
+    /// O bug da 1.1.68: manifesto apontava para `v1.1.68-pre-alpha` e a tag era
+    /// `v1.1.68`. O manifesto passava na verificação de assinatura e a escolha
+    /// do asset, e o download dava 404 — "não atualiza sozinho".
+    #[test]
+    fn url_do_asset_precisa_estar_na_tag_verificada() {
+        use updater_version::url_na_tag;
+
+        let ok = "https://github.com/ArthurFreire77/dis-torrent/releases/download/v1.1.68/DisTorrent_1.1.68-pre-alpha_x64_setup.exe";
+        assert!(url_na_tag(ok, "v1.1.68"), "tag exata casa");
+
+        let tag_errada = "https://github.com/ArthurFreire77/dis-torrent/releases/download/v1.1.68-pre-alpha/DisTorrent_1.1.68-pre-alpha_x64_setup.exe";
+        assert!(
+            !url_na_tag(tag_errada, "v1.1.68"),
+            "tag com sufixo a mais NÃO é a mesma release (era o 404)"
+        );
+        assert!(
+            !url_na_tag(tag_errada, "v1.1.69"),
+            "outra release não pode ser usada"
+        );
+
+        assert!(!url_na_tag(ok, "v1.1.69"), "versão diferente é recusada");
+        assert!(
+            !url_na_tag("https://example.com/v1.1.68/x.exe", "v1.1.68"),
+            "sem o caminho de release não há tag"
+        );
+        assert!(!url_na_tag("", "v1.1.68"), "vazio nunca casa");
+    }
+
     #[test]
     fn versao_maior_ganha_da_ordem_da_api() {
         use std::cmp::Ordering;
