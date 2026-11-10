@@ -980,12 +980,8 @@ export default function MobileShell() {
   const deleteConv = useCallback(async (id: string, title: string, isSelected: boolean) => {
     const conv = conversations.find((c) => c.id === id)
     if (conv?.kind === 'group') {
-      let owner = false
-      try {
-        const mems = await services.groupMembers(id)
-        owner = mems.length > 0 && mems[0][0] === identity?.fingerprint
-      } catch {  }
-      setLeaveTarget({ id, title, owner })
+      const dono = await services.groupOwner(id).catch(() => null)
+      setLeaveTarget({ id, title, owner: !!dono && dono === identity?.fingerprint })
       return
     }
     if (!confirm(`Apagar conversa com ${title}?`)) return
@@ -1747,6 +1743,7 @@ export default function MobileShell() {
         {}
         {showGroupPanel && isGroupConv && selConv && sheetWrap(
           selConvObj?.title || 'Grupo',
+          <>
           <GroupPanel
             convId={selConv}
             title={selConvObj?.title || 'Grupo'}
@@ -1763,7 +1760,21 @@ export default function MobileShell() {
                 if (!l.some((c) => c.id === selConv)) { setSelConv(null); setSelPeerFp(null) }
               }).catch(() => {  })
             }}
-          />,
+          />
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button
+              type="button"
+              onClick={async () => {
+                const owner = (await services.groupOwner(selConv).catch(() => null)) === identity?.fingerprint
+                setShowGroupPanel(false)
+                setLeaveTarget({ id: selConv, title: selConvObj?.title || 'Grupo', owner })
+              }}
+              style={{ background: '#f23f42', color: '#fff', border: 'none', padding: '10px 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 13 }}
+            >
+              Sair ou apagar o grupo
+            </button>
+          </div>
+          </>,
           () => setShowGroupPanel(false),
         )}
         {}

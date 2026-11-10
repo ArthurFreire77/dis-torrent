@@ -91,7 +91,7 @@ import { MessageRetentionSettings } from '../components/prefs/MessageRetentionSe
 import { usePrivacySettings } from '../services/usePrivacySettings'
 import { Avatar, PeerDot } from '../shared/avatarView'
 import { bannerBackground } from '../shared/profileStyle'
-import { avatarColor } from '../shared/theme'
+import { avatarColor, resolveTheme, type Tokens } from '../shared/theme'
 import { BootScreen, CreateAccount, LockScreen } from './auth/AuthScreens'
 
 const authPalette = {
@@ -108,6 +108,17 @@ const t = {
   text: '#dbdee1', heading: '#f2f3f5', muted: '#949ba4',
   lbg: '#ffffff', lsidebar: '#f2f3f5', lrail: '#e3e5e8', ltext: '#060607',
   lmuted: '#5c5e66', lborder: '#e3e5e8', linput: '#ebedef',
+}
+
+/** Resolve o tema atual incluindo customizações do usuário. */
+function useResolvedTheme(): Tokens {
+  const prefs = usePrefs()
+  return useMemo(() => {
+    if (prefs.theme === 'custom') {
+      return resolveTheme('custom', prefs.customTheme as Partial<Tokens>)
+    }
+    return resolveTheme(prefs.theme)
+  }, [prefs.theme, prefs.customTheme])
 }
 
 const stateLabel: Record<NetworkState, string> = {
@@ -138,14 +149,15 @@ export default function ThemeShell({ designId }: {designId:string}){
   void designId
   const prefs = usePrefs()
   const theme = prefs.theme
+  const resolved = useResolvedTheme()
   const light = theme==='light'
-  const bg = light ? t.lbg : t.main
-  const sidebarBg = light ? t.lsidebar : t.sidebar
-  const railBg = light ? t.lrail : t.rail
-  const text = light ? t.ltext : t.text
-  const muted = light ? t.lmuted : t.muted
-  const borderColor = light ? t.lborder : t.border
-  const inputBg = light ? t.linput : t.input
+  const bg = light ? t.lbg : resolved.main
+  const sidebarBg = light ? t.lsidebar : resolved.sidebar
+  const railBg = light ? t.lrail : resolved.rail
+  const text = light ? t.ltext : resolved.text
+  const muted = light ? t.lmuted : resolved.muted
+  const borderColor = light ? t.lborder : resolved.border
+  const inputBg = light ? t.linput : resolved.input
 
   const [phase, setPhase] = useState<'loading'|'create'|'lock'|'app'>('loading')
   const { identity, setIdentity } = useIdentityBase()
@@ -1137,6 +1149,14 @@ export default function ThemeShell({ designId }: {designId:string}){
       setActiveAutocomplete(null)
       const nowSlash = Date.now()
       const ans = await runSlash(body)
+      // Comando /limpar: limpa a tela sem enviar mensagem
+      if (ans === '\u0000CLEAR\u0000') {
+        setInput('')
+        setActiveAutocomplete(null)
+        // Limpa as mensagens da UI (não apaga do banco)
+        msgListRef.current?.clear?.()
+        return
+      }
       const convIdSlash = selConv
       const cidSlash = communities.find(c => c.channels.some(([id]) => id === convIdSlash))?.id ?? null
       const meFpSlash = identity?.fingerprint ?? ''
@@ -1255,11 +1275,173 @@ export default function ThemeShell({ designId }: {designId:string}){
     { name: 'ping', summary: 'mede o tempo de resposta', run: async () => `🏓 pong — ${Math.max(1, Date.now() - slashPingAt.current)} ms` },
     { name: 'hora', summary: 'mostra a hora atual', run: async () => `🕐 ${new Date().toLocaleString('pt-BR')}` },
     { name: 'uptime', summary: 'há quanto tempo estou online', run: async () => `⏱ no ar há ${fmtShortDuration(Date.now() - bootAt.current)}` },
-    { name: 'meu-fp', summary: 'mostra meu fingerprint', run: async () => `🔑 ${identity?.fingerprint ?? '?'}` },
-    { name: 'meu-status', summary: 'mostra minha presença', run: async () => `🟢 status: ${identity ? socialPresence[identity.fingerprint] ?? 'online' : 'online'}` },
-    { name: 'membros', summary: 'conta os membros do servidor', run: async () => `👥 ${communityMembers.length} membro(s) neste servidor` },
+    { name: 'meu-fp', summary: 'mostra meu fingerprint', run: async () => `fingerprint: ${identity?.fingerprint ?? '?'}` },
+    { name: 'meu-status', summary: 'mostra minha presença', run: async () => `status: ${identity ? socialPresence[identity.fingerprint] ?? 'online' : 'online'}` },
+    { name: 'membros', summary: 'conta os membros do servidor', run: async () => `${communityMembers.length} membro(s) neste servidor` },
     { name: 'canais', summary: 'lista os canais', run: async () => 'Canais: ' + (extraChannels.map(c => '#' + c.name).join(', ') || 'nenhum') },
-  ], [identity, communityMembers, extraChannels, selCommunity, socialPresence])
+    { name: 'dado', summary: 'rola um dado (ex: /dado 20)', run: async (args: string) => {
+      const n = Number(args) || 6
+      if (n < 2 || n > 1000) return '❌ use /dado <2-1000>'
+      return `🎲 saiu ${1 + Math.floor(Math.random() * n)} (d${n})`
+    }},
+    { name: 'limpar', summary: 'limpa a tela de mensagens', run: async () => {
+      return '\u0000CLEAR\u0000'
+    }},
+    { name: 'serverinfo', summary: 'informações do servidor', run: async () => {
+      if (!selCommunity) return '❌ abra um servidor primeiro'
+      const c = communities.find(x => x.id === selCommunity)
+      if (!c) return '❌ servidor não encontrado'
+      return `${c.name}\n${c.members?.length ?? 0} membros\n${c.channels?.length ?? 0} canais\nid: ${c.id.slice(0, 16)}...`
+    }},
+    { name: 'userinfo', summary: 'informações do usuário', run: async (args: string) => {
+      const fp = args.trim() || identity?.fingerprint || ''
+      if (!fp) return '❌ use /userinfo <fingerprint> ou deixe vazio para você'
+      const p = socialProfiles[fp]
+      const name = p?.display_name || nameOfFp(fp)
+      return `${name}\nfingerprint: ${fp.slice(0, 16)}...\nbio: ${p?.bio || 'sem bio'}\ncor: ${p?.accent || 'padrão'}`
+    }},
+    { name: 'clima', summary: 'previsão do tempo (simulada)', run: async () => {
+      const conditions = ['ensolarado', 'parcialmente nublado', 'nublado', 'chuvoso', 'tempestade', 'neve']
+      const temp = Math.floor(Math.random() * 35) + 5
+      const cond = conditions[Math.floor(Math.random() * conditions.length)]
+      return `${temp}°C — ${cond}\nvento: ${Math.floor(Math.random() * 30)} km/h\numidade: ${Math.floor(Math.random() * 60) + 30}%`
+    }},
+    { name: 'traduzir', summary: 'traduz texto (ex: /traduzir olá)', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /traduzir <texto>'
+      const translations: Record<string, string> = {
+        'olá': 'hello', 'mundo': 'world', 'obrigado': 'thank you', 'por favor': 'please',
+        'bom dia': 'good morning', 'boa tarde': 'good afternoon', 'boa noite': 'good night',
+        'como vai': 'how are you', 'tudo bem': 'all good', 'adeus': 'goodbye',
+      }
+      const lower = args.toLowerCase().trim()
+      return `"${args}" -> "${translations[lower] ?? '[tradução não disponível offline]'}"`
+    }},
+    { name: 'calc', summary: 'calculadora (ex: /calc 2+2)', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /calc <expressão>'
+      try {
+        const sanitized = args.replace(/[^0-9+\-*/().\s]/g, '')
+        if (!sanitized.trim()) return '❌ expressão inválida'
+        const result = Function(`"use strict"; return (${sanitized})`)()
+        return `${args} = ${result}`
+      } catch {
+        return '❌ expressão inválida'
+      }
+    }},
+    { name: 'lembrete', summary: 'cria um lembrete (ex: /lembrete 10m reunião)', run: async (args: string) => {
+      const match = args.match(/^(\d+)([smhd])\s+(.+)$/i)
+      if (!match) return '❌ use /lembrete <tempo><s|m|h|d> <mensagem>\nex: /lembrete 10m reunião'
+      const [, num, unit, ...msgParts] = match
+      const msg = msgParts.join(' ')
+      const multipliers: Record<string, number> = { s: 1000, m: 60000, h: 3600000, d: 86400000 }
+      const ms = parseInt(num) * (multipliers[unit.toLowerCase()] || 60000)
+      setTimeout(() => {
+        try { services.notificationShow({ id: Date.now(), title: 'Lembrete', body: msg, conversation: selConv ?? '' }) } catch {}
+      }, ms)
+      return `lembrete agendado para daqui a ${num}${unit}`
+    }},
+    { name: 'votar', summary: 'inicia uma votação rápida', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /votar <pergunta>'
+      return `**Votação:** ${args}\n\n+ = Sim\n- = Não\n\n*Reaja com + ou - para votar*`
+    }},
+    { name: 'sortear', summary: 'sorteia um item da lista', run: async (args: string) => {
+      const items = args.split(',').map(s => s.trim()).filter(Boolean)
+      if (items.length < 2) return '❌ use /sortear item1, item2, item3...'
+      const winner = items[Math.floor(Math.random() * items.length)]
+      return `sorteado: **${winner}**`
+    }},
+    { name: 'emoji', summary: 'busca emoji por nome', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /emoji <nome>'
+      const found = NAMED_EMOJI.filter(e => e.names.some(n => n.includes(args.toLowerCase())))
+      if (found.length === 0) return '❌ nenhum emoji encontrado'
+      return found.slice(0, 5).map(e => `${e.char} :${e.names[0]}:`).join('\n')
+    }},
+    { name: 'avatar', summary: 'mostra avatar do usuário', run: async (args: string) => {
+      const fp = args.trim() || identity?.fingerprint || ''
+      if (!fp) return '❌ use /avatar <fingerprint> ou deixe vazio para você'
+      const p = socialProfiles[fp]
+      return `avatar de ${p?.display_name || nameOfFp(fp)}: ${p?.avatar_b64 ? '[imagem carregada]' : 'padrão (iniciais)'}`
+    }},
+    { name: 'limpar', summary: 'limpa a tela de mensagens', run: async () => {
+      // Retorna um caractere especial que a UI interpreta como "limpar"
+      return '\u0000CLEAR\u0000'
+    }},
+    { name: 'serverinfo', summary: 'informações do servidor', run: async () => {
+      if (!selCommunity) return '❌ abra um servidor primeiro'
+      const c = communities.find(x => x.id === selCommunity)
+      if (!c) return '❌ servidor não encontrado'
+      return `${c.name}\n${c.members?.length ?? 0} membros\n${c.channels?.length ?? 0} canais\nid: ${c.id.slice(0, 16)}...`
+    }},
+    { name: 'userinfo', summary: 'informações do usuário', run: async (args: string) => {
+      const fp = args.trim() || identity?.fingerprint || ''
+      if (!fp) return '❌ use /userinfo <fingerprint> ou deixe vazio para você'
+      const p = socialProfiles[fp]
+      const name = p?.display_name || nameOfFp(fp)
+      return `${name}\nfingerprint: ${fp.slice(0, 16)}...\nbio: ${p?.bio || 'sem bio'}\ncor: ${p?.accent || 'padrão'}`
+    }},
+    { name: 'clima', summary: 'previsão do tempo (simulada)', run: async () => {
+      const conditions = ['ensolarado', 'parcialmente nublado', 'nublado', 'chuvoso', 'tempestade', 'neve']
+      const temp = Math.floor(Math.random() * 35) + 5
+      const cond = conditions[Math.floor(Math.random() * conditions.length)]
+      return `${temp}°C — ${cond}\nvento: ${Math.floor(Math.random() * 30)} km/h\numidade: ${Math.floor(Math.random() * 60) + 30}%`
+    }},
+    { name: 'traduzir', summary: 'traduz texto (ex: /traduzir olá)', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /traduzir <texto>'
+      // Simulação simples - em produção usaria API de tradução
+      const translations: Record<string, string> = {
+        'olá': 'hello', 'mundo': 'world', 'obrigado': 'thank you', 'por favor': 'please',
+        'bom dia': 'good morning', 'boa tarde': 'good afternoon', 'boa noite': 'good night',
+        'como vai': 'how are you', 'tudo bem': 'all good', 'adeus': 'goodbye',
+      }
+      const lower = args.toLowerCase().trim()
+      return `"${args}" -> "${translations[lower] ?? '[tradução não disponível offline]'}"`
+    }},
+    { name: 'calc', summary: 'calculadora (ex: /calc 2+2)', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /calc <expressão>'
+      try {
+        // Avaliação segura: apenas números e operadores básicos
+        const sanitized = args.replace(/[^0-9+\-*/().\s]/g, '')
+        if (!sanitized.trim()) return '❌ expressão inválida'
+        const result = Function(`"use strict"; return (${sanitized})`)()
+        return `${args} = ${result}`
+      } catch {
+        return '❌ expressão inválida'
+      }
+    }},
+    { name: 'lembrete', summary: 'cria um lembrete (ex: /lembrete 10m reunião)', run: async (args: string) => {
+      const match = args.match(/^(\d+)([smhd])\s+(.+)$/i)
+      if (!match) return '❌ use /lembrete <tempo><s|m|h|d> <mensagem>\nex: /lembrete 10m reunião'
+      const [, num, unit, ...msgParts] = match
+      const msg = msgParts.join(' ')
+      const multipliers: Record<string, number> = { s: 1000, m: 60000, h: 3600000, d: 86400000 }
+      const ms = parseInt(num) * (multipliers[unit.toLowerCase()] || 60000)
+      setTimeout(() => {
+        try { services.notificationShow({ id: Date.now(), title: 'Lembrete', body: msg, conversation: selConv ?? '' }) } catch {}
+      }, ms)
+      return `lembrete agendado para daqui a ${num}${unit}`
+    }},
+    { name: 'votar', summary: 'inicia uma votação rápida', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /votar <pergunta>'
+      return `**Votação:** ${args}\n\n+ = Sim\n- = Não\n\n*Reaja com + ou - para votar*`
+    }},
+    { name: 'sortear', summary: 'sorteia um item da lista', run: async (args: string) => {
+      const items = args.split(',').map(s => s.trim()).filter(Boolean)
+      if (items.length < 2) return '❌ use /sortear item1, item2, item3...'
+      const winner = items[Math.floor(Math.random() * items.length)]
+      return `sorteado: **${winner}**`
+    }},
+    { name: 'emoji', summary: 'busca emoji por nome', run: async (args: string) => {
+      if (!args.trim()) return '❌ use /emoji <nome>'
+      const found = NAMED_EMOJI.filter(e => e.names.some(n => n.includes(args.toLowerCase())))
+      if (found.length === 0) return '❌ nenhum emoji encontrado'
+      return found.slice(0, 5).map(e => `${e.char} :${e.names[0]}:`).join('\n')
+    }},
+    { name: 'avatar', summary: 'mostra avatar do usuário', run: async (args: string) => {
+      const fp = args.trim() || identity?.fingerprint || ''
+      if (!fp) return '❌ use /avatar <fingerprint> ou deixe vazio para você'
+      const p = socialProfiles[fp]
+      return `avatar de ${p?.display_name || nameOfFp(fp)}: ${p?.avatar_b64 ? '[imagem carregada]' : 'padrão (iniciais)'}`
+    }},
+  ], [identity, communityMembers, extraChannels, selCommunity, socialPresence, communities, socialProfiles, selConv])
 
   const slashPingAt = useRef(Date.now())
   const bootAt = useRef(Date.now())
@@ -2147,7 +2329,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                           <Icon d={Icons.phone} size={11} /> {callActionBusy ? 'entrando…' : `Entrar ${sala.participants.length || ''}`}
                         </button>
                       )}
-                      <button title={c.kind === 'group' ? 'Sair ou apagar o grupo' : 'Apagar conversa'} onClick={async (e) => { e.stopPropagation(); if (c.kind === 'group') { let owner = false; try { const mems = await services.groupMembers(c.id); owner = mems.length > 0 && mems[0][0] === identity?.fingerprint } catch {  } setLeaveTarget({ id: c.id, title: c.title, owner }); return } if (!confirm(`Apagar conversa com ${c.title}?`)) return; try { await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={14} /></button>
+                      <button title={c.kind === 'group' ? 'Sair ou apagar o grupo' : 'Apagar conversa'} onClick={async (e) => { e.stopPropagation(); if (c.kind === 'group') { const owner = (await services.groupOwner(c.id).catch(() => null)) === identity?.fingerprint; setLeaveTarget({ id: c.id, title: c.title, owner }); return } if (!confirm(`Apagar conversa com ${c.title}?`)) return; try { await services.conversationDelete(c.id); if (selConv === c.id) setSelConv(null); refreshConvos() } catch (err: any) { setError(String(err?.message ?? err)) } }} style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 4, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon d={c.kind === 'group' ? Icons.minus : Icons.trash} size={14} /></button>
                     </div>
                     )
                   })}
@@ -3343,7 +3525,15 @@ export default function ThemeShell({ designId }: {designId:string}){
                     name: info.name,
                     avatar: info.avatar,
                   })
-                  await services.botUpdate(selCommunity, id, { config: info.config })
+                  try {
+                    await services.botUpdate(selCommunity, id, { config: info.config })
+                  } catch (e) {
+                    // Sem isto o bot ficava órfão na lista com "0 comando(s)" e
+                    // config vazia, e o usuário achava que o import tinha falhado.
+                    await services.botDelete(selCommunity, id).catch(() => {})
+                    throw e
+                  }
+                  setConfigBotId(id)
                   refreshExtras(selCommunity)
                   return info.name
                 }
@@ -3637,6 +3827,20 @@ export default function ThemeShell({ designId }: {designId:string}){
               }).catch(() => {  })
             }}
           />
+          {selConv && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${borderColor}` }}>
+              <Button
+                variant="danger"
+                onClick={async () => {
+                  const owner = (await services.groupOwner(selConv).catch(() => null)) === identity?.fingerprint
+                  setShowGroupPanel(false)
+                  setLeaveTarget({ id: selConv, title: selConvObj?.title || 'Grupo', owner })
+                }}
+              >
+                Sair ou apagar o grupo
+              </Button>
+            </div>
+          )}
         </Modal>
       )}
 
@@ -4168,7 +4372,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       {showShortcuts && (
         <div onClick={() => setShowShortcuts(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 250, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div onClick={e => e.stopPropagation()} style={{ background: t.main, border: `1px solid ${borderColor}`, borderRadius: 12, padding: 20, width: 420, maxWidth: '92vw' }}>
-            <div style={{ fontSize: 16, fontWeight: 900, color: t.heading, marginBottom: 12 }}>⌨️ Atalhos de teclado</div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: t.heading, marginBottom: 12 }}>Atalhos de teclado</div>
             {[['Ctrl + K', 'Paleta de comandos'], ['Ctrl + F', 'Buscar mensagens'], ['Ctrl + Shift + P', 'Mensagens fixadas'], ['Ctrl + Shift + M', 'Mute/desmute'], ['Alt + ↑ / ↓', 'Trocar de conversa'], ['Esc', 'Fechar painel'], ['Enter', 'Enviar'], ['Shift + Enter', 'Nova linha'], ['Clique direito na mensagem', 'Menu completo (editar/apagar/fixar/encaminhar/thread)']].map(([k, v]) => (
               <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12.5, padding: '6px 0', borderBottom: `1px solid ${borderColor}` }}>
                 <span style={{ color: text, fontWeight: 700 }}>{v}</span>
