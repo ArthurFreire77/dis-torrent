@@ -1,5 +1,65 @@
 # CHANGELOG
 
+## [1.1.68-pre-alpha] - 2026-11-09
+
+### Chamada: áudio da tela, entrar e efeitos
+
+**Som da tela não sumia mais.** Quando alguém compartilhava tela e câmera em
+transmissões separadas, o som do sistema vinha junto com a tela e era
+descartado — só o microfone tocava. Agora o card da pessoa toca a voz dela e o
+card da tela toca o som do sistema, cada um com seu próprio volume.
+
+**Volume até 200%.** O controle de volume de cada participante passou a aceitar
+até 200%, com amplificador de verdade (acima de 100% o áudio passa por um ganho,
+não é só o elemento no máximo). A interface avisa que pode distorcer.
+
+**Volume que "não descia".** Em transmissão única o card da pessoa mostrava um
+controle que mexia num elemento que não existia (o som estava no card da tela).
+Agora o controle só aparece no card que realmente toca o áudio.
+
+**Botão "Entrar" não trava mais.** Entrar sozinho num canal de voz ficava
+"Conectando…" para sempre, porque não há com quem conectar. Agora quem entrou
+num canal vazio já aparece como "na chamada", e o botão verde só aparece quando
+há alguém além de você na sala.
+
+**Efeitos sonoros ao lado do microfone.** O botão saiu do painel de extras (que
+ficava escondido) e foi para a barra de controles da chamada, logo depois do
+microfone — desktop e celular.
+
+### Avisos do sistema
+
+**"Som de mensagem" e "Som de chamada" agora funcionam.** Os botões existiam mas
+não controlavam nada: o app tocava sempre. Agora desligar realmente silencia.
+
+### Perfil
+
+**A aura do avatar usa a sua cor.** "Brilho" e "Pulsar" ficavam sempre azuis e
+ignoravam a cor de destaque do perfil.
+
+**Perfil no servidor.** Abrir o perfil pelo desktop agora mostra a aba do
+servidor e permite trocar o apelido só naquele servidor.
+
+### Amizades
+
+**Pedido repetido não vira amizade sozinha.** O reenvio automático do pedido era
+tratado como "os dois se pediram ao mesmo tempo", e a amizade nascia sem ninguém
+apertar Aceitar.
+
+**Escolha de aceitar solicitações.** Em "Adicionar amigo" há a opção **Aceitar
+solicitações de amizade**. Desligada, novas solicitações são ignoradas em
+silêncio, sem bloquear ninguém.
+
+### Nomes
+
+**Nome de servidor não aparece como nome de pessoa** em chamadas e listas.
+
+### Build
+
+Documentado em `docs/windows-sac-build.md` o bloqueio do Controle de Aplicativo
+do Windows (SAC/WDAC) sobre os executáveis gerados pelo `cargo` em `target/`:
+o build do Windows precisa ser feito com o controle desligado ou pelo WSL.
+
+
 ## [1.1.67-pre-alpha] - 2026-11-09
 
 ### Perfil decorado, super-reações, efeitos sonoros e emojis do servidor
