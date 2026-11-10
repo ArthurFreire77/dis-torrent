@@ -99,9 +99,13 @@ interface BoostGraph {
   context: AudioContext
   source: MediaElementAudioSourceNode
   gain: GainNode
+  /** Ligado pela stream (call): o elemento fica mudo e o grafo toca. */
+  stream?: boolean
 }
 
 const boostGraphs = new WeakMap<HTMLMediaElement, BoostGraph>()
+/** Elementos que não aceitam boost: usar só `element.volume`. */
+const boostFailed = new WeakSet<HTMLMediaElement>()
 let boostContext: AudioContext | null = null
 
 function audioContextCtor(): typeof AudioContext | null {
@@ -119,22 +123,43 @@ function audioContextCtor(): typeof AudioContext | null {
 function graphFor(element: HTMLMediaElement): BoostGraph | null {
   const existente = boostGraphs.get(element)
   if (existente) return existente
+  if (boostFailed.has(element)) return null
   const Ctor = audioContextCtor()
   if (!Ctor) return null
   try {
     boostContext = boostContext && boostContext.state !== 'closed' ? boostContext : new Ctor()
     const ctx = boostContext
     if (!ctx || ctx.state === 'closed') return null
-    const source = ctx.createMediaElementSource(element)
+    // `srcObject` (áudio da call): MediaElementSource fica MUDO no WebView2
+    // (medido: pico 0). A stream, ao contrário, passa — então usamos ela.
+    const stream = element.srcObject
+    let source: AudioNode
+    if (stream instanceof MediaStream) {
+      source = ctx.createMediaStreamSource(stream)
+    } else {
+      source = ctx.createMediaElementSource(element)
+    }
     const gain = ctx.createGain()
     source.connect(gain)
     gain.connect(ctx.destination)
-    const graph = { context: ctx, source, gain }
+    const graph = {
+      context: ctx,
+      source: source as MediaElementAudioSourceNode,
+      gain,
+      stream: stream instanceof MediaStream,
+    }
     boostGraphs.set(element, graph)
     return graph
   } catch {
+    boostFailed.add(element)
     return null
   }
+}
+
+/** O elemento aceita amplificação acima de 100%? A UI usa para não mentir. */
+export function canBoost(element: unknown): boolean {
+  if (!isMediaElement(element)) return false
+  return !boostFailed.has(element)
 }
 
 function isMediaElement(value: unknown): value is HTMLMediaElement {
@@ -159,6 +184,15 @@ function applyBoost(element: HTMLMediaElement, gain: number): void {
   } catch {  }
 }
 
+/**
+ * Amplificação real disponível? Medido no WebView2: MediaElementSource com
+ * `srcObject` fica mudo, mas MediaStreamSource funciona — então 200% é real
+ * quando existe AudioContext.
+ */
+export function volumeBoostSupported(): boolean {
+  return !!audioContextCtor()
+}
+
 export function applyParticipantPlayback(
   element: Pick<HTMLMediaElement, 'volume' | 'muted'>,
   fp: string,
@@ -166,9 +200,25 @@ export function applyParticipantPlayback(
   settings = getParticipantPlaybackSettings(fp),
 ): void {
   const { elementVolume, gain } = playbackGain(settings.volume)
+  const mudo = callDeafened || settings.muted
+  if (isMediaElement(element)) {
+    applyBoost(element, gain)
+    const graph = boostGraphs.get(element)
+    // Com o grafo da stream no comando, o elemento fica mudo (senão o som
+    // sairia DUAS vezes) e o volume/mute vai todo pelo GainNode.
+    const pelaStream = !!graph?.stream
+    if (pelaStream) {
+      try { graph!.gain.gain.value = mudo ? 0 : gain } catch {  }
+      element.muted = true
+      element.volume = 1
+    } else {
+      element.muted = mudo
+      element.volume = elementVolume
+    }
+    return
+  }
+  element.muted = mudo
   element.volume = elementVolume
-  element.muted = callDeafened || settings.muted
-  if (isMediaElement(element)) applyBoost(element, gain)
 }
 
 export function applyMountedParticipantPlayback(

@@ -3,6 +3,7 @@ import {
   applyMountedParticipantPlayback,
   getParticipantPlaybackSettings,
   saveParticipantPlaybackSettings,
+  volumeBoostSupported,
   MAX_PARTICIPANT_VOLUME,
 } from '../../services/callPlayback'
 
@@ -17,6 +18,8 @@ export function ParticipantAudioControls({
 }) {
   const [settings, setSettings] = useState(() => getParticipantPlaybackSettings(fp))
   const [aberto, setAberto] = useState(false)
+  // Pergunta ao WebView uma vez: em WebView2 o áudio da call não amplifica.
+  const [boostOk] = useState(() => volumeBoostSupported())
   const label = nickname || fp.slice(0, 8)
 
   useEffect(() => {
@@ -101,7 +104,9 @@ export function ParticipantAudioControls({
             </span>
             {settings.volume > 100 && (
               <span style={{ display: 'block', fontSize: 10, color: '#f0b232', marginTop: 5, lineHeight: 1.4 }}>
-                Acima de 100% o som é amplificado e pode distorcer.
+                {boostOk
+                  ? 'Acima de 100% o som é amplificado e pode distorcer.'
+                  : 'Nesta plataforma o áudio da chamada não amplifica acima de 100%: o som fica no volume normal.'}
               </span>
             )}
           </label>
