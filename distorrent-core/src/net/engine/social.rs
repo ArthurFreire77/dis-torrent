@@ -83,9 +83,14 @@ impl NetworkEngine {
                 self.store.set_message_status(&env.id, "pending")?;
             }
         }
-        self.store
+        let stored = self
+            .store
             .message_by_id(&env.id)?
-            .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))
+            .ok_or_else(|| DistorrentError::Storage(rusqlite::Error::QueryReturnedNoRows))?;
+        // Sem este evento o bot dono do servidor nunca vê o comando digitado no
+        // canal (só mensagens recebidas emitiam), então `!ping` não respondia.
+        let _ = self.events.send(EngineEvent::MessageNew(stored.clone()));
+        Ok(stored)
     }
 
     pub fn gate_speech(&self, community_id: &str, channel_id: &str) -> Result<()> {
