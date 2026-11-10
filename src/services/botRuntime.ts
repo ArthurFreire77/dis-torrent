@@ -26,8 +26,8 @@ export const botRuntime = new BotEngine(
     communitiesList: () => services.communitiesList(),
     botsList: (cid) => services.botsList(cid),
     channelList: (cid) => services.channelList(cid),
-    httpFetch: (url, method, headers, body, timeoutMs) =>
-      services.httpFetch(url, method, headers, body, timeoutMs),
+    httpFetch: (url, method, headers, body, timeoutMs, allowPrivate) =>
+      services.httpFetch(url, method, headers, body, timeoutMs, allowPrivate),
     botPostMessage: (cid, channelId, botId, body) =>
       services.botPostMessage(cid, channelId, botId, body),
     botAdmin: (cid, botId, action, target, reason, number, channel) =>

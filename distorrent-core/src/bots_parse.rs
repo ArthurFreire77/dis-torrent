@@ -70,12 +70,30 @@ pub fn parse_command(v: &serde_json::Value) -> Option<BotCommand> {
         .and_then(|x| x.as_str())
         .map(|s| normalize_command_name(s))
         .filter(|s| !s.is_empty());
+    // Ação do player de música; sem ação o comando é descartado abaixo.
+    cmd.music = v
+        .get("music")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty() && s.len() <= 16);
+    // Nome do som do soundboard: só o id/nome, nunca um caminho.
+    cmd.sfx = v
+        .get("sfx")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 64);
     cmd.need = Need::parse(v.get("permission").and_then(|x| x.as_str()).unwrap_or(""));
     cmd.cooldown_ms = v
         .get("cooldownMs")
         .and_then(|x| x.as_i64())
         .unwrap_or(DEFAULT_COOLDOWN_MS)
         .clamp(MIN_COOLDOWN_MS, MAX_COOLDOWN_MS);
+    // Timeout HTTP por comando; 0 = default do runtime. LLM precisa de teto maior.
+    cmd.timeout_ms = v
+        .get("timeoutMs")
+        .and_then(|x| x.as_i64())
+        .filter(|t| *t > 0)
+        .map(|t| t.clamp(1_000, 90_000));
     cmd.ephemeral = v.get("ephemeral").map(b).unwrap_or(false);
     cmd.enabled = v.get("enabled").map(b).unwrap_or(true);
     cmd.autocomplete = v.get("autocomplete").map(b).unwrap_or(false);
@@ -87,7 +105,11 @@ pub fn parse_command(v: &serde_json::Value) -> Option<BotCommand> {
         Some("reply") => Exec::Reply,
         Some("script") => Exec::Script,
         Some("admin") => Exec::Admin,
+        Some("music") => Exec::Music,
+        Some("sfx") => Exec::Sfx,
         _ if cmd.admin.is_some() => Exec::Admin,
+        _ if cmd.music.is_some() => Exec::Music,
+        _ if cmd.sfx.is_some() => Exec::Sfx,
         _ if cmd.script.is_some() => Exec::Script,
         _ if cmd.url.is_empty() && cmd.reply.is_some() => Exec::Reply,
         _ => Exec::Http,
@@ -96,6 +118,8 @@ pub fn parse_command(v: &serde_json::Value) -> Option<BotCommand> {
     match cmd.exec {
         Exec::Http if !url_ok(&cmd.url) => return None,
         Exec::Admin if cmd.admin.is_none() => return None,
+        Exec::Music if cmd.music.is_none() => return None,
+        Exec::Sfx if cmd.sfx.is_none() => return None,
         Exec::Script
             if cmd
                 .script

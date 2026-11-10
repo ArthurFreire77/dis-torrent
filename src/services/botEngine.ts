@@ -11,6 +11,7 @@ import {
   urlProblem,
   hostAllowed,
   permAllows,
+  encodeForJson,
   BOT_MAX_COOLDOWN_MS,
   BOT_MAX_SCRIPT_LINES,
   type BotChannelKind,
@@ -69,6 +70,7 @@ export interface BotRuntimeDeps {
   botLog: (cid: string, botId: string, level: string, message: string) => Promise<unknown>
   botVarGet: (cid: string, botId: string, key: string) => Promise<string | null>
   botVarSet: (cid: string, botId: string, key: string, value: string) => Promise<void>
+
 }
 
 export interface BotRuntimeLog {
@@ -80,6 +82,8 @@ export interface BotRuntimeLog {
 }
 
 const HTTP_TIMEOUT_MS = 10_000
+/** Teto do timeout por comando: LLM responde devagar e 10s matava a resposta. */
+const HTTP_TIMEOUT_MAX_MS = 90_000
 const RATE_WINDOW_MS = 60_000
 const MAX_REPLY_CHARS = BOT_MAX_REPLY
 
@@ -227,7 +231,6 @@ export class BotEngine {
 
   /** Mensagem: comando com prefixo E entrega de evento `message_new`. */
   private async onMessage(cid: string, ev: any): Promise<void> {
-    if (ev.direction !== 'in') return
     if (ev.bot_id) return
     const body = typeof ev.body === 'string' ? ev.body : ''
     if (!body) return
@@ -245,7 +248,8 @@ export class BotEngine {
     if (ids.size > 0 && !ids.has(convId)) return
     const kind = ids.get(convId)
 
-    const author = typeof ev.author_fp === 'string' ? ev.author_fp : ''
+    const me = this.getIdentity()
+    const author = typeof ev.author_fp === 'string' ? ev.author_fp : (ev.direction === 'out' && me ? me.fingerprint : '')
     for (const bot of bots) {
       if (!bot.config) continue
       if (!botIsActive(bot.online)) continue
@@ -257,7 +261,7 @@ export class BotEngine {
       if (!channelInScope(config, convId)) continue
       if (!kindInScope(config, kind)) continue
 
-      if (config.webhook?.url || config.events.includes('message_new')) {
+      if (ev.direction === 'in' && (config.webhook?.url || config.events.includes('message_new'))) {
         await this.deliverEvent(cid, bot, config, 'message_new', {
           channel: convId,
           author,
@@ -490,7 +494,10 @@ export class BotEngine {
   ): boolean {
     const need = cmd.permission
     if (!need) return true
-    if (need === 'owner') return ev?.author_is_owner === true
+    if (need === 'owner') {
+      const me = this.getIdentity()
+      return ev?.author_is_owner === true || (!!me?.fingerprint && (ev?.author_fp === me.fingerprint || ev?.direction === 'out'))
+    }
     const perms = typeof bot.perms === 'number' ? bot.perms : 0
     if (need === 'moderate') return permAllows(perms, 'warn') || perms === 0
     if (need === 'manage') return permAllows(perms, 'kick') || perms === 0
@@ -510,7 +517,7 @@ export class BotEngine {
     const started = this.now()
     switch (cmd.exec) {
       case 'reply': {
-        const text = renderTemplate(cmd.reply ?? '', { args })
+        const text = renderTemplate(cmd.reply ?? '', { args, author })
         await this.post(cid, channelId, bot, cmd, text)
         this.log(cid, bot.id, 'info', `/${cmd.name} respondeu (${this.now() - started}ms)`)
         return
@@ -530,10 +537,14 @@ export class BotEngine {
         return
       }
       default:
-        await this.runHttp(cid, channelId, bot, cmd, args, config)
+        await this.runHttp(cid, channelId, bot, cmd, args, config, author)
     }
   }
 
+  /**
+   * Player de música. O som sai pela conexão de quem está na call (mixer do
+   * soundboard); se não houver call, o bot diz a verdade em vez de fingir.
+   */
   private async runHttp(
     cid: string,
     channelId: string,
@@ -541,6 +552,7 @@ export class BotEngine {
     cmd: BotCommandDef,
     args: string[],
     config?: BotConfig,
+    author = '',
   ): Promise<void> {
     const problem = urlProblem(cmd.url, config?.blockPrivate ?? true)
     if (problem) {
@@ -557,7 +569,11 @@ export class BotEngine {
       )
       return
     }
-    const reqBody = cmd.method === 'POST' && cmd.body ? renderTemplate(cmd.body, { args }) : null
+    const reqBody = cmd.method === 'POST' && cmd.body ? renderTemplate(cmd.body, { args, author }) : null
+    const timeout = Math.min(
+      HTTP_TIMEOUT_MAX_MS,
+      Math.max(HTTP_TIMEOUT_MS, typeof cmd.timeoutMs === 'number' ? cmd.timeoutMs : 0),
+    )
     let res: { status: number; body: string }
     try {
       res = await this.deps.httpFetch(
@@ -565,7 +581,7 @@ export class BotEngine {
         cmd.method,
         cmd.headers ?? {},
         reqBody,
-        HTTP_TIMEOUT_MS,
+        timeout,
         !(config?.blockPrivate ?? true),
       )
     } catch (e: unknown) {
@@ -669,6 +685,7 @@ export class BotEngine {
     const renderExpr = (tpl: string): string =>
       tpl.replace(/\{\{\s*([\w.:-]+)\s*\}\}/g, (_m, key: string) => {
         if (key === 'raw.args') return args.join(' ')
+        if (key === 'jsonargs') return encodeForJson(args.join(' '))
         if (key === 'args') return args.map((a) => encodeURIComponent(a)).join('/')
         if (key === 'author') return author
         if (key === 'bot') return bot.name
@@ -686,21 +703,26 @@ export class BotEngine {
       })
 
     const resolveValue = (expr: string): string => {
-      const t = expr.trim().replace(/^"|"$/g, '')
-      if (t === 'args') return args.join(' ')
-      if (t === 'raw.args') return args.join(' ')
-      if (t === 'author') return author
-      if (t === 'bot') return bot.name
-      if (t === 'channel') return String(event?.channel ?? replyChannel ?? '')
-      if (t.startsWith('event.')) {
-        const v = event?.[t.slice(6)]
+      const trimmed = expr.trim()
+      if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+        return trimmed.slice(1, -1)
+      }
+      if (trimmed === 'args') return args.join(' ')
+      if (trimmed === 'raw.args') return args.join(' ')
+      if (trimmed === 'author') return author
+      if (trimmed === 'bot') return bot.name
+      if (trimmed === 'channel') return String(event?.channel ?? replyChannel ?? '')
+      if (trimmed.startsWith('event.')) {
+        const v = event?.[trimmed.slice(6)]
         return v === undefined || v === null ? '' : String(v)
       }
-      if (t.startsWith('arg')) {
-        const i = Number(t.slice(3))
+      if (trimmed.startsWith('arg')) {
+        const i = Number(trimmed.slice(3))
         if (Number.isInteger(i)) return args[i] ?? ''
       }
-      return vars.get(normalizeBotCommandName(t)) ?? vars.get(t) ?? ''
+      const fromVar = vars.get(normalizeBotCommandName(trimmed)) ?? vars.get(trimmed)
+      if (fromVar !== undefined) return fromVar
+      return trimmed
     }
 
     const evalCond = (raw: string): boolean => {
@@ -899,10 +921,25 @@ export class BotEngine {
           vars.set(into, res.body)
           try {
             const parsed = JSON.parse(res.body)
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-              for (const [k, v] of Object.entries(parsed).slice(0, 64)) {
-                vars.set(`${into}.${k}`, typeof v === 'string' ? v : JSON.stringify(v))
+            if (parsed && typeof parsed === 'object') {
+              const flatten = (prefix: string, val: any, depth: number) => {
+                if (depth > 5) return
+                if (val && typeof val === 'object' && !Array.isArray(val)) {
+                  for (const [k, v] of Object.entries(val).slice(0, 32)) {
+                    const subKey = `${prefix}.${k}`
+                    vars.set(subKey, typeof v === 'string' ? v : JSON.stringify(v))
+                    flatten(subKey, v, depth + 1)
+                  }
+                } else if (Array.isArray(val)) {
+                  val.slice(0, 10).forEach((item, idx) => {
+                    const subKey = `${prefix}[${idx}]`
+                    vars.set(subKey, typeof item === 'string' ? item : JSON.stringify(item))
+                    vars.set(`${prefix}.${idx}`, typeof item === 'string' ? item : JSON.stringify(item))
+                    flatten(subKey, item, depth + 1)
+                  })
+                }
               }
+              flatten(into, parsed, 0)
             }
             vars.set(`${into}.json`, JSON.stringify(parsed))
           } catch {}

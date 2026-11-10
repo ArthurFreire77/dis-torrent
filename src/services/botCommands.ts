@@ -6,7 +6,25 @@ import { sanitizeText } from '../core/security/sanitize.ts'
  * vira "salvei e não funcionou".
  */
 
+/**
+ * Tipos de comando do bot declarativo. Música e efeitos NÃO ficam aqui: quem
+ * faz isso é um bot importado (plugin), não um comando embutido no app.
+ */
 export type BotExec = 'http' | 'reply' | 'script' | 'admin'
+
+/** Tipos que só existem em config antiga; lidos, nunca mais criados. */
+export type BotExecLegacy = 'music' | 'sfx'
+const LEGACY_EXEC: BotExecLegacy[] = ['music', 'sfx']
+
+/** Comandos do player de música. O bot toca na call de quem é dono. */
+export const BOT_MUSIC_ACTIONS: { id: string; label: string; hint: string }[] = [
+  { id: 'play', label: 'Tocar', hint: 'Enfileira o arquivo anexado (o bot precisa de uma faixa).' },
+  { id: 'pause', label: 'Pausar', hint: 'Pausa a faixa atual.' },
+  { id: 'resume', label: 'Continuar', hint: 'Retoma de onde pausou.' },
+  { id: 'skip', label: 'Próxima', hint: 'Pula para a próxima da fila.' },
+  { id: 'stop', label: 'Parar', hint: 'Para e limpa a fila.' },
+  { id: 'queue', label: 'Ver fila', hint: 'Mostra o que está tocando e o que vem depois.' },
+]
 
 export type BotNeed = '' | 'moderate' | 'manage' | 'owner'
 
@@ -30,8 +48,17 @@ export interface BotCommandDef {
   reply?: string
   script?: string
   admin?: string
+  /**
+   * Legado: bots criados antes desta versão tinham `music`/`sfx` embutidos.
+   * O campo continua sendo LIDO (para não quebrar config antiga) mas o editor
+   * não oferece mais o tipo — música agora é um bot importado.
+   */
+  music?: string
+  sfx?: string
   permission?: BotNeed
   cooldownMs?: number
+  /** Segundos que o runtime espera a resposta HTTP (LLM costuma passar de 10s). */
+  timeoutMs?: number
   ephemeral?: boolean
   enabled?: boolean
   autocomplete?: boolean
@@ -516,12 +543,32 @@ function parseCommand(c: any): BotCommandDef | null {
   const script = typeof c.script === 'string' ? c.script.slice(0, 200 * 160) : undefined
   const admin =
     typeof c.admin === 'string' && c.admin.trim() ? normalizeBotCommandName(c.admin) : undefined
+  const music = typeof c.music === 'string' && c.music.trim() ? c.music.trim().slice(0, 16) : undefined
+  const sfx = typeof c.sfx === 'string' && c.sfx.trim() ? c.sfx.trim().slice(0, 64) : undefined
   let exec: BotExec = 'http'
   if (c.exec === 'http' || c.exec === 'reply' || c.exec === 'script' || c.exec === 'admin') {
     exec = c.exec
   } else if (admin) exec = 'admin'
   else if (script) exec = 'script'
   else if (!url && reply) exec = 'reply'
+  // Comando de música/efeito de config antiga: o runtime não executa mais,
+  // mas NÃO pode sumir da config — perdê-lo apagaria o bot do usuário em
+  // silêncio e ainda marcaria o painel como "não salvo" para sempre.
+  if (LEGACY_EXEC.includes(c.exec) || music || sfx) {
+    return {
+      name,
+      aliases,
+      description: typeof c.description === 'string' ? c.description.slice(0, 200) : '',
+      exec: (c.exec as BotExec) ?? (music ? 'music' : 'sfx'),
+      method: 'GET',
+      url: '',
+      permission: '',
+      cooldownMs: BOT_DEFAULT_COOLDOWN_MS,
+      enabled: false,
+      music,
+      sfx,
+    } as BotCommandDef
+  }
   if (exec === 'http' && !isHttpUrl(url)) return null
   if (exec === 'admin' && !admin) return null
   if (exec === 'script' && !(script ?? '').trim()) return null
@@ -553,11 +600,17 @@ function parseCommand(c: any): BotCommandDef | null {
     reply,
     script,
     admin,
+    music,
+    sfx,
     permission: perm === 'moderate' || perm === 'manage' || perm === 'owner' ? perm : '',
     cooldownMs: Math.max(
       0,
       Math.min(BOT_MAX_COOLDOWN_MS, numberOr(c.cooldownMs, BOT_DEFAULT_COOLDOWN_MS)),
     ),
+    timeoutMs:
+      typeof c.timeoutMs === 'number' && Number.isFinite(c.timeoutMs)
+        ? Math.trunc(Math.max(1_000, Math.min(90_000, c.timeoutMs)))
+        : undefined,
     ephemeral: c.ephemeral === true,
     enabled: c.enabled !== false,
     autocomplete: c.autocomplete === true,
@@ -735,6 +788,15 @@ export function serializeBotConfig(cfg: BotConfig): string {
       const out: Record<string, unknown> = { name: c.name }
       if (c.aliases?.length) out.aliases = c.aliases
       if (c.description) out.description = c.description
+      // Legado (música/efeito): preserva como estava para não perder a config
+      // do usuário; o runtime atual simplesmente não executa.
+      if (LEGACY_EXEC.includes(exec as BotExecLegacy)) {
+        out.exec = exec
+        if (c.music) out.music = c.music
+        if (c.sfx) out.sfx = c.sfx
+        if (c.enabled === false) out.enabled = false
+        return out
+      }
       out.exec = exec
       if (exec === 'http') {
         out.method = c.method
@@ -743,6 +805,7 @@ export function serializeBotConfig(cfg: BotConfig): string {
         if (c.body) out.body = c.body
         if (c.responsePath) out.responsePath = c.responsePath
         if (c.template) out.template = c.template
+        if (c.timeoutMs !== undefined) out.timeoutMs = c.timeoutMs
       }
       if (exec === 'reply' && c.reply) out.reply = c.reply
       if (exec === 'script' && c.script) out.script = c.script
@@ -793,6 +856,12 @@ export interface RenderVars {
   value?: string
   json?: unknown
   vars?: Record<string, string>
+  author?: string
+}
+
+/** Args como string pronta para dentro de um JSON ("pergunta \"assim\"" válida). */
+export function encodeForJson(s: string): string {
+  return JSON.stringify(s).slice(1, -1)
 }
 
 export function renderTemplate(tpl: string, vars: RenderVars): string {
@@ -805,6 +874,16 @@ export function renderTemplate(tpl: string, vars: RenderVars): string {
       return i < vars.args.length ? encodeForUrl(vars.args[i]) : ''
     })
     .replace(/\{\{\s*raw\.args\s*\}\}/g, () => vars.args.join(' '))
+    .replace(/\{\{\s*jsonargs\s*\}\}/g, () =>
+      vars.args
+        .join(' ')
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\r/g, '\\r')
+        .replace(/\n/g, '\\n')
+        .replace(/\t/g, '\\t'),
+    )
+    .replace(/\{\{\s*author\s*\}\}/g, () => vars.author ?? '')
     .replace(/\{\{\s*value\s*\}\}/g, () => vars.value ?? '')
     .replace(/\{\{\s*var\.([\w.:-]+)\s*\}\}/g, (_m, k: string) => table[k] ?? '')
     .replace(/\{\{\s*json\.([\w.$-]+)\s*\}\}/g, (_m, path: string) => {
@@ -898,6 +977,9 @@ export function renderBotReply(
 
 /** Valida a definição de UM comando no editor, antes de salvar. */
 export function commandProblem(cmd: BotCommandDef, others: BotCommandDef[]): string | null {
+  // Comando legado (música/efeito de config antiga) fica visível mas desligado:
+  // não é erro do usuário, então não bloqueia o salvar do resto.
+  if (cmd.enabled === false && (cmd.music || cmd.sfx)) return null
   const name = normalizeBotCommandName(cmd.name)
   if (!name) return 'informe um nome (ex.: clima)'
   if (others.some((o) => o !== cmd && o.name === name)) return 'já existe um comando com esse nome'

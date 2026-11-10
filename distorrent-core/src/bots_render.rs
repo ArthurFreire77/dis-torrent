@@ -45,6 +45,8 @@ pub(crate) fn render_key(key: &str, ctx: &RenderCtx<'_>) -> String {
             .collect::<Vec<_>>()
             .join("+"),
         "raw.args" => ctx.args.join(" "),
+        // Args escapados para colar dentro de um literal JSON de corpo POST.
+        "jsonargs" => json_encode(&ctx.args.join(" ")),
         "value" => ctx.value.unwrap_or("").to_string(),
         "json" => {
             if let Some(j) = ctx.json {
@@ -122,6 +124,9 @@ pub fn normalize(cfg: &BotConfig) -> serde_json::Value {
             if !c.need.as_str().is_empty() {
                 o["permission"] = serde_json::json!(c.need.as_str());
             }
+            if let Some(t) = c.timeout_ms {
+                o["timeoutMs"] = serde_json::json!(t);
+            }
             if c.ephemeral {
                 o["ephemeral"] = serde_json::json!(true);
             }
@@ -151,6 +156,12 @@ pub fn normalize(cfg: &BotConfig) -> serde_json::Value {
             }
             if let Some(a) = &c.admin {
                 o["admin"] = serde_json::json!(a);
+            }
+            if let Some(m) = &c.music {
+                o["music"] = serde_json::json!(m);
+            }
+            if let Some(s) = &c.sfx {
+                o["sfx"] = serde_json::json!(s);
             }
             if !c.args.is_empty() {
                 o["args"] = serde_json::json!(c
@@ -210,6 +221,23 @@ pub(crate) fn url_encode(s: &str) -> String {
                 out.push(b as char)
             }
             _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Escapa uma string para caber DENTRO de um literal JSON (sem aspas externas).
+pub(crate) fn json_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if (other as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", other as u32)),
+            other => out.push(other),
         }
     }
     out

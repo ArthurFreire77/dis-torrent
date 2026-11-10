@@ -200,7 +200,11 @@ pub(crate) async fn http_fetch(
             .unwrap_or_else(|| reqwest::Body::from(b.to_string())),
         _ => reqwest::Body::from(Vec::new()),
     };
-    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000).min(15_000));
+    // LLM responde devagar; o teto acompanha o do runtime declarativo (90s).
+    let mut timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000).min(90_000));
+    if timeout.as_millis() < 1_000 {
+        timeout = std::time::Duration::from_millis(1_000);
+    }
     let guarded = block_private;
     let client = reqwest::Client::builder()
         .timeout(timeout)

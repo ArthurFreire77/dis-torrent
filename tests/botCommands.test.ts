@@ -19,6 +19,7 @@ import {
   BOT_PERM_DEFS,
   BOT_ADMIN_ACTIONS,
   BOT_EVENTS,
+  defaultBotConfig,
   type BotConfig,
   type BotCommandDef,
 } from '../src/services/botCommands.ts'
@@ -45,6 +46,33 @@ test('renderTemplate: args/arg0/query/raw.args/value/json', () => {
   assert.equal(renderTemplate('{{raw.args}}', { args: ['a b', 'c'] }), 'a b c')
   assert.equal(renderTemplate('{{value}}', { args: [], value: 'ok' }), 'ok')
   assert.equal(renderTemplate('{{json.data.x}}', { args: [], json: { data: { x: 'v' } } }), 'v')
+})
+
+test('renderTemplate: jsonargs/author — o corpo POST de IA não quebra', () => {
+  // Aspas, barra invertida e quebra de linha no meio da pergunta do usuário.
+  assert.equal(
+    renderTemplate('{{jsonargs}}', { args: ['o', 'que', 'é', '"\\n"'] }),
+    'o que é \\"\\\\n\\"',
+  )
+  assert.equal(renderTemplate('"prompt": "{{jsonargs}}"', { args: ['oi "tudo" bem'] }), '"prompt": "oi \\"tudo\\" bem"')
+  assert.equal(renderTemplate('{{author}}', { args: [], author: 'lucas' }), 'lucas')
+  assert.equal(renderTemplate('{{author}}', { args: [] }), '')
+})
+
+test('serialize/parse: timeoutMs sobrevive ao round-trip', () => {
+  const cfg = defaultBotConfig()
+  cfg.commands = [
+    { name: 'ia', method: 'POST', url: 'https://api.exemplo.com/v1/chat', exec: 'http', timeoutMs: 60_000, body: '{"q":"{{jsonargs}}"}' },
+  ]
+  const json = serializeBotConfig(cfg)
+  const back = parseBotConfig(json)
+  assert.equal(back?.commands[0].timeoutMs, 60_000)
+  // Fora dos limites é clampado, não descartado.
+  const cfg2 = defaultBotConfig()
+  cfg2.commands = [
+    { name: 'x', method: 'POST', url: 'https://api.exemplo.com/v1/chat', exec: 'http', timeoutMs: 999_999 },
+  ]
+  assert.equal(parseBotConfig(serializeBotConfig(cfg2))?.commands[0].timeoutMs, 90_000)
 })
 
 test('renderTemplate: URL com {{query}} usa "+" como separador', () => {

@@ -14,6 +14,9 @@ import {
   commandProblem,
   normalizeBotCommandName,
   urlProblem,
+  hostAllowed,
+  renderTemplate,
+  renderBotReply,
   type BotCommandDef,
   type BotExec,
   type BotConfig,
@@ -53,6 +56,7 @@ export function BotPanel({
   const [cfg, setCfg] = useState<BotConfig>(initial)
   const [perms, setPerms] = useState<number>(bot.perms ?? 0)
   const [roleId, setRoleId] = useState(bot.roleId ?? '')
+  const [avatar, setAvatar] = useState(bot.avatar ?? '')
   const [online, setOnline] = useState(bot.online)
   const [roles, setRoles] = useState<RoleView[]>([])
   const [token, setToken] = useState(bot.token)
@@ -73,6 +77,9 @@ export function BotPanel({
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
   const [folderDir, setFolderDir] = useState('')
   const [folderRun, setFolderRun] = useState('')
+  /** Teste de comando HTTP: roda sem postar; guarda o resultado por comando. */
+  const [testState, setTestState] = useState<Record<string, { busy: boolean; out: string | null }>>({})
+  const [testArgs, setTestArgs] = useState<Record<string, string>>({})
   const consoleRef = useRef<HTMLDivElement | null>(null)
 
   const hasNative = typeof services.botBridgeStart === 'function'
@@ -141,6 +148,22 @@ export function BotPanel({
     }))
   }
 
+  /** `Chave: valor` por linha — o formato do editor de headers. */
+  function headersToText(h?: Record<string, string>): string {
+    return Object.entries(h ?? {})
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('\n')
+  }
+
+  function headersFromText(text: string): Record<string, string> | undefined {
+    const out: Record<string, string> = {}
+    for (const line of text.split('\n')) {
+      const m = line.match(/^\s*([A-Za-z0-9-]{1,64})\s*:\s*(.*)$/)
+      if (m) out[m[1]] = m[2].trim().slice(0, 1024)
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+
   function addCommand() {
     const usados = new Set(cfg.commands.map((c) => c.name))
     let n = cfg.commands.length + 1
@@ -180,6 +203,7 @@ export function BotPanel({
         roleId: roleId || null,
         online,
         webhookSecret: cfg.webhookSecret,
+        avatar: avatar.trim().slice(0, 2),
       })
       setSavedAt(Date.now())
       onSaved()
@@ -204,6 +228,52 @@ export function BotPanel({
       setError(e instanceof Error ? e.message : 'não foi possível gerar um novo token')
     } finally {
       setRegenBusy(false)
+    }
+  }
+
+  /** Executa o comando HTTP com args de amostra sem postar no canal. */  async function testCommand(index: number, cmd: BotCommandDef, sample: string) {
+    const uid = `cmd-${index}`
+    const args = sample.trim() ? sample.trim().split(/\s+/).slice(0, 16) : []
+    const p = urlProblem(cmd.url, cfg.blockPrivate)
+    if (p) {
+      setTestState((prev) => ({ ...prev, [uid]: { busy: false, out: `❌ ${p}` } }))
+      return
+    }
+    if (cfg.httpAllow?.length && !hostAllowed(renderTemplate(cmd.url, { args }), cfg.httpAllow)) {
+      setTestState((prev) => ({ ...prev, [uid]: { busy: false, out: '❌ domínio fora da allowlist' } }))
+      return
+    }
+    setTestState((prev) => ({ ...prev, [uid]: { busy: true, out: null } }))
+    const started = Date.now()
+    try {
+      const url = renderTemplate(cmd.url, { args })
+      const body = cmd.method === 'POST' && cmd.body ? renderTemplate(cmd.body, { args }) : null
+      const timeout = Math.max(10_000, cmd.timeoutMs ?? 0)
+      const res = await services.httpFetch(
+        url,
+        cmd.method,
+        cmd.headers ?? {},
+        body,
+        timeout,
+        !cfg.blockPrivate,
+      )
+      const ms = Date.now() - started
+      if (res.status >= 400) {
+        setTestState((prev) => ({ ...prev, [uid]: { busy: false, out: `❌ HTTP ${res.status} (${ms}ms): ${(res.body || '').slice(0, 300)}` } }))
+        return
+      }
+      const reply = renderBotReply(cmd, args, res.body ?? '')
+      setTestState((prev) => ({
+        ...prev,
+        [uid]: {
+          busy: false,
+          out: reply
+            ? `✅ HTTP ${res.status} (${ms}ms) — resposta: ${reply.slice(0, 400)}`
+            : `⚠️ HTTP ${res.status} (${ms}ms), mas o responsePath/template não achou texto (resposta: ${(res.body || '').slice(0, 200)})`,
+        },
+      }))
+    } catch (e: unknown) {
+      setTestState((prev) => ({ ...prev, [uid]: { busy: false, out: `❌ ${e instanceof Error ? e.message : String(e)}` } }))
     }
   }
 
@@ -510,6 +580,14 @@ export function BotPanel({
                 hint="As permissões do bot vêm deste cargo. Menos é mais."
                 onChange={setRoleId}
               />
+              <TextField
+                label="Ícone do bot"
+                value={avatar}
+                maxLength={2}
+                ariaLabel="Ícone do bot"
+                hint="Um emoji (🎵, 🔊) ou uma letra. Vazio usa a inicial do nome."
+                onChange={setAvatar}
+              />
             </div>
             <div
               style={{
@@ -589,6 +667,15 @@ export function BotPanel({
                 onChange={(v) => setCfg((p) => ({ ...p, maxRepliesPerMinute: Math.max(1, Math.min(120, Number(v) || 20)) }))}
               />
             </div>
+            {cfg.commands.some((c) => c.enabled === false && (c.music || c.sfx)) && (
+              <div style={{ marginTop: ui.md }}>
+                <Notice tone="warning" icon="warn">
+                  Há comando(s) de <b>música</b>/<b>efeito</b> de uma versão antiga. Eles ficam
+                  desligados: música e efeitos agora são um <b>bot importado</b>, não um comando do
+                  app. Pode excluir estes comandos sem medo.
+                </Notice>
+              </div>
+            )}
 
             {cfg.commands.length === 0 ? (
               <EmptyState
@@ -734,11 +821,33 @@ export function BotPanel({
                                 <TextArea
                                   label="Corpo (POST)"
                                   value={c.body ?? ''}
-                                  rows={2}
+                                  rows={3}
                                   ariaLabel={`Corpo do comando ${i + 1}`}
+                                  hint={`Use {{jsonargs}} para o texto do usuário escapado para JSON (pergunta com aspas não quebra), {{raw.args}} cru.`}
                                   onChange={(v) => patchCmd(i, { body: v || undefined })}
                                 />
                               )}
+                              <TextArea
+                                label="Headers (um por linha: Chave: valor)"
+                                value={headersToText(c.headers)}
+                                rows={2}
+                                ariaLabel={`Headers do comando ${i + 1}`}
+                                hint="Ex.: Authorization: Bearer sua-chave (necessário para APIs de IA)."
+                                onChange={(v) => patchCmd(i, { headers: headersFromText(v) })}
+                              />
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: `0 ${ui.lg}` }}>
+                                <TextField
+                                  label="Timeout (s)"
+                                  value={c.timeoutMs ? String(Math.round(c.timeoutMs / 1000)) : ''}
+                                  mono
+                                  ariaLabel={`Timeout do comando ${i + 1}`}
+                                  hint="Vazio = 10s. Até 90s. APIs de IA precisam de mais."
+                                  onChange={(v) => {
+                                    const n = Math.trunc(Number(v) || 0)
+                                    patchCmd(i, { timeoutMs: n > 0 ? Math.min(90, n) * 1000 : undefined })
+                                  }}
+                                />
+                              </div>
                               <TextField
                                 label="Template da resposta"
                                 value={c.template ?? ''}
@@ -747,6 +856,30 @@ export function BotPanel({
                                 hint="{{value}} é o campo do caminho; {{json.campo}} busca direto no corpo."
                                 onChange={(v) => patchCmd(i, { template: v || undefined })}
                               />
+                              <div style={{ display: 'flex', gap: ui.sm, alignItems: 'flex-end', flexWrap: 'wrap', paddingTop: ui.sm }}>
+                                <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+                                  <TextField
+                                    label="Testar com argumentos"
+                                    value={testArgs[uid] ?? ''}
+                                    mono
+                                    ariaLabel={`Argumentos de teste do comando ${i + 1}`}
+                                    hint="Ex.: sao paulo — executa o comando sem postar no canal."
+                                    onChange={(v) => setTestArgs((prev) => ({ ...prev, [uid]: v }))}
+                                  />
+                                </div>
+                                <Button
+                                  variant="secondary"
+                                  icon="play"
+                                  busy={testState[uid]?.busy}
+                                  disabled={!c.url.trim()}
+                                  onClick={() => void testCommand(i, c, testArgs[uid] ?? '')}
+                                >
+                                  Testar
+                                </Button>
+                              </div>
+                              {testState[uid]?.out && (
+                                <div style={{ ...consoleStyle, padding: '8px 10px' }} data-bot-test={uid}>{testState[uid].out}</div>
+                              )}
                             </>
                           )}
 

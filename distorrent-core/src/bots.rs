@@ -83,6 +83,10 @@ pub enum Exec {
     Script,
     /// Ação administrativa nativa (`admin`).
     Admin,
+    /// Player de música na call (`music`).
+    Music,
+    /// Efeito sonoro na call (`sfx`) — reaproveita o soundboard.
+    Sfx,
 }
 
 impl Exec {
@@ -92,6 +96,8 @@ impl Exec {
             Exec::Reply => "reply",
             Exec::Script => "script",
             Exec::Admin => "admin",
+            Exec::Music => "music",
+            Exec::Sfx => "sfx",
         }
     }
 }
@@ -118,8 +124,14 @@ pub struct BotCommand {
     pub reply: Option<String>,
     pub script: Option<String>,
     pub admin: Option<String>,
+    /// Ação do player de música (`play`, `pause`, `resume`, `skip`, `stop`, `queue`).
+    pub music: Option<String>,
+    /// Nome do som do soundboard que este comando toca (`sfx`).
+    pub sfx: Option<String>,
     pub need: Need,
     pub cooldown_ms: i64,
+    /// Timeout HTTP por comando em ms (1s..90s); `None` = default do runtime.
+    pub timeout_ms: Option<i64>,
     pub ephemeral: bool,
     pub enabled: bool,
     pub autocomplete: bool,
@@ -142,8 +154,11 @@ impl BotCommand {
             reply: None,
             script: None,
             admin: None,
+            music: None,
+            sfx: None,
             need: Need::None,
             cooldown_ms: DEFAULT_COOLDOWN_MS,
+            timeout_ms: None,
             ephemeral: false,
             enabled: true,
             autocomplete: false,
