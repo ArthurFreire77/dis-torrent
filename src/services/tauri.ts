@@ -312,6 +312,9 @@ export const tauriServices: DisTorrentServices = {
     invoke<boolean>('bot_audio_open', { communityId: cid, botId }),
   /** Pedidos de entrada na call feitos por bots (consumido uma vez). */
   botCallTake: () => invoke<[string, string][]>('bot_call_take'),
+  /** Puxa frames de PCM (i16 48 kHz mono, base64) do bot para tocar. */
+  botAudioDrain: (cid, botId, max) =>
+    invoke<string[]>('bot_audio_drain', { communityId: cid, botId, max: max ?? null }),
   botAudioPush: (cid, botId, pcmB64, gain) =>
     invoke<{ accepted: number; dropped: number; delivered: string; to_call: boolean }>(
       'bot_audio_push',

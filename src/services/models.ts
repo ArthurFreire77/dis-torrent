@@ -753,6 +753,8 @@ export interface DisTorrentServices {
   botAudioOpen?(communityId: string, botId: string): Promise<boolean>
   /** Bots que pediram para entrar na call com áudio próprio. */
   botCallTake?(): Promise<[string, string][]>
+  /** Puxa frames de PCM (i16 48 kHz mono, base64) do bot. */
+  botAudioDrain?(communityId: string, botId: string, max?: number | null): Promise<string[]>
   botAudioPush?(
     communityId: string,
     botId: string,

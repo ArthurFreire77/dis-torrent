@@ -410,8 +410,9 @@ pub(super) fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<Networ
                         "ok": true,
                         "accepted": acc,
                         "dropped": drop,
-                        "delivered": "local",
-                        "to_call": false,
+                        // O áudio vira a track do participante na chamada.
+                        "delivered": "participant",
+                        "to_call": true,
                     }),
                 ),
                 Err(e) => respond(req, 409, serde_json::json!({"error": e})),
@@ -428,11 +429,11 @@ pub(super) fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<Networ
                         "open": true,
                         "accepted": acc,
                         "dropped": drop,
-                        "delivered": "local",
-                        "to_call": false,
+                        "delivered": "participant",
+                        "to_call": true,
                     }),
                     None => {
-                        serde_json::json!({"open": false, "delivered": "local", "to_call": false})
+                        serde_json::json!({"open": false, "delivered": "participant", "to_call": true})
                     }
                 },
             )

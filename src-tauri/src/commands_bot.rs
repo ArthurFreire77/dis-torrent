@@ -526,10 +526,31 @@ pub(crate) fn bot_audio_push(
     Ok(serde_json::json!({
         "accepted": acc,
         "dropped": drop,
-        // Honestidade: o áudio saiu neste PC, não na call.
-        "delivered": "local",
-        "to_call": false,
+        // O áudio entra na track do participante; quem liga é o frontend.
+        "delivered": "participant",
+        "to_call": true,
     }))
+}
+
+#[tauri::command]
+pub(crate) fn bot_audio_drain(
+    community_id: String,
+    bot_id: String,
+    max: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    // Cada frame é PCM i16 mono 48 kHz em base64 — o frontend decodifica para
+    // AudioBuffer e toca na track do participante.
+    let key = bridge_key(&community_id, &bot_id);
+    let frames = state.bot_music.drain(&key, max.unwrap_or(25).min(100));
+    use base64::Engine as _;
+    Ok(frames
+        .into_iter()
+        .map(|pcm| {
+            let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        })
+        .collect())
 }
 
 #[tauri::command]

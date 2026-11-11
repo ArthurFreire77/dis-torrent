@@ -56,11 +56,16 @@ async function entryDoBot(communityId: string, botId: string): Promise<boolean> 
 
   // `setBotMusicEnabled` cria a m-line separada e entra no roster. O frontend
   // entrega o áudio decodificado no destino que ela devolve.
-  return callManager.setBotMusicEnabled(true, nome, `bot:${botId}`).catch(() => false)
+  const abriu = await callManager
+    .setBotMusicEnabled(true, nome, `bot:${botId}`)
+    .catch(() => false)
+  if (abriu) iniciarConsumoDeAudio(communityId, botId)
+  return abriu
 }
 
 /** O bot sai da call (fim do plugin ou `!parar`). */
 export async function sairDaCall(): Promise<void> {
+  pararConsumoDeAudio()
   await callManager.setBotMusicEnabled(false).catch(() => {})
 }
 
@@ -79,5 +84,73 @@ export function tocarNoBot(buffer: AudioBuffer): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+// ─── Laço de consumo do PCM ──────────────────────────────────────────────
+
+let lacoAudio: ReturnType<typeof setInterval> | null = null
+let botAtual: { communityId: string; botId: string } | null = null
+
+/** base64 → Float32Array (PCM i16 little-endian). */
+function pcmB64ParaFloat(b64: string): Float32Array<ArrayBuffer> | null {
+  try {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    const n = Math.floor(bytes.length / 2)
+    // Buffer próprio: `copyToChannel` exige ArrayBuffer, não SharedArrayBuffer.
+    const out = new Float32Array(new ArrayBuffer(n * 4))
+    const dv = new DataView(bytes.buffer)
+    for (let i = 0; i < n; i++) out[i] = dv.getInt16(i * 2, true) / 32768
+    return out
+  } catch {
+    return null
+  }
+}
+
+/** Junta os frames em um AudioBuffer e toca. */
+function tocarLote(frames: string[]): number {
+  const { ctx } = callManager.botMusicSink()
+  if (!ctx) return 0
+  let tocados = 0
+  for (const b64 of frames) {
+    const amostras = pcmB64ParaFloat(b64)
+    if (!amostras || amostras.length === 0) continue
+    try {
+      const buffer = ctx.createBuffer(1, amostras.length, 48_000)
+      buffer.copyToChannel(amostras, 0)
+      if (tocarNoBot(buffer)) tocados++
+    } catch {}
+  }
+  return tocados
+}
+
+/**
+ * Puxa o PCM do bot a cada 450 ms e toca na track do participante.
+ * Começa quando um bot entra na call; para sozinho se a track sumir.
+ */
+export function iniciarConsumoDeAudio(communityId: string, botId: string): void {
+  botAtual = { communityId, botId }
+  if (lacoAudio) return
+  lacoAudio = setInterval(() => {
+    void (async () => {
+      if (!botAtual) return
+      if (!services.botAudioDrain) return
+      try {
+        // 25 frames = 500 ms de áudio por ciclo.
+        const frames = await services.botAudioDrain(botAtual.communityId, botAtual.botId, 25)
+        if (!Array.isArray(frames) || frames.length === 0) return
+        tocarLote(frames)
+      } catch {}
+    })()
+  }, 450)
+}
+
+export function pararConsumoDeAudio(): void {
+  botAtual = null
+  if (lacoAudio) {
+    clearInterval(lacoAudio)
+    lacoAudio = null
   }
 }

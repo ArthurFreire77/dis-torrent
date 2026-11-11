@@ -66,7 +66,7 @@ import { mergeChannels, isCallableChannel } from '../app/channels'
 import CallPhaseBadge from '../components/CallPhaseBadge'
 import { downloadManager } from '../services/downloadManager'
 import { startDownload } from '../services/downloadAction'
-import { botRuntime } from '../services/botRuntime'
+import { botRuntime, iniciarEntradaDeBotsNaCall } from '../services/botRuntime'
 import { StormVaultPanel } from '../components/vault/StormVaultPanel'
 import { UpdateSettingsBox } from '../components/UpdateSettingsBox'
 import { MetricsPanel } from '../components/dev/MetricsPanel'
@@ -553,6 +553,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     } catch (e) { console.warn('[distorrent-probe] AppState FALHOU:', String(e)) }
     let stopBots: (() => void) | undefined
     try { stopBots = botRuntime.start() } catch {  }
+    try { iniciarEntradaDeBotsNaCall() } catch {  }
     void downloadManager.load().catch(() => {  })
     let unCount = () => {}
     try {
