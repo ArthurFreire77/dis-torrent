@@ -220,7 +220,9 @@ pub async fn completar(
         path: caminho_existente,
     }) {
         if let Err(e) = store.kv_set(KV_PENDING, &raw) {
-            return Err(format!("não consegui registrar a atualização pendente: {e}"));
+            return Err(format!(
+                "não consegui registrar a atualização pendente: {e}"
+            ));
         }
     }
     let _ = app.emit("distorrent://update", &info);
