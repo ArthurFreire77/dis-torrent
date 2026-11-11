@@ -20,8 +20,7 @@ refreshIdentityCache()
  * Instância única do runtime. Só o dono do servidor executa bots; a checagem de
  * dono acontece dentro do `BotEngine` (compara `owner_fp` com o meu).
  */
-export const botRuntime = new BotEngine(
-  {
+export const botRuntime = new BotEngine(  {
     subscribe: (cb) => services.subscribe(cb),
     communitiesList: () => services.communitiesList(),
     botsList: (cid) => services.botsList(cid),
@@ -48,3 +47,21 @@ export const botRuntime = new BotEngine(
     return cachedFingerprint ? { fingerprint: cachedFingerprint } : null
   },
 )
+
+// O bot roda fora do app e pede para entrar na call pela ponte. Este laço só
+// aceita o pedido e liga a track — o app não sabe o que o bot vai tocar.
+let lacoCall: ReturnType<typeof setInterval> | null = null
+
+export function iniciarEntradaDeBotsNaCall(): void {
+  if (lacoCall) return
+  lacoCall = setInterval(() => {
+    void import('./botCallMedia').then((m) => m.processarPedidosDeCall()).catch(() => {})
+  }, 4000)
+}
+
+export function pararEntradaDeBotsNaCall(): void {
+  if (lacoCall) {
+    clearInterval(lacoCall)
+    lacoCall = null
+  }
+}

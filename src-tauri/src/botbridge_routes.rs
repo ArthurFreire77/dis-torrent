@@ -368,16 +368,19 @@ pub(super) fn handle(mut req: Request, shared: &Arc<Shared>, engine: &Arc<Networ
         (Method::Post, "/v1/audio/open") => {
             let key = format!("{}|{}", shared.community_id, shared.bot_id);
             let (abriu, _) = shared.music.open(&key);
+            // O bot entra na call como PARTICIPANTE: o frontend lê este estado
+            // e cria a track própria. O app não sabe que é música — aceita
+            // qualquer áudio de participante.
+            crate::botmusic::marcar_pedido_de_call(&shared.community_id, &shared.bot_id);
             respond(
                 req,
                 200,
                 serde_json::json!({
                     "ok": true,
                     "opened": abriu,
-                    "delivered": "local",
-                    "to_call": false,
                     "sample_rate": 48_000,
                     "channels": 1,
+                    "joined_as": "participant",
                 }),
             )
         }

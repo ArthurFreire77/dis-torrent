@@ -1532,6 +1532,7 @@ fn main() {
             commands_misc::open_bots_window,
             commands_misc::http_fetch,
             commands_voice::voice_join,
+            commands_bot::bot_call_take,
             commands_bot::bot_audio_open,
             commands_bot::bot_audio_push,
             commands_bot::bot_audio_status,

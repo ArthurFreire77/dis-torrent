@@ -486,6 +486,11 @@ pub(crate) fn bot_plugin_list(
 }
 
 #[tauri::command]
+pub(crate) fn bot_call_take() -> Vec<(String, String)> {
+    crate::botmusic::tomar_pedidos_de_call()
+}
+
+#[tauri::command]
 pub(crate) fn bot_audio_open(
     community_id: String,
     bot_id: String,

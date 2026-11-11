@@ -91,6 +91,31 @@ pub struct Music {
     map: Mutex<HashMap<String, MusicHandle>>,
 }
 
+/// Pedidos de entrada na call: `(community_id, bot_id)`. O frontend consome
+/// via `bot_call_take`, que zera a entrada. Um bot que abre `/v1/audio/open`
+/// quer entrar como participante com áudio próprio.
+static PEDIDOS_CALL: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn marcar_pedido_de_call(community_id: &str, bot_id: &str) {
+    let mut p = PEDIDOS_CALL.lock().unwrap_or_else(|e| e.into_inner());
+    let entrada = (community_id.to_string(), bot_id.to_string());
+    if !p.contains(&entrada) {
+        // Teto: a fila não pode crescer sem limite se o frontend não consumir.
+        if p.len() >= 32 {
+            p.remove(0);
+        }
+        p.push(entrada);
+    }
+}
+
+/// Tira (e devolve) os pedidos pendentes. Consumir zera: o frontend decide uma
+/// vez por pedido.
+pub fn tomar_pedidos_de_call() -> Vec<(String, String)> {
+    let mut p = PEDIDOS_CALL.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *p)
+}
+
 impl Default for Music {
     fn default() -> Self {
         Self {

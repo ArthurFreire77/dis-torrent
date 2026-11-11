@@ -310,6 +310,8 @@ export const tauriServices: DisTorrentServices = {
   botBridgeList: () => invoke<BotBridgeInfo[]>('bot_bridge_list'),
   botAudioOpen: (cid, botId) =>
     invoke<boolean>('bot_audio_open', { communityId: cid, botId }),
+  /** Pedidos de entrada na call feitos por bots (consumido uma vez). */
+  botCallTake: () => invoke<[string, string][]>('bot_call_take'),
   botAudioPush: (cid, botId, pcmB64, gain) =>
     invoke<{ accepted: number; dropped: number; delivered: string; to_call: boolean }>(
       'bot_audio_push',

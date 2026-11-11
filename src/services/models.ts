@@ -751,6 +751,8 @@ export interface DisTorrentServices {
    * devolve erro explicando.
    */
   botAudioOpen?(communityId: string, botId: string): Promise<boolean>
+  /** Bots que pediram para entrar na call com áudio próprio. */
+  botCallTake?(): Promise<[string, string][]>
   botAudioPush?(
     communityId: string,
     botId: string,
