@@ -548,6 +548,67 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// Reenfileira mensagens que desistiram ("failed") quando o peer volta.
+    ///
+    /// POR QUE: `give_up_outbox` marcava `failed` e removia do outbox; sem isto
+    /// a mensagem ficava failed para sempre e só saía por "reenviar" manual.
+    /// O retry automático ao reconectar é o que o usuário espera de mensageiro.
+    pub fn requeue_failed_for_peer(&self, peer_fp: &str) -> Result<usize> {
+        let ids = {
+            let conn = self.locked();
+            let mut st = conn.prepare(
+                "SELECT m.id FROM messages m
+                   JOIN conversations c ON c.id = m.conv_id
+                  WHERE m.direction='out' AND m.status='failed' AND c.kind='dm' AND c.peer_fp=?1
+                  ORDER BY m.ts ASC LIMIT 200",
+            )?;
+            let ids = st
+                .query_map(params![peer_fp], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &ids {
+            self.requeue_outbox(id, peer_fp)?;
+            self.set_message_status(id, "pending")?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Mensagens presas em `sending` cujo outbox parou de tentar (peer offline).
+    /// A UI precisa dizer a verdade: "pendente, entrega ao reconectar".
+    pub fn revert_stuck_outbox_sending(&self, older_than_ts: i64) -> Result<Vec<String>> {
+        let ids = {
+            let conn = self.locked();
+            let mut st = conn.prepare(
+                "SELECT m.id FROM messages m
+                   JOIN outbox o ON o.msg_id = m.id
+                  WHERE m.direction='out' AND m.status='sending' AND m.ts < ?1
+                  LIMIT 500",
+            )?;
+            let ids = st
+                .query_map(params![older_than_ts], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &ids {
+            self.set_message_status(id, "pending")?;
+        }
+        Ok(ids)
+    }
+
+    /// Peers com mensagem no outbox, inclusive offline. O tick de flush usava
+    /// só `online_peer_fps()`, então o outbox de um amigo sem rota nunca era
+    /// inspecionado nem avisado.
+    pub fn outbox_peers(&self) -> Result<Vec<String>> {
+        let conn = self.locked();
+        let mut st = conn.prepare("SELECT DISTINCT peer_fp FROM outbox")?;
+        let rows = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(DistorrentError::from)?;
+        Ok(rows)
+    }
+
     pub fn message_by_id(&self, msg_id: &str) -> Result<Option<StoredMessage>> {
         let conn = self.locked();
         let mut st = conn.prepare(

@@ -575,6 +575,19 @@ pub(super) async fn run_engine(engine: Arc<NetworkEngine>, discovery_enabled: bo
                     }
                     engine.cmd_tx.send(EngineCmd::FlushOutbox(fp)).ok();
                 }
+                // O outbox de um amigo SEM rota também precisa ser olhado: antes
+                // só peers Online entravam aqui, então `sending`/`failed` ficavam
+                // presos para sempre e o usuário via "enviando…" eterno.
+                for fp in engine.store.outbox_peers().unwrap_or_default() {
+                    if engine.online_peer_fps().iter().any(|p| p == &fp) {
+                        continue;
+                    }
+                    if let Ok(ids) = engine.store.revert_stuck_outbox_sending(cutoff) {
+                        for id in ids {
+                            let _ = engine.events.send(EngineEvent::MessageStatus { msg_id: id, status: "pending".into() });
+                        }
+                    }
+                }
             }
             _ = friend_tick.tick() => {
                 friend_retry_tick = friend_retry_tick.wrapping_add(1);

@@ -69,6 +69,78 @@ fn outbox_respeita_backoff_e_teto_de_tentativas() {
 }
 
 #[test]
+fn failed_volta_pra_fila_quando_o_amigo_reconecta() {
+    let store = Store::open_in_memory().unwrap();
+    let kp = crate::identity::Keypair::generate();
+    let me = kp.identity("me");
+    let peer = "peerfp000003";
+    let conv = store
+        .ensure_dm_conversation(&me.fingerprint, peer, "Peer")
+        .unwrap();
+    let env = MessageEnvelope::new(&kp, &conv.id, "oi");
+    store.insert_message(&env, "out", "sent").unwrap();
+    store.enqueue_outbox(&env.id, peer).unwrap();
+    for _ in 0..=Store::OUTBOX_MAX_ATTEMPTS {
+        store.bump_outbox(&env.id).unwrap();
+    }
+    assert_eq!(store.give_up_outbox(peer).unwrap(), vec![env.id.clone()]);
+    assert_eq!(
+        store.message_by_id(&env.id).unwrap().unwrap().status,
+        "failed"
+    );
+    assert!(
+        store.outbox_len_for_peer(peer) == 0,
+        "desistiu saiu da fila"
+    );
+
+    // Reconexão: a falha volta para pending e ganha nova tentativa.
+    assert_eq!(store.requeue_failed_for_peer(peer).unwrap(), 1);
+    let m = store.message_by_id(&env.id).unwrap().unwrap();
+    assert_eq!(
+        m.status, "pending",
+        "failed antigo não fica preso para sempre"
+    );
+    assert_eq!(store.pending_outbox(peer).unwrap(), vec![env.id.clone()]);
+}
+
+#[test]
+fn outbox_peers_inclui_quem_esta_offline() {
+    let store = Store::open_in_memory().unwrap();
+    let kp = crate::identity::Keypair::generate();
+    let me = kp.identity("me");
+    let peer = "peerfp000004";
+    let conv = store
+        .ensure_dm_conversation(&me.fingerprint, peer, "Peer")
+        .unwrap();
+    let env = MessageEnvelope::new(&kp, &conv.id, "pendente");
+    store.insert_message(&env, "out", "pending").unwrap();
+    store.enqueue_outbox(&env.id, peer).unwrap();
+    // Sem link Online, o flush antigo nunca olhava este outbox.
+    assert_eq!(store.outbox_peers().unwrap(), vec![peer.to_string()]);
+}
+
+#[test]
+fn sending_preso_sem_link_volta_para_pending() {
+    let store = Store::open_in_memory().unwrap();
+    let kp = crate::identity::Keypair::generate();
+    let me = kp.identity("me");
+    let peer = "peerfp000005";
+    let conv = store
+        .ensure_dm_conversation(&me.fingerprint, peer, "Peer")
+        .unwrap();
+    let env = MessageEnvelope::new(&kp, &conv.id, "enviando");
+    store.insert_message(&env, "out", "sending").unwrap();
+    store.enqueue_outbox(&env.id, peer).unwrap();
+    let futuro = crate::identity::now_ms() + 5_000;
+    let ids = store.revert_stuck_outbox_sending(futuro).unwrap();
+    assert_eq!(ids, vec![env.id.clone()]);
+    assert_eq!(
+        store.message_by_id(&env.id).unwrap().unwrap().status,
+        "pending"
+    );
+}
+
+#[test]
 fn backoff_do_outbox_cresce_e_da_janela_util() {
     let store = Store::open_in_memory().unwrap();
     let kp = crate::identity::Keypair::generate();

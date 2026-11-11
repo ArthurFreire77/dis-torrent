@@ -25,13 +25,15 @@ export function statusTitle(status: string, peerOnline?: boolean): string {
     case 'sent':
       return 'enviada'
     case 'sending':
-      return 'enviando…'
+      // "enviando…" só com o peer online; offline isso mentiria (a mensagem
+      // pode nem ter saído do outbox). O texto certo é o de fila.
+      return peerOnline ? 'enviando…' : 'na fila — entrega quando o contato voltar'
     case 'pending':
       return peerOnline
         ? 'na fila: o contato está online mas ainda não confirmou a entrega'
         : 'aguardando conexão'
     case 'failed':
-      return 'falhou — clique para reenviar'
+      return 'não entregue — tentaremos de novo ao reconectar (ou clique para reenviar agora)'
     default:
       return ''
   }

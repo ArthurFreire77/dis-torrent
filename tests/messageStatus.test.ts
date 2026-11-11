@@ -47,12 +47,22 @@ describe('statusTitle', () => {
   })
 
   it('demais estados não dependem da presença do contato', () => {
-    for (const st of ['sent', 'delivered', 'read', 'sending', 'failed']) {
+    for (const st of ['sent', 'delivered', 'read']) {
       assert.equal(statusTitle(st, true), statusTitle(st, false))
     }
     assert.equal(statusTitle('sent'), 'enviada')
-    assert.equal(statusTitle('failed'), 'falhou — clique para reenviar')
     assert.equal(statusTitle('ok'), '')
+  })
+
+  it('"enviando" só com o contato online; offline vira fila honesta', () => {
+    assert.equal(statusTitle('sending', true), 'enviando…')
+    assert.match(statusTitle('sending', false), /fila/)
+    assert.match(statusTitle('sending'), /fila/)
+  })
+
+  it('falha não promete reenvio imediato: diz que tentará ao reconectar', () => {
+    assert.match(statusTitle('failed'), /ao reconectar/)
+    assert.doesNotMatch(statusTitle('failed'), /falhou — clique/)
   })
 })
 

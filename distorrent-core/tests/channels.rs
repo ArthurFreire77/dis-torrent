@@ -369,6 +369,41 @@ fn send_dm_em_grupo_fica_pendente_sem_erro() {
 }
 
 #[test]
+fn grupo_novo_nasce_sem_bots() {
+    // Regressão do "DJ Resenha predefinido": nenhum caminho de criação pode
+    // semear bot. Grupo e servidor começam vazios; bot só entra por ação do dono.
+    let (a, _ka, _da) = engine_for("Alice");
+    let b = distorrent_core::identity::Keypair::generate().identity("Bob");
+
+    let grupo = a
+        .create_group("Sem bots", vec![b.fingerprint.clone()])
+        .unwrap();
+    let membros: Vec<String> = a
+        .group_members(&grupo.id)
+        .into_iter()
+        .map(|(fp, _)| fp)
+        .collect();
+    assert!(
+        !membros
+            .iter()
+            .any(|fp| fp.starts_with("bot") || fp.contains("-bot-")),
+        "grupo novo não pode ter bot: {membros:?}"
+    );
+
+    let cid = a.create_community("Servidor novo", &[]).unwrap();
+    assert!(
+        a.bots_list(&cid).unwrap().is_empty(),
+        "servidor novo começa sem bots; o DJ não é predefinido"
+    );
+
+    // Bot só aparece quando o dono cria explicitamente.
+    let bot = a.bot_create(&cid, "DJ", Some("🎵"), None).unwrap();
+    let lista = a.bots_list(&cid).unwrap();
+    assert_eq!(lista.len(), 1);
+    assert_eq!(lista[0].id, bot.id);
+}
+
+#[test]
 fn pending_group_messages_e_revert_no_store() {
     let store = Store::open_in_memory().unwrap();
     let kp = distorrent_core::identity::Keypair::generate();
