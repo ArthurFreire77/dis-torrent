@@ -199,9 +199,11 @@ pub async fn update_download(app: tauri::AppHandle, name: String) -> Result<Stri
         path: final_path.to_string_lossy().to_string(),
         ..pending
     };
-    let _ = store.kv_set(
-        KV_PENDING,
-        &serde_json::to_string(&registrado).map_err(|e| e.to_string())?,
-    );
+    store
+        .kv_set(
+            KV_PENDING,
+            &serde_json::to_string(&registrado).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("não consegui registrar o instalador baixado: {e}"))?;
     Ok(final_path.to_string_lossy().to_string())
 }

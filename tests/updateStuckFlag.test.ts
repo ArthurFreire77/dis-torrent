@@ -152,7 +152,19 @@ test('o instalador do Windows NÃO pode receber /NORESTART', () => {
   assert.ok(ini > 0, 'achou a lista de argumentos do instalador')
   const bloco = rust.slice(ini, ini + 300)
   assert.doesNotMatch(bloco, /NORESTART/, 'sem /NORESTART na atualização automática')
-  assert.match(bloco, /RESTARTAPPLICATIONS/)
+  assert.match(bloco, /CLOSEAPPLICATIONS/, 'o app precisa ser fechado para o exe ser substituído')
+})
+
+test('o reinício tem UM dono: o [Code] do instalador', () => {
+  const apply = readFileSync('src-tauri/src/updater_apply.rs', 'utf8')
+  assert.doesNotMatch(
+    apply,
+    /RESTARTAPPLICATIONS/,
+    'o /RESTARTAPPLICATIONS brigava com RestartApplications=no e com o [Code]',
+  )
+  const iss = readFileSync('installer/distorent.iss', 'utf8')
+  assert.match(iss, /RestartApplications=no/, 'quem reabre é o [Code], não o Restart Manager')
+  assert.match(iss, /ReiniciarAppSilencioso/, 'o [Code] reabre esperando o mutex sumir')
 })
 
 test('o instalador .iss reabre o app no modo silencioso', () => {

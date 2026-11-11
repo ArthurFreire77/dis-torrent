@@ -1,7 +1,7 @@
 // Updater checks: parte de updater.rs.
 // Irmao do updater.rs; usa os tipos la declarados via super::*.
 
-use super::updater_version::{compare_version_strings, escolher, releases_all};
+use super::updater_version::{compare_version_strings, escolher, mesma_versao, releases_all};
 use super::*;
 
 pub fn current_version(app: &tauri::AppHandle) -> String {
@@ -132,7 +132,9 @@ pub async fn completar(
     let asset = &escolha.asset;
 
     let rotulo = version_in_asset_name(&asset.name);
-    let label_mismatch = !rotulo.is_empty() && rotulo != body.version;
+    // O rótulo do arquivo tem só o núcleo ("1.1.70"); o manifesto diz
+    // "1.1.70-pre-alpha". Comparar por igualdade acusava TODA release.
+    let label_mismatch = !rotulo.is_empty() && !mesma_versao(&rotulo, &body.version);
 
     let self_integrity = distorrent_core::net::release_trust::self_integrity(store);
     let digests = format!("sha256:{}", asset.sha256);
@@ -191,6 +193,23 @@ pub async fn completar(
         },
     };
 
+    // Preserva o `path` de um download já verificado: zerar aqui fazia o apply
+    // recusar o instalador sempre que uma checagem rodasse no meio do fluxo.
+    let mut caminho_existente = store
+        .kv_get(KV_PENDING)
+        .and_then(|raw| serde_json::from_str::<PendingUpdate>(&raw).ok())
+        .filter(|p| {
+            p.version == body.version
+                && p.manifest_hash == verified.manifest_hash
+                && p.asset_name == asset.name
+                && p.sha256 == asset.sha256
+        })
+        .map(|p| p.path)
+        .unwrap_or_default();
+    if !caminho_existente.is_empty() && !std::path::Path::new(&caminho_existente).is_file() {
+        caminho_existente.clear();
+    }
+
     if let Ok(raw) = serde_json::to_string(&PendingUpdate {
         asset_name: asset.name.clone(),
         sha256: asset.sha256.clone(),
@@ -198,9 +217,11 @@ pub async fn completar(
         version: body.version.clone(),
         manifest_hash: verified.manifest_hash.clone(),
         security_epoch: body.security_epoch,
-        path: String::new(),
+        path: caminho_existente,
     }) {
-        let _ = store.kv_set(KV_PENDING, &raw);
+        if let Err(e) = store.kv_set(KV_PENDING, &raw) {
+            return Err(format!("não consegui registrar a atualização pendente: {e}"));
+        }
     }
     let _ = app.emit("distorrent://update", &info);
     Ok(info)

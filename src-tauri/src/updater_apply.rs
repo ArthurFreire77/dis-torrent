@@ -93,19 +93,14 @@ pub fn update_apply(app: tauri::AppHandle, path: String) -> Result<(), String> {
         // `runas` mostra o UAC e, negado, devolve erro claro (não trava).
         if instalação_por_usuario()? {
             std::process::Command::new(&p)
-                .args([
-                    "/SILENT",
-                    "/SUPPRESSMSGBOXES",
-                    "/CLOSEAPPLICATIONS",
-                    "/RESTARTAPPLICATIONS",
-                ])
+                .args(["/SILENT", "/SUPPRESSMSGBOXES", "/CLOSEAPPLICATIONS"])
                 .current_dir(p.parent().unwrap_or(std::path::Path::new(".")))
                 .spawn()
                 .map_err(|e| format!("não consegui iniciar o instalador: {e}"))?;
         } else {
             run_elevated(&p)?;
         }
-        // O Inno precisa do .exe livre para substituir; o /RESTARTAPPLICATIONS reabre.
+        // O Inno precisa do .exe livre para substituir; quem reabre é o [Code].
         let app_quit = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -172,9 +167,7 @@ fn run_elevated(installer: &std::path::Path) -> Result<(), String> {
     }
     let op = wide(std::ffi::OsStr::new("runas"));
     let file = wide(installer.as_os_str());
-    let params = wide(std::ffi::OsStr::new(
-        "/SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
-    ));
+    let params = wide(std::ffi::OsStr::new("/SILENT /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS"));
     let dir = installer.parent().unwrap_or(std::path::Path::new("."));
     let cwd = wide(dir.as_os_str());
     // SAFETY: as quatro strings são NUL-terminadas e vivem até o fim da chamada;
