@@ -62,6 +62,8 @@ export interface MobileMessageProps {
   onOpenProfile?: (fp: string) => void
   isBot?: boolean
   botName?: string
+  /** Emoji do bot (`🎵`), quando o criador escolheu um. */
+  botAvatar?: string
   highlighted?: boolean
   renderFile?: (m: StoredMessage) => React.ReactNode
   fontSize?: number
@@ -74,7 +76,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
   const {
     m, mine, authorName, authorFp, authorAvatar, authorAccent, body, meta, reactions, grouped, ctx,
     replyTo, onJumpToReply, onReact, onEdit, onDelete, onPin, onReply, onCopy,
-    onReport, onForward, onOpenThread, onOpenProfile, isBot, botName, highlighted,
+    onReport, onForward, onOpenThread, onOpenProfile, isBot, botName, botAvatar, highlighted,
     renderFile, resolveName, fontSize, peerOnline,
   } = props
   const fs = fontSize && fontSize > 0 ? fontSize : 15
@@ -172,7 +174,7 @@ const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
         boxShadow: meta?.pinned ? 'inset 0 0 0 1px rgba(240,178,50,0.35)' : 'none',
       }}
     >
-      {grouped ? <span style={{ width: 36, flexShrink: 0 }} /> : <Avatar name={authorName} fp={authorFp} size={36} avatarB64={authorAvatar} accent={authorAccent} />}
+      {grouped ? <span style={{ width: 36, flexShrink: 0 }} /> : <Avatar name={authorName} fp={authorFp} size={36} emoji={isBot ? (botAvatar || '🤖') : undefined} avatarB64={isBot ? undefined : authorAvatar} accent={isBot ? undefined : authorAccent} />}
       <div style={{ flex: 1, minWidth: 0 }}>
         {!grouped && (
           <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>

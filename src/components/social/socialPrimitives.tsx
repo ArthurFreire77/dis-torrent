@@ -117,7 +117,7 @@ export function StatusPicker({ value, onChange }: { value: PresenceStatus; onCha
   )
 }
 
-export function Avatar({ name, fp, size = 40, avatarB64, ring, effect, accent }: {
+export function Avatar({ name, fp, size = 40, avatarB64, ring, effect, accent, emoji }: {
   name: string
   fp: string
   size?: number
@@ -126,8 +126,10 @@ export function Avatar({ name, fp, size = 40, avatarB64, ring, effect, accent }:
   effect?: string
   /** Cor de destaque do perfil; a aura usa esta cor. */
   accent?: string
+  /** Emoji do bot (`🎵`) no lugar da inicial. */
+  emoji?: string
 }) {
-  return <AvatarView name={name} fp={fp} size={size} avatarB64={avatarB64} ring={ring} effect={effect} accent={accent} />
+  return <AvatarView name={name} fp={fp} size={size} avatarB64={avatarB64} ring={ring} effect={effect} accent={accent} emoji={emoji} />
 }
 
 export function Modal({ title, onClose, children, width = 520, footer }: {

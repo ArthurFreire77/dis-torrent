@@ -3,7 +3,7 @@ import type { NetworkState } from '../services/models'
 import { avatarColor } from './theme'
 import { effectClass, effectStyle } from './profileStyle'
 
-export function Avatar({ name, fp, size = 40, avatarB64, accent, ring, effect }: {
+export function Avatar({ name, fp, size = 40, avatarB64, accent, ring, effect, emoji }: {
   name: string
   fp: string
   size?: number
@@ -12,6 +12,8 @@ export function Avatar({ name, fp, size = 40, avatarB64, accent, ring, effect }:
   ring?: string
   /** Aura do perfil (`glow`, `pulse`, `rainbow`, `sparkle`). */
   effect?: string
+  /** Emoji no lugar da inicial (avatar de bot, ex.: `🎵`). */
+  emoji?: string
 }) {
   const [err, setErr] = useState(false)
   const border = accent ? `2px solid ${accent}` : ring ? `2px solid ${ring}` : undefined
@@ -22,12 +24,12 @@ export function Avatar({ name, fp, size = 40, avatarB64, accent, ring, effect }:
         style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', flexShrink: 0, border }} />
     )
     : (() => {
-      const initial = (name || fp || '?').trim().charAt(0).toUpperCase() || '?'
+      const initial = emoji || (name || fp || '?').trim().charAt(0).toUpperCase() || '?'
       return (
         <span style={{
           width: size, height: size, borderRadius: '50%', background: accent || avatarColor(fp),
           color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          fontWeight: 800, fontSize: size * 0.42, flexShrink: 0, overflow: 'hidden',
+          fontWeight: 800, fontSize: emoji ? size * 0.52 : size * 0.42, flexShrink: 0, overflow: 'hidden',
           border, boxShadow: accent && !ring ? `0 0 0 2px ${accent}55` : undefined,
         }}>{initial}</span>
       )

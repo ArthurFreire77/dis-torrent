@@ -51,6 +51,7 @@ import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink
 import { callManager, setCallIdentity, supportsScreenShare, getCallsSupport, getCallsUnavailableMessage, hasRelayConfigured, CALLS_UNAVAILABLE_MSG, SCREEN_UNAVAILABLE_MSG, screenShareUnavailableReason, ICE_RELAY_MSG, ICE_FAILED_MSG, getStoredQuality, getTurnUrl, isValidTurnUrl, getCallMediaPrefs, type CallQuality, type IncomingCall } from '../services/callManager'
 import { sfxMessage, sfxRingStart, sfxRingStop, sfxCallConnect, sfxCallEnd } from '../services/sfx'
 import MobileMessage from './MobileMessage'
+import { agruparComAnterior, autorDaMensagem } from '../components/social/messageAuthors'
 import { EmojiPicker } from '../shared/EmojiPicker'
 import { NAMED_EMOJI } from '../shared/emojiSet'
 import { activeToken } from '../shared/markdown'
@@ -1539,14 +1540,19 @@ export default function MobileShell() {
 
   const messageNodes = useMemo(() => messages.map((m, idx) => {
     const mine = m.direction === 'out'
-    const authorName = mine
-      ? identity?.nickname ?? 'você'
-      : (isChannel
-          ? (resolveMemberName(m.author_fp) || m.author_fp.slice(0, 8))
-          : (selConvObj?.kind === 'group'
-              ? (resolveMemberName(m.author_fp) || m.author_fp.slice(0, 8))
-              : (selConvObj?.title ?? m.author_fp.slice(0, 8))))
-    const authorFp = mine ? identity?.fingerprint ?? '' : m.author_fp
+    // A mensagem do bot é gravada como `out` do dono; o `bot_id` diz quem falou.
+    const autor = autorDaMensagem(m, {
+      myFp,
+      bots,
+      nomeDe: (fp) => {
+        if (fp === identity?.fingerprint) return identity?.nickname ?? 'você'
+        if (isChannel || selConvObj?.kind === 'group') return resolveMemberName(fp) || fp.slice(0, 8)
+        const known = peers.find((p) => p.fp === fp)?.nickname || peerNickCacheRef.current[fp]
+        return selConvObj?.title ?? known ?? fp.slice(0, 8)
+      },
+    })
+    const authorName = autor.nome
+    const authorFp = autor.fp
     const fmeta = parseFileBody(m.body)
     const body = social.bodies.get(m.id) ?? m.body
     const meta = social.meta.get(m.id)
@@ -1567,10 +1573,9 @@ export default function MobileShell() {
       }
     }
     const prev = idx > 0 ? messages[idx - 1] : null
-    const grouped = !!prev
-      && prev.author_fp === m.author_fp && prev.direction === m.direction
-      && (m.ts - prev.ts) < 5 * 60 * 1000
-      && !social.meta.get(prev.id)?.deleted
+    const grouped = agruparComAnterior(m, prev, {
+      anteriorApagada: !!social.meta.get(prev?.id ?? '')?.deleted,
+    })
     const replyId = meta?.reply_to
     const replyMsg = replyId ? messages.find((x) => x.id === replyId) : undefined
     const replyTo = replyId
@@ -1612,8 +1617,9 @@ export default function MobileShell() {
         }}
         replyTo={replyTo}
         highlighted={!!meta?.mentioned}
-        isBot={!!m.bot_id}
-        botName={m.bot_id ? (bots.find((b) => b.id === m.bot_id)?.name ?? undefined) : undefined}
+        isBot={autor.bot}
+        botName={autor.bot ? autor.nome : undefined}
+        botAvatar={autor.bot ? autor.emoji : undefined}
         renderFile={renderFile}
         fontSize={15 * prefs.fontScale}
         peerOnline={selConvObj?.kind === 'dm' && !!selConvObj.peer_fp && onlineFps.has(selConvObj.peer_fp)}

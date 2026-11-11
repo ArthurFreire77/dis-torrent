@@ -2,7 +2,7 @@ import { services } from './index'
 import { isAndroidRuntime } from './screenShare'
 import { isWindowsRuntime, isIOSRuntime } from '../shared/runtime'
 import { setCallVideoSending } from './callMedia'
-import { addVoiceParticipant, removeVoiceParticipant, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
+import { addVoiceParticipant, removeVoiceParticipant, setParticipantNickname, updateVoiceParticipantState, type CallParticipantView } from './callParticipants'
 import { isCollectiveRoom, leaveOutcome } from './callRoomRules'
 import { shouldInitiatePair } from './callRepair'
 import { shouldFallbackToRelay, shouldDropRelayAfterIceRecovered } from './callRelayFallback'
@@ -3479,6 +3479,114 @@ export class CallManager {
 
   private cameraQuality(): '480p' | '720p' | '1080p' | '4K' {
     try { return getCallMediaPrefs().quality } catch { return this.quality }
+  }
+
+  // ── Entrada de mídia externa (participante que não é o dono) ────────────
+  // Um processo externo (bot) não alcança os peers: o app cria uma track de
+  // áudio própria e a liga na call. Para a UI é um participante a mais; para o
+  // motor é só mais um fluxo de áudio. O app NÃO sabe de onde vem o som.
+
+  private mediaExternaSenders = new Map<RTCPeerConnection, RTCRtpSender>()
+  private mediaExternaStream: MediaStream | null = null
+  private mediaExternaCtx: AudioContext | null = null
+  private mediaExternaDestino: MediaStreamAudioDestinationNode | null = null
+  private mediaExternaLigada = false
+
+  private ensureMediaExterna(): { stream: MediaStream; ctx: AudioContext } | null {
+    try {
+      if (this.mediaExternaStream && this.mediaExternaCtx && this.mediaExternaCtx.state !== 'closed') {
+        return { stream: this.mediaExternaStream, ctx: this.mediaExternaCtx }
+      }
+      const AC: any =
+        typeof AudioContext !== 'undefined'
+          ? AudioContext
+          : (typeof window !== 'undefined' ? (window as any)?.webkitAudioContext : null)
+      if (!AC) return null
+      this.mediaExternaCtx = new AC()
+      const ctx = this.mediaExternaCtx
+      if (!ctx || ctx.state === 'closed') return null
+      if (ctx.state === 'suspended') void ctx.resume().catch(() => {})
+      this.mediaExternaDestino = ctx.createMediaStreamDestination()
+      this.mediaExternaStream = this.mediaExternaDestino.stream
+      return { stream: this.mediaExternaStream, ctx }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Liga/desliga a track de mídia externa em todos os peers e registra o
+   * participante `fp` na call. Devolve `false` sem Web Audio.
+   */
+  async setBotMusicEnabled(on: boolean, nome = 'Bot', fp = 'bot'): Promise<boolean> {
+    if (on === this.mediaExternaLigada) {
+      if (on && this.state) {
+        const ja = this.state.participants.some((p) => p.fp === fp)
+        if (!ja && addVoiceParticipant(this.state.participants, fp)) {
+          setParticipantNickname(this.state.participants, fp, nome)
+          const p = this.state.participants.find((x) => x.fp === fp)
+          if (p && this.mediaExternaStream) p.stream = this.mediaExternaStream
+          this.onUpdate({ ...this.state })
+        }
+      }
+      return this.mediaExternaLigada
+    }
+
+    const criado = on ? this.ensureMediaExterna() : null
+    const track = criado?.stream.getAudioTracks()[0] ?? null
+    if (on && (!track || !criado)) return false
+
+    this.mediaExternaLigada = on
+    const ofertas: string[] = []
+
+    for (const [alvo, pc] of this.pcs) {
+      try {
+        if (pc.signalingState === 'closed') continue
+        let sender = this.mediaExternaSenders.get(pc) ?? null
+        if (on && track && criado) {
+          if (!sender) {
+            sender = pc.addTrack(track, criado.stream)
+            this.mediaExternaSenders.set(pc, sender)
+            ofertas.push(alvo)
+          } else {
+            await sender.replaceTrack(track)
+            ofertas.push(alvo)
+          }
+        } else if (sender) {
+          await sender.replaceTrack(null).catch(() => {})
+          ofertas.push(alvo)
+        }
+      } catch {}
+    }
+
+    for (const alvo of ofertas) {
+      const callId = this.state?.callId
+      if (callId) await this.sendOffer(alvo, callId).catch(() => {})
+    }
+
+    if (this.state) {
+      if (on) {
+        if (addVoiceParticipant(this.state.participants, fp)) {
+          setParticipantNickname(this.state.participants, fp, nome)
+          const p = this.state.participants.find((x) => x.fp === fp)
+          if (p && criado) p.stream = criado.stream
+        }
+      } else if (removeVoiceParticipant(this.state.participants, fp)) {
+        void 0
+      }
+      this.onUpdate({ ...this.state })
+    }
+    return on
+  }
+
+  /** Contexto e destino da mídia externa (o bot conecta a fonte aqui). */
+  botMusicSink(): { ctx: AudioContext | null; destination: MediaStreamAudioDestinationNode | null } {
+    if (!this.mediaExternaLigada) return { ctx: null, destination: null }
+    return { ctx: this.mediaExternaCtx, destination: this.mediaExternaDestino }
+  }
+
+  botMusicLive(): boolean {
+    return this.mediaExternaLigada && !!this.mediaExternaStream
   }
 
   private async applyAudioBitrate(sender: RTCRtpSender): Promise<boolean> {

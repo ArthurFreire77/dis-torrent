@@ -2,6 +2,7 @@ import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, use
 import { services } from '../../services'
 import { FILE_PREFIX } from '../../services/fileSwarm'
 import type {
+  BotView,
   EmojiView,
   MsgMetaView,
   PollTally,
@@ -10,6 +11,7 @@ import type {
   ReactionSummary,
   StoredMessage,
 } from '../../services/models'
+import { agruparComAnterior, autorDaMensagem } from './messageAuthors'
 import {
   Avatar,
   DayDivider,
@@ -35,6 +37,8 @@ export interface MessageListProps {
   convId: string
   myFp: string
   nameOf: (fp: string) => string
+  /** Bots do servidor: uma mensagem de bot mostra o nome/foto do BOT, não a do dono. */
+  bots?: Pick<BotView, 'id' | 'name' | 'avatar'>[]
   profiles: Record<string, ProfileView>
   presence: Record<string, string>
   peerOnline?: boolean
@@ -58,7 +62,7 @@ export interface MessageListHandle {
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageListInner(props, ref) {
   const {
-    messages, convId, myFp, nameOf, profiles, presence, emptyBlock,
+    messages, convId, myFp, nameOf, profiles, presence, emptyBlock, bots,
     onReply, onProfile, onForward, onThread, onToast, renderFile, pollChannel, onResend,
     compact, fontScale, peerOnline,
   } = props
@@ -251,14 +255,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
     }} style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: 2 }}>
       {visible.map((m, idx) => {
         const mine = m.direction === 'out'
-        const authorFp = mine ? myFp : m.author_fp
-        const authorName = nameOf(authorFp)
+        const autor = autorDaMensagem(m, { myFp, bots: bots ?? [], nomeDe: nameOf })
+        const authorFp = autor.fp
+        const authorName = autor.nome
         const meta = metas[m.id]
         const body = meta?.deleted ? '' : (bodies[m.id] ?? m.body)
         const prev = idx > 0 ? visible[idx - 1] : null
         const grouped = !!prev && !prev.body.startsWith(FILE_PREFIX)
-          && prev.author_fp === m.author_fp && prev.direction === m.direction
-          && (m.ts - prev.ts) < 5 * 60_000
+          && agruparComAnterior(m, prev, { anteriorApagada: !!metas[prev.id]?.deleted })
         const newDay = !prev || new Date(prev.ts).toDateString() !== new Date(m.ts).toDateString()
         const replyRef = meta?.reply_to ? messages.find(x => x.id === meta.reply_to) : undefined
         const rx = reactions[m.id] ?? []
@@ -266,7 +270,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
         const pres = presence[authorFp] as never
         const showUnread = unreadBefore !== null && m.ts >= unreadBefore
         const wantsUnfurl = body.includes('<@') || body.includes('http://') || body.includes('https://')
-        const vistos = mine ? receiptsOf(m) : null
+        const vistos = mine && !autor.bot ? receiptsOf(m) : null
         const statusMostrado = vistos && m.status !== 'ok' ? groupStatus(m.status, vistos) : m.status
 
         return (
@@ -283,16 +287,19 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                 <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono', flexShrink: 0, paddingTop: 2 }}>{fmtClock(m.ts)}</span>
               ) : grouped ? <span style={{ width: 40, flexShrink: 0 }} /> : (
                 <span style={{ position: 'relative', flexShrink: 0, cursor: 'pointer' }} onClick={() => onProfile(authorFp)}>
-                  <Avatar name={authorName} fp={authorFp} size={40} avatarB64={profiles[authorFp]?.avatar_b64} ring={profiles[authorFp]?.accent || undefined} effect={profiles[authorFp]?.avatar_effect || undefined} accent={profiles[authorFp]?.accent || undefined} />
+                  <Avatar name={authorName} fp={authorFp} size={40} emoji={autor.bot ? (autor.emoji || '🤖') : undefined} avatarB64={autor.bot ? undefined : profiles[authorFp]?.avatar_b64} ring={!autor.bot ? (profiles[authorFp]?.accent || undefined) : undefined} effect={!autor.bot ? (profiles[authorFp]?.avatar_effect || undefined) : undefined} accent={!autor.bot ? (profiles[authorFp]?.accent || undefined) : undefined} />
                   {pres && <PresenceDot status={pres} size={12} ring={T_MAIN} />}
                 </span>
               )}
               <div style={{ flex: 1, minWidth: 0 }}>
                 {compact ? (
                   <div style={{ fontSize: 14 * fs, color: T_TEXT, lineHeight: 1.4 }}>
-                    <span style={{ fontWeight: 700, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
+                    <span style={{ fontWeight: 700, color: autor.bot ? T_ACCENT : (profiles[authorFp]?.accent || T_HEADING), cursor: 'pointer' }}
                       onClick={() => onProfile(authorFp)}>{authorName}</span>
-                    {profiles[authorFp]?.decoration ? (
+                    {autor.bot && (
+                      <span style={{ fontSize: 9, fontWeight: 800, background: T_ACCENT, color: '#fff', padding: '1px 4px', borderRadius: 4, marginLeft: 4 }}>BOT</span>
+                    )}
+                    {profiles[authorFp]?.decoration && !autor.bot ? (
                       <span aria-hidden="true" style={{ fontSize: 12, marginRight: 4 }}>{profiles[authorFp]?.decoration}</span>
                     ) : null}
                     {!isFile && (
@@ -303,13 +310,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     )}
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }}> (editado)</span> : null}
                     {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED, verticalAlign: 'middle' }}><Icon d={Icons.pin} size={11} /></span> : null}
-                    {mine && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={statusMostrado} peerOnline={peerOnline} titulo={vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined} /></span>}
+                    {mine && !autor.bot && m.status !== 'ok' && <span style={{ marginLeft: 6 }}><StatusGlyph status={statusMostrado} peerOnline={peerOnline} titulo={vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined} /></span>}
                   </div>
                 ) : !grouped && (
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 700, fontSize: 14 * fs, color: profiles[authorFp]?.accent || T_HEADING, cursor: 'pointer' }}
+                    <span style={{ fontWeight: 700, fontSize: 14 * fs, color: autor.bot ? T_ACCENT : (profiles[authorFp]?.accent || T_HEADING), cursor: 'pointer' }}
                       onClick={() => onProfile(authorFp)}>{authorName}</span>
-                    {profiles[authorFp]?.decoration ? (
+                    {autor.bot && (
+                      <span style={{ fontSize: 9, fontWeight: 800, background: T_ACCENT, color: '#fff', padding: '1px 4px', borderRadius: 4 }}>BOT</span>
+                    )}
+                    {profiles[authorFp]?.decoration && !autor.bot ? (
                       <span aria-hidden="true" title="decoração do perfil" style={{ fontSize: 13, marginLeft: -4 }}>{profiles[authorFp]?.decoration}</span>
                     ) : null}
                     <span style={{ fontSize: 11, color: T_MUTED, fontFamily: 'JetBrains Mono' }}>{authorFp.slice(0, 12)}</span>
@@ -317,7 +327,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     {meta?.edited_at ? <span style={{ fontSize: 10, color: T_MUTED }} title={new Date(meta.edited_at).toLocaleString('pt-BR')}>(editado)</span> : null}
                     {meta?.pinned ? <span title="fixada" style={{ display: 'inline-flex', color: T_MUTED }}><Icon d={Icons.pin} size={11} /></span> : null}
                     {meta?.forwarded_from ? <span style={{ fontSize: 10, color: T_MUTED }}>↪ encaminhada de {meta.forwarded_from}</span> : null}
-                    {mine && m.status !== 'ok' && <StatusGlyph status={statusMostrado} peerOnline={peerOnline} titulo={vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined} />}
+                    {mine && !autor.bot && m.status !== 'ok' && <StatusGlyph status={statusMostrado} peerOnline={peerOnline} titulo={vistos ? statusTitleFor(statusMostrado, vistos, peerOnline) : undefined} />}
                   </div>
                 )}
 
@@ -420,7 +430,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
                     ><Icon d={Icons.smile} size={12} /> reagir</button>
                   )}
 
-                  {mine && vistos && roster.kind !== 'dm' && (
+                  {mine && !autor.bot && vistos && roster.kind !== 'dm' && (
                     <div style={{ position: 'relative', display: 'inline-flex', marginTop: 3 }}>
                       <button
                         onClick={() => setQuemViu(quemViu === m.id ? null : m.id)}
@@ -493,13 +503,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
               <MenuItem label="Fixar / desafixar" icon={Icons.pin} onClick={() => { doPin(m.id); setMenu(null) }} />
               <MenuItem label="Encaminhar" icon={Icons.externalLink} onClick={() => { onForward(m); setMenu(null) }} />
               <MenuItem label="Criar thread" icon={Icons.hash} onClick={() => { onThread(m); setMenu(null) }} />
-              {(mine || meta) && <MenuItem label="Editar" icon={Icons.edit} onClick={() => { setEditing({ id: m.id, body }); setMenu(null) }} />}
+              {(mine && !autor.bot || meta) && <MenuItem label="Editar" icon={Icons.edit} onClick={() => { setEditing({ id: m.id, body }); setMenu(null) }} />}
               {
 }
-              {mine && m.status === 'failed' && onResend && (
+              {mine && !autor.bot && m.status === 'failed' && onResend && (
                 <MenuItem label="Reenviar" icon={Icons.refresh} onClick={() => { onResend(m); setMenu(null) }} />
               )}
-              {mine && roster.kind !== 'dm' && (
+              {mine && !autor.bot && roster.kind !== 'dm' && (
                 <MenuItem label="Quem visualizou" icon={Icons.eye} onClick={() => { setQuemViu(m.id); setMenu(null) }} />
               )}
               <MenuItem label="Marcar como não lida" icon={Icons.eye} onClick={() => {

@@ -2987,6 +2987,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 convId={selConv}
                 myFp={identity?.fingerprint ?? ''}
                 nameOf={nameOfFp}
+                bots={bots}
                 profiles={socialProfiles}
                 presence={socialPresence}
                 peerOnline={!ehGrupo && !!selPeerFp && onlineFps.has(selPeerFp)}
@@ -4405,4 +4406,4 @@ export default function ThemeShell({ designId }: {designId:string}){
       )}
     </div>
   )
-}
+}
