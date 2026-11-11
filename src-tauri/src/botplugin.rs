@@ -193,20 +193,63 @@ impl Plugins {
             return Err(format!("pasta do bot não existe: {dir}"));
         }
         let (prog, args) = split_command(run)?;
-        let resolved = if std::path::Path::new(&prog).is_absolute() {
-            prog.clone()
-        } else {
-            path.join(&prog).display().to_string()
-        };
         let canon_dir = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let canon_prog = std::fs::canonicalize(&resolved)
-            .map_err(|_| format!("programa `{prog}` não encontrado na pasta do bot"))?;
-        if !canon_prog.starts_with(&canon_dir) {
-            return Err("o programa do bot precisa estar dentro da pasta importada".into());
-        }
 
-        let mut cmd = Command::new(&canon_prog);
-        cmd.args(&args)
+        // Se `prog` existe na pasta do bot ou é caminho absoluto na pasta, executa diretamente.
+        // Se for um interpretador de sistema (ex.: `node`, `python`, `deno`, `bun`), valida se o primeiro argumento
+        // (o script) está localizado dentro da pasta do bot e não tenta escapar.
+        let local_candidate = path.join(&prog);
+        let (exec_prog, exec_args) = if local_candidate.exists()
+            || std::path::Path::new(&prog).is_absolute()
+        {
+            let resolved = if std::path::Path::new(&prog).is_absolute() {
+                prog.clone()
+            } else {
+                local_candidate.display().to_string()
+            };
+            let canon_prog = std::fs::canonicalize(&resolved)
+                .map_err(|_| format!("programa `{prog}` não encontrado na pasta do bot"))?;
+            if !canon_prog.starts_with(&canon_dir) {
+                return Err("o programa do bot precisa estar dentro da pasta importada".into());
+            }
+            (canon_prog.display().to_string(), args)
+        } else {
+            // Interpretador do sistema (ex.: node bot.js / python bot.py)
+            let is_known_runtime = matches!(
+                prog.to_ascii_lowercase().as_str(),
+                "node"
+                    | "python"
+                    | "python3"
+                    | "py"
+                    | "deno"
+                    | "bun"
+                    | "ruby"
+                    | "php"
+                    | "bash"
+                    | "sh"
+            );
+            if !is_known_runtime {
+                return Err(format!(
+                    "programa `{prog}` não encontrado na pasta do bot (use executável local ou interpretador como node/python)"
+                ));
+            }
+            if let Some(script_arg) = args.first() {
+                if !script_arg.starts_with('-') {
+                    let script_path = path.join(script_arg);
+                    if let Ok(canon_script) = std::fs::canonicalize(&script_path) {
+                        if !canon_script.starts_with(&canon_dir) {
+                            return Err(
+                                "o script do bot precisa estar dentro da pasta importada".into()
+                            );
+                        }
+                    }
+                }
+            }
+            (prog.clone(), args)
+        };
+
+        let mut cmd = Command::new(&exec_prog);
+        cmd.args(&exec_args)
             .current_dir(path)
             .env_clear()
             .env("PATH", std::env::var("PATH").unwrap_or_default())
@@ -442,6 +485,25 @@ mod tests {
         let erro = p
             .start(
                 "k",
+                &dir.path().display().to_string(),
+                &run,
+                "http://127.0.0.1:1/b/segredo",
+            )
+            .unwrap_err();
+        assert!(erro.contains("dentro da pasta"), "{erro}");
+    }
+
+    #[test]
+    fn interpretador_sistema_valida_script_dentro_da_pasta() {
+        let p = Plugins::new();
+        let dir = tempdir();
+        let outside = tempdir();
+        let script = outside.path().join("evil.js");
+        std::fs::write(&script, "// x").unwrap();
+        let run = format!("node {}", script.display());
+        let erro = p
+            .start(
+                "k2",
                 &dir.path().display().to_string(),
                 &run,
                 "http://127.0.0.1:1/b/segredo",

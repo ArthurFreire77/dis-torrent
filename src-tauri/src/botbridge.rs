@@ -488,13 +488,38 @@ pub struct ImportedFolder {
 /// Lê uma pasta de bot, valida o `bot.json` e devolve o que seria importado.
 /// Não grava nada: o painel mostra e o dono confirma.
 pub fn read_bot_folder(dir: &std::path::Path) -> Result<ImportedFolder, String> {
-    let meta = std::fs::metadata(dir).map_err(|e| format!("pasta inacessível: {e}"))?;
-    if !meta.is_dir() {
-        return Err("selecione uma PASTA de bot (com bot.json dentro)".into());
-    }
-    let manifest_path = dir.join("bot.json");
-    let raw = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("bot.json não encontrado/ilegível: {e}"))?;
+    let (target_dir, manifest_path) = if dir.is_file() {
+        let parent = dir.parent().unwrap_or(dir);
+        (parent.to_path_buf(), dir.to_path_buf())
+    } else {
+        let candidate = dir.join("bot.json");
+        if candidate.is_file() {
+            (dir.to_path_buf(), candidate)
+        } else {
+            // Se houver algum *.bot.json na pasta, aceita também
+            let found = std::fs::read_dir(dir).ok().and_then(|mut entries| {
+                entries.find_map(|e| {
+                    let p = e.ok()?.path();
+                    if p.file_name()?.to_str()?.ends_with(".bot.json") {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                })
+            });
+            match found {
+                Some(p) => (dir.to_path_buf(), p),
+                None => (dir.to_path_buf(), candidate),
+            }
+        }
+    };
+
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "arquivo de bot não encontrado/ilegível em {}: {e}",
+            manifest_path.display()
+        )
+    })?;
     if raw.len() > 256 * 1024 {
         return Err("bot.json grande demais (máx 256KB)".into());
     }
@@ -519,9 +544,9 @@ pub fn read_bot_folder(dir: &std::path::Path) -> Result<ImportedFolder, String> 
         return Err("o bot não faz nada: declare `commands` (prefixo+comando) ou `events`".into());
     }
     let mut files = Vec::new();
-    collect_files(dir, dir, &mut files, 0)?;
+    collect_files(&target_dir, &target_dir, &mut files, 0)?;
     Ok(ImportedFolder {
-        dir: dir.display().to_string(),
+        dir: target_dir.display().to_string(),
         name: name.chars().take(32).collect(),
         avatar: if manifest.avatar.trim().is_empty() {
             "🤖".to_string()
@@ -614,7 +639,24 @@ mod tests {
     fn pasta_sem_bot_json_e_recusada() {
         let dir = tempdir();
         let erro = read_bot_folder(dir.path()).unwrap_err();
-        assert!(erro.contains("bot.json"), "{erro}");
+        assert!(
+            erro.contains("bot.json") || erro.contains("ilegível"),
+            "{erro}"
+        );
+    }
+
+    #[test]
+    fn arquivo_bot_json_direto_e_aceito() {
+        let dir = tempdir();
+        let file = dir.path().join("meu.bot.json");
+        std::fs::write(
+            &file,
+            r#"{"name":"Direto","config":{"prefix":"!","commands":[{"name":"ping","reply":"pong"}]}}"#,
+        )
+        .unwrap();
+        let imp = read_bot_folder(&file).expect("ler arquivo bot.json direto");
+        assert_eq!(imp.name, "Direto");
+        assert_eq!(imp.dir, dir.path().display().to_string());
     }
 
     #[test]
