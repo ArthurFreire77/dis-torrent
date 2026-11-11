@@ -547,12 +547,10 @@ pub(crate) fn save_file_stream(
             }
         }
         if safety.strip_exif {
-            if let Ok(mut f) = fs::File::open(&tmp) {
-                use std::io::Read;
-                let mut head = vec![0u8; 512];
-                let n = f.read(&mut head).unwrap_or(0);
-                head.truncate(n);
-                let sniffed = distorrent_core::media::sniff_mime(&head);
+            // Lê o arquivo inteiro para detectar MIME corretamente — os primeiros
+            // 512 bytes podem não bastar para formatos com cabeçalho longo.
+            if let Ok(all) = fs::read(&tmp) {
+                let sniffed = distorrent_core::media::sniff_mime(&all);
                 let is_image = matches!(
                     sniffed,
                     distorrent_core::media::SniffedMime::Jpeg
@@ -561,10 +559,8 @@ pub(crate) fn save_file_stream(
                         | distorrent_core::media::SniffedMime::Webp
                 );
                 if is_image {
-                    if let Ok(all) = fs::read(&tmp) {
-                        if let Ok(clean) = distorrent_core::media::strip_metadata(&all) {
-                            let _ = fs::write(&tmp, &clean);
-                        }
+                    if let Ok(clean) = distorrent_core::media::strip_metadata(&all) {
+                        let _ = fs::write(&tmp, &clean);
                     }
                 }
             }

@@ -74,6 +74,8 @@ const SDP_WAIT: Duration = Duration::from_millis(1500);
 const OPUS_FMTP: &str = "minptime=10;useinbandfec=1";
 #[allow(dead_code)]
 const MAX_PLC_BURST: u32 = 50;
+/// Máximo de peers com vídeo simultâneo por chamada (evita device busy).
+const MAX_VIDEO_PEERS: usize = 4;
 
 const PLC_RESYNC_GAP: u32 = 10;
 
@@ -162,6 +164,9 @@ struct Shared {
     video_frame: Mutex<Option<VideoFrame>>,
     recv_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
     video_track: Mutex<Option<Arc<TrackLocalStaticSample>>>,
+    /// Geração de vídeo: cada troca de fonte incrementa. Tasks antigas verificam
+    /// se sua geração ainda é atual antes de enviar frames.
+    video_generation: AtomicU64,
 }
 
 impl Shared {
@@ -198,6 +203,7 @@ impl Shared {
             video_frame: Mutex::new(None),
             recv_tasks: Mutex::new(Vec::new()),
             video_track: Mutex::new(None),
+            video_generation: AtomicU64::new(0),
         }
     }
 
@@ -784,6 +790,23 @@ impl VoiceMedia {
             .inner
             .get(&(call_id.to_owned(), peer_fp.to_owned()))
             .ok_or_else(|| "sessao inexistente".to_string())?;
+        // Limita peers com vídeo ativo para evitar device busy.
+        let ativos = self
+            .inner
+            .of_call(call_id)
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.sh.video_state.lock().unwrap().as_str(),
+                    "starting" | "live"
+                )
+            })
+            .count();
+        if ativos >= MAX_VIDEO_PEERS {
+            return Err(format!(
+                "limite de {MAX_VIDEO_PEERS} peers com vídeo atingido — pare o vídeo de outro participante antes"
+            ));
+        }
         {
             let mut st = sess.sh.video_state.lock().unwrap();
             if st.as_str() == "live" || st.as_str() == "starting" {
@@ -800,7 +823,7 @@ impl VoiceMedia {
                     return Ok(codec);
                 }
                 drop(st);
-                self.video_purge_source();
+                let gen = self.video_purge_source(&sess);
                 let mut st = sess.sh.video_state.lock().unwrap();
                 *sess.sh.video_want.lock().unwrap() = Some((source.to_string(), monitor_id));
                 *st = "starting".to_string();
@@ -810,7 +833,7 @@ impl VoiceMedia {
                 let for_abort = sess.clone();
                 let want = source.to_string();
                 self.inner.core.run(async move {
-                    let h = tokio::spawn(async move { video_send_task(for_task, want).await });
+                    let h = tokio::spawn(async move { video_send_task(for_task, want, gen).await });
                     for_abort.tasks.lock().unwrap().push(h.abort_handle());
                     Ok::<(), String>(())
                 })??;
@@ -820,19 +843,27 @@ impl VoiceMedia {
             *st = "starting".to_string();
             *sess.sh.video_error.lock().unwrap() = None;
         }
+        let gen = sess.sh.video_generation.load(Ordering::SeqCst);
         let for_task = sess.clone();
         let for_abort = sess.clone();
         let want = source.to_string();
         self.inner.core.run(async move {
-            let h = tokio::spawn(async move { video_send_task(for_task, want).await });
+            let h = tokio::spawn(async move { video_send_task(for_task, want, gen).await });
             for_abort.tasks.lock().unwrap().push(h.abort_handle());
             Ok::<(), String>(())
         })??;
         Ok("starting".to_string())
     }
 
-    fn video_purge_source(&self) {
-        std::thread::sleep(Duration::from_millis(120));
+    /// Incrementa a geração de vídeo, invalidando tasks de envio antigas.
+    /// Retorna o novo token de geração.
+    fn video_purge_source(&self, sess: &Session) -> u64 {
+        let gen = sess.sh.video_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // Aborta tasks de vídeo anteriores para esta sessão
+        for h in sess.tasks.lock().unwrap().drain(..) {
+            h.abort();
+        }
+        gen
     }
 
     pub fn video_stop(&self, call_id: &str, peer_fp: &str) {
@@ -1564,7 +1595,7 @@ const VIDEO_FPS: u32 = 30;
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const VIDEO_STALL: Duration = Duration::from_secs(15);
 
-async fn video_send_task(sess: Arc<Session>, want_source: String) {
+async fn video_send_task(sess: Arc<Session>, want_source: String, generation: u64) {
     let sh = sess.sh.clone();
     let want = sh.video_want.lock().unwrap().clone();
     let Some((_, want_monitor)) = want else {
@@ -1576,6 +1607,7 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
     loop {
         if sess.closed.load(Ordering::SeqCst)
             || sh.video_state.lock().unwrap().as_str() != "starting"
+            || sh.video_generation.load(Ordering::SeqCst) != generation
         {
             return;
         }
@@ -1681,6 +1713,9 @@ async fn video_send_task(sess: Arc<Session>, want_source: String) {
             break;
         }
         if !matches!(sh.video_state.lock().unwrap().as_str(), "starting" | "live") {
+            break;
+        }
+        if sh.video_generation.load(Ordering::SeqCst) != generation {
             break;
         }
         let t_iter = Instant::now();
