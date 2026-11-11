@@ -232,6 +232,7 @@ fn community_state_payload_mascara_token_para_nao_dono() {
 #[test]
 fn call_add_participant_valida_e_registra() {
     let (a, _ka, _st, _da) = engine_for("Alice");
+    a.store.set_friend("bbbbbbbbbbbb", "B", "accepted").unwrap();
     let call_id = a.call_invite("bbbbbbbbbbbb", "voice").unwrap();
 
     a.call_add_participant("bbbbbbbbbbbb", &call_id, "cccccccccccc", "")

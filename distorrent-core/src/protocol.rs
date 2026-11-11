@@ -238,6 +238,10 @@ pub enum SecureFrame {
         call_id: String,
         kind: String,
         target_fp: String,
+        /// `true` quando o convite é de uma chamada de GRUPO (contexto de grupo
+        /// em comum). Em `false` a chamada é 1:1 e exige amizade aceita.
+        #[serde(default)]
+        group: bool,
     },
     CallAccept {
         call_id: String,

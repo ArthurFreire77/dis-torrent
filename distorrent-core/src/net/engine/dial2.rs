@@ -127,6 +127,11 @@ pub(super) async fn connect_and_maintain(
                 }
                 if let Some(fp) = &expected_fp {
                     engine.note_dial_failure(fp);
+                    // Sem isto o peer ficava "CONECTANDO" para sempre no painel:
+                    // o link era criado em Connecting e nenhum caminho de erro
+                    // mudava o estado. Reconnecting diz a verdade e o backoff
+                    // abaixo continua tentando.
+                    set_link_state(&engine, fp, PeerLinkState::Reconnecting);
                 }
                 if let Some(fp) = &expected_fp {
                     let mode = engine

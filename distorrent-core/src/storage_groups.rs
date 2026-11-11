@@ -211,6 +211,20 @@ impl Store {
             .is_ok()
     }
 
+    /// Chamadas (ainda abertas) criadas por mim para este peer. Usado para
+    /// revogar a chamada quando a amizade/bloqueio muda.
+    pub fn open_calls_targeting(&self, host_fp: &str, peer_fp: &str) -> Result<Vec<String>> {
+        let conn = self.locked();
+        let mut st = conn.prepare(
+            "SELECT call_id FROM calls
+              WHERE host_fp = ?1 AND conv_id = ?2 AND ended_at IS NULL",
+        )?;
+        let rows = st
+            .query_map(params![host_fp, peer_fp], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn set_voice_state(
         &self,
         community_id: &str,
@@ -223,6 +237,21 @@ impl Store {
             "INSERT INTO voice_states(community_id,channel_id,fp,muted,deafened,speaking,joined_at,announced_at) VALUES(?1,?2,?3,?4,?5,0,?6,?6)
              ON CONFLICT(community_id,channel_id,fp) DO UPDATE SET muted=excluded.muted, deafened=excluded.deafened, announced_at=excluded.announced_at",
             params![community_id, channel_id, fp, if muted {1} else {0}, if deafened {1} else {0}, crate::identity::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Revalida o carimbo de quem está em call SEM alterar mute/deaf.
+    ///
+    /// POR QUE: `list_voice_states` apaga linhas com `announced_at` velho. O
+    /// re-anúncio periódico mandava `VoiceJoin` mas nunca atualizava o carimbo,
+    /// então depois de 90 s o próprio dono "saía" da call para todo mundo — era
+    /// o roster que aparecia só com uma pessoa ou vazio depois de um tempo.
+    pub fn touch_voice_state(&self, community_id: &str, channel_id: &str, fp: &str) -> Result<()> {
+        self.locked().execute(
+            "UPDATE voice_states SET announced_at=?4
+              WHERE community_id=?1 AND channel_id=?2 AND fp=?3",
+            params![community_id, channel_id, fp, crate::identity::now_ms()],
         )?;
         Ok(())
     }
@@ -240,13 +269,10 @@ impl Store {
         community_id: &str,
         channel_id: &str,
     ) -> Result<Vec<(String, bool, bool)>> {
-        let agora = crate::identity::now_ms();
-        let limite = agora - (Self::VOICE_PRESENCE_TTL_MS as i64);
+        // Leitura NÃO apaga: a UI consulta isso a cada 10 s e a exclusão por
+        // TTL aqui fazia um simples poll destruir o roster de quem estava na
+        // call. A limpeza acontece no tick de manutenção, com o carimbo certo.
         let conn = self.locked();
-        let _ = conn.execute(
-            "DELETE FROM voice_states WHERE community_id=?1 AND channel_id=?2 AND announced_at > 0 AND announced_at < ?3",
-            params![community_id, channel_id, limite],
-        );
         let mut st = conn.prepare(
             "SELECT fp,muted,deafened FROM voice_states WHERE community_id=?1 AND channel_id=?2",
         )?;
@@ -260,6 +286,61 @@ impl Store {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Remove quem parou de se anunciar (fechou o app, caiu de vez). Chamado
+    /// só pela manutenção do motor, nunca por uma leitura da interface.
+    pub fn purge_stale_voice_states(
+        &self,
+        community_id: &str,
+        channel_id: &str,
+        older_than_ts: i64,
+    ) -> Result<Vec<String>> {
+        let ids = {
+            let conn = self.locked();
+            let mut st = conn.prepare(
+                "SELECT fp FROM voice_states
+                  WHERE community_id=?1 AND channel_id=?2
+                    AND announced_at > 0 AND announced_at < ?3",
+            )?;
+            let rows = st
+                .query_map(params![community_id, channel_id, older_than_ts], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for fp in &ids {
+            let _ = self.leave_voice(community_id, channel_id, fp);
+        }
+        Ok(ids)
+    }
+
+    /// Só para teste: envelhece o carimbo de presença de voz.
+    #[doc(hidden)]
+    pub fn envelhecer_voice_state_para_teste(&self, fp: &str, ms: i64) {
+        let _ = self.locked().execute(
+            "UPDATE voice_states SET announced_at = ?1 WHERE fp = ?2",
+            params![crate::identity::now_ms() - ms, fp],
+        );
+    }
+
+    /// Mute/estado de quem já está na linha; usado no reanúncio para não
+    /// resetar o estado de um peer que já estava na call.
+    pub fn peer_voice_mute(
+        &self,
+        community_id: &str,
+        channel_id: &str,
+        fp: &str,
+    ) -> Option<(bool, bool)> {
+        let conn = self.locked();
+        conn.query_row(
+            "SELECT muted,deafened FROM voice_states
+              WHERE community_id=?1 AND channel_id=?2 AND fp=?3",
+            params![community_id, channel_id, fp],
+            |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0)),
+        )
+        .ok()
     }
 
     pub fn my_voice_states(&self, fp: &str) -> Result<Vec<(String, String, bool, bool)>> {

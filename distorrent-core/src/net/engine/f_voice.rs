@@ -19,9 +19,20 @@ pub(super) async fn handle_voice(
                     "não é membro da comunidade".into(),
                 ));
             }
+            // Ler o estado ANTES de gravar: `set_voice_state` zera mute/deaf,
+            // então restaurar depois de gravar lia o valor já zerado.
+            let anterior = engine
+                .store
+                .peer_voice_mute(&community_id, &channel_id, peer_fp);
+            let (m, d) = anterior.unwrap_or((false, false));
             engine
                 .store
-                .set_voice_state(&community_id, &channel_id, peer_fp, false, false)?;
+                .set_voice_state(&community_id, &channel_id, peer_fp, m, d)?;
+            // Cada anúncio renova o carimbo de vida do peer no canal. A
+            // manutenção remove quem deixou de anunciar; a LEITURA nunca apaga.
+            let _ = engine
+                .store
+                .touch_voice_state(&community_id, &channel_id, peer_fp);
             #[cfg(target_os = "linux")]
             {
                 engine.voice_mesh_maybe_offer(&community_id, &channel_id, peer_fp);

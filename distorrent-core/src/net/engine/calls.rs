@@ -36,6 +36,23 @@ impl NetworkEngine {
     }
 
     pub fn call_invite(self: &Arc<Self>, target_fp: &str, kind: &str) -> Result<String> {
+        self.call_invite_ctx(target_fp, kind, false)
+    }
+
+    /// `group = true` é chamada de grupo/canal (o alvo já está no grupo). Em
+    /// 1:1 a regra é dura: sem amizade ACEITA não sai convite — a UI desabilita
+    /// o botão, mas a barreira de verdade fica aqui.
+    pub fn call_invite_ctx(
+        self: &Arc<Self>,
+        target_fp: &str,
+        kind: &str,
+        group: bool,
+    ) -> Result<String> {
+        if !group && !self.is_accepted_friend(target_fp) {
+            return Err(DistorrentError::Protocol(
+                "só amigos aceitos podem ligar — envie uma solicitação de amizade primeiro".into(),
+            ));
+        }
         let short = self
             .identity
             .fingerprint
@@ -53,6 +70,7 @@ impl NetworkEngine {
                 call_id: call_id.clone(),
                 kind: kind.into(),
                 target_fp: target_fp.into(),
+                group,
             },
         );
         #[cfg(target_os = "linux")]
@@ -73,9 +91,24 @@ impl NetworkEngine {
         Ok(call_id)
     }
 
+    /// Amizade efetivamente aceita (não vale pendente, recusada nem bloqueada).
+    pub fn is_accepted_friend(&self, peer_fp: &str) -> bool {
+        matches!(
+            self.store.get_friend(peer_fp).ok().flatten(),
+            Some((_, s)) if s == "accepted"
+        )
+    }
+
     pub fn call_ring_retry(&self, call_id: &str, target_fp: &str, kind: &str) -> Result<()> {
         if call_id.trim().is_empty() || target_fp.trim().is_empty() {
             return Err(DistorrentError::Protocol("call_id/alvo vazios".into()));
+        }
+        // O retry também respeita a amizade: sem isto bastava o toque inicial
+        // ser recusado para o app continuar insistindo por outro caminho.
+        if !self.is_accepted_friend(target_fp) && !self.store.is_in_call(call_id, target_fp) {
+            return Err(DistorrentError::Protocol(
+                "só amigos aceitos podem ligar".into(),
+            ));
         }
         self.remember_call_target(call_id, target_fp);
         self.queue_or_send_call_frame(
@@ -84,6 +117,7 @@ impl NetworkEngine {
                 call_id: call_id.into(),
                 kind: kind.into(),
                 target_fp: target_fp.into(),
+                group: false,
             },
         );
         Ok(())

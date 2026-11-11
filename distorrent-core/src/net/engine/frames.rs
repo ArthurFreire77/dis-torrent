@@ -44,13 +44,7 @@ pub(super) async fn handle_frame(
                 "sinalização de chamada descartada (rate limit)".into(),
             ));
         }
-        let is_friend = engine
-            .store
-            .get_friend(peer_fp)
-            .ok()
-            .flatten()
-            .map(|(_, s)| s == "accepted")
-            .unwrap_or(false);
+        let is_friend = engine.is_accepted_friend(peer_fp);
         let shares_chamada = call_id_do_frame(&frame)
             .map(|cid| engine.store.is_in_call(&cid, &engine.identity.fingerprint))
             .unwrap_or(false);
@@ -58,17 +52,13 @@ pub(super) async fn handle_frame(
             .store
             .group_convs_with_peer(peer_fp)
             .map(|v| !v.is_empty())
-            .unwrap_or(false)
-            || shares_chamada;
-        let shares_comm = engine
-            .store
-            .list_communities()
-            .map(|cs| {
-                cs.iter()
-                    .any(|(id, _, _)| engine.store.member_role(id, peer_fp).is_some())
-            })
             .unwrap_or(false);
-        if !is_friend && !shares_group && !shares_comm {
+        // Chamada de GRUPO continua valendo pelo grupo em comum; chamada 1:1
+        // exige amizade ACEITA. Antes bastava compartilhar um servidor para
+        // um não-amigo tocar a campainha — a UI escondia, a rede não.
+        let grupo_convite = matches!(&frame, SecureFrame::CallInvite { group: true, .. });
+        let permitido = is_friend || shares_chamada || (grupo_convite && shares_group);
+        if !permitido {
             if let SecureFrame::CallInvite { call_id, .. } = &frame {
                 let _ = engine.queue_or_send_call_frame(
                     peer_fp,

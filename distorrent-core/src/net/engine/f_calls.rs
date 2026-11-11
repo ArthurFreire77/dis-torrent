@@ -14,6 +14,7 @@ pub(super) async fn handle_calls(
             call_id,
             kind,
             target_fp,
+            group: _,
         } => {
             // `target_fp` vazio em versões antigas. Quando vem preenchido,
             // precisa ser eu: um convite endereçado a outra pessoa não pode
@@ -85,6 +86,19 @@ pub(super) async fn handle_calls(
         }
 
         SecureFrame::CallReject { call_id, reason } => {
+            // Revogação imediata: se a amizade caiu entre o toque e o aceite,
+            // o convite não pode mais virar chamada. A CEIFA aqui também cobre
+            // o caso de a UI ainda mostrar o painel de toque.
+            if engine
+                .store
+                .is_in_call(&call_id, &engine.identity.fingerprint)
+                && !engine.is_accepted_friend(peer_fp)
+                && engine.store.get_call_host(&call_id)?.as_deref() != Some(peer_fp)
+            {
+                engine
+                    .store
+                    .leave_call(&call_id, &engine.identity.fingerprint)?;
+            }
             let _ = engine.events.send(EngineEvent::CallRejected {
                 call_id,
                 from_fp: peer_fp.into(),

@@ -141,6 +141,7 @@ impl NetworkEngine {
 
     pub fn friend_remove(&self, peer_fp: &str) -> Result<()> {
         let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        self.end_calls_with_peer(&peer_fp);
         self.store.clear_friendship(&peer_fp)?;
         self.deliver_friend_frame(&peer_fp, SecureFrame::FriendRemove);
         let _ = self.events.send(EngineEvent::FriendRemoved {
@@ -149,8 +150,31 @@ impl NetworkEngine {
         Ok(())
     }
 
+    /// Remover/bloquear revoga a permissão de chamada na hora: sem isto a
+    /// chamada 1:1 em andamento continuava de pé depois do "remover amigo".
+    fn end_calls_with_peer(&self, peer_fp: &str) {
+        let me = self.identity.fingerprint.clone();
+        let mut ids = self
+            .store
+            .open_calls_targeting(&me, peer_fp)
+            .unwrap_or_default();
+        ids.extend(
+            self.store
+                .open_calls_targeting(peer_fp, &me)
+                .unwrap_or_default(),
+        );
+        ids.sort();
+        ids.dedup();
+        for call_id in ids {
+            let _ = self.call_end(&call_id);
+        }
+    }
+
     pub fn friend_block(&self, peer_fp: &str) -> Result<()> {
         let peer_fp = Self::normalize_peer_id(peer_fp)?;
+        // Bloqueio revoga a chamada na hora: continuar conectado com quem foi
+        // bloqueado seria manter a permissão que o bloqueio acabou de tirar.
+        self.end_calls_with_peer(&peer_fp);
         self.store.set_friend(&peer_fp, "", "blocked")?;
         self.deliver_friend_frame(&peer_fp, SecureFrame::FriendRemove);
         // Bloqueio é local e imediato: a UI precisa ver o peer sair da lista e da conversa sem esperar o próximo refresh.

@@ -29,6 +29,12 @@ impl Rooms {
             Some(r) if r.call_id == call_id => {
                 if r.host_fp == publisher_fp {
                     r.participants = participants;
+                    // O host saiu da própria lista (fechou o app, saiu da call):
+                    // o comando passa para quem ficou. Sem isto a sala ficava
+                    // presa num host que não está mais nela — ninguém entrava.
+                    if !r.participants.iter().any(|p| p == &r.host_fp) {
+                        r.host_fp = r.participants.first().cloned().unwrap_or_default();
+                    }
                     r.updated_ms = now_ms;
                 }
                 r.clone()
@@ -55,6 +61,11 @@ impl Rooms {
     pub fn set_participants(&mut self, conv_id: &str, participants: Vec<String>) {
         if let Some(r) = self.map.get_mut(conv_id) {
             r.participants = participants;
+            // Quem era host e não está mais na lista não pode continuar
+            // mandando na sala: o comando passa para quem ficou.
+            if !r.participants.iter().any(|p| p == &r.host_fp) {
+                r.host_fp = r.participants.first().cloned().unwrap_or_default();
+            }
             r.updated_ms = crate::identity::now_ms();
         }
     }

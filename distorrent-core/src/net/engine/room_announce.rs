@@ -96,6 +96,8 @@ impl NetworkEngine {
             participants: atual.participants.clone(),
             host_fp: atual.host_fp.clone(),
         });
+        // Avisa os outros com a lista JÁ atualizada. Sem isto, quem ficou na
+        // sala continuava vendo o participante que acabou de sair.
         self.room_announce(
             conv_id,
             SecureFrame::CallRoom {
@@ -153,6 +155,37 @@ impl NetworkEngine {
         let _ = self
             .store
             .join_call(&room.call_id, &self.identity.fingerprint);
+        // Entra também na SALA ANUNCIADA: sem isto quem já estava nunca via o
+        // recém-chegado (o roster local só recebia o anúncio do host).
+        let (kind_atual, participantes) = {
+            let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
+            let mut lista = rooms
+                .get(conv_id)
+                .map(|r| r.participants.clone())
+                .unwrap_or_else(|| room.participants.clone());
+            if !lista.iter().any(|p| p == &self.identity.fingerprint) {
+                lista.push(self.identity.fingerprint.clone());
+                rooms.set_participants(conv_id, lista.clone());
+            }
+            (
+                rooms
+                    .get(conv_id)
+                    .map(|r| r.kind.clone())
+                    .unwrap_or_else(|| room.kind.clone()),
+                lista,
+            )
+        };
+        self.room_announce(
+            conv_id,
+            SecureFrame::CallRoom {
+                call_id: room.call_id.clone(),
+                conv_id: conv_id.to_string(),
+                kind: kind_atual,
+                state: "open".into(),
+                participants: participantes.clone(),
+                ts: crate::identity::now_ms(),
+            },
+        );
         Ok((room.call_id, alvos))
     }
 
@@ -360,16 +393,52 @@ impl NetworkEngine {
             }
             return;
         }
+        if state == "open" && participants.is_empty() {
+            // Sala vazia não é sala: aceitar criaria um room fantasma em que
+            // `room_join` promete entrada sem ninguém do outro lado.
+            return;
+        }
         let room = {
             let mut rooms = self.call_rooms.lock().unwrap_or_else(|e| e.into_inner());
-            rooms.open(
-                call_id,
-                conv_id,
-                kind,
-                peer_fp,
-                participants,
-                crate::identity::now_ms(),
-            )
+            // O publisher aqui é o PEER que anunciou (host ou convidado). A
+            // lista de participantes é a fonte da verdade; a regra antiga só
+            // aceitava atualização de quem era host, então a entrada de um
+            // convidado nunca entrava no roster de quem já estava.
+            let existente = rooms.get(conv_id).cloned();
+            match existente {
+                Some(atual) if atual.call_id == call_id => {
+                    // Aceitar a atualização quando o publisher está na lista
+                    // nova (entrou) OU estava na antiga (saiu). Recusar quem
+                    // não é nem uma coisa nem outra impede um peer de reescrever
+                    // o roster de terceiros.
+                    let entrou = participants.iter().any(|p| p == peer_fp);
+                    let saiu = atual.participants.iter().any(|p| p == peer_fp);
+                    if !entrou && !saiu {
+                        atual
+                    } else {
+                        rooms.set_participants(conv_id, participants.clone());
+                        let mut r = atual;
+                        r.participants = participants;
+                        r.kind = if kind.is_empty() {
+                            r.kind
+                        } else {
+                            kind.to_string()
+                        };
+                        if !r.participants.iter().any(|p| p == &r.host_fp) {
+                            r.host_fp = r.participants.first().cloned().unwrap_or_default();
+                        }
+                        r
+                    }
+                }
+                _ => rooms.open(
+                    call_id,
+                    conv_id,
+                    kind,
+                    peer_fp,
+                    participants,
+                    crate::identity::now_ms(),
+                ),
+            }
         };
         let _ = self.events.send(EngineEvent::CallRoom {
             call_id: room.call_id,

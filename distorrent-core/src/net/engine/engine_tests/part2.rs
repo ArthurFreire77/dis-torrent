@@ -330,6 +330,7 @@ fn apagar_so_para_mim_funciona_para_quem_nao_e_dono() {
 fn call_end_avisa_o_alvo_que_ainda_nao_aceitou() {
     let (e, _d) = mk_engine("cancelar-toque");
     let alvo = peer_hex(0x55);
+    e.store.set_friend(&alvo, "alvo", "accepted").unwrap();
     let call_id = e.call_invite(&alvo, "voice").unwrap();
     assert!(
         e.remembered_call_targets(&call_id)
@@ -366,12 +367,65 @@ fn call_end_avisa_o_alvo_que_ainda_nao_aceitou() {
 fn call_invite_registra_o_chamador_como_participante() {
     let (e, _d) = mk_engine("call-invite-parte");
     let me = e.identity.fingerprint.clone();
-    let call_id = e.call_invite("peer-alvo", "voice").unwrap();
+    let alvo = "peer-alvo";
+    e.store.set_friend(alvo, "alvo", "accepted").unwrap();
+    let call_id = e.call_invite(alvo, "voice").unwrap();
     assert!(
         e.store.is_in_call(&call_id, &me),
         "sem isto o gate de grupo não reconhece a própria chamada do chamador"
     );
     assert!(e.store.call_participants(&call_id).unwrap().contains(&me));
+}
+
+#[test]
+fn call_invite_um_a_um_exige_amizade_aceita() {
+    let (e, _d) = mk_engine("call-so-amigo");
+    let alvo = peer_hex(0x77);
+    let err = e.call_invite(&alvo, "voice").unwrap_err();
+    assert!(
+        err.to_string().contains("amigos"),
+        "sem amizade aceita o motor precisa recusar o convite: {err}"
+    );
+    assert!(
+        e.remembered_call_targets("call-inexistente").is_empty(),
+        "um convite recusado não pode deixar alvo pendente"
+    );
+
+    // Pendente também não libera: apenas `accepted`.
+    e.store.set_friend_request_out(&alvo, "alvo").unwrap();
+    assert!(e.call_invite(&alvo, "voice").is_err(), "pendente não liga");
+
+    e.store.accept_friend(&alvo, "alvo").unwrap();
+    assert!(e.call_invite(&alvo, "voice").is_ok(), "amizade aceita liga");
+}
+
+#[test]
+fn call_ring_retry_nao_contorna_a_regra_de_amizade() {
+    let (e, _d) = mk_engine("ring-so-amigo");
+    let alvo = peer_hex(0x88);
+    assert!(
+        e.call_ring_retry("call-x", &alvo, "voice").is_err(),
+        "o retry não pode insistir com quem não é amigo"
+    );
+    e.store.accept_friend(&alvo, "alvo").unwrap();
+    assert!(e.call_ring_retry("call-x", &alvo, "voice").is_ok());
+}
+
+#[test]
+fn remover_amizade_derruba_a_chamada_em_andamento() {
+    let (e, _d) = mk_engine("amizade-cai-chamada");
+    let alvo = peer_hex(0x99);
+    e.store.accept_friend(&alvo, "alvo").unwrap();
+    let call_id = e.call_invite(&alvo, "voice").unwrap();
+    assert!(e.store.is_in_call(&call_id, &e.identity.fingerprint));
+
+    e.friend_remove(&alvo).unwrap();
+
+    assert!(
+        !e.store.is_in_call(&call_id, &e.identity.fingerprint),
+        "sem amizade a chamada não pode continuar de pé"
+    );
+    assert!(e.call_invite(&alvo, "voice").is_err(), "e não pode religar");
 }
 
 #[test]

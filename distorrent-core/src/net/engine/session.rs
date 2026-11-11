@@ -148,6 +148,13 @@ pub(super) async fn register_and_run(
                     });
                 }
             }
+            // O amigo voltou: failed do passado também merece nova tentativa —
+            // antes ele só saía por "reenviar" manual.
+            if let Ok(n) = engine.store.requeue_failed_for_peer(peer_fp) {
+                if n > 0 {
+                    debug!(%peer_fp, n, "mensagens failed reenfileiradas na reconexão");
+                }
+            }
         }
         engine
             .cmd_tx

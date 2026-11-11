@@ -218,6 +218,30 @@ impl NetworkEngine {
             Err(_) => return,
         };
         for (community_id, channel_id, muted, deafened) in mine {
+            // Renova o próprio carimbo: sem isto a linha local expirava em 90 s
+            // e o roster de todos perdia quem continuava na call.
+            let _ = self
+                .store
+                .touch_voice_state(&community_id, &channel_id, &me);
+            // Limpa só quem REALMENTE parou de se anunciar, no tick de
+            // manutenção. Ler o roster nunca deve apagar linha.
+            let limite =
+                crate::identity::now_ms() - (crate::storage::Store::VOICE_PRESENCE_TTL_MS as i64);
+            if let Ok(saidos) =
+                self.store
+                    .purge_stale_voice_states(&community_id, &channel_id, limite)
+            {
+                for fp in saidos {
+                    if fp == me {
+                        continue;
+                    }
+                    let _ = self.events.send(EngineEvent::VoiceLeft {
+                        community_id: community_id.clone(),
+                        channel_id: channel_id.clone(),
+                        fp,
+                    });
+                }
+            }
             for (fp, _, _) in self.store.list_members(&community_id).unwrap_or_default() {
                 if fp == me {
                     continue;

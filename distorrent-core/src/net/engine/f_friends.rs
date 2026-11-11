@@ -119,6 +119,21 @@ pub(super) async fn handle_friends(
         SecureFrame::FriendRemove => {
             // Quem bloqueou não pode ser "desamigado" pelo outro lado: o bloqueio é local e soberano.
             if !engine.store.is_blocked_fp(peer_fp) {
+                // Remover amizade revoga a chamada 1:1 que estava de pé.
+                let me = engine.identity.fingerprint.clone();
+                let mut ids = engine
+                    .store
+                    .open_calls_targeting(&me, peer_fp)
+                    .unwrap_or_default();
+                ids.extend(
+                    engine
+                        .store
+                        .open_calls_targeting(peer_fp, &me)
+                        .unwrap_or_default(),
+                );
+                for call_id in ids {
+                    let _ = engine.call_end(&call_id);
+                }
                 engine.store.clear_friendship(peer_fp)?;
             }
             let _ = engine
