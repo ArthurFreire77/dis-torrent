@@ -105,6 +105,12 @@ pub fn update_apply(app: tauri::AppHandle, path: String) -> Result<(), String> {
         } else {
             run_elevated(&p)?;
         }
+        // O Inno precisa do .exe livre para substituir; o /RESTARTAPPLICATIONS reabre.
+        let app_quit = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = app_quit.exit(0);
+        });
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {

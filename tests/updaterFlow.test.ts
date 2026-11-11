@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import { runUpdateFlow, FLAG_FAILED, FLAG_APPLIED, type UpdateDeps, type UpdateInfo } from '../src/services/updateRules.ts'
+import { runUpdateFlow, FLAG_FAILED, FLAG_APPLIED, FLAG_HANDOFF, type UpdateDeps, type UpdateInfo } from '../src/services/updateRules.ts'
 
 // O bug da 1.1.68: o manifesto assinado apontava as URLs para a tag
 // `v1.1.68-pre-alpha`, mas a tag real é `v1.1.68`. O download dava 404, o app
@@ -95,6 +95,28 @@ test('salto aplicado e versão ainda antiga = stalled (instalador não subiu)', 
   d.flags.set(FLAG_APPLIED, '1.1.68-pre-alpha')
   const r = await runUpdateFlow(d, { autoApply: true, boot: true })
   assert.equal(r.kind, 'stalled')
+})
+
+test('instalador já aberto NÃO é reaberto no boot seguinte (loop infinito)', async () => {
+  const d = deps()
+  d.flags.set(FLAG_HANDOFF, `1.1.68-pre-alpha|${Date.now() - 60_000}`)
+  const r = await runUpdateFlow(d, { autoApply: true, boot: true })
+  assert.equal(r.kind, 'handoff', 'o app reabriu antes do Inno terminar')
+  assert.equal(d.downloads, 0, 'baixar de novo alimentava o loop')
+})
+
+test('handoff vencido volta a permitir a atualização', async () => {
+  const d = deps()
+  d.flags.set(FLAG_HANDOFF, `1.1.68-pre-alpha|${Date.now() - 11 * 60 * 1000}`)
+  const r = await runUpdateFlow(d, { autoApply: true, boot: true })
+  assert.equal(r.kind, 'applied')
+})
+
+test('versão nova depois de um handoff antigo não fica presa', async () => {
+  const d = deps()
+  d.flags.set(FLAG_HANDOFF, `1.1.67-pre-alpha|${Date.now() - 60_000}`)
+  const r = await runUpdateFlow(d, { autoApply: true, boot: true })
+  assert.equal(r.kind, 'applied')
 })
 
 // --- fio: o manifesto publicado precisa usar a tag real ---------------------

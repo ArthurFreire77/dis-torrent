@@ -130,6 +130,7 @@ export type UpdateOutcome =
   | { kind: 'none' }
   | { kind: 'later'; info: UpdateInfo }
   | { kind: 'stalled'; info: UpdateInfo }
+  | { kind: 'handoff'; info: UpdateInfo }
   | { kind: 'applied'; info: UpdateInfo; path: string }
   | { kind: 'error'; message: string }
 
@@ -147,7 +148,10 @@ export interface UpdateDeps {
 export const FLAG_SKIP = 'update.skip'
 export const FLAG_FAILED = 'update.failed'
 export const FLAG_APPLIED = 'update.applied'
+export const FLAG_HANDOFF = 'update.handoff'
 export const FAILED_TTL_MS = 6 * 60 * 60 * 1000
+/** Instalador entregue ao SO: não reabrir o mesmo até o Inno terminar. */
+export const HANDOFF_TTL_MS = 10 * 60 * 1000
 
 export function falhaExpirada(marca: string | null, nowMs = Date.now()): boolean {
   if (!marca) return true
@@ -172,6 +176,19 @@ export async function runUpdateFlow(
 
   if (!isNewer(info.current, info.latest)) return { kind: 'none' }
   if ((await deps.getFlag(FLAG_SKIP)) === info.latest) return { kind: 'none' }
+
+  const entregue = await deps.getFlag(FLAG_HANDOFF).catch(() => null)
+  if (entregue) {
+    const [versao, ts] = entregue.split('|')
+    const quando = Number(ts)
+    const recente = Number.isFinite(quando) && Date.now() - quando < HANDOFF_TTL_MS
+    if (recente && versao === info.latest) {
+      return { kind: 'handoff', info }
+    }
+    if (!recente || versao !== info.latest) {
+      await deps.setFlag(FLAG_HANDOFF, '').catch(() => {})
+    }
+  }
 
   const mode = updateModeFor(info.platform, info.asset_name)
   if (mode === 'link') return { kind: 'later', info }
@@ -207,6 +224,7 @@ export async function runUpdateFlow(
   }
 
   await deps.setFlag(FLAG_APPLIED, info.latest).catch(() => {})
+  await deps.setFlag(FLAG_HANDOFF, `${info.latest}|${Date.now()}`).catch(() => {})
 
   try {
     await deps.apply(path)
@@ -217,6 +235,7 @@ export async function runUpdateFlow(
       return { kind: 'applied', info, path }
     }
     await deps.setFlag(FLAG_APPLIED, '').catch(() => {})
+    await deps.setFlag(FLAG_HANDOFF, '').catch(() => {})
     await deps.setFlag(FLAG_FAILED, `${info.latest}|${Date.now()}`).catch(() => {})
     return { kind: 'error', message: msg }
   }

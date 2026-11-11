@@ -2,6 +2,7 @@ import React from 'react'
 import { services } from '../services'
 import {
   FLAG_APPLIED,
+  FLAG_HANDOFF,
   FLAG_SKIP,
   compareVersions,
   formatBytes,
@@ -21,6 +22,7 @@ export type UpdatePhase =
   | 'installing'
   | 'later'
   | 'stalled'
+  | 'handoff'
   | 'error'
 
 export interface UpdateGateState {
@@ -128,6 +130,15 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
             progress: null,
           })
           return outcome
+        case 'handoff':
+          setState({
+            phase: 'handoff',
+            info: outcome.info,
+            current: outcome.info.current,
+            message: 'o instalador já foi aberto — feche o app e deixe o Windows concluir',
+            progress: null,
+          })
+          return outcome
         case 'error':
           setState((s) =>
             s.info
@@ -199,6 +210,8 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
         if (!info) return
         const path = await deps.download(info)
         set({ phase: 'installing', message: 'instalando — o app vai reiniciar sozinho' })
+        await deps.setFlag(FLAG_APPLIED, info.latest).catch(() => {})
+        await deps.setFlag(FLAG_HANDOFF, `${info.latest}|${Date.now()}`).catch(() => {})
         await deps.apply(path)
       } catch (e) {
         set({ phase: 'error', message: String((e as Error)?.message ?? e) })
@@ -242,6 +255,11 @@ export function useUpdateGate(enabled = true): UpdateGateApi {
       setState({ phase: 'stalled', info, current: info.current, message: '', progress: null })
       return info
     }
+    const entregue = await deps.getFlag(FLAG_HANDOFF).catch(() => null)
+    if (entregue?.startsWith(`${info.latest}|`)) {
+      setState({ phase: 'handoff', info, current: info.current, message: '', progress: null })
+      return info
+    }
     setState({ phase: 'later', info, current: info.current, message: '', progress: null })
     return info
   }, [set])
@@ -266,6 +284,7 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
 
   const blocking = api.phase === 'downloading' || api.phase === 'installing'
   const stalled = api.phase === 'stalled'
+  const handoff = api.phase === 'handoff'
   const info = api.info
   const mode = info ? updateModeFor(info.platform, info.asset_name) : 'link'
 
@@ -305,11 +324,13 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
         <div style={{ fontSize: 22, fontWeight: 900, marginTop: 6, color: '#fff' }}>
           {api.phase === 'error'
             ? 'não deu para atualizar'
-            : stalled
-              ? 'atualização já aplicada'
-              : info && isNewer(info.current, info.latest)
-                ? `DisTorrent ${info.latest} disponível`
-                : 'DisTorrent'}
+            : handoff
+              ? 'instalador já aberto'
+              : stalled
+                ? 'atualização já aplicada'
+                : info && isNewer(info.current, info.latest)
+                  ? `DisTorrent ${info.latest} disponível`
+                  : 'DisTorrent'}
         </div>
 
         {info && (
@@ -379,7 +400,18 @@ export function UpdateOverlay({ api }: { api: UpdateGateApi }) {
             </>
           )}
 
-          {!blocking && !stalled && api.phase !== 'error' && (
+          {handoff && (
+            <>
+              <button onClick={api.openPage} style={primaryBtn}>
+                Ver a versão publicada
+              </button>
+              <button onClick={api.dismiss} style={ghostBtn}>
+                Continuar no app
+              </button>
+            </>
+          )}
+
+          {!blocking && !stalled && !handoff && api.phase !== 'error' && (
             <>
               {mode === 'link' ? (
                 <button onClick={api.openPage} style={primaryBtn}>

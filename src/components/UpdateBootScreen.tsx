@@ -19,6 +19,7 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
   const rotuloErrado = !!info?.label_mismatch
   const ocupada = api.phase === 'checking' || api.phase === 'downloading' || api.phase === 'installing'
   const prender = ocupada && !expirou
+  const handoff = api.phase === 'handoff'
 
   const titulo =
     api.phase === 'checking'
@@ -27,27 +28,31 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
         ? 'baixando a versão nova'
         : api.phase === 'installing'
           ? 'instalando'
-          : api.phase === 'stalled'
-            ? 'atualização já aplicada'
-            : api.phase === 'error'
-              ? 'não deu para verificar'
-              : temNova
-                ? `versão ${info?.latest} disponível`
-                : 'você está na versão mais nova'
+          : handoff
+            ? 'instalador já aberto'
+            : api.phase === 'stalled'
+              ? 'atualização já aplicada'
+              : api.phase === 'error'
+                ? 'não deu para verificar'
+                : temNova
+                  ? `versão ${info?.latest} disponível`
+                  : 'você está na versão mais nova'
 
   const detalhe =
     api.message ||
-    (rotuloErrado
-      ? `o instalador desta release é o da ${info?.asset_version || '?'} — a release anuncia ${info?.latest || '?'}`
-      : api.phase === 'checking'
-        ? 'conferindo o GitHub…'
-        : api.phase === 'installing'
-          ? mode === 'auto'
-            ? 'o app vai reiniciar sozinho'
-            : 'conclua no instalador do sistema'
-          : info
-            ? `instalada: ${info.current || '?'}`
-            : '')
+    (handoff
+      ? 'o Windows está concluindo — feche o app e abra de novo em instantes'
+      : rotuloErrado
+        ? `o instalador desta release é o da ${info?.asset_version || '?'} — a release anuncia ${info?.latest || '?'}`
+        : api.phase === 'checking'
+          ? 'conferindo o GitHub…'
+          : api.phase === 'installing'
+            ? mode === 'auto'
+              ? 'o app vai reiniciar sozinho'
+              : 'conclua no instalador do sistema'
+            : info
+              ? `instalada: ${info.current || '?'}`
+              : '')
 
   if (api.phase === 'idle' && fallback) return <>{fallback}</>
 
@@ -108,7 +113,7 @@ export function UpdateBootScreen({ api, fallback }: { api: UpdateGateApi; fallba
 
         {
 }
-        {!prender && temNova && !rotuloErrado && (
+        {!prender && temNova && !rotuloErrado && !handoff && (
           <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'center' }}>
             <button
               onClick={mode === 'link' ? api.openPage : api.apply}
