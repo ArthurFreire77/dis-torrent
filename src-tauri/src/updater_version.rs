@@ -357,3 +357,65 @@ pub fn releases_all(store: &Arc<Store>) -> Vec<GhRelease> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests_updater_version {
+    use super::*;
+    use std::cmp::Ordering;
+
+    /// Regressão do bug da 1.1.65: comparar signed.body.version com a tag por
+    /// IGUALDADE recusava toda release ("divergência de versão"), porque o
+    /// manifesto carrega o sufixo e a tag é limpa. O núcleo N.N.N tem de bater.
+    #[test]
+    fn mesma_versao_aceita_sufixo_contra_tag_limpa() {
+        assert!(mesma_versao("1.1.70-pre-alpha", "v1.1.70"));
+        assert!(mesma_versao("1.1.70", "v1.1.70"));
+        assert!(mesma_versao("v1.1.70", "v1.1.70"));
+        assert!(mesma_versao("1.1.65-pre-alpha", "1.1.65"));
+    }
+
+    #[test]
+    fn mesma_versao_recusa_versoes_diferentes() {
+        assert!(!mesma_versao("1.1.69-pre-alpha", "v1.1.70"));
+        assert!(!mesma_versao("1.1.70-pre-alpha", "v1.1.71"));
+        assert!(!mesma_versao("1.2.0", "v1.1.70"));
+    }
+
+    #[test]
+    fn cliente_antigo_ve_a_nova_como_mais_nova() {
+        // 1.1.69 precisa aceitar 1.1.70: é o caminho real de atualização.
+        assert_eq!(
+            compare_version_strings("1.1.70-pre-alpha", "1.1.69-pre-alpha"),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn cliente_na_mesma_versao_nao_reinstala() {
+        assert_eq!(
+            compare_version_strings("1.1.70-pre-alpha", "1.1.70-pre-alpha"),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn nao_faz_downgrade() {
+        assert_eq!(
+            compare_version_strings("1.1.69-pre-alpha", "1.1.70-pre-alpha"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_version_strings("1.1.70", "1.2.0"),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn dez_e_maior_que_nove_nao_ordem_de_string() {
+        // 1.1.10 > 1.1.9: comparar como texto inverteria e criaria loop.
+        assert_eq!(
+            compare_version_strings("1.1.10", "1.1.9"),
+            Ordering::Greater
+        );
+    }
+}
