@@ -88,7 +88,7 @@ impl NetworkEngine {
         Ok(conv)
     }
 
-    fn broadcast_group_created(&self, conv_id: &str) {
+    pub(super) fn broadcast_group_created(&self, conv_id: &str) {
         let members = self.store.list_group_members(conv_id).unwrap_or_default();
         let title = self
             .store
@@ -268,10 +268,8 @@ impl NetworkEngine {
                 .ok();
         }
         self.store.leave_group_local(conv_id)?;
-        // Sair do grupo precisa marcar como dispensado como apagar "só para mim".
-        // Sem isto, o próximo GroupCreated/sync de qualquer membro recriava o
-        // grupo minutos depois — era o "saio e ele volta". O criador vai junto
-        // porque a conversa some e só ele pode me readicionar de propósito.
+        // Marcar como dispensado é o que impede o GroupCreated/sync de qualquer
+        // membro de recriar o grupo minutos depois — era o "saio e ele volta".
         let dono = self.store.group_owner(conv_id)?.unwrap_or_default();
         let _ = crate::group_trash::dismiss_owned(&self.store, conv_id, &dono);
         let _ = self.events.send(EngineEvent::GroupSynced {
@@ -327,11 +325,9 @@ impl NetworkEngine {
         if conv.kind != "group" {
             return Err(DistorrentError::Protocol("não é grupo".into()));
         }
-        let membros = self.store.list_group_members(conv_id).unwrap_or_default();
         let dono = self.store.group_owner(conv_id)?.unwrap_or_default();
         self.store.leave_group_local(conv_id)?;
         let _ = crate::group_trash::dismiss_owned(&self.store, conv_id, &dono);
-        let _ = membros;
         let _ = self.events.send(EngineEvent::GroupSynced {
             conv_id: conv_id.to_string(),
             title: String::new(),

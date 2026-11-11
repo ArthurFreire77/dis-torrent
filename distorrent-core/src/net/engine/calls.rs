@@ -5,6 +5,36 @@
 use super::*;
 
 impl NetworkEngine {
+    fn remember_call_target(&self, call_id: &str, fp: &str) {
+        if call_id.is_empty() || fp.is_empty() {
+            return;
+        }
+        let mut map = self.call_targets.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() > 512 {
+            map.clear();
+        }
+        let alvos = map.entry(call_id.to_string()).or_default();
+        if !alvos.iter().any(|f| f == fp) {
+            alvos.push(fp.to_string());
+        }
+    }
+
+    pub(super) fn remembered_call_targets(&self, call_id: &str) -> Vec<String> {
+        self.call_targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(call_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn forget_call_targets(&self, call_id: &str) {
+        self.call_targets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(call_id);
+    }
+
     pub fn call_invite(self: &Arc<Self>, target_fp: &str, kind: &str) -> Result<String> {
         let short = self
             .identity
@@ -16,6 +46,7 @@ impl NetworkEngine {
         self.store
             .create_call(&call_id, kind, target_fp, &self.identity.fingerprint)?;
         let _ = self.store.join_call(&call_id, &self.identity.fingerprint);
+        self.remember_call_target(&call_id, target_fp);
         self.queue_or_send_call_frame(
             target_fp,
             SecureFrame::CallInvite {
@@ -46,6 +77,7 @@ impl NetworkEngine {
         if call_id.trim().is_empty() || target_fp.trim().is_empty() {
             return Err(DistorrentError::Protocol("call_id/alvo vazios".into()));
         }
+        self.remember_call_target(call_id, target_fp);
         self.queue_or_send_call_frame(
             target_fp,
             SecureFrame::CallInvite {
@@ -97,8 +129,10 @@ impl NetworkEngine {
     pub fn call_end(&self, call_id: &str) -> Result<()> {
         #[cfg(target_os = "linux")]
         self.forget_held_call(call_id);
-        let participants = self.store.call_participants(call_id).unwrap_or_default();
-        for fp in participants {
+        let participantes = self.store.call_participants(call_id).unwrap_or_default();
+        // O alvo do toque ainda NÃO é participante: sem avisar, ele segue tocando.
+        let alvos = self.remembered_call_targets(call_id);
+        for fp in participantes {
             if fp == self.identity.fingerprint {
                 continue;
             }
@@ -109,7 +143,26 @@ impl NetworkEngine {
                 },
             );
         }
+        for fp in alvos {
+            if fp == self.identity.fingerprint || self.store.is_in_call(call_id, &fp) {
+                continue;
+            }
+            self.queue_or_send_call_frame(
+                &fp,
+                SecureFrame::CallReject {
+                    call_id: call_id.into(),
+                    reason: "cancele".into(),
+                },
+            );
+            self.queue_or_send_call_frame(
+                &fp,
+                SecureFrame::CallEnd {
+                    call_id: call_id.into(),
+                },
+            );
+        }
         self.store.end_call(call_id)?;
+        self.forget_call_targets(call_id);
         #[cfg(target_os = "linux")]
         self.voice_hangup(call_id);
         let _ = self.events.send(EngineEvent::CallEnded {
@@ -159,6 +212,7 @@ impl NetworkEngine {
                 kind,
             },
         );
+        self.remember_call_target(call_id, target_fp);
         Ok(())
     }
 }

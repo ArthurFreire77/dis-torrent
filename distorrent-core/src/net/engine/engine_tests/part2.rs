@@ -109,7 +109,7 @@ async fn grupo_dispensado_nao_volta_com_roster_reenviado() {
             "Grupo que eu saí",
         )
         .unwrap();
-    // O grupo foi criado por `criador` (não por mim): é o cenário real de quem recebe um convite e depois sai.
+    // O grupo foi criado por `criador`: cenário real de quem recebe e depois sai.
     e.store.group_owner_set(&conv.id, criador).unwrap();
     let membros = e.store.list_group_members(&conv.id).unwrap();
     e.store.leave_group_local(&conv.id).unwrap();
@@ -142,7 +142,7 @@ async fn grupo_dispensado_nao_volta_com_roster_reenviado() {
 }
 
 #[tokio::test]
-async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
+async fn roster_do_criador_NAO_ressuscita_grupo_dispensado() {
     let (e, _d) = mk_engine("grupo-volta");
     let criador = "c0c0c0c00003";
     let outro_membro = "c0c0c0c00004";
@@ -159,7 +159,7 @@ async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
     e.store.leave_group_local(&conv.id).unwrap();
     crate::group_trash::dismiss_owned(&e.store, &conv.id, criador).unwrap();
 
-    // O criador reenvia o roster me incluindo de novo: readição de propósito.
+    // O criador reenvia o roster ainda me incluindo: não é readição.
     frames::handle_frame(
         &e,
         criador,
@@ -176,12 +176,46 @@ async fn grupo_dispensado_volta_quando_o_criador_me_adiciona() {
     .unwrap();
 
     assert!(
-        e.store.get_conversation(&conv.id).unwrap().is_some(),
-        "o criador me adicionando de novo tem de recriar o grupo"
+        e.store.get_conversation(&conv.id).unwrap().is_none(),
+        "roster reenviado não é reentrada de propósito"
     );
     assert!(
+        crate::group_trash::is_dismissed(&e.store, &conv.id),
+        "o bloqueio continua valendo"
+    );
+}
+
+#[tokio::test]
+async fn criador_me_readiciona_com_group_member_added() {
+    let (e, _d) = mk_engine("grupo-readicao");
+    let criador = "c0c0c0c00011";
+    let eu = e.identity.fingerprint.clone();
+    let conv = e
+        .store
+        .create_group_dm(&eu, &[criador.to_string()], "Grupo readição")
+        .unwrap();
+    e.store.group_owner_set(&conv.id, criador).unwrap();
+    e.store.leave_group_local(&conv.id).unwrap();
+    crate::group_trash::dismiss_owned(&e.store, &conv.id, criador).unwrap();
+
+    // Add-member do dono referenciando o meu fp é readição explícita.
+    frames::handle_frame(
+        &e,
+        criador,
+        "",
+        "Criador",
+        SecureFrame::GroupMemberAdded {
+            conv_id: conv.id.clone(),
+            fp: eu.clone(),
+            nickname: "eu".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
         !crate::group_trash::is_dismissed(&e.store, &conv.id),
-        "a readição do criador limpa o bloqueio"
+        "só o criador readicionando limpa o bloqueio"
     );
 }
 
@@ -288,6 +322,43 @@ fn apagar_so_para_mim_funciona_para_quem_nao_e_dono() {
     assert!(
         crate::group_trash::is_dismissed(&e.store, &conv.id),
         "sem dispensar, o sync do dono recriava o grupo"
+    );
+}
+
+/// Cancelar a chamada avisa quem ainda está tocando, mesmo sem aceite.
+#[test]
+fn call_end_avisa_o_alvo_que_ainda_nao_aceitou() {
+    let (e, _d) = mk_engine("cancelar-toque");
+    let alvo = peer_hex(0x55);
+    let call_id = e.call_invite(&alvo, "voice").unwrap();
+    assert!(
+        e.remembered_call_targets(&call_id)
+            .iter()
+            .any(|f| f == &alvo),
+        "o alvo do toque precisa ficar registrado para o cancelamento"
+    );
+    e.call_end(&call_id).unwrap();
+    let vistos: Vec<String> = e
+        .pending_calls
+        .lock()
+        .unwrap()
+        .get(&alvo)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|f| format!("{f:?}"))
+        .collect();
+    assert!(
+        vistos.iter().any(|f| f.contains("CallReject")),
+        "quem ligou desistindo precisa avisar o alvo do toque: {vistos:?}"
+    );
+    assert!(
+        vistos.iter().any(|f| f.contains("CallEnd")),
+        "e também encerrar a chamada do lado dele: {vistos:?}"
+    );
+    assert!(
+        e.remembered_call_targets(&call_id).is_empty(),
+        "depois de encerrar não sobra alvo pendente"
     );
 }
 

@@ -708,6 +708,8 @@ pub struct NetworkEngine {
     punch_rate: StdMutex<HashMap<String, i64>>,
     pending_calls: StdMutex<HashMap<String, Vec<SecureFrame>>>,
     ring_seen: StdMutex<std::collections::HashSet<String>>,
+    /// Alvos do toque por chamada; o `call_end` avisa quem ainda não aceitou.
+    call_targets: StdMutex<HashMap<String, Vec<String>>>,
     call_rooms: StdMutex<super::call_room::Rooms>,
     public_addr: StdMutex<Option<String>>,
     nat_external_port: Arc<AtomicU16>,
