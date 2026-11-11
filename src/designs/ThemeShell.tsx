@@ -20,6 +20,7 @@ import ConnectionDiagnostics from '../components/ConnectionDiagnostics'
 import CallDiagnostics from '../components/CallDiagnostics'
 import CallTilesGrid from '../components/calls/CallTilesGrid'
 import VoiceStage from '../components/calls/VoiceStage'
+import CallControlBar from '../components/calls/CallControlBar'
 import {
   resolveVoiceLayout,
   resolveCallDock,
@@ -1320,86 +1321,6 @@ export default function ThemeShell({ designId }: {designId:string}){
     { name: 'calc', summary: 'calculadora (ex: /calc 2+2)', run: async (args: string) => {
       if (!args.trim()) return '❌ use /calc <expressão>'
       try {
-        const sanitized = args.replace(/[^0-9+\-*/().\s]/g, '')
-        if (!sanitized.trim()) return '❌ expressão inválida'
-        const result = Function(`"use strict"; return (${sanitized})`)()
-        return `${args} = ${result}`
-      } catch {
-        return '❌ expressão inválida'
-      }
-    }},
-    { name: 'lembrete', summary: 'cria um lembrete (ex: /lembrete 10m reunião)', run: async (args: string) => {
-      const match = args.match(/^(\d+)([smhd])\s+(.+)$/i)
-      if (!match) return '❌ use /lembrete <tempo><s|m|h|d> <mensagem>\nex: /lembrete 10m reunião'
-      const [, num, unit, ...msgParts] = match
-      const msg = msgParts.join(' ')
-      const multipliers: Record<string, number> = { s: 1000, m: 60000, h: 3600000, d: 86400000 }
-      const ms = parseInt(num) * (multipliers[unit.toLowerCase()] || 60000)
-      setTimeout(() => {
-        try { services.notificationShow({ id: Date.now(), title: 'Lembrete', body: msg, conversation: selConv ?? '' }) } catch {}
-      }, ms)
-      return `lembrete agendado para daqui a ${num}${unit}`
-    }},
-    { name: 'votar', summary: 'inicia uma votação rápida', run: async (args: string) => {
-      if (!args.trim()) return '❌ use /votar <pergunta>'
-      return `**Votação:** ${args}\n\n+ = Sim\n- = Não\n\n*Reaja com + ou - para votar*`
-    }},
-    { name: 'sortear', summary: 'sorteia um item da lista', run: async (args: string) => {
-      const items = args.split(',').map(s => s.trim()).filter(Boolean)
-      if (items.length < 2) return '❌ use /sortear item1, item2, item3...'
-      const winner = items[Math.floor(Math.random() * items.length)]
-      return `sorteado: **${winner}**`
-    }},
-    { name: 'emoji', summary: 'busca emoji por nome', run: async (args: string) => {
-      if (!args.trim()) return '❌ use /emoji <nome>'
-      const found = NAMED_EMOJI.filter(e => e.names.some(n => n.includes(args.toLowerCase())))
-      if (found.length === 0) return '❌ nenhum emoji encontrado'
-      return found.slice(0, 5).map(e => `${e.char} :${e.names[0]}:`).join('\n')
-    }},
-    { name: 'avatar', summary: 'mostra avatar do usuário', run: async (args: string) => {
-      const fp = args.trim() || identity?.fingerprint || ''
-      if (!fp) return '❌ use /avatar <fingerprint> ou deixe vazio para você'
-      const p = socialProfiles[fp]
-      return `avatar de ${p?.display_name || nameOfFp(fp)}: ${p?.avatar_b64 ? '[imagem carregada]' : 'padrão (iniciais)'}`
-    }},
-    { name: 'limpar', summary: 'limpa a tela de mensagens', run: async () => {
-      // Retorna um caractere especial que a UI interpreta como "limpar"
-      return '\u0000CLEAR\u0000'
-    }},
-    { name: 'serverinfo', summary: 'informações do servidor', run: async () => {
-      if (!selCommunity) return '❌ abra um servidor primeiro'
-      const c = communities.find(x => x.id === selCommunity)
-      if (!c) return '❌ servidor não encontrado'
-      return `${c.name}\n${c.members?.length ?? 0} membros\n${c.channels?.length ?? 0} canais\nid: ${c.id.slice(0, 16)}...`
-    }},
-    { name: 'userinfo', summary: 'informações do usuário', run: async (args: string) => {
-      const fp = args.trim() || identity?.fingerprint || ''
-      if (!fp) return '❌ use /userinfo <fingerprint> ou deixe vazio para você'
-      const p = socialProfiles[fp]
-      const name = p?.display_name || nameOfFp(fp)
-      return `${name}\nfingerprint: ${fp.slice(0, 16)}...\nbio: ${p?.bio || 'sem bio'}\ncor: ${p?.accent || 'padrão'}`
-    }},
-    { name: 'clima', summary: 'previsão do tempo (simulada)', run: async () => {
-      const conditions = ['ensolarado', 'parcialmente nublado', 'nublado', 'chuvoso', 'tempestade', 'neve']
-      const temp = Math.floor(Math.random() * 35) + 5
-      const cond = conditions[Math.floor(Math.random() * conditions.length)]
-      return `${temp}°C — ${cond}\nvento: ${Math.floor(Math.random() * 30)} km/h\numidade: ${Math.floor(Math.random() * 60) + 30}%`
-    }},
-    { name: 'traduzir', summary: 'traduz texto (ex: /traduzir olá)', run: async (args: string) => {
-      if (!args.trim()) return '❌ use /traduzir <texto>'
-      // Simulação simples - em produção usaria API de tradução
-      const translations: Record<string, string> = {
-        'olá': 'hello', 'mundo': 'world', 'obrigado': 'thank you', 'por favor': 'please',
-        'bom dia': 'good morning', 'boa tarde': 'good afternoon', 'boa noite': 'good night',
-        'como vai': 'how are you', 'tudo bem': 'all good', 'adeus': 'goodbye',
-      }
-      const lower = args.toLowerCase().trim()
-      return `"${args}" -> "${translations[lower] ?? '[tradução não disponível offline]'}"`
-    }},
-    { name: 'calc', summary: 'calculadora (ex: /calc 2+2)', run: async (args: string) => {
-      if (!args.trim()) return '❌ use /calc <expressão>'
-      try {
-        // Avaliação segura: apenas números e operadores básicos
         const sanitized = args.replace(/[^0-9+\-*/().\s]/g, '')
         if (!sanitized.trim()) return '❌ expressão inválida'
         const result = Function(`"use strict"; return (${sanitized})`)()
@@ -3724,65 +3645,38 @@ export default function ThemeShell({ designId }: {designId:string}){
             <button onClick={() => fileInputRef.current?.click()} style={{ background: 'transparent', border: 'none', color: t.accent, cursor: 'pointer', fontSize: 11, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 6px' }}><Icon d={Icons.attach} size={12} /> enviar arquivo</button>
           </div>
           {}
-          <div style={{ height: 76, background: '#232428', borderTop: `1px solid ${borderColor}`, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-            <button onClick={()=>{ setIsMuted(m=>!m); callManager.toggleMute() }} title={isMuted ? 'Ativar microfone' : 'Silenciar'} aria-label={isMuted ? 'Ativar microfone' : 'Silenciar'} style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: isMuted ? t.red : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isMuted ? <Icon d={Icons.micOff} size={18} /> : <Icon d={Icons.mic} size={18} />}</button>
-            <button onClick={()=>{ setIsDeafened(d=>!d); callManager.toggleDeafen() }} title={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} aria-label={isDeafened ? 'Ativar áudio' : 'Ensurdecer'} style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: isDeafened ? t.red : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{isDeafened ? <Icon d={Icons.volumeX} size={18} /> : <Icon d={Icons.headphones} size={18} />}</button>
-            {
-}
-            <button
-              onClick={()=> callManager.toggleCamera()}
-              disabled={!!activeCall.sharing && !activeCall.cameraOn}
-              title={activeCall.sharing && !activeCall.cameraOn ? 'Pare o compartilhamento de tela para ligar a câmera' : 'Câmera'}
-              aria-label={activeCall.sharing && !activeCall.cameraOn ? 'Câmera indisponível enquanto compartilha a tela' : 'Câmera'}
-              style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: activeCall.cameraOn ? t.green : '#3a3a3c', color: '#fff', cursor: activeCall.sharing && !activeCall.cameraOn ? 'not-allowed' : 'pointer', opacity: activeCall.sharing && !activeCall.cameraOn ? 0.45 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-            ><Icon d={Icons.video} size={18} /></button>
-            {}
-            <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-              {activeCall.sharing ? (
-                <button
-                  onClick={() => callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e)))}
-                  data-testid="call-screen-stop"
-                  title="Parar de compartilhar"
-                  aria-label="Parar de compartilhar"
-                  style={{ height: 48, width: 48, borderRadius: '50%', border: 'none', background: t.red, color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                ><Icon d={Icons.screen} size={18} /></button>
-              ) : (
-                <>
-                  <button
-                    onClick={() => {
-                      if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return }
-                      setShowScreenPicker(true)
-                    }}
-                    disabled={!supportsScreenShare()}
-                    data-testid="call-screen-share"
-                    title={supportsScreenShare() ? 'Compartilhar tela (fonte, áudio e qualidade)' : (screenShareUnavailableReason() ?? 'Este navegador não permite compartilhar tela')}
-                    aria-label="Compartilhar tela"
-                    style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: '#3a3a3c', color: '#fff', opacity: supportsScreenShare() ? 1 : 0.45, cursor: supportsScreenShare() ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                  ><Icon d={Icons.screen} size={18} /></button>
-                </>
-              )}
-            </div>
-            {
-}
-            {mostrarTrocaCamera && (
-              <button
-                onClick={() => { void trocarCamera() }}
-                data-testid="call-camera-switch"
-                title={cameraSwitchLabel ? `Trocar de câmera (${cameraSwitchLabel})` : 'Trocar de câmera'}
-                aria-label={cameraSwitchLabel ? `Trocar de câmera (${cameraSwitchLabel})` : 'Trocar de câmera'}
-                style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-              ><Icon d={Icons.cameraSwitch} size={18} /></button>
-            )}
-            <button
-              onClick={() => setShowCallSettings(v => !v)}
-              data-testid="call-settings"
-              title="Configurações da chamada: câmera, tela, microfone, qualidade e FPS"
-              aria-label="Configurações da chamada"
-              aria-expanded={showCallSettings}
-              style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: showCallSettings ? t.accent : '#3a3a3c', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-            ><Icon d={Icons.gear} size={18} /></button>
-            <button onClick={() => { void callManager.leave() }} data-testid="call-leave" aria-label="Sair da chamada" title="Sair da chamada" style={{ width: 64, height: 48, borderRadius: 24, border: 'none', background: t.red, color: '#fff', cursor: 'pointer', fontWeight: 800, fontSize: 13 }}>Sair</button>
-          </div>
+          <CallControlBar
+            variant="dock"
+            inCall
+            palette={{ panel: '#232428', border: borderColor }}
+            muted={isMuted}
+            deafened={isDeafened}
+            cameraOn={!!activeCall.cameraOn}
+            sharing={!!activeCall.sharing}
+            cameraDisabled={!!activeCall.sharing && !activeCall.cameraOn}
+            onToggleMute={() => { setIsMuted(m => !m); callManager.toggleMute() }}
+            onToggleDeafen={() => {
+              const nd = !isDeafened
+              setIsDeafened(nd)
+              if (nd) setIsMuted(true)
+              callManager.toggleDeafen()
+            }}
+            onToggleCamera={() => { void callManager.toggleCamera().catch((e: any) => setError(String(e?.message ?? e))) }}
+            onToggleScreen={() => {
+              if (activeCall.sharing) { void callManager.stopScreenShare().catch((e: any) => setError(String(e?.message ?? e))); return }
+              if (!supportsScreenShare()) { setError(screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG); return }
+              setShowScreenPicker(true)
+            }}
+            screenAvailable={supportsScreenShare() || !!activeCall.sharing}
+            screenUnavailableReason={screenShareUnavailableReason() ?? SCREEN_UNAVAILABLE_MSG}
+            onSwitchCamera={mostrarTrocaCamera ? () => { void trocarCamera() } : undefined}
+            cameraSwitchLabel={cameraSwitchLabel}
+            cameraSwitchDisabled={camerasDisponiveis.length < 2}
+            onOpenSettings={() => setShowCallSettings(v => !v)}
+            onSoundboard={() => setShowSoundboard((v) => !v)}
+            soundboardOpen={showSoundboard}
+            onLeave={() => { void callManager.leave() }}
+          />
         </div>
       )}
 
@@ -4406,4 +4300,4 @@ export default function ThemeShell({ designId }: {designId:string}){
       )}
     </div>
   )
-}
+}
