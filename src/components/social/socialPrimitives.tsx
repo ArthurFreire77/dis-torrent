@@ -67,18 +67,138 @@ export function RichText({
   )
 }
 
+function extractUrls(body: string): string[] {
+  return (body.match(/https?:\/\/[^\s<>"']+/g) ?? []).slice(0, 3)
+}
+
+function isImageUrl(url: string): boolean {
+  return /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/i.test(url)
+}
+
+function isVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|mov|avi|mkv)(\?|$)/i.test(url)
+}
+
+function isYouTubeUrl(url: string): boolean {
+  return /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)/i.test(url)
+}
+
+function extractYouTubeId(url: string): string | null {
+  const m = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/i)
+  return m?.[1] ?? null
+}
+
+function isTwitterUrl(url: string): boolean {
+  return /(?:twitter\.com|x\.com)\/\w+\/status\/\d+/i.test(url)
+}
+
+/** Detecta se a URL é do GitHub. */
+function isGitHubUrl(url: string): boolean {
+  return /github\.com\/[\w-]+\/[\w-]+/i.test(url)
+}
+
 export function LinkUnfurl({ body }: { body: string }) {
-  const urls = useMemo(() => (body.match(/https?:\/\/[^\s<>"']+/g) ?? []).slice(0, 2), [body])
+  const urls = useMemo(() => extractUrls(body), [body])
   if (urls.length === 0) return null
   return (
     <>
       {urls.map((u) => {
         let host = u
-        try { host = new URL(u).hostname } catch {  }
+        let favicon = ''
+        try {
+          const parsed = new URL(u)
+          host = parsed.hostname
+          favicon = `${parsed.origin}/favicon.ico`
+        } catch {  }
+
+        // Preview de imagem
+        if (isImageUrl(u)) {
+          return (
+            <a key={u} href={u} target="_blank" rel="noreferrer noopener"
+              style={{ display: 'block', marginTop: 6, borderRadius: 8, overflow: 'hidden', maxWidth: 400 }}>
+              <img src={u} alt="" style={{ width: '100%', maxHeight: 300, objectFit: 'cover', display: 'block' }}
+                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+            </a>
+          )
+        }
+
+        // Preview de vídeo
+        if (isVideoUrl(u)) {
+          return (
+            <div key={u} style={{ marginTop: 6, borderRadius: 8, overflow: 'hidden', maxWidth: 400, background: '#000' }}>
+              <video src={u} controls style={{ width: '100%', maxHeight: 300, display: 'block' }} />
+            </div>
+          )
+        }
+
+        // Preview do YouTube
+        if (isYouTubeUrl(u)) {
+          const videoId = extractYouTubeId(u)
+          if (videoId) {
+            return (
+              <a key={u} href={u} target="_blank" rel="noreferrer noopener"
+                style={{ display: 'block', marginTop: 6, borderRadius: 8, overflow: 'hidden', maxWidth: 480, textDecoration: 'none', background: T.sidebar, border: `1px solid ${T.border}` }}>
+                <div style={{ position: 'relative', paddingTop: '56.25%', background: '#000' }}>
+                  <img src={`https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`} alt=""
+                    style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                    onError={(e) => { (e.target as HTMLImageElement).src = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` }} />
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <div style={{ width: 68, height: 48, background: 'rgba(255,0,0,0.9)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <div style={{ width: 0, height: 0, borderLeft: '18px solid #fff', borderTop: '11px solid transparent', borderBottom: '11px solid transparent', marginLeft: 4 }} />
+                    </div>
+                  </div>
+                </div>
+                <div style={{ padding: '10px 12px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 2 }}>YouTube</div>
+                  <div style={{ fontSize: 11, color: T.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u}</div>
+                </div>
+              </a>
+            )
+          }
+        }
+
+        // Preview do Twitter/X
+        if (isTwitterUrl(u)) {
+          return (
+            <a key={u} href={u} target="_blank" rel="noreferrer noopener"
+              style={{ display: 'block', marginTop: 6, borderLeft: `3px solid #1da1f2`, background: T.sidebar, borderRadius: 6, padding: '10px 12px', maxWidth: 420, textDecoration: 'none' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <div style={{ width: 20, height: 20, borderRadius: '50%', background: '#1da1f2', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 900 }}>𝕏</div>
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#1da1f2' }}>Twitter / X</span>
+              </div>
+              <div style={{ fontSize: 11, color: T.muted, fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u}</div>
+            </a>
+          )
+        }
+
+        // Preview do GitHub
+        if (isGitHubUrl(u)) {
+          const match = u.match(/github\.com\/([\w-]+\/[\w-]+)/i)
+          const repo = match?.[1] ?? ''
+          return (
+            <a key={u} href={u} target="_blank" rel="noreferrer noopener"
+              style={{ display: 'block', marginTop: 6, borderLeft: `3px solid #6e5494`, background: T.sidebar, borderRadius: 6, padding: '10px 12px', maxWidth: 420, textDecoration: 'none' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <div style={{ width: 20, height: 20, borderRadius: '50%', background: '#6e5494', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 900 }}>GH</div>
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#6e5494' }}>GitHub</span>
+                {repo && <span style={{ fontSize: 11, color: T.text, fontFamily: 'JetBrains Mono' }}>{repo}</span>}
+              </div>
+              <div style={{ fontSize: 11, color: T.muted, fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u}</div>
+            </a>
+          )
+        }
+
+        // Preview genérico
         return (
           <a key={u} href={u} target="_blank" rel="noreferrer noopener"
-            style={{ display: 'block', marginTop: 6, borderLeft: `3px solid ${T.accent}`, background: T.sidebar, borderRadius: 6, padding: '8px 10px', maxWidth: 420, textDecoration: 'none' }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: '#00a8fc' }}>{host}</div>
+            style={{ display: 'block', marginTop: 6, borderLeft: `3px solid ${T.accent}`, background: T.sidebar, borderRadius: 6, padding: '10px 12px', maxWidth: 420, textDecoration: 'none' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              {favicon && (
+                <img src={favicon} alt="" width={16} height={16} style={{ borderRadius: 2 }}
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }} />
+              )}
+              <span style={{ fontSize: 12, fontWeight: 800, color: '#00a8fc' }}>{host}</span>
+            </div>
             <div style={{ fontSize: 11, color: T.muted, fontFamily: 'JetBrains Mono', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u}</div>
           </a>
         )

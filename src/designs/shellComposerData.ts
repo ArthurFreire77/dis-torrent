@@ -30,7 +30,9 @@ export const composerMenuStyle: React.CSSProperties = {
 export const SLASH_BASE = [
   { name: 'ajuda' }, { name: 'ping' }, { name: 'hora' }, { name: 'uptime' },
   { name: 'meu-fp' }, { name: 'meu-status' }, { name: 'membros' }, { name: 'canais' },
-  { name: 'dado' },
+  { name: 'dado' }, { name: 'limpar' }, { name: 'serverinfo' }, { name: 'userinfo' },
+  { name: 'clima' }, { name: 'traduzir' }, { name: 'calc' }, { name: 'lembrete' },
+  { name: 'votar' }, { name: 'sortear' }, { name: 'emoji' }, { name: 'avatar' },
 ]
 
 export function fmtShortDuration(ms: number): string {

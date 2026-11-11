@@ -515,8 +515,161 @@ function listInfo(line: string): { indent: number; marker: string; text: string 
   }
 }
 
+/** Cores de syntax highlight por tipo de token. */
+const SYNTAX_COLORS: Record<string, string> = {
+  keyword: '#ff7b72',
+  string: '#a5d6ff',
+  comment: '#8b949e',
+  number: '#79c0ff',
+  function: '#d2a8ff',
+  operator: '#ff7b72',
+  punctuation: '#c9d1d9',
+  property: '#79c0ff',
+  tag: '#7ee787',
+  attribute: '#79c0ff',
+  value: '#a5d6ff',
+}
+
+/** Palavras-chave por linguagem para highlight básico. */
+const KEYWORDS: Record<string, string[]> = {
+  javascript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'extends', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'typeof', 'instanceof', 'null', 'undefined', 'true', 'false'],
+  typescript: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'extends', 'implements', 'interface', 'type', 'enum', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'typeof', 'instanceof', 'null', 'undefined', 'true', 'false', 'string', 'number', 'boolean', 'any', 'void', 'never', 'unknown'],
+  python: ['def', 'class', 'return', 'if', 'elif', 'else', 'for', 'while', 'import', 'from', 'as', 'try', 'except', 'raise', 'with', 'lambda', 'None', 'True', 'False', 'and', 'or', 'not', 'in', 'is', 'pass', 'break', 'continue', 'yield', 'async', 'await'],
+  rust: ['fn', 'let', 'mut', 'const', 'static', 'if', 'else', 'match', 'for', 'while', 'loop', 'struct', 'enum', 'impl', 'trait', 'pub', 'mod', 'use', 'crate', 'self', 'Self', 'super', 'return', 'break', 'continue', 'true', 'false', 'Some', 'None', 'Ok', 'Err'],
+  go: ['func', 'var', 'const', 'type', 'struct', 'interface', 'map', 'chan', 'if', 'else', 'for', 'range', 'switch', 'case', 'default', 'return', 'break', 'continue', 'go', 'defer', 'select', 'package', 'import', 'nil', 'true', 'false'],
+  java: ['public', 'private', 'protected', 'class', 'interface', 'extends', 'implements', 'static', 'final', 'void', 'int', 'long', 'double', 'float', 'boolean', 'char', 'byte', 'short', 'new', 'this', 'super', 'return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'try', 'catch', 'finally', 'throw', 'throws', 'import', 'package', 'null', 'true', 'false'],
+  c: ['int', 'char', 'float', 'double', 'void', 'struct', 'union', 'enum', 'typedef', 'static', 'const', 'volatile', 'extern', 'register', 'auto', 'signed', 'unsigned', 'short', 'long', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'return', 'goto', 'sizeof', 'NULL'],
+  cpp: ['int', 'char', 'float', 'double', 'void', 'bool', 'struct', 'union', 'enum', 'class', 'typedef', 'static', 'const', 'volatile', 'extern', 'register', 'mutable', 'explicit', 'friend', 'inline', 'virtual', 'template', 'typename', 'namespace', 'using', 'new', 'delete', 'this', 'operator', 'public', 'private', 'protected', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'return', 'goto', 'sizeof', 'nullptr', 'true', 'false', 'try', 'catch', 'throw', 'noexcept'],
+  csharp: ['public', 'private', 'protected', 'internal', 'class', 'interface', 'struct', 'enum', 'delegate', 'event', 'static', 'readonly', 'const', 'volatile', 'void', 'int', 'long', 'double', 'float', 'decimal', 'bool', 'char', 'byte', 'sbyte', 'short', 'ushort', 'uint', 'ulong', 'string', 'object', 'dynamic', 'var', 'new', 'this', 'base', 'return', 'if', 'else', 'for', 'foreach', 'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'try', 'catch', 'finally', 'throw', 'using', 'namespace', 'null', 'true', 'false', 'is', 'as', 'typeof', 'sizeof', 'nameof'],
+  html: ['html', 'head', 'body', 'div', 'span', 'p', 'a', 'img', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'form', 'input', 'button', 'select', 'option', 'textarea', 'label', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'footer', 'nav', 'section', 'article', 'aside', 'main', 'figure', 'figcaption', 'video', 'audio', 'source', 'canvas', 'svg', 'script', 'style', 'link', 'meta', 'title', 'br', 'hr', 'iframe'],
+  css: ['color', 'background', 'margin', 'padding', 'border', 'width', 'height', 'display', 'position', 'top', 'right', 'bottom', 'left', 'float', 'clear', 'overflow', 'font', 'text', 'line', 'letter', 'word', 'white', 'vertical', 'align', 'justify', 'flex', 'grid', 'animation', 'transition', 'transform', 'opacity', 'visibility', 'z-index', 'cursor', 'pointer', 'none', 'block', 'inline', 'inline-block', 'flex', 'grid', 'absolute', 'relative', 'fixed', 'sticky', 'static', 'auto', 'inherit', 'initial', 'unset', 'important'],
+  json: ['true', 'false', 'null'],
+  sql: ['SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN', 'ORDER', 'BY', 'GROUP', 'HAVING', 'LIMIT', 'OFFSET', 'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE', 'CREATE', 'TABLE', 'ALTER', 'DROP', 'INDEX', 'VIEW', 'TRIGGER', 'PROCEDURE', 'FUNCTION', 'DATABASE', 'SCHEMA', 'GRANT', 'REVOKE', 'COMMIT', 'ROLLBACK', 'TRANSACTION', 'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'ON', 'AS', 'DISTINCT', 'UNION', 'ALL', 'EXISTS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'NULL', 'IS', 'TRUE', 'FALSE'],
+  yaml: ['true', 'false', 'null', 'yes', 'no', 'on', 'off'],
+  markdown: ['#', '##', '###', '####', '#####', '######'],
+  bash: ['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'function', 'return', 'exit', 'echo', 'printf', 'read', 'cd', 'ls', 'pwd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch', 'cat', 'grep', 'sed', 'awk', 'sort', 'uniq', 'wc', 'head', 'tail', 'find', 'which', 'whereis', 'locate', 'chmod', 'chown', 'chgrp', 'sudo', 'su', 'ps', 'kill', 'killall', 'top', 'htop', 'df', 'du', 'free', 'uname', 'whoami', 'id', 'groups', 'date', 'cal', 'history', 'alias', 'unalias', 'export', 'env', 'set', 'unset', 'source', '.', 'true', 'false'],
+  shell: ['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'function', 'return', 'exit', 'echo', 'printf', 'read', 'cd', 'ls', 'pwd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch', 'cat', 'grep', 'sed', 'awk', 'sort', 'uniq', 'wc', 'head', 'tail', 'find', 'which', 'whereis', 'locate', 'chmod', 'chown', 'chgrp', 'sudo', 'su', 'ps', 'kill', 'killall', 'top', 'htop', 'df', 'du', 'free', 'uname', 'whoami', 'id', 'groups', 'date', 'cal', 'history', 'alias', 'unalias', 'export', 'env', 'set', 'unset', 'source', '.', 'true', 'false'],
+}
+
+/** Aplica syntax highlight básico ao código. */
+function highlightCode(code: string, lang: string): ReactNode[] {
+  const keywords = KEYWORDS[lang.toLowerCase()] ?? []
+  const lines = code.split('\n')
+  const nodes: ReactNode[] = []
+  
+  lines.forEach((line, li) => {
+    const parts: ReactNode[] = []
+    let remaining = line
+    let key = 0
+    
+    while (remaining.length > 0) {
+      // Comentários
+      const commentMatch = remaining.match(/^(\/\/.*|#.*|\/\*[\s\S]*?\*\/)/)
+      if (commentMatch) {
+        parts.push(
+          <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.comment }}>
+            {commentMatch[0]}
+          </span>
+        )
+        remaining = remaining.slice(commentMatch[0].length)
+        continue
+      }
+      
+      // Strings
+      const stringMatch = remaining.match(/^("[^"]*"|'[^']*'|`[^`]*`)/)
+      if (stringMatch) {
+        parts.push(
+          <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.string }}>
+            {stringMatch[0]}
+          </span>
+        )
+        remaining = remaining.slice(stringMatch[0].length)
+        continue
+      }
+      
+      // Números
+      const numberMatch = remaining.match(/^(\d+\.?\d*|\.\d+)/)
+      if (numberMatch) {
+        parts.push(
+          <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.number }}>
+            {numberMatch[0]}
+          </span>
+        )
+        remaining = remaining.slice(numberMatch[0].length)
+        continue
+      }
+      
+      // Palavras-chave
+      let matchedKeyword = false
+      for (const kw of keywords) {
+        if (remaining.startsWith(kw) && !/\w/.test(remaining[kw.length] ?? '')) {
+          parts.push(
+            <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.keyword, fontWeight: 600 }}>
+              {kw}
+            </span>
+          )
+          remaining = remaining.slice(kw.length)
+          matchedKeyword = true
+          break
+        }
+      }
+      if (matchedKeyword) continue
+      
+      // Funções (identificador seguido de parêntese)
+      const funcMatch = remaining.match(/^([a-zA-Z_]\w*)(?=\s*\()/)
+      if (funcMatch) {
+        parts.push(
+          <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.function }}>
+            {funcMatch[0]}
+          </span>
+        )
+        remaining = remaining.slice(funcMatch[0].length)
+        continue
+      }
+      
+      // Operadores
+      const opMatch = remaining.match(/^([+\-*/%=<>!&|^~?:]+)/)
+      if (opMatch) {
+        parts.push(
+          <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.operator }}>
+            {opMatch[0]}
+          </span>
+        )
+        remaining = remaining.slice(opMatch[0].length)
+        continue
+      }
+      
+      // Pontuação
+      const punctMatch = remaining.match(/^([{}[\]();,.])/)
+      if (punctMatch) {
+        parts.push(
+          <span key={`${li}-${key++}`} style={{ color: SYNTAX_COLORS.punctuation }}>
+            {punctMatch[0]}
+          </span>
+        )
+        remaining = remaining.slice(punctMatch[0].length)
+        continue
+      }
+      
+      // Caractere normal
+      parts.push(
+        <span key={`${li}-${key++}`} style={{ color: '#c9d1d9' }}>
+          {remaining[0]}
+        </span>
+      )
+      remaining = remaining.slice(1)
+    }
+    
+    nodes.push(<div key={li}>{parts}</div>)
+  })
+  
+  return nodes
+}
+
 function CodeBlock({ lang, code, th }: { lang: string; code: string; th: MarkdownTheme }) {
   const [copied, setCopied] = useState(false)
+  const highlighted = lang && KEYWORDS[lang.toLowerCase()] ? highlightCode(code, lang) : null
+  
   return (
     <div
       style={{
@@ -554,7 +707,7 @@ function CodeBlock({ lang, code, th }: { lang: string; code: string; th: Markdow
           fontFamily: th.mono, fontSize: 12.5, lineHeight: 1.45, color: th.codeFg,
         }}
       >
-        <code>{code}</code>
+        {highlighted ? <code>{highlighted}</code> : <code>{code}</code>}
       </pre>
     </div>
   )

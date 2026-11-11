@@ -58,6 +58,7 @@ export interface MessageListProps {
 
 export interface MessageListHandle {
   reloadPolls: () => void
+  clear?: () => void
 }
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(function MessageListInner(props, ref) {
@@ -87,7 +88,17 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(function Mes
   const [reactions, setReactions] = useState<Record<string, ReactionSummary[]>>({})
   const [polls, setPolls] = useState<PollView[]>([])
   const [pollNonce, setPollNonce] = useState(0)
-  useImperativeHandle(ref, () => ({ reloadPolls: () => setPollNonce(n => n + 1) }))
+  useImperativeHandle(ref, () => ({
+    reloadPolls: () => setPollNonce(n => n + 1),
+    clear: () => {
+      // Limpa estados locais para "limpar" a visualização
+      setMetas({})
+      setBodies({})
+      setReactions({})
+      setPolls([])
+      setTallies({})
+    },
+  }))
   const [tallies, setTallies] = useState<Record<string, PollTally>>({})
   const [emojis, setEmojis] = useState<EmojiView[]>([])
   const emojiMap = useMemo(() => {
