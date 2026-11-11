@@ -99,7 +99,9 @@ mod tests {
             let ok = match b.ext {
                 "ogg" => &b.bytes[0..4] == b"OggS",
                 "wav" => &b.bytes[0..4] == b"RIFF",
-                "mp3" => &b.bytes[0..3] == b"ID3" || (b.bytes[0] == 0xFF && (b.bytes[1] & 0xE0) == 0xE0),
+                "mp3" => {
+                    &b.bytes[0..3] == b"ID3" || (b.bytes[0] == 0xFF && (b.bytes[1] & 0xE0) == 0xE0)
+                }
                 other => panic!("extensão inesperada: {other}"),
             };
             assert!(ok, "{} não tem magic bytes de {}", b.id, b.ext);
@@ -118,7 +120,9 @@ mod tests {
     fn sources_json_registra_licenca_de_cada_arquivo() {
         let raw = include_str!("../sounds/SOURCES.json");
         let lista: serde_json::Value = serde_json::from_str(raw).expect("SOURCES.json inválido");
-        let arr = lista.as_array().expect("SOURCES.json precisa ser uma lista");
+        let arr = lista
+            .as_array()
+            .expect("SOURCES.json precisa ser uma lista");
         for b in BUILTINS {
             let nome = b.id.trim_start_matches("builtin:");
             let achou = arr.iter().any(|e| {
@@ -132,11 +136,16 @@ mod tests {
         for e in arr {
             let lic = e.get("license").and_then(|l| l.as_str()).unwrap_or("");
             assert!(
-                lic.starts_with("CC0") || lic.starts_with("CC BY") || lic.starts_with("Public domain"),
+                lic.starts_with("CC0")
+                    || lic.starts_with("CC BY")
+                    || lic.starts_with("Public domain"),
                 "licença não permitida: {lic}"
             );
             assert!(
-                e.get("artist").and_then(|a| a.as_str()).map(|a| !a.is_empty()).unwrap_or(false),
+                e.get("artist")
+                    .and_then(|a| a.as_str())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false),
                 "autor ausente: {e:?}"
             );
         }

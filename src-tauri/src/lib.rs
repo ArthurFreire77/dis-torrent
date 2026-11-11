@@ -20,11 +20,11 @@ pub mod commands_net;
 pub mod commands_server;
 pub mod commands_social;
 pub mod commands_sound;
-pub mod sound_builtin;
 pub mod commands_voice;
 mod download_spool;
 mod download_target;
 mod seed_files;
+pub mod sound_builtin;
 
 mod botbridge;
 mod botmusic;

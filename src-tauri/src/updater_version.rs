@@ -404,10 +404,7 @@ mod tests_updater_version {
             compare_version_strings("1.1.69-pre-alpha", "1.1.70-pre-alpha"),
             Ordering::Less
         );
-        assert_eq!(
-            compare_version_strings("1.1.70", "1.2.0"),
-            Ordering::Less
-        );
+        assert_eq!(compare_version_strings("1.1.70", "1.2.0"), Ordering::Less);
     }
 
     #[test]
