@@ -3539,6 +3539,26 @@ export default function ThemeShell({ designId }: {designId:string}){
                 }
               : undefined
           }
+          onImportBotZip={
+            services.botZipRead
+              ? async (zipPath) => {
+                  const info = await services.botZipRead!(zipPath)
+                  const id = await services.botCreate(selCommunity, {
+                    name: info.name,
+                    avatar: info.avatar,
+                  })
+                  try {
+                    await services.botUpdate(selCommunity, id, { config: info.config })
+                  } catch (e) {
+                    await services.botDelete(selCommunity, id).catch(() => {})
+                    throw e
+                  }
+                  setConfigBotId(id)
+                  refreshExtras(selCommunity)
+                  return info.name
+                }
+              : undefined
+          }
           onConfigBot={setConfigBotId}
           configBotId={configBotId}
           onMakeInvite={async () =>
