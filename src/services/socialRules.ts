@@ -148,6 +148,59 @@ export function effectivePresence(input: {
   return 'online'
 }
 
+/**
+ * A pessoa conta como "online" na interface?
+ *
+ * Invisível é conexão válida, mas não pode acender o ponto verde: a lista e a
+ * conversa precisavam concordar — antes a lista pintava verde e o cabeçalho
+ * dizia offline para o mesmo peer.
+ */
+export function isPresenceOnline(input: {
+  connected: boolean
+  chosen?: string
+}): boolean {
+  const p = effectivePresence(input)
+  return p !== 'offline' && p !== 'invisible'
+}
+
+export type ConversationFilter = 'todos' | 'amigos' | 'contatos' | 'grupos'
+
+/**
+ * Filtro da área de conversas diretas. Grupo só entra em "todos"/"grupos";
+ * contato é toda DM cujo peer NÃO tem amizade aceita.
+ */
+export function conversationMatchesFilter(input: {
+  kind: string
+  peerFp?: string
+  filter: ConversationFilter
+  friendFps: ReadonlySet<string> | readonly string[]
+}): boolean {
+  if (input.filter === 'todos') return true
+  const isGroup = input.kind === 'group'
+  if (input.filter === 'grupos') return isGroup
+  if (isGroup) return false
+  const amigos = input.friendFps instanceof Set ? input.friendFps : new Set(input.friendFps)
+  const isFriend = !!input.peerFp && amigos.has(input.peerFp)
+  return input.filter === 'amigos' ? isFriend : !isFriend
+}
+
+/**
+ * Chamada 1:1 só entre amizade aceita. Grupo/canal continua valendo pela
+ * participação no grupo/servidor — a UI usa esta função apenas em DM.
+ */
+export function canCallPeer(relation: SocialRelation): { ok: boolean; reason: string | null } {
+  if (relation === 'friend') return { ok: true, reason: null }
+  if (relation === 'blocked') return { ok: false, reason: 'esta pessoa está bloqueada' }
+  if (relation === 'self') return { ok: false, reason: 'não é possível ligar para você mesmo' }
+  if (relation === 'request_in' || relation === 'request_out') {
+    return { ok: false, reason: 'a amizade ainda não foi aceita — só amigos podem ligar' }
+  }
+  return {
+    ok: false,
+    reason: 'só amigos aceitos podem ligar — envie uma solicitação de amizade primeiro',
+  }
+}
+
 /** Quantos pedidos de amizade estão esperando resposta (só os recebidos). */
 export function pendingRequestsCount(list: FriendStateView[]): number {
   return list.filter((f) => f.status === 'pending_in').length

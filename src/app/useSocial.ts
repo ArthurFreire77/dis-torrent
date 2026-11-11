@@ -154,8 +154,10 @@ export function usePresence() {
     let alive = true
     const load = () => {
       services.presenceList()
+        // Erro de IPC não pode apagar a presença já conhecida: um soluço no
+        // backend fazia a lista inteira piscar para offline.
         .then((list) => { if (alive) setMap(new Map((list ?? []).map((p) => [p.fp, p]))) })
-        .catch(() => { if (alive) setMap(new Map()) })
+        .catch(() => {})
     }
     load()
     const t = setInterval(load, 30000)
@@ -169,8 +171,12 @@ export function usePresence() {
       } else if (ev.type === 'peer_offline') {
         setMap((prev) => {
           const next = new Map(prev)
+          // Mesmo sem entrada anterior, o offline precisa existir: senão o
+          // default "online" da UI continuava pintando verde.
           const cur = next.get(ev.fp)
-          if (cur) next.set(ev.fp, { ...cur, status: 'offline' })
+          next.set(ev.fp, cur
+            ? { ...cur, status: 'offline' }
+            : { fp: ev.fp, status: 'offline', custom: '', custom_emoji: '', updated_at: Date.now() })
           return next
         })
       }

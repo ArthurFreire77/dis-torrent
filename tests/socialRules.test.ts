@@ -1,10 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  canCallPeer,
   canOpenConversation,
   contactBadge,
+  conversationMatchesFilter,
   effectivePresence,
   introState,
+  isPresenceOnline,
   pendingRequestsCount,
   relationOf,
 } from '../src/services/socialRules.ts'
@@ -88,4 +91,49 @@ test('só pedidos recebidos contam como pendentes', () => {
     ]),
     2,
   )
+})
+
+test('presença "online" para a UI não acende com invisível', () => {
+  assert.equal(isPresenceOnline({ connected: true }), true)
+  assert.equal(isPresenceOnline({ connected: true, chosen: 'idle' }), true)
+  assert.equal(isPresenceOnline({ connected: true, chosen: 'dnd' }), true)
+  assert.equal(
+    isPresenceOnline({ connected: true, chosen: 'invisible' }),
+    false,
+    'invisível é conexão válida, mas não é o verde',
+  )
+  assert.equal(isPresenceOnline({ connected: false, chosen: 'online' }), false)
+})
+
+test('filtros de conversa separam amigos, contatos, grupos e todos', () => {
+  const amigos = ['aaaaaaaaaaaa']
+  const dmAmigo = { kind: 'dm', peerFp: 'aaaaaaaaaaaa' }
+  const dmContato = { kind: 'dm', peerFp: 'bbbbbbbbbbbb' }
+  const grupo = { kind: 'group', peerFp: '' }
+  const base = { friendFps: amigos }
+
+  assert.equal(conversationMatchesFilter({ ...dmAmigo, ...base, filter: 'todos' }), true)
+  assert.equal(conversationMatchesFilter({ ...grupo, ...base, filter: 'todos' }), true)
+
+  assert.equal(conversationMatchesFilter({ ...dmAmigo, ...base, filter: 'amigos' }), true)
+  assert.equal(conversationMatchesFilter({ ...dmContato, ...base, filter: 'amigos' }), false)
+  assert.equal(conversationMatchesFilter({ ...grupo, ...base, filter: 'amigos' }), false)
+
+  assert.equal(conversationMatchesFilter({ ...dmContato, ...base, filter: 'contatos' }), true)
+  assert.equal(conversationMatchesFilter({ ...dmAmigo, ...base, filter: 'contatos' }), false)
+  assert.equal(conversationMatchesFilter({ ...grupo, ...base, filter: 'contatos' }), false)
+
+  assert.equal(conversationMatchesFilter({ ...grupo, ...base, filter: 'grupos' }), true)
+  assert.equal(conversationMatchesFilter({ ...dmAmigo, ...base, filter: 'grupos' }), false)
+  assert.equal(conversationMatchesFilter({ ...dmContato, ...base, filter: 'grupos' }), false)
+})
+
+test('chamada 1:1 só com amizade aceita', () => {
+  assert.equal(canCallPeer('friend').ok, true)
+  for (const rel of ['request_in', 'request_out', 'none', 'blocked', 'self'] as const) {
+    const r = canCallPeer(rel)
+    assert.equal(r.ok, false, `${rel} não pode ligar`)
+    assert.ok(r.reason && r.reason.length > 0, `${rel} precisa explicar o motivo`)
+  }
+  assert.match(canCallPeer('request_out').reason ?? '', /aceita/)
 })
