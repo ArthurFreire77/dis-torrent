@@ -40,6 +40,7 @@ import {
 export type CallKind = 'voice' | 'video' | 'screen'
 
 import { parseWireSdp, parseWireCandidate } from './callWire'
+import { parseVoiceCallId } from './voiceChannelRef'
 export { parseWireSdp, parseWireCandidate } from './callWire'
 export type { WireSdp } from './callWire'
 
@@ -222,10 +223,15 @@ function attachRemoteTrack(
     }
     const temVideo = hasLiveVideoTrack(stream)
     const telaAtual = (p as any).screenStream as MediaStream | null | undefined
-    const ehTela = !!p.sharing && temVideo && !!p.stream && p.stream.id !== stream.id
+    // `p.sharing` pode chegar DEPOIS do ontrack (sinal é outro frame). Se já
+    // existe uma tela neste peer e chega outro vídeo, é troca de tela — não
+    // pode virar câmera. Antes a tela do outro aparecia no card da câmera.
+    const pareceTela = !!(p as any).sharing || (!!telaAtual && temVideo)
+    const ehTela = pareceTela && temVideo && !!p.stream && p.stream.id !== stream.id
     if (ehTela) {
       if (!telaAtual || telaAtual.id !== stream.id) {
         ;(p as any).screenStream = stream
+        ;(p as any).sharing = true
         onUpdate({ ...state })
       }
       return
@@ -1178,8 +1184,11 @@ export class CallManager {
           (p: { fp?: string }) => !!p.fp && p.fp !== this.myFp,
         )
         if (sozinho) {
+          // Sozinho no canal não há par para negociar: "conectando" eterno era
+          // mentira. Sem ninguém, o estado correto é conectado (só você), e o
+          // tick de roster promove a mídia quando alguém entrar.
           this.connectWatchdogGrants = 0
-          this.connectTimer = setTimeout(() => this.onConnectWatchdogFire(callId), CallManager.CONNECT_TIMEOUT_MS)
+          this.applyPhase('media-connected')
           return
         }
         this.setFailureCause(
@@ -1449,7 +1458,21 @@ export class CallManager {
       if (on !== null) {
         p.sharing = on
         if (cameraOn !== null) p.cameraOn = cameraOn
-        if (!on) {
+        if (on) {
+          // O vídeo pode ter chegado ANTES deste sinal e ido para o card da
+          // câmera. Ao saber que é tela, move o stream atual para o quadro de
+          // tela — era o "um amigo vê a tela, o outro vê na câmera".
+          const atual = (p as any).screenStream as MediaStream | null | undefined
+          if (!atual && p.stream) {
+            const hasVideo = p.stream.getVideoTracks?.().some(t => t.readyState === 'live')
+            if (hasVideo) {
+              ;(p as any).screenStream = p.stream
+              // A câmera continua no card dela se ainda houver outra trilha.
+              const outras = p.stream.getVideoTracks?.().filter(t => t.readyState === 'live') ?? []
+              if (outras.length <= 1) p.stream = undefined
+            }
+          }
+        } else {
           try { delete (p as any).videoUrl } catch {  }
           try { (p as any).videoSeq = -1 } catch {  }
           try { (p as any).screenStream = null } catch {  }
@@ -1502,7 +1525,7 @@ export class CallManager {
     try { this.lastStats.clear() } catch {  }
     try { this.lastNativeStats = null } catch {  }
     this.prevLost.clear()
-    const callId = await services.callInvite(targetFps[0] ?? convId, kind)
+    const callId = await services.callInvite(targetFps[0] ?? convId, kind, this.callIsGroup)
     this.acceptedCalls.add(callId)
     for (const fp of targetFps.slice(1)) {
       if (fp === me.fingerprint) continue
@@ -1723,7 +1746,15 @@ export class CallManager {
         if (!this.state.participants.some((p: any) => p.fp === fp)) {
           this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
         }
-        try { await this.createPC(fp, callId, true) } catch {  }
+        // Não cria PC para todo mundo: quem tem fp maior inicia, o outro espera
+        // a oferta. Criar dos dois lados dava duas m-lines e a call "conectava"
+        // sem áudio (glare).
+        const euInicio = shouldInitiatePair({
+          myFp: me.fingerprint, peerFp: fp, hasPair: this.pcs.has(fp), nowMs: Date.now(),
+        })
+        if (euInicio) {
+          try { await this.createPC(fp, callId, true) } catch {  }
+        }
       }
     } catch {  }
     const adiantados = this.pendingVoiceJoins.get(callId)
@@ -2129,22 +2160,27 @@ export class CallManager {
     if (!MR) throw new Error('MediaRecorder indisponível')
     let stream: MediaStream | null = null
     try {
-      const audioTracks = this.localStream?.getAudioTracks().filter(t => t.readyState === 'live') ?? []
-      if (audioTracks.length > 0 && this.localStream) {
-        stream = this.localStream
+      // No relay, o que importa é a track MIXADA (mic + efeito). Gravar o
+      // localStream cru fazia o soundboard silenciar justamente no modo
+      // compatibilidade — o efeito tocava só para quem enviou.
+      const mixed = this.sfxDestination?.stream.getAudioTracks().find(t => t.readyState === 'live') ?? null
+      const audioTracks = mixed ? [mixed] : (this.localStream?.getAudioTracks().filter(t => t.readyState === 'live') ?? [])
+      if (audioTracks.length > 0) {
+        stream = mixed ? new MediaStream([mixed]) : this.localStream
       } else {
         stream = await getLocalMedia({ audio: true })
       }
     } catch { stream = null }
     if (!stream) throw new Error('sem microfone para o modo compatibilidade')
+    const streamEhMixada = !!this.sfxDestination && stream.getAudioTracks()[0] === this.sfxDestination.stream.getAudioTracks()[0]
     try {
-      if (this.localStream && stream !== this.localStream) {
+      if (!streamEhMixada && this.localStream && stream !== this.localStream) {
         const at = stream.getAudioTracks()[0]
         if (at && this.localStream.getAudioTracks().length === 0) {
           try { this.localStream.addTrack(at) } catch {  }
         }
       }
-      if (!this.localStream) this.localStream = stream
+      if (!this.localStream && !streamEhMixada) this.localStream = stream
     } catch {  }
     this.relayRecStream = stream
     this.relayRecDedicated = stream !== this.localStream
@@ -2240,7 +2276,8 @@ export class CallManager {
       // (recuperação de mic, troca de dispositivo). Sem revalidar, o efeito
       // continuava "tocando" num grafo que ninguém enviava.
       if (this.sfxDestination && this.sfxMicTrack === mic) return
-      if (!mic) return
+      // Sem mic ainda dá para montar o sink (só efeito). Antes `if (!mic) return`
+      // deixava o botão mudo para quem entrou sem microfone.
       if (this.sfxDestination) this.stopSoundboard()
       const AC: any = typeof AudioContext !== 'undefined' ? AudioContext : (typeof window !== 'undefined' ? (window as any).webkitAudioContext : null)
       if (!AC) return
@@ -2249,10 +2286,12 @@ export class CallManager {
       if (!ctx || ctx.state === 'closed') return
       try { if (ctx.state === 'suspended') void ctx.resume().catch(() => {}) } catch {  }
       this.sfxDestination = ctx.createMediaStreamDestination()
-      try {
-        const src = ctx.createMediaStreamSource(new MediaStream([mic]))
-        src.connect(this.sfxDestination)
-      } catch {  }
+      if (mic) {
+        try {
+          const src = ctx.createMediaStreamSource(new MediaStream([mic]))
+          src.connect(this.sfxDestination)
+        } catch {  }
+      }
       this.sfxMicTrack = mic
       this.mixSoundboardIntoPeers()
       soundboard.attach({ ctx, destination: this.sfxDestination })
@@ -2266,8 +2305,16 @@ export class CallManager {
     for (const pc of this.pcs.values()) {
       try {
         if (pc.signalingState === 'closed') continue
-        const sender = pc.getSenders().find(s => s.track?.kind === 'audio') ?? null
-        if (!sender || sender.track === mixed) continue
+        // Sender de áudio pode existir SEM track (transceiver recvonly criado
+        // por ensureMlines). Procurar só `s.track?.kind === 'audio'` deixava
+        // esse caso de fora e o efeito não saía.
+        const sender =
+          pc.getSenders().find(s => s.track?.kind === 'audio')
+          ?? pc.getTransceivers().find(t =>
+            (t.sender?.track?.kind ?? t.receiver?.track?.kind) === 'audio')?.sender
+          ?? null
+        if (!sender) continue
+        if (sender.track === mixed) continue
         if (this.screenAudioSenders.get(pc) === sender) continue
         void sender.replaceTrack(mixed).catch(() => {  })
         this.sfxSender = sender
@@ -2755,6 +2802,9 @@ export class CallManager {
           this.localStream = s
         }
         this.micRecoveryAttempts = 0
+        // O mic mudou: o sink apontava para a track morta. Sem reconstruir,
+        // o efeito tocava num grafo que ninguém enviava.
+        try { this.ensureSoundboardSink() } catch {  }
         const anexados = this.attachMissingLocalTracks()
         for (const fp of anexados) {
           const pc = this.pcs.get(fp)
@@ -2964,6 +3014,14 @@ export class CallManager {
     if ((this.state as any)?.nativeMedia) {
       services.voiceSetMuted(this.state.callId, muted).catch(() => {})
     }
+    // Canal de SERVIDOR usa voice_states: sem publicar, o ícone de mic dos
+    // outros nunca mudava (o botão parecia não funcionar).
+    const ref = parseVoiceCallId(this.state.callId, this.state.convId)
+    if (ref) {
+      services
+        .voiceState(ref.communityId, ref.channelId, muted, !!this.state.deafened)
+        .catch(() => {  })
+    }
     this.onUpdate({ ...this.state })
   }
 
@@ -2982,6 +3040,12 @@ export class CallManager {
     if ((this.state as any)?.nativeMedia) {
       services.voiceSetDeafened(this.state.callId, this.state.deafened).catch(() => {})
       if (this.state.deafened) services.voiceSetMuted(this.state.callId, true).catch(() => {})
+    }
+    const ref = parseVoiceCallId(this.state.callId, this.state.convId)
+    if (ref) {
+      services
+        .voiceState(ref.communityId, ref.channelId, !!this.state.muted, !!this.state.deafened)
+        .catch(() => {  })
     }
     this.onUpdate({ ...this.state })
   }
@@ -3066,12 +3130,35 @@ export class CallManager {
         const cur = this.state
         if (!cur || cur.callId !== callId) return
         let changed = false
+        const noMotor = new Set(states.map(([fp]) => fp).filter(Boolean))
+        // Entrou gente: aparece na tela (mesmo sem oferta pronta ainda).
         for (const [fp, muted, deafened] of states) {
           if (!fp || fp === this.myFp) continue
           if (addVoiceParticipant(cur.participants, fp)) changed = true
           if (updateVoiceParticipantState(cur.participants, fp, !!muted, !!deafened)) changed = true
         }
+        // Saiu gente: some da tela. Antes o roster só ADICIONAVA, então quem
+        // saía continuava aparecendo para sempre em quem ficou.
+        const restantes = (cur.participants ?? []).filter((p: any) => {
+          if (!p?.fp || p.fp === this.myFp) return true
+          if (noMotor.has(p.fp)) return true
+          changed = true
+          try { this.pcs.get(p.fp)?.close() } catch {  }
+          this.pcs.delete(p.fp)
+          return false
+        })
+        if (restantes.length !== (cur.participants ?? []).length) cur.participants = restantes
         if (changed) this.onUpdate({ ...cur })
+        // Entrou alguém e ainda não há PC: monta a malha (quem tem fp maior
+        // inicia), senão a pessoa fica na lista sem nunca conectar.
+        if (!(cur as any).nativeMedia) {
+          for (const fp of noMotor) {
+            if (!fp || fp === this.myFp || this.pcs.has(fp)) continue
+            if (this.myFp && this.myFp > fp) {
+              void this.createPC(fp, callId, true).catch(() => {  })
+            }
+          }
+        }
       }).catch(() => {  })
     }
     try {
@@ -3391,6 +3478,10 @@ export class CallManager {
     this.screenMetrics = emptyScreenMetrics()
     this.watchScreenTrack(track, gen)
     this.screenMonitor.attach(track)
+    // O sinal vai ANTES da renegociação: se o vídeo chegar primeiro, o outro
+    // lado não sabe que aquele stream é tela e mostra no card da câmera. Era a
+    // corrida que fazia um amigo ver a tela certa e o outro ver na câmera.
+    this.broadcastScreenSignal(true, false)
     await this.tuneScreenTrack(track)
     try {
       const audioTracks = await this.collectScreenAudioTracks(stream)
@@ -3416,6 +3507,7 @@ export class CallManager {
     }
     if (gen !== this.screenGen) return
     this.startScreenStatsTimer()
+    // Repetir é idempotente e cobre quem entrou na call no meio do caminho.
     this.broadcastScreenSignal(true, false)
     this.onUpdate({ ...this.state })
     void services.hideShareBar?.().catch(() => {})
@@ -4080,6 +4172,11 @@ export class CallManager {
   private announceSelfToRoom(callId: string) {
     const st = this.state
     if (!st || st.callId !== callId || !this.myFp) return
+    // Reanunciar o estado de TELA junto com a malha: quem entrou depois (ou
+    // perdeu o frame) precisa saber que o vídeo que vai chegar é tela.
+    if (st.sharing) {
+      try { this.broadcastScreenSignal(true, !!st.cameraOn) } catch {  }
+    }
     const outros = st.participants
       .map(p => p.fp)
       .filter(fp => !!fp && fp !== this.myFp)
@@ -4104,9 +4201,27 @@ export class CallManager {
       const streams: MediaStream[] = []
       if (this.localStream) streams.push(this.localStream)
       if (this.screenStream && this.screenStream !== this.localStream) streams.push(this.screenStream)
+      // Com o soundboard ativo, a track enviada é a MIXADA (mic + efeitos).
+      // Sem isto, um PC criado depois de ativar o sink mandava o microfone
+      // cru e o efeito não chegava a quem entrou depois.
+      const mixed = this.sfxDestination?.stream.getAudioTracks()[0] ?? null
       for (const s of streams) {
         for (const t of s.getTracks()) {
           try {
+            if (t.kind === 'audio' && mixed && s === this.localStream) {
+              const ja = pc.getSenders().some(x => x.track === t)
+              if (ja) continue
+              // Reusa a m-line de ÁUDIO que já existe (inclusive recvonly),
+              // nunca um sender de vídeo. `!x.track` sozinho pegava o primeiro
+              // sender vazio, que podia ser o de vídeo.
+              const senderAudio = pc
+                .getTransceivers()
+                .find(tr => (tr.sender?.track?.kind ?? tr.receiver?.track?.kind) === 'audio')
+                ?.sender ?? null
+              if (senderAudio) { void senderAudio.replaceTrack(mixed).catch(() => {  }); continue }
+              pc.addTrack(mixed, this.sfxDestination!.stream)
+              continue
+            }
             const already = pc.getSenders().some(x => x.track === t)
             if (already) continue
             if (t.kind === 'video') {
@@ -4123,6 +4238,8 @@ export class CallManager {
       }
     } catch {  }
     this.ensureMlines(pc)
+    // Garante que TODOS os senders de áudio apontem para a mixada.
+    this.mixSoundboardIntoPeers()
   }
 
   private ensureMlines(pc: RTCPeerConnection) {

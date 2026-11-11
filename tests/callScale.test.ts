@@ -138,15 +138,45 @@ test('o watchdog de conexão não desiste no canal vazio', () => {
   assert.doesNotMatch(trecho, /ninguém conectou a mídia ainda/, 'não declara desistência')
 })
 
-test('voice_states tem prazo de validade por re-anúncio', () => {
+test('voice_states tem prazo de validade, mas a LEITURA não apaga', () => {
   assert.match(storage, /VOICE_PRESENCE_TTL_MS/)
   assert.match(storage, /announced_at/)
   const li = storage.slice(storage.indexOf('pub fn list_voice_states'))
-  assert.match(li.slice(0, 1600), /DELETE FROM voice_states/)
-  assert.match(li.slice(0, 1600), /announced_at < \?3/)
+  assert.match(li.slice(0, 900), /pub fn list_voice_states/)
+  // Bug real: a UI lê o roster a cada 10 s; se a leitura apaga por TTL, um
+  // poll da própria interface derruba quem está na call.
+  assert.doesNotMatch(
+    li.slice(0, 1400),
+    /DELETE FROM voice_states/,
+    'list_voice_states precisa ser somente leitura',
+  )
+  const purge = storage.slice(storage.indexOf('pub fn purge_stale_voice_states'))
+  assert.match(purge.slice(0, 900), /DELETE FROM voice_states|leave_voice/, 'a limpeza vive na manutenção')
+  assert.match(purge.slice(0, 900), /announced_at < \?3/)
+})
+
+test('a manutenção renova o próprio carimbo antes de limpar', () => {
+  const engine = readFileSync('distorrent-core/src/net/engine/voice_channels.rs', 'utf8')
+  const reannounce = engine.slice(engine.indexOf('fn reannounce_voice_channels'))
+  assert.match(
+    reannounce.slice(0, 3000),
+    /touch_voice_state/,
+    'sem renovar, o próprio dono expirava em 90 s e sumia para os outros',
+  )
+  assert.match(
+    reannounce.slice(0, 3000),
+    /purge_stale_voice_states/,
+    'quem parou de anunciar é removido no tick, não na leitura',
+  )
 })
 
 test('o re-anúncio do motor renova o prazo', () => {
   const set = storage.slice(storage.indexOf('pub fn set_voice_state'))
   assert.match(set.slice(0, 900), /announced_at=excluded\.announced_at/, 'upsert renova o carimbo')
+  const recebido = readFileSync(new URL('../distorrent-core/src/net/engine/f_voice.rs', import.meta.url), 'utf8')
+  assert.match(
+    recebido.slice(recebido.indexOf('SecureFrame::VoiceJoin')),
+    /touch_voice_state/,
+    'o anúncio recebido do peer também renova o carimbo de vida dele',
+  )
 })

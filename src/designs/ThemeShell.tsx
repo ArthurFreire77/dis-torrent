@@ -53,7 +53,17 @@ import {
   type ServerSummary,
 } from '../components/server/ServerHub'
 import { consumeInvite, peekInvite, subscribeInvite } from '../services/deepLink'
-import { contactBadge, effectivePresence, introState, relationOf } from '../services/socialRules'
+import {
+  canCallPeer,
+  canOpenConversation,
+  contactBadge,
+  conversationMatchesFilter,
+  effectivePresence,
+  introState,
+  isPresenceOnline,
+  relationOf,
+  type ConversationFilter,
+} from '../services/socialRules'
 import { resolveContactName } from '../services/contactNames'
 import { Modal, Notice, Button } from '../shared/ui'
 import { WIDTHS } from '../shared/ui'
@@ -289,6 +299,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const [showPollForm, setShowPollForm] = useState(false)
   const [serverFlow, setServerFlow] = useState<'choose'|'create'|'join'|'invite'>('choose')
   const [friendsTab, setFriendsTab] = useState<'online'|'todos'|'pendentes'|'bloqueados'|'adicionar'>('online')
+  const [convFilter, setConvFilter] = useState<ConversationFilter>('todos')
+  const [convSearch, setConvSearch] = useState('')
   const [unreadServers, setUnreadServers] = useState<Set<string>>(new Set())
   const [typingPeers, setTypingPeers] = useState<Record<string, { nick: string; at: number }>>({})
   const typingTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
@@ -910,6 +922,17 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (ev.type === 'call_incoming') {
       const fp = ev.from_fp
       if (fp && identity?.fingerprint && fp === identity.fingerprint) return
+      // Não-amigo não toca a campainha: rejeita ANTES de notificar. O motor já
+      // recusa o frame; isto cobre um cliente antigo/alterado que ainda toque.
+      const emGrupoComum = conversations.some((c) => {
+        if (c.kind !== 'group') return false
+        const mem = groupRosters[c.id]
+        return !!mem && mem.some(([mfp]) => mfp === fp)
+      })
+      if (!friendsAccepted.some((f) => f.fp === fp) && !emGrupoComum) {
+        try { void services.callReject(ev.call_id, fp, 'não é amigo') } catch {  }
+        return
+      }
       const known = peers.find((p) => p.fp === fp)?.nickname
         || friendsAccepted.find((f) => f.fp === fp)?.nickname
         || peerNickCacheRef.current[fp]
@@ -1027,6 +1050,16 @@ export default function ThemeShell({ designId }: {designId:string}){
     return () => { vivo = false; off() }
   }, [selConv, ehGrupo])
   const onlinePeers = peers.filter(p => p.state === 'CONNECTED')
+  /** Lista de conversas filtrada: mesma fonte para sidebar e busca, sem duplicar dados. */
+  const friendFpSet = useMemo(() => new Set(friendsAccepted.map((f) => f.fp)), [friendsAccepted])
+  const filteredConversations = useMemo(() => {
+    const q = convSearch.trim().toLowerCase()
+    return conversations.filter((c) => {
+      if (!conversationMatchesFilter({ kind: c.kind, peerFp: c.peer_fp, filter: convFilter, friendFps: friendFpSet })) return false
+      if (!q) return true
+      return c.title.toLowerCase().includes(q) || (c.peer_fp ?? '').toLowerCase().includes(q)
+    })
+  }, [conversations, convFilter, convSearch, friendFpSet])
   const activeComm = view === 'servidores' && selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null
   const mergedChannelsForLabel = (() => {
     if (!activeComm) return [] as { id: string; name: string; kind: ChannelMeta['kind'] }[]
@@ -1087,7 +1120,7 @@ export default function ThemeShell({ designId }: {designId:string}){
     return s
   }, [conversations, groupRosters, identity?.fingerprint])
   const shownFriends = friendsTab === 'online'
-    ? friendsAccepted.filter(f => effectivePresence({ connected: onlineFps.has(f.fp), chosen: socialPresence[f.fp] }) !== 'offline')
+    ? friendsAccepted.filter(f => isPresenceOnline({ connected: onlineFps.has(f.fp), chosen: socialPresence[f.fp] }))
     : friendsAccepted
   const [, forceCallsRefresh] = useState(0)
   useEffect(() => {
@@ -1107,11 +1140,16 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   async function openDm(p: { fp: string; nickname?: string }) {
     if (!p?.fp || p.fp.trim() === '') { setError('Selecione um amigo válido'); return }
+    // O id do contato é o fingerprint; o nome é só rótulo. Se já existe
+    // conversa com esse peer, `dmOpen` devolve a MESMA (id determinístico),
+    // então clicar na lista online nunca duplica a DM.
+    const fp = p.fp.trim()
+    const nome = (p.nickname || fp).trim() || fp
     setError(null)
     try {
-      const conv = await services.dmOpen(p.fp.trim(), (p.nickname || p.fp).trim())
+      const conv = await services.dmOpen(fp, nome)
       setSelCommunity(null)
-      setSelPeerFp(p.fp.trim())
+      setSelPeerFp(fp)
       setSelConv(conv.id)
       refreshConvos()
     } catch (e: any) { setError(String(e?.message ?? e)) }
@@ -1120,6 +1158,28 @@ export default function ThemeShell({ designId }: {designId:string}){
   const lastSendByConvRef = useRef<{ conv: string; at: number }>({ conv: '', at: 0 })
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
+
+  const socialPresenceWithLink = useMemo<Record<string, string>>(() => {
+    // O status persistido sozinho mente: pode estar "online" com o link caído
+    // (TTL de 90s) ou "offline" com o peer conectado. Quem manda é o link;
+    // invisível continua invisível, e o status escolhido só colore quando há
+    // conexão de verdade a partir da lista.
+    const out: Record<string, string> = { ...socialPresence }
+    const conhecidos = new Set<string>([
+      ...Object.keys(socialPresence),
+      ...peers.map((p) => p.fp),
+    ])
+    for (const fp of conhecidos) {
+      if (fp === identity?.fingerprint) continue
+      const conectado = onlineFps.has(fp)
+      const escolhido = socialPresence[fp]
+      if (!conectado) out[fp] = 'offline'
+      else if (escolhido === 'invisible') out[fp] = 'invisible'
+      else if (escolhido === 'idle' || escolhido === 'dnd') out[fp] = escolhido
+      else out[fp] = 'online'
+    }
+    return out
+  }, [socialPresence, peers, onlineFps, identity?.fingerprint])
 
   useEffect(() => {
     const el = messagesScrollRef.current
@@ -1539,10 +1599,25 @@ export default function ThemeShell({ designId }: {designId:string}){
     if (fps.length === 0) { setError('selecione um amigo ou crie um grupo'); return }
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
     if (callViva) { setError('já existe uma chamada em andamento'); return }
+    // 1:1 só entre amigos ACEITOS. Grupo/canal vale pela participação nele.
+    if (!isGroup) {
+      const alvo = fps[0]
+      const rel = relationOf(selPeerState && selPeerState.fp === alvo ? selPeerState : null, identity?.fingerprint ?? '')
+      const permissao = canCallPeer(rel === 'none' && friendFpSet.has(alvo) ? 'friend' : rel)
+      if (!permissao.ok) { setError(permissao.reason ?? 'só amigos podem ligar'); return }
+    }
     setCallActionBusy(true)
     try { await callManager.start(kind, selConv, fps, { group: isGroup }) } catch (e: any) { setError(String(e?.message ?? e)) }
     finally { setCallActionBusy(false) }
   }
+  /** Motivo para desabilitar o botão de chamada da conversa aberta (1:1). */
+  const chamadaBloqueada = (() => {
+    if (!selConv) return { ok: false, reason: 'abra uma conversa' }
+    if (ehGrupo) return { ok: true, reason: null as string | null }
+    if (selRelation === 'friend') return { ok: true, reason: null as string | null }
+    const p = canCallPeer(selRelation)
+    return { ok: false, reason: p.reason }
+  })()
   async function handleIncomingAccept() {
     if (!incomingCall || callActionBusy) return
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
@@ -1765,22 +1840,35 @@ export default function ThemeShell({ designId }: {designId:string}){
 
   const channelCallPeers = useMemo(() => {
     const eu = identity?.fingerprint ?? ''
-    const vivos = new Set(onlinePeers.filter((p) => p.state === 'CONNECTED').map((p) => p.fp))
     const estadoMotor = new Map(
       voiceStates.filter(([fp]) => !!fp).map(([fp, muted, deafened]) => [fp, { muted, deafened }]),
     )
     const vistos = new Map<string, { fp: string; nome: string; muted?: boolean; deafened?: boolean; eu?: boolean }>()
-
-    for (const p of (activeCall?.participants ?? []) as any[]) {
-      const fp = String(p?.fp ?? '')
+    // A LISTA DO CANAL é a presença de voz (voice_states), não o link P2P.
+    // Antes filtrávamos por link vivo: quem estava na call mas sem rota direta
+    // (via relay ou ainda negociando) sumia da tela — cada um via um número
+    // diferente de participantes.
+    for (const [fp] of voiceStates) {
       if (!fp) continue
-      if (fp !== eu && vivos.size > 0 && !vivos.has(fp)) continue
       const motor = estadoMotor.get(fp)
       vistos.set(fp, {
         fp,
-        nome: nameOfFp(fp) || p?.nickname || fp.slice(0, 8),
-        muted: p?.muted ?? motor?.muted,
-        deafened: p?.deafened ?? motor?.deafened,
+        nome: nameOfFp(fp) || fp.slice(0, 8),
+        muted: motor?.muted,
+        deafened: motor?.deafened,
+        eu: fp === eu,
+      })
+    }
+    for (const p of (activeCall?.participants ?? []) as any[]) {
+      const fp = String(p?.fp ?? '')
+      if (!fp) continue
+      const motor = estadoMotor.get(fp)
+      const atual = vistos.get(fp)
+      vistos.set(fp, {
+        fp,
+        nome: atual?.nome || nameOfFp(fp) || p?.nickname || fp.slice(0, 8),
+        muted: atual?.muted ?? p?.muted ?? motor?.muted,
+        deafened: atual?.deafened ?? p?.deafened ?? motor?.deafened,
         eu: fp === eu,
       })
     }
@@ -1789,7 +1877,7 @@ export default function ThemeShell({ designId }: {designId:string}){
       vistos.set(eu, { fp: eu, nome: nameOfFp(eu) || 'você', muted: motor?.muted, deafened: motor?.deafened, eu: true })
     }
     return [...vistos.values()].sort((a, b) => (a.eu === b.eu ? a.nome.localeCompare(b.nome) : a.eu ? -1 : 1))
-  }, [voiceStates, activeCall?.participants, identity?.fingerprint, onlinePeers])
+  }, [voiceStates, activeCall?.participants, identity?.fingerprint, nameOfFp])
 
   const canalVazio = inThisCall && channelCallPeers.filter((p) => !p.eu).length === 0
 
@@ -2165,25 +2253,30 @@ export default function ThemeShell({ designId }: {designId:string}){
                               <div key={ch.id} className={'chan-row-wrap' + (selConv === ch.id ? ' active' : '') + (voiceChannel?.channelId===ch.id ? ' voice-active' : '')}>
                                 <button
                                   onClick={async () => {
-                                    if (isCallableChannel(ch.kind)) {
-                                      if (callActionBusy) return
-                                      if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
-                                      setCallActionBusy(true)
-                                      const estouNesteCanal = canalDaChamada?.channelId === ch.id
-                                      if (estouNesteCanal) {
-                                        try {
-                                          await callManager.leaveVoice(canalDaChamada.communityId, ch.id)
-                                        } catch (e: any) { setError(String(e?.message ?? e)) }
-                                        setVoiceStates([])
-                                      } else {
-                                        setSelConv(ch.id)
-                                        try {
-                                          await callManager.joinVoice(selCommunity!, ch.id)
-                                        } catch (e: any) { setError(String(e?.message ?? e)); setCallActionBusy(false); return }
-                                        services.voiceStates(selCommunity!, ch.id).then(setVoiceStates).catch(()=>{})
-                                      }
+                                    // Clicar no canal NUNCA desconecta: se já estou
+                                    // nele, só abre a interface da chamada (ajustes,
+                                    // tela, câmera). Sair é só pelo botão vermelho.
+                                    setSelConv(ch.id)
+                                    setSelPeerFp(null)
+                                    if (!isCallableChannel(ch.kind)) return
+                                    if (callActionBusy) return
+                                    if (getCallsSupport() === 'none') { setError(getCallsUnavailableMessage()); return }
+                                    const estouNesteCanal = canalDaChamada?.channelId === ch.id
+                                    if (estouNesteCanal) {
+                                      // Já estou aqui: clicar abre os controles da
+                                      // chamada (tela, câmera, ajustes) — nunca sai.
+                                      setShowCallSettings(true)
+                                      return
+                                    }
+                                    setCallActionBusy(true)
+                                    try {
+                                      await callManager.joinVoice(selCommunity!, ch.id)
+                                      services.voiceStates(selCommunity!, ch.id).then(setVoiceStates).catch(()=>{})
+                                    } catch (e: any) {
+                                      setError(String(e?.message ?? e))
+                                    } finally {
                                       setCallActionBusy(false)
-                                    } else setSelConv(ch.id)
+                                    }
                                   }}
                                   onContextMenu={e => { e.preventDefault(); setChannelMenu({ x: e.clientX, y: e.clientY, id: ch.id }) }}
                                   className={'chan-row' + (selConv === ch.id ? ' active' : '')}
@@ -2227,9 +2320,29 @@ export default function ThemeShell({ designId }: {designId:string}){
                   {friendRequests.length > 0 && <span className="nav-badge">{friendRequests.length}</span>}
                 </button>
 
-                <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}><span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, flex: 1 }}>CONVERSAS DIRETAS</span><button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', display: 'flex' }}><Icon d={Icons.plus} size={12}/></button></div>
+                <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 6, padding: '0 8px' }}><span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: muted, flex: 1 }}>CONVERSAS DIRETAS</span><button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" aria-label="Criar grupo" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', display: 'flex' }}><Icon d={Icons.plus} size={12}/></button></div>
+                <div style={{ display: 'flex', gap: 4, padding: '6px 8px 0', flexWrap: 'wrap' }}>
+                  {([['todos', 'Todos'], ['amigos', 'Amigos'], ['contatos', 'Contatos'], ['grupos', 'Grupos']] as const).map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setConvFilter(id)}
+                      aria-pressed={convFilter === id}
+                      style={{ background: convFilter === id ? t.accent : 'transparent', color: convFilter === id ? '#fff' : muted, border: `1px solid ${convFilter === id ? t.accent : borderColor}`, borderRadius: 99, padding: '3px 9px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                    >{label}</button>
+                  ))}
+                </div>
+                <div style={{ padding: '6px 8px 2px' }}>
+                  <input
+                    value={convSearch}
+                    onChange={(e) => setConvSearch(e.target.value)}
+                    placeholder="Buscar conversa ou id"
+                    aria-label="Buscar conversa"
+                    style={{ width: '100%', boxSizing: 'border-box', background: inputBg, border: `1px solid ${borderColor}`, borderRadius: 6, padding: '5px 8px', color: text, fontSize: 11.5, outline: 'none' }}
+                  />
+                </div>
                 <Section variant="desktop" title="" maxVisible={12} collapsible={false}>
-                  {conversations.map(c => {
+                  {filteredConversations.map(c => {
                     const sala = callRoomsMap.get(c.id) ?? null
                     return (
                     <div key={c.id} className={'nav-row' + (c.id === selConv ? ' active' : '')} onClick={() => { setSelConv(c.id); setSelPeerFp(c.peer_fp) }} style={{ cursor: 'pointer' }}>
@@ -2267,18 +2380,32 @@ export default function ThemeShell({ designId }: {designId:string}){
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
                           const mesmoGrupo = groupMemberFps.has(p.fp)
-                          const mesmoServidor = (activeComm?.members ?? []).some(([fp]) => fp === p.fp)
-                          const podeConversar = ehAmigo || mesmoGrupo || mesmoServidor
+                          // Servidor em comum em QUALQUER comunidade — antes só
+                          // o servidor aberto contava, então o contato de outro
+                          // servidor aparecia na lista e o clique não abria nada.
+                          const mesmoServidor = communities.some((c) =>
+                            (c.members ?? []).some(([fp]) => fp === p.fp),
+                          )
+                          const podeConversar = canOpenConversation({
+                            relation: ehAmigo ? 'friend' : 'none',
+                            sharedGroup: mesmoGrupo,
+                            sharedCommunity: mesmoServidor,
+                          })
                           const badge = contactBadge({
                             relation: ehAmigo ? 'friend' : 'none',
                             sharedGroup: mesmoGrupo,
                             sharedCommunity: mesmoServidor,
                           })
                           return (
-                            <button key={p.fp} onClick={() => { if (podeConversar) void openDm({ fp: p.fp, nickname: p.nickname }) }} className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')} title={podeConversar ? 'Abrir conversa' : 'Sem canal de contato — peça o fingerprint para adicionar'}>
+                            <button
+                              key={p.fp}
+                              onClick={() => { if (podeConversar) void openDm({ fp: p.fp, nickname: p.nickname }); else setNotice('Sem canal de contato — peça o fingerprint e adicione como amigo') }}
+                              className={'nav-row' + (p.fp === selPeerFp && !selConv ? ' active' : '')}
+                              title={podeConversar ? `Abrir conversa com ${p.nickname || p.fp} (${badge})` : 'Sem canal de contato — peça o fingerprint e adicione como amigo'}
+                            >
                               <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                                 <Avatar name={p.nickname || p.fp} fp={p.fp} size={28} avatarB64={socialProfiles[p.fp]?.avatar_b64} />
-                                <PeerDot s={effectivePresence({ connected: p.state === 'CONNECTED', chosen: socialPresence[p.fp] }) === 'offline' ? 'DISCONNECTED' : 'CONNECTED'} />
+                                <PeerDot s={isPresenceOnline({ connected: p.state === 'CONNECTED', chosen: socialPresence[p.fp] }) ? 'CONNECTED' : 'DISCONNECTED'} />
                               </span>
                               <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{p.nickname || p.fp}</span>
                               {!ehAmigo && <span style={{ fontSize: 10, color: muted, flexShrink: 0 }}>{badge}</span>}
@@ -2439,7 +2566,21 @@ export default function ThemeShell({ designId }: {designId:string}){
                   </span>
                 </button>
               ) : (
-                <span style={{ fontWeight: 700, color: t.heading, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                  <span style={{ fontWeight: 700, color: t.heading, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{peerTitle}</span>
+                  {selPeerFp && (() => {
+                    const pres = effectivePresence({ connected: onlineFps.has(selPeerFp), chosen: socialPresence[selPeerFp] })
+                    const rotulo = pres === 'online' ? 'online' : pres === 'idle' ? 'ausente' : pres === 'dnd' ? 'não perturbe' : pres === 'invisible' ? 'invisível' : 'offline'
+                    const cor = pres === 'online' ? t.green : pres === 'idle' ? t.yellow : pres === 'dnd' ? t.red : muted
+                    return (
+                      <span title={`presença: ${rotulo}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, color: cor, flexShrink: 0 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: cor, boxShadow: pres === 'online' ? `0 0 6px ${cor}` : undefined }} />
+                        {rotulo}
+                        {!isPresenceOnline({ connected: onlineFps.has(selPeerFp), chosen: socialPresence[selPeerFp] }) && selRelation === 'friend' ? ' — entrega ao voltar' : ''}
+                      </span>
+                    )
+                  })()}
+                </span>
               )}
               {}
               {selRoom && (
@@ -2475,8 +2616,8 @@ export default function ThemeShell({ designId }: {designId:string}){
                   <Icon d={Icons.download} size={18} />
                   {dlCount > 0 && <span style={{ position: 'absolute', top: 0, right: 0, background: t.accent, color: '#fff', fontSize: 9, fontWeight: 800, borderRadius: 99, minWidth: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px' }}>{dlCount}</span>}
                 </button>
-                <button onClick={() => startCall('voice')} title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} aria-label="Iniciar chamada de voz" style={{ background: 'transparent', border: 'none', color: callsOk ? muted : t.red, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex', opacity: callsOk ? 1 : 0.75 }}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 1 1 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a1 1 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg></button>
-                <button onClick={() => startCall('video')} title={callsOk ? 'Iniciar chamada de vídeo' : `Iniciar chamada de vídeo — ${callsUnavailableDetail}`} aria-label="Iniciar chamada de vídeo" style={{ background: 'transparent', border: 'none', color: callsOk ? muted : t.red, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex', opacity: callsOk ? 1 : 0.75 }}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><polygon points="23 7 13 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg></button>
+                <button onClick={() => { if (chamadaBloqueada.ok) startCall('voice'); else setError(chamadaBloqueada.reason ?? 'só amigos podem ligar') }} disabled={!callsOk || !chamadaBloqueada.ok} title={!chamadaBloqueada.ok ? (chamadaBloqueada.reason ?? 'só amigos podem ligar') : callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} aria-label="Iniciar chamada de voz" style={{ background: 'transparent', border: 'none', color: callsOk && chamadaBloqueada.ok ? muted : t.red, cursor: callsOk && chamadaBloqueada.ok ? 'pointer' : 'not-allowed', padding: 6, borderRadius: 6, display: 'flex', opacity: callsOk && chamadaBloqueada.ok ? 1 : 0.45 }}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 1 1 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a1 1 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg></button>
+                <button onClick={() => { if (chamadaBloqueada.ok) startCall('video'); else setError(chamadaBloqueada.reason ?? 'só amigos podem ligar') }} disabled={!callsOk || !chamadaBloqueada.ok} title={!chamadaBloqueada.ok ? (chamadaBloqueada.reason ?? 'só amigos podem ligar') : callsOk ? 'Iniciar chamada de vídeo' : `Iniciar chamada de vídeo — ${callsUnavailableDetail}`} aria-label="Iniciar chamada de vídeo" style={{ background: 'transparent', border: 'none', color: callsOk && chamadaBloqueada.ok ? muted : t.red, cursor: callsOk && chamadaBloqueada.ok ? 'pointer' : 'not-allowed', padding: 6, borderRadius: 6, display: 'flex', opacity: callsOk && chamadaBloqueada.ok ? 1 : 0.45 }}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><polygon points="23 7 13 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg></button>
                 <button onClick={() => setShowAddToCall(true)} title="Adicionar amigos à chamada" style={{ background: 'transparent', border: 'none', color: muted, cursor: 'pointer', padding: 6, borderRadius: 6, display: 'flex' }}><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg></button>
                 <button onClick={() => setShowCreateGroup(true)} title="Criar grupo (igual Discord)" style={{ background: inputBg, border: `1px solid ${borderColor}`, color: t.accent, cursor: 'pointer', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800 }}>+ Grupo</button>
                 <span style={{ width: 1, height: 20, background: borderColor, margin: '0 4px' }}/>
@@ -2704,7 +2845,7 @@ export default function ThemeShell({ designId }: {designId:string}){
                 <div key={f.fp} className={'friend-row' + (f.fp === selPeerFp ? ' active' : '')} onClick={() => openDm(f)}>
                   <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                     <Avatar name={f.nickname || f.fp} fp={f.fp} size={32} avatarB64={socialProfiles[f.fp]?.avatar_b64} />
-                    <PeerDot s={onlineFps.has(f.fp) ? 'CONNECTED' : 'DISCONNECTED'} />
+                    <PeerDot s={isPresenceOnline({ connected: onlineFps.has(f.fp), chosen: socialPresence[f.fp] }) ? 'CONNECTED' : 'DISCONNECTED'} />
                   </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: f.fp === selPeerFp ? t.heading : text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.nickname || f.fp}</div>
@@ -2865,13 +3006,6 @@ export default function ThemeShell({ designId }: {designId:string}){
                       style={{ background: inputBg, border: `1px solid ${borderColor}`, color: text, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11.5, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}
                     ><Icon d={Icons.attach} size={12} /> Arquivo</button>
                   </div>
-                  {showSoundboard && (
-                    <SoundboardPanel
-                      open
-                      onClose={() => setShowSoundboard(false)}
-                      palette={{ input: inputBg, border: borderColor, text, muted, accent: t.accent, panel: t.panel }}
-                    />
-                  )}
                   {((activeCall?.qualityNotice as string | undefined) || qualityError) && (
                     <div role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow, lineHeight: 1.5 }}>
                       {qualityError ?? (activeCall?.qualityNotice as string)}
@@ -2910,8 +3044,8 @@ export default function ThemeShell({ designId }: {designId:string}){
                 nameOf={nameOfFp}
                 bots={bots}
                 profiles={socialProfiles}
-                presence={socialPresence}
-                peerOnline={!ehGrupo && !!selPeerFp && onlineFps.has(selPeerFp)}
+                presence={socialPresenceWithLink}
+                peerOnline={!ehGrupo && !!selPeerFp && isPresenceOnline({ connected: onlineFps.has(selPeerFp), chosen: socialPresence[selPeerFp] })}
                 emptyBlock={emptyBlock('Nenhuma mensagem ainda', 'Envie a primeira. Se o peer estiver offline, fica pendente e sai ao reconectar.')}
                 onReply={(m) => { setReplyTo(m); setInput('') }}
                 onProfile={(fp) => setProfileFp(fp)}
@@ -3075,7 +3209,18 @@ export default function ThemeShell({ designId }: {designId:string}){
                 >
                   <Icon d={Icons.lock} size={12} />
                   <span style={{ flex: 1 }}>{intro.hint}</span>
-                  {selPeerFp && intro.blocked && (
+                  {selPeerFp && intro.blocked && selRelation === 'request_out' && (
+                    <span style={{ fontSize: 10, fontWeight: 700, color: muted }}>aguardando aceitação</span>
+                  )}
+                  {selPeerFp && intro.blocked && selRelation === 'request_in' && (
+                    <button
+                      onClick={async () => { try { await services.friendRespond(selPeerFp, true); refreshFriends(); setFriendSuccess('Amizade aceita') } catch (e: any) { setError(String(e?.message ?? e)) } }}
+                      style={{ background: t.green, color: '#fff', border: 'none', borderRadius: 5, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                    >
+                      Aceitar amizade
+                    </button>
+                  )}
+                  {selPeerFp && intro.blocked && selRelation !== 'request_out' && selRelation !== 'request_in' && (
                     <button
                       onClick={() => { setFriendsTab('adicionar'); setFriendFpInput(selPeerFp) }}
                       style={{ background: t.accent, color: '#fff', border: 'none', borderRadius: 5, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
@@ -3128,11 +3273,14 @@ export default function ThemeShell({ designId }: {designId:string}){
               )}
               <div style={{ fontSize: 10, color: muted, marginTop: 6, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <span>
-                  {selPeer && effectivePresence({ connected: selPeer.state === 'CONNECTED', chosen: socialPresence[selPeer.fp] }) === 'offline'
-                    ? 'offline — mensagens ficarão pendentes e entregarão ao voltar'
-                    : socialPresence[selPeerFp ?? ''] === 'invisible'
-                      ? 'contato invisível — pode receber mensagens mesmo sem aparecer online'
-                      : '↵ Enter para enviar • Shift+Enter quebra linha'}
+                  {selPeer
+                    ? (() => {
+                        const pres = effectivePresence({ connected: selPeer.state === 'CONNECTED', chosen: socialPresence[selPeer.fp] })
+                        if (pres === 'offline') return 'offline — mensagens ficarão na fila e entregam ao voltar'
+                        if (pres === 'invisible') return 'contato invisível — pode receber mensagens mesmo sem aparecer online'
+                        return '↵ Enter para enviar • Shift+Enter quebra linha'
+                      })()
+                    : '↵ Enter para enviar • Shift+Enter quebra linha'}
                 </span>
                 <span style={{ opacity: 0.7, display: 'none' } as any}></span>
               </div>
@@ -3677,6 +3825,16 @@ export default function ThemeShell({ designId }: {designId:string}){
             soundboardOpen={showSoundboard}
             onLeave={() => { void callManager.leave() }}
           />
+          {/* O painel precisa ser montado no MESMO return que o botão: o dock da
+              conversa alternava `showSoundboard` e nada aparecia (bug do ícone
+              de música). O canal já monta o dele dentro do VoiceStage. */}
+          {showSoundboard && (
+            <SoundboardPanel
+              open
+              onClose={() => setShowSoundboard(false)}
+              palette={{ input: inputBg, border: borderColor, text, muted, accent: t.accent, panel: t.panel }}
+            />
+          )}
         </div>
       )}
 

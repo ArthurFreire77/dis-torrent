@@ -801,7 +801,7 @@ export interface DisTorrentServices {
   callRoomJoin(convId: string, kind: string): Promise<[string, string[]]>
   callRoomsList(): Promise<any[]>
 
-  callInvite(targetFp: string, kind: string): Promise<string>
+  callInvite(targetFp: string, kind: string, group?: boolean): Promise<string>
   callRingRetry(callId: string, targetFp: string, kind: string): Promise<void>
   callAccept(callId: string, fromFp: string): Promise<void>
   callReject(callId: string, fromFp: string, reason: string): Promise<void>

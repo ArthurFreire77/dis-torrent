@@ -374,7 +374,7 @@ export const tauriServices: DisTorrentServices = {
   callRoomJoin: (convId, kind) =>
     invoke<[string, string[]]>('call_room_join', { convId, kind }),
   callRoomsList: () => invoke<any[]>('call_rooms_list').catch(() => []),
-  callInvite: (targetFp, kind) => invoke<string>('call_invite', { targetFp: targetFp, kind }),
+  callInvite: (targetFp, kind, group) => invoke<string>('call_invite', { targetFp: targetFp, kind, group: group ?? false }),
   callRingRetry: (callId, targetFp, kind) => invoke<void>('call_ring_retry', { callId, targetFp, kind }),
   callAccept: (callId, fromFp) => invoke<void>('call_accept', { callId: callId, fromFp: fromFp }),
   callReject: (callId, fromFp, reason) => invoke<void>('call_reject', { callId: callId, fromFp: fromFp, reason }),

@@ -1200,7 +1200,8 @@ export const browserServices: DisTorrentServices = {
     return Promise.resolve([sala.call_id, sala.participants.slice()] as [string, string[]])
   },
   callRoomsList: () => Promise.resolve([...roomsInBrowser.values()]),
-  callInvite: (targetFp, kind) => {
+  callInvite: (targetFp, kind, group) => {
+    void group
     const rand = (() => {
       try {
         const b = new Uint8Array(6)

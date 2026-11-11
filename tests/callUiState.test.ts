@@ -155,16 +155,21 @@ test('segundo stream de vídeo do peer vira TELA, não substitui a câmera', () 
 
 test('câmera religada NÃO vira card de tela (só a tela anunciada é tela)', () => {
   const bloco = manager.slice(manager.indexOf('function attachRemoteTrack'))
+  const trecho = bloco.slice(0, 2600)
+  // A tela só nasce com sinal `sharing` OU quando já existe uma tela anterior
+  // naquele peer (o sinal chega em frame separado e pode vir depois).
   assert.match(
-    bloco.slice(0, 2600),
-    /const ehTela = !!p\.sharing && temVideo/,
-    'sem o sinal `sharing` um vídeo novo é câmera, não tela',
+    trecho,
+    /const pareceTela = !!\(p as any\)\.sharing \|\| \(!!telaAtual && temVideo\)/,
+    'a tela exige sinal sharing ou uma tela já conhecida no peer',
   )
-  assert.doesNotMatch(
-    bloco.slice(0, 2600),
-    /p\.sharing = true\s*\n\s*}\s*\n\s*onUpdate/,
-    'não pode inventar sharing ao ver dois streams de vídeo',
+  assert.match(
+    trecho,
+    /const ehTela = pareceTela && temVideo && !!p\.stream && p\.stream\.id !== stream\.id/,
+    'sem peer/stream anterior não há como afirmar que é tela',
   )
+  // Um vídeo NOVO, sem sinal e sem tela anterior, tem de cair na câmera.
+  assert.match(trecho, /if \(!p\.stream\) \{\s*p\.stream = stream/)
 })
 
 test('offer recusada no glare é reenviada sozinha (sem desligar/ligar)', () => {

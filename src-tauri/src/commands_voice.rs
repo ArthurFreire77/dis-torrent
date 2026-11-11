@@ -68,10 +68,12 @@ pub(crate) fn call_rooms_list(state: State<AppState>) -> Result<Vec<serde_json::
 pub(crate) async fn call_invite(
     target_fp: String,
     kind: String,
+    group: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let e = engine(&state)?;
-    tauri::async_runtime::spawn_blocking(move || e.call_invite(&target_fp, &kind))
+    let grupo = group.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || e.call_invite_ctx(&target_fp, &kind, grupo))
         .await
         .map_err(|e| e.to_string())?
         .map_err(err)

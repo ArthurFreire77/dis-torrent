@@ -168,7 +168,7 @@ test('inverter câmera é AO VIVO, não só na próxima transmissão', () => {
 
 test('câmera no canal de servidor: reusa a m-line de vídeo existente', () => {
   const attach = manager.slice(manager.indexOf('private attachLocalStreamToPC'))
-  const bloco = attach.slice(0, 1400)
+  const bloco = attach.slice(0, 2200)
   assert.match(
     bloco,
     /findVideoTransceiver\(pc\)/,

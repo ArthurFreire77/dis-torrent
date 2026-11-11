@@ -58,7 +58,7 @@ import { activeToken } from '../shared/markdown'
 import { RichText, type InlineCtx } from '../shared/richText'
 import { useSocialWindow, useMessageActions, usePresence, useReadState } from '../app/useSocial'
 import { BookmarksPanel } from '../components/social/Social'
-import { introState, relationOf, effectivePresence } from '../services/socialRules'
+import { introState, relationOf, canCallPeer, canOpenConversation, conversationMatchesFilter, isPresenceOnline, type ConversationFilter } from '../services/socialRules'
 import { resolveContactName } from '../services/contactNames'
 import { ProfileModal } from '../components/social/socialProfile'
 import { GroupPanel } from '../components/social/GroupPanel'
@@ -818,6 +818,13 @@ export default function MobileShell() {
     if (ev.type === 'call_incoming') {
       const fp = ev.from_fp
       if (fp && identity?.fingerprint && fp === identity.fingerprint) return
+      // Não-amigo não toca a campainha: recusa ANTES de notificar. O motor já
+      // recusa o frame; isto cobre cliente antigo/alterado e o toque local.
+      const emGrupoComum = groupMemberFps.some(([mfp]) => mfp === fp)
+      if (!friendsAccepted.some((f) => f.fp === fp) && !emGrupoComum) {
+        try { void services.callReject(ev.call_id, fp, 'não é amigo') } catch {  }
+        return
+      }
       const known = peers.find((p) => p.fp === fp)?.nickname
         || peerNickCacheRef.current[fp]
         || (ev as unknown as { nickname?: string }).nickname
@@ -854,10 +861,19 @@ export default function MobileShell() {
   const activeComm = useMemo(() => selCommunity ? communities.find(c => c.id === selCommunity) ?? null : null, [communities, selCommunity])
   const onlineFps = useMemo(() => new Set(peers.filter(p => p.state === 'CONNECTED').map(p => p.fp)), [peers])
   const { presence } = usePresence()
-  const filteredConvs = useMemo(() => conversations.filter(c => !searchQ || c.title.toLowerCase().includes(searchQ.toLowerCase())), [conversations, searchQ])
+  const [convFilter, setConvFilter] = useState<ConversationFilter>('todos')
+  const friendFpSet = useMemo(() => new Set(friendsAccepted.map((f) => f.fp)), [friendsAccepted])
+  const filteredConvs = useMemo(() => {
+    const q = searchQ.trim().toLowerCase()
+    return conversations.filter((c) => {
+      if (!conversationMatchesFilter({ kind: c.kind, peerFp: c.peer_fp, filter: convFilter, friendFps: friendFpSet })) return false
+      if (!q) return true
+      return c.title.toLowerCase().includes(q) || (c.peer_fp ?? '').toLowerCase().includes(q)
+    })
+  }, [conversations, convFilter, searchQ, friendFpSet])
   const filteredComms = useMemo(() => communities.filter(c => !searchQ || c.name.toLowerCase().includes(searchQ.toLowerCase())), [communities, searchQ])
   const onlineFriends = useMemo(() => friendsAccepted.filter(f =>
-    onlineFps.has(f.fp) && presence.get(f.fp)?.status !== 'invisible'
+    isPresenceOnline({ connected: onlineFps.has(f.fp), chosen: presence.get(f.fp)?.status })
   ), [friendsAccepted, onlineFps, presence])
   const [groupMemberFps, setGroupMemberFps] = useState<[string, string][]>([])
   useEffect(() => {
@@ -904,7 +920,20 @@ export default function MobileShell() {
   const onlineLabel = `${pillLabel} · ${linkedCount}`
   const privacyLabel = PRIVACY_MODES.find(pm => pm.mode === privacyMode)?.label ?? privacyMode
 
-  const openDm = useCallback(async (fp: string, nick?: string) => { if (!fp || fp.trim() === '') { setError('Selecione um amigo válido'); return } try { const conv = await services.dmOpen(fp.trim(), (nick || fp).trim()); setSelCommunity(null); setSelPeerFp(fp.trim()); setSelConv(conv.id); setTab('chats'); refreshConvos() } catch (e: any) { setError(String(e?.message ?? e)) } }, [refreshConvos])
+  const openDm = useCallback(async (fp: string, nick?: string) => {
+    const alvo = fp.trim()
+    if (!alvo) { setError('Selecione um amigo válido'); return }
+    try {
+      // Chave de identidade é o fingerprint; o nome só rotula. A conversa já
+      // existente é reaproveitada (id determinístico), sem duplicar histórico.
+      const conv = await services.dmOpen(alvo, (nick || alvo).trim() || alvo)
+      setSelCommunity(null)
+      setSelPeerFp(alvo)
+      setSelConv(conv.id)
+      setTab('chats')
+      refreshConvos()
+    } catch (e: any) { setError(String(e?.message ?? e)) }
+  }, [refreshConvos])
   const openConv = useCallback((c: Conversation) => { setSelCommunity(null); setSelConv(c.id); setSelPeerFp(c.peer_fp) }, [])
   const [callRoomsMap, setCallRoomsMap] = useState<Map<string, CallRoomView>>(() => callRooms.snapshot())
   useEffect(() => {
@@ -950,6 +979,17 @@ export default function MobileShell() {
     if (callActionBusy) return
     const support = getCallsSupport()
     if (support === 'none') { setError(getCallsUnavailableMessage()); return }
+    // Já estou neste canal: o clique só abre a interface (não sai da call).
+    if (activeCall && String((activeCall as any).callId ?? '').startsWith('voice-')) {
+      const ref = parseVoiceCallId((activeCall as any).callId, (activeCall as any).convId)
+      if (ref && ref.communityId === communityId && ref.channelId === channelId) {
+        setSelCommunity(communityId)
+        setSelConv(channelId)
+        setSelPeerFp(null)
+        setShowServerDetails(false)
+        return
+      }
+    }
     setCallActionBusy(true)
     try {
       await callManager.joinVoice(communityId, channelId)
@@ -962,7 +1002,7 @@ export default function MobileShell() {
     } finally {
       setCallActionBusy(false)
     }
-  }, [callActionBusy])
+  }, [activeCall, callActionBusy])
   const leaveCallChannel = useCallback(async () => {
     const st: any = activeCall
     const ref = parseVoiceCallId(st?.callId, st?.convId)
@@ -1025,6 +1065,11 @@ export default function MobileShell() {
     } else {
       const fp = selPeerFp ?? selConvObj?.peer_fp
       if (!fp) { setError('selecione um amigo para ligar'); return }
+      // 1:1 exige amizade ACEITA: pendente/contato/bloqueado não liga nem
+      // recebe. A checagem de verdade também existe no motor.
+      const rel = relationOf(selPeerState, identity?.fingerprint ?? '')
+      const permissao = canCallPeer(rel === 'none' && friendFpSet.has(fp) ? 'friend' : rel)
+      if (!permissao.ok) { setError(permissao.reason ?? 'só amigos podem ligar'); return }
       fps = [fp]
     }
     if (!callsOk) { setError(getCallsUnavailableMessage()); return }
@@ -1336,6 +1381,12 @@ export default function MobileShell() {
             : null
     : null
   const selRelation = relationOf(selPeerState, identity?.fingerprint ?? '')
+  /** 1:1 só entre amigos aceitos; grupo/canal vale pela participação. */
+  const chamadaBloqueada = (() => {
+    if (!selConv) return { ok: false, reason: 'abra uma conversa' as string | null }
+    if (isGroupConv) return { ok: true, reason: null as string | null }
+    return canCallPeer(selRelation)
+  })()
   const [introUsed, setIntroUsed] = useState(0)
   useEffect(() => {
     if (!selConv || selConvObj?.kind !== 'dm') { setIntroUsed(0); return }
@@ -2054,7 +2105,7 @@ export default function MobileShell() {
                 ? `${activeComm?.members?.length ?? 0} membros`
                 : isGroupConv
                   ? `${groupMemberCount} ${groupMemberCount === 1 ? 'membro' : 'membros'}`
-                  : onlineFps.has(selPeerFp ?? '') ? 'online' : 'offline'}
+                  : isPresenceOnline({ connected: onlineFps.has(selPeerFp ?? ''), chosen: presence.get(selPeerFp ?? '')?.status }) ? 'online' : 'offline'}
             </div>
           </div>
           {!isChannel && (
@@ -2076,11 +2127,11 @@ export default function MobileShell() {
                 </button>
               )}
               {}
-              <span title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
-                <button aria-label="Chamada de voz" title={callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? undefined : { opacity: 0.75, color: t.red }} onClick={() => startCall('voice')}><Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" size={17} /></button>
+              <span title={!chamadaBloqueada.ok ? (chamadaBloqueada.reason ?? 'só amigos podem ligar') : callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
+                <button aria-label="Chamada de voz" disabled={!callsOk || !chamadaBloqueada.ok} title={!chamadaBloqueada.ok ? (chamadaBloqueada.reason ?? 'só amigos podem ligar') : callsOk ? 'Iniciar chamada de voz' : `Iniciar chamada de voz — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? (chamadaBloqueada.ok ? undefined : { opacity: 0.4, color: t.red, cursor: 'not-allowed' }) : { opacity: 0.75, color: t.red }} onClick={() => { if (chamadaBloqueada.ok) startCall('voice'); else setError(chamadaBloqueada.reason ?? 'só amigos podem ligar') }}><Icon d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" size={17} /></button>
               </span>
-              <span title={callsOk ? 'Iniciar chamada de vídeo' : `Iniciar chamada de vídeo — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
-                <button aria-label="Chamada de vídeo" title={callsOk ? 'Iniciar chamada de vídeo' : `Iniciar chamada de vídeo — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? undefined : { opacity: 0.75, color: t.red }} onClick={() => startCall('video')}><Icon d="M23 7l-7 5 7 5V7z M14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z" size={17} /></button>
+              <span title={!chamadaBloqueada.ok ? (chamadaBloqueada.reason ?? 'só amigos podem ligar') : callsOk ? 'Iniciar chamada de vídeo' : `Iniciar chamada de vídeo — ${callsUnavailableDetail}`} style={{ display: 'flex', flexShrink: 0 }}>
+                <button aria-label="Chamada de vídeo" disabled={!callsOk || !chamadaBloqueada.ok} title={!chamadaBloqueada.ok ? (chamadaBloqueada.reason ?? 'só amigos podem ligar') : callsOk ? 'Iniciar chamada de vídeo' : `Iniciar chamada de vídeo — ${callsUnavailableDetail}`} className="m-iconbtn" style={callsOk ? (chamadaBloqueada.ok ? undefined : { opacity: 0.4, color: t.red, cursor: 'not-allowed' }) : { opacity: 0.75, color: t.red }} onClick={() => { if (chamadaBloqueada.ok) startCall('video'); else setError(chamadaBloqueada.reason ?? 'só amigos podem ligar') }}><Icon d="M23 7l-7 5 7 5V7z M14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z" size={17} /></button>
               </span>
             </>
           )}
@@ -2239,14 +2290,16 @@ export default function MobileShell() {
             {(activeCall as any)?.relayActive && (
               <div title="Áudio via relay pela sinalização — latência alta, WebRTC indisponível" style={{ fontSize: 11, fontWeight: 800, background: '#f0b232', color: '#000', padding: '4px 8px', borderRadius: 8, textAlign: 'center' }}>via relay (latência alta)</div>
             )}
-            {callPanelSize !== 'compact' && <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <label htmlFor="m-call-quality" style={{ fontSize: 11, color: t.muted, fontWeight: 700 }}>Qualidade</label>
-              <select id="m-call-quality" aria-label="Qualidade da chamada" value={(activeCall.quality as CallQuality | undefined) ?? callQuality} onChange={e => changeQuality(e.target.value as CallQuality)} style={{ background: t.input, color: t.text, border: `1px solid ${t.border}`, borderRadius: 8, padding: '6px 8px', fontSize: 12 }}>
+            {/* Qualidade/tela/efeitos ficam FORA do if de tamanho: no compacto
+                eles desapareciam e o botão de tela "não existia". */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {callPanelSize !== 'compact' && <label htmlFor="m-call-quality" style={{ fontSize: 11, color: t.muted, fontWeight: 700 }}>Qualidade</label>}
+              {callPanelSize !== 'compact' && <select id="m-call-quality" aria-label="Qualidade da chamada" value={(activeCall.quality as CallQuality | undefined) ?? callQuality} onChange={e => changeQuality(e.target.value as CallQuality)} style={{ background: t.input, color: t.text, border: `1px solid ${t.border}`, borderRadius: 8, padding: '6px 8px', fontSize: 12 }}>
                 <option value="480p">480p</option>
                 <option value="720p">720p</option>
                 <option value="1080p">1080p</option>
                 <option value="4K">4K</option>
-              </select>
+              </select>}
               {(((activeCall as any)?.qualityNotice as string | undefined) || qualityError) && (
                 <span role="status" style={{ fontSize: 11, color: qualityError ? '#ff9c9c' : t.yellow }}>{qualityError ?? ((activeCall as any)?.qualityNotice as string) ?? ((activeCall as any)?.relayActive ? `modo compatibilidade ativo (${(activeCall as any)?.relayReason ?? 'relay'}) — áudio via relay (latência alta)` : null)}</span>
               )}
@@ -2262,7 +2315,7 @@ export default function MobileShell() {
                   />
                 )}
               </div>
-            </div>}
+            </div>
             {}
             {renderCallTilesMobile(callPanelSize === 'compact', true)}
           </div>
@@ -2404,7 +2457,18 @@ export default function MobileShell() {
             >
               <Icon d={Icons.lock} size={12} />
               <span style={{ flex: 1 }}>{intro.hint}</span>
-              {selPeerFp && intro.blocked && (
+              {selPeerFp && intro.blocked && selRelation === 'request_out' && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: t.muted }}>aguardando aceitação</span>
+              )}
+              {selPeerFp && intro.blocked && selRelation === 'request_in' && (
+                <button
+                  onClick={async () => { try { await services.friendRespond(selPeerFp, true); refreshFriends() } catch (e: any) { setError(String(e?.message ?? e)) } }}
+                  style={{ background: t.green, color: '#fff', border: 'none', borderRadius: 5, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
+                >
+                  Aceitar amizade
+                </button>
+              )}
+              {selPeerFp && intro.blocked && selRelation !== 'request_out' && selRelation !== 'request_in' && (
                 <button
                   onClick={() => { setFriendsTab('adicionar'); setFriendFpInput(selPeerFp); setTab('friends') }}
                   style={{ background: t.accent, color: '#fff', border: 'none', borderRadius: 5, padding: '3px 8px', fontSize: 10, fontWeight: 800, cursor: 'pointer' }}
@@ -2589,19 +2653,32 @@ export default function MobileShell() {
                         {vinculados.map(p => {
                           const ehAmigo = amigos.has(p.fp)
                           const mesmoGrupo = groupMemberFps.some(([fp]) => fp === p.fp)
-                          const podeConversar = ehAmigo || mesmoGrupo
+                          // Servidor em comum em QUALQUER comunidade: antes só o
+                          // grupo contava e o contato de servidor não abria.
+                          const mesmoServidor = communities.some((c) =>
+                            (c.members ?? []).some(([fp]) => fp === p.fp),
+                          )
+                          const podeConversar = canOpenConversation({
+                            relation: ehAmigo ? 'friend' : 'none',
+                            sharedGroup: mesmoGrupo,
+                            sharedCommunity: mesmoServidor,
+                          })
                           const nome = resolveMemberName(p.fp) || p.nickname || p.fp.slice(0, 8)
+                          const rotulo = ehAmigo ? 'amigo' : mesmoGrupo ? 'mesmo grupo' : mesmoServidor ? 'mesmo servidor' : 'contato'
                           return (
-                            <div key={p.fp} className="friend-row" onClick={() => { if (podeConversar) void openDm(p.fp, nome) }} style={{ cursor: podeConversar ? 'pointer' : 'default' }}>
+                            <div
+                              key={p.fp}
+                              className="friend-row"
+                              onClick={() => { if (podeConversar) void openDm(p.fp, nome); else setNotice('Sem canal de contato — peça o fingerprint e adicione como amigo') }}
+                              style={{ cursor: podeConversar ? 'pointer' : 'default' }}
+                            >
                               <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                                 <Avatar name={nome} fp={p.fp} size={32} avatarB64={profilesByFp[p.fp]?.avatar_b64} />
                                 <PeerDot on ring={t.sidebar} />
                               </span>
                               <div style={{ flex: 1, minWidth: 0 }}>
                                 <div style={{ fontSize: 14, fontWeight: 700, color: t.heading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{nome}</div>
-                                <div style={{ fontSize: 11, color: t.muted }}>
-                                  {ehAmigo ? 'amigo' : mesmoGrupo ? 'mesmo grupo' : 'contato'}
-                                </div>
+                                <div style={{ fontSize: 11, color: t.muted }}>{rotulo}</div>
                               </div>
                             </div>
                           )
@@ -2615,7 +2692,7 @@ export default function MobileShell() {
           <Section variant="mobile" title="CONVERSAS RECENTES" maxVisible={5}>
             {filteredConvs.length === 0
               ? <EmptyBlock msg="Nenhuma conversa" sub="Adicione amigos e comece a conversar." />
-              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={effectivePresence({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status }) !== 'offline'} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} myFp={identity?.fingerprint} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+              : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={isPresenceOnline({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status })} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} myFp={identity?.fingerprint} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
           </Section>
 
           <Section variant="mobile" title={`SEUS SERVIDORES — ${filteredComms.length}`} maxVisible={6}>
@@ -2752,9 +2829,19 @@ export default function MobileShell() {
 
         {tab === 'chats' && <>
           <div className="m-sec">CONVERSAS DIRETAS — {filteredConvs.length}</div>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', padding: '0 0 8px' }}>
+            {([['todos', 'Todos'], ['amigos', 'Amigos'], ['contatos', 'Contatos'], ['grupos', 'Grupos']] as const).map(([id, label]) => (
+              <button
+                key={id}
+                className={'m-tab' + (convFilter === id ? ' on' : '')}
+                aria-pressed={convFilter === id}
+                onClick={() => setConvFilter(id)}
+              >{label}</button>
+            ))}
+          </div>
           {filteredConvs.length === 0
             ? <EmptyBlock msg="Nenhuma conversa" sub={<span>Adicione amigos em <button className="link-btn" onClick={() => setTab('friends')}>Amigos</button> e comece a conversar.</span>} />
-            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={effectivePresence({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status }) !== 'offline'} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
+            : <div style={{ display: 'flex', flexDirection: 'column' }}>{filteredConvs.map(c => <ConvRow key={c.id} c={c} online={isPresenceOnline({ connected: onlineFps.has(c.peer_fp), chosen: presence.get(c.peer_fp)?.status })} selected={selConv === c.id} avatarB64={profilesByFp[c.peer_fp]?.avatar_b64} onOpen={openConv} onDelete={deleteConv} room={callRoomsMap.get(c.id) ?? null} onJoinRoom={joinRoom} />)}</div>}
         </>}
 
         {tab === 'friends' && <>
@@ -2880,7 +2967,7 @@ export default function MobileShell() {
           ) : shownFriends.length === 0 ? (
             <EmptyBlock msg={friendsTab === 'online' ? 'Ninguém online agora — é silencioso demais aqui.' : 'Que silêncio por aqui...'} sub={<span>Um amigo que trabalha em equipe é uma coisa boa — <button className="link-btn" onClick={() => setFriendsTab('adicionar')}>adicione alguém!</button></span>} />
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column' }}>{shownFriends.map(f => <FriendRow key={f.fp} f={f} online={onlineFps.has(f.fp)} avatarB64={profilesByFp[f.fp]?.avatar_b64} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>{shownFriends.map(f => <FriendRow key={f.fp} f={f} online={isPresenceOnline({ connected: onlineFps.has(f.fp), chosen: presence.get(f.fp)?.status })} avatarB64={profilesByFp[f.fp]?.avatar_b64} onOpen={openDm} onRemove={removeFriend} onBlock={blockFriend} />)}</div>
           )}
         </>}
 
