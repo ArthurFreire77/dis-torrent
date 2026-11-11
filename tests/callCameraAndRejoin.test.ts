@@ -84,6 +84,30 @@ test('a grade usa o stream local mesmo antes do primeiro quadro', () => {
   assert.match(bind, /withScreen\.localStream = this\.localStream/, 'bind injeta o stream no state')
 })
 
+test('a fase sai de "Discando…" com answer/offer, sem depender de call_accepted', () => {
+  const resposta = manager.slice(manager.indexOf('private async handleAnswer'))
+  assert.match(
+    resposta.slice(0, 1800),
+    /st\.phase === 'outgoing'\) this\.applyPhase\('signal'\)/,
+    'answer aplicada é prova de que atenderam',
+  )
+  const junto = manager.slice(manager.indexOf('private markJoined'))
+  assert.match(
+    junto.slice(0, 900),
+    /if \(this\.state\.phase === 'outgoing'\) this\.applyPhase\('signal'\)/,
+    'par vivo também tira o selo de discando',
+  )
+})
+
+test('o estado da chamada existe antes do getUserMedia (answer não se perde)', () => {
+  const inicio = manager.slice(manager.indexOf('async start(kind: CallKind'))
+  const iState = inicio.indexOf("phase: 'outgoing'")
+  const iMidia = inicio.indexOf('await getLocalMedia(constraints)')
+  assert.ok(iState > 0, 'o chamador precisa nascer em outgoing')
+  assert.ok(iMidia > 0, 'captura de mídia continua no start')
+  assert.ok(iState < iMidia, 'sem state antes da captura, a answer rápida era descartada')
+})
+
 test('troca de rede (wifi ↔ dados) refaz a rota da chamada', () => {
   const bind = manager.slice(manager.indexOf('bind(cb:'), manager.indexOf('bind(cb:') + 1800)
   assert.match(bind, /addEventListener\('online'/, 'volta da rede dispara recuperação')

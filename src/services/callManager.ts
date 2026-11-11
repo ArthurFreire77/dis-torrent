@@ -849,8 +849,9 @@ export class CallManager {
             }
           } else {
             this.applyPhase('remote-reject')
+            this.onIncomingGone?.(String(ev.call_id))
             this.onCallNotice?.('chamada recusada')
-            this.leave()
+            void this.leave()
           }
         }
       }
@@ -1501,14 +1502,7 @@ export class CallManager {
       return this.state
     }
 
-    const qOrVideo: MediaTrackConstraints | boolean = kind === 'video' ? { ...CAMERA_CONSTRAINTS } : false
-    const constraints: MediaStreamConstraints = kind === 'video' ? { audio: true, video: qOrVideo } : { audio: true, video: false }
-    this.localStream = await getLocalMedia(constraints)
-    if (!this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
-      this.scheduleMicRecovery(callId)
-    }
-    try { this.ensureSoundboardSink() } catch {  }
-
+    // Estado antes da captura: a answer pode voltar durante o getUserMedia.
     this.resetRelayForNewCall()
     this.state = {
       callId,
@@ -1518,11 +1512,9 @@ export class CallManager {
       ringing: false,
       muted: false,
       deafened: false,
-      cameraOn: this.hasLiveCamera(),
+      cameraOn: false,
       sharing: false,
-      participants: [
-        { fp: me.fingerprint, nickname: me.nickname, stream: this.localStream ?? undefined },
-      ],
+      participants: [{ fp: me.fingerprint, nickname: me.nickname }],
       invited: convidados.map(fp => ({ fp, nickname: fp.slice(0, 6) })),
       startAt: Date.now(),
       quality: this.quality,
@@ -1532,6 +1524,26 @@ export class CallManager {
       relayReason: null,
     }
     this.startOutgoingWatchdog()
+    this.onUpdate({ ...this.state })
+
+    const qOrVideo: MediaTrackConstraints | boolean = kind === 'video' ? { ...CAMERA_CONSTRAINTS } : false
+    const constraints: MediaStreamConstraints = kind === 'video' ? { audio: true, video: qOrVideo } : { audio: true, video: false }
+    try {
+      this.localStream = await getLocalMedia(constraints)
+    } catch (e) {
+      if (this.state?.callId !== callId) throw e
+      this.localStream = null
+      this.setFailureCause(`captura falhou: ${(e as Error)?.message ?? e}`)
+    }
+    if (this.state?.callId !== callId) return this.state as CallState
+    this.state.cameraOn = this.hasLiveCamera()
+    const eu = this.state.participants.find((p) => p.fp === me.fingerprint)
+    if (eu && this.localStream) eu.stream = this.localStream
+    if (!this.localStream?.getAudioTracks().some((t) => t.readyState === 'live')) {
+      this.scheduleMicRecovery(callId)
+    }
+    try { this.ensureSoundboardSink() } catch {  }
+
     this.ensureRelayTransport()
     this.startQualityMonitor()
     for (const fp of targetFps) {
@@ -1546,7 +1558,6 @@ export class CallManager {
     }
     this.startMeshRepair(callId)
     this.publishRoom()
-    this.startMeshRepair(this.state.callId)
     this.onUpdate({ ...this.state })
     this.startCallForeground()
     return this.state
@@ -4344,7 +4355,9 @@ export class CallManager {
   private async doIceRestart(fp: string, callId: string, force = false) {
     const pc = this.pcs.get(fp)
     if (!pc || pc.signalingState !== 'stable') return
+    if (pc.connectionState === 'closed' || pc.iceConnectionState === 'closed') return
     if (!force && pc.iceConnectionState !== 'failed') return
+    if (this.state?.callId !== callId) return
     try { const anyPc = pc as any; if (typeof anyPc.restartIce === 'function') anyPc.restartIce() } catch {  }
     await this.sendOffer(fp, callId, { iceRestart: true })
   }
@@ -4586,13 +4599,17 @@ export class CallManager {
   private markJoined(fp: string) {
     try {
       if (!this.state || !fp || fp === this.myFp) return
+      // Prova de par vivo também tira o chamador de "Discando…".
+      if (this.state.phase === 'outgoing') this.applyPhase('signal')
+      const st = this.state
+      if (!st) return
       const eraConvidado = this.dropInvite(fp)
-      if (this.state.participants.find((p: any) => p.fp === fp)) {
-        if (eraConvidado) this.onUpdate({ ...this.state })
+      if (st.participants.find((p: any) => p.fp === fp)) {
+        if (eraConvidado) this.onUpdate({ ...st })
         return
       }
-      this.state.participants.push({ fp, nickname: fp.slice(0, 6) })
-      this.onUpdate({ ...this.state })
+      st.participants.push({ fp, nickname: fp.slice(0, 6) })
+      this.onUpdate({ ...st })
     } catch {  }
   }
 
@@ -4683,8 +4700,19 @@ export class CallManager {
         this.marcarRenegociacaoPendente(fromFp, 'resend')
         return
       }
-      try { await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit) }
-      catch { if ((pc.signalingState as string) !== 'stable') return }
+      try {
+        await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit)
+        const stateAfter = pc.signalingState as string
+        if (stateAfter !== 'stable') {
+          console.warn(`[call] GLARE ${callId}: rollback não estabilizou PC com ${fromFp.slice(0, 8)} (estado: ${stateAfter})`)
+          this.marcarRenegociacaoPendente(fromFp, 'resend')
+          return
+        }
+      } catch (e) {
+        console.warn(`[call] GLARE ${callId}: rollback falhou para ${fromFp.slice(0, 8)}: ${(e as Error)?.message ?? e}`)
+        this.marcarRenegociacaoPendente(fromFp, 'resend')
+        return
+      }
     }
     try {
       await pc.setRemoteDescription(offer)
@@ -4703,7 +4731,9 @@ export class CallManager {
   }
 
   private async handleAnswer(fromFp: string, callId: string, sdpStr: string) {
-    if (!fromFp || fromFp === this.myFp || this.state?.callId !== callId) return
+    if (!fromFp || fromFp === this.myFp) return
+    // Sem state/PC ainda, a answer fica guardada para o createPC aplicar.
+    if (this.state && this.state.callId !== callId) return
     const pc = this.pcs.get(fromFp)
     if (!pc) {
       this.pendingAnswers.set(fromFp, { callId, sdp: sdpStr })
@@ -4720,6 +4750,9 @@ export class CallManager {
       await pc.setRemoteDescription(ans as RTCSessionDescriptionInit)
       if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
       await this.flushPendingIce(fromFp, pc, callId)
+      // Answer aplicada: o outro lado atendeu, mesmo sem `call_accepted`.
+      const st = this.state
+      if (st && st.callId === callId && st.phase === 'outgoing') this.applyPhase('signal')
     } catch (e) {
       console.warn(`[call] falha ao aplicar answer de ${fromFp.slice(0, 8)}: ${(e as Error)?.message ?? e}`)
       this.marcarRenegociacaoPendente(fromFp)
@@ -4740,6 +4773,8 @@ export class CallManager {
       await pc.setRemoteDescription(ans as RTCSessionDescriptionInit)
       if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       await this.flushPendingIce(fp, pc, callId)
+      const st = this.state
+      if (st && st.callId === callId && st.phase === 'outgoing') this.applyPhase('signal')
     } catch {  }
   }
 
