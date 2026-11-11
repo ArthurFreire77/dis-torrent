@@ -425,6 +425,22 @@ export function CallTile({
             <Icon d={tile.muted ? Icons.micOff : Icons.mic} size={12} />
           </span>
           {tile.speaking && <span style={{ width: 8, height: 8, borderRadius: '50%', background: c.green, boxShadow: `0 0 6px ${c.green}` }} />}
+          {tile.connectionQuality && (
+            <span
+              title={`qualidade: ${tile.qualityLabel ?? tile.connectionQuality}`}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 2,
+                fontSize: 9, fontWeight: 800, color: '#fff',
+                textShadow: '0 1px 2px rgba(0,0,0,.7)',
+              }}
+            >
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: tile.connectionQuality === 'good' ? '#23a559' : tile.connectionQuality === 'medium' ? '#f0b232' : '#f23f42',
+              }} />
+              {tile.qualityLabel ?? tile.connectionQuality}
+            </span>
+          )}
         </div>
       )}
     </div>

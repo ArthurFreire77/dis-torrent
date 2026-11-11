@@ -7,7 +7,8 @@ export type Presenca = 'online' | 'idle' | 'dnd' | 'invisible' | 'offline'
 export type PresencaEmSegundoPlano = 'away' | 'online'
 
 export interface Prefs {
-  theme: 'dark' | 'light'
+  theme: 'dark' | 'light' | 'system' | 'custom'
+  customTheme: Record<string, string>
   fontScale: number
   compact: boolean
   notifDefault: NotifLevel
@@ -36,6 +37,7 @@ const KEY = 'distorrent:prefs:v1'
 
 const DEFAULTS: Prefs = {
   theme: 'dark',
+  customTheme: {},
   fontScale: 1,
   compact: false,
   notifDefault: 'all',
@@ -68,6 +70,7 @@ function load(): Prefs {
     return {
       ...DEFAULTS,
       ...p,
+      customTheme: p.customTheme && typeof p.customTheme === 'object' ? p.customTheme : {},
       mutedServers: Array.isArray(p.mutedServers) ? p.mutedServers : [],
       mutedChannels: Array.isArray(p.mutedChannels) ? p.mutedChannels : [],
       channelLevel: p.channelLevel && typeof p.channelLevel === 'object' ? p.channelLevel : {},

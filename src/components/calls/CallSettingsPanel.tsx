@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   CALL_FPS_OPTIONS,
   CALL_VIDEO_QUALITIES,
@@ -87,6 +87,83 @@ const selectStyle: React.CSSProperties = {
   fontWeight: 600,
   width: '100%',
   minWidth: 0,
+}
+
+/** Botão para testar a câmera antes de entrar na chamada. */
+function TestVideoButton({ onError }: { onError?: (msg: string) => void }) {
+  const [testing, setTesting] = useState(false)
+  const [stream, setStream] = useState<MediaStream | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  const startTest = async () => {
+    setTesting(true)
+    try {
+      const md = (navigator as any)?.mediaDevices
+      if (!md?.getUserMedia) {
+        onError?.('getUserMedia não disponível neste aparelho')
+        return
+      }
+      const s = await md.getUserMedia({ video: true, audio: false })
+      setStream(s)
+      if (videoRef.current) {
+        videoRef.current.srcObject = s
+      }
+    } catch (e) {
+      onError?.(`falha ao acessar câmera: ${(e as Error)?.message ?? e}`)
+      setTesting(false)
+    }
+  }
+
+  const stopTest = () => {
+    stream?.getTracks().forEach((t) => t.stop())
+    setStream(null)
+    setTesting(false)
+  }
+
+  useEffect(() => {
+    return () => {
+      stream?.getTracks().forEach((t) => t.stop())
+    }
+  }, [stream])
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      {!testing ? (
+        <button
+          type="button"
+          onClick={startTest}
+          style={{
+            width: '100%', background: T_INPUT, border: `1px solid ${T_BORDER}`,
+            borderRadius: 8, padding: '8px 10px', color: T_TEXT, fontSize: 12,
+            fontWeight: 700, cursor: 'pointer',
+          }}
+        >
+          Testar câmera
+        </button>
+      ) : (
+        <div style={{ position: 'relative', borderRadius: 8, overflow: 'hidden', background: '#000' }}>
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            style={{ width: '100%', maxHeight: 180, display: 'block' }}
+          />
+          <button
+            type="button"
+            onClick={stopTest}
+            style={{
+              position: 'absolute', top: 8, right: 8, background: 'rgba(0,0,0,0.7)',
+              border: 'none', borderRadius: 6, padding: '4px 10px', color: '#fff',
+              fontSize: 11, fontWeight: 700, cursor: 'pointer',
+            }}
+          >
+            Parar teste
+          </button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function CallSettingsPanel({
@@ -200,6 +277,7 @@ export default function CallSettingsPanel({
                 Pare a transmissão de tela para ligar a câmera — as duas usam o mesmo vídeo.
               </span>
             )}
+            <TestVideoButton onError={onError} />
           </>
         )}
         <Row label="APARELHO" hint={videoDevices.length === 0 ? 'nenhuma câmera detectada (ou permissão ainda não concedida)' : `${videoDevices.length} câmera(s) encontrada(s)`}>

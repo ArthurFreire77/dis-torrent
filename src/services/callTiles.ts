@@ -48,6 +48,10 @@ export interface CallTile {
   localPreviewUnavailable: boolean
   /** Este quadrado realmente toca áudio remoto (há `<audio>` montado). */
   hasAudio: boolean
+  /** Qualidade da conexão com este peer. */
+  connectionQuality?: 'good' | 'medium' | 'bad'
+  /** Rótulo legível da qualidade. */
+  qualityLabel?: string
 }
 
 export function participantTileId(fp: string): string {
@@ -206,6 +210,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
       cameraOn,
       localPreviewUnavailable: isLocal && !participantStream && !participantVideoUrl && !!local?.nativeMedia && cameraOn,
       hasAudio: !isLocal && !!personAudioStream,
+      connectionQuality: p.disconnected ? 'bad' : undefined,
+      qualityLabel: p.disconnected ? 'offline' : undefined,
     })
 
     if (sharing) {
@@ -227,6 +233,8 @@ export function buildCallTiles(input: BuildCallTilesInput): CallTile[] {
         cameraOn,
         localPreviewUnavailable: isLocal && !screenStream && !screenVideoUrl && !!local?.nativeMedia,
         hasAudio: !isLocal && !!screenAudioStream,
+        connectionQuality: p.disconnected ? 'bad' : undefined,
+        qualityLabel: p.disconnected ? 'offline' : undefined,
       })
     }
   }
