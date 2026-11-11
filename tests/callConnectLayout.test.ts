@@ -64,12 +64,18 @@ test('sem par ICE selecionado a rota é "n/d", nunca "LAN"', () => {
   assert.match(rota.slice(0, 1500), /if \(!comPar\.length\) return 'n\/d'/, 'sem par = sem rota')
 })
 
-test('fase presa em connecting é promovida pelo estado REAL do PC', () => {
+test('fase presa em connecting/outgoing é promovida pelo estado REAL do PC', () => {
   const repair = manager.slice(manager.indexOf('private startMeshRepair'))
   const bloco = repair.slice(0, 1800)
-  assert.match(bloco, /if \(st\.phase === 'connecting'\)/, 'só age na fase presa')
-  assert.match(bloco, /connectionState/, 'consulta o PC')
-  assert.match(bloco, /applyPhase\('media-connected'\)/, 'promove quando há par vivo')
+  assert.match(
+    bloco,
+    /if \(st\.phase === 'outgoing' \|\| st\.phase === 'connecting'\)/,
+    'quem liga também precisa ser promovido',
+  )
+  assert.match(bloco, /promoteFromPairEvidence/, 'promoção usa a evidência de par')
+  const promo = manager.slice(manager.indexOf('private promoteFromPairEvidence'))
+  assert.match(promo.slice(0, 1200), /connectionState/, 'consulta o PC')
+  assert.match(promo.slice(0, 1200), /applyPhase\('media-connected'\)/, 'promove quando há par vivo')
 })
 
 test('quadrado tem TETO de altura (não estica a janela toda)', () => {

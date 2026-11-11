@@ -202,7 +202,7 @@ test('offer repetida reenvia a answer local (answer perdida não trava)', () => 
   const oferta = manager.slice(manager.indexOf('private async handleOffer'))
   assert.match(
     oferta.slice(0, 2400),
-    /reenviarAnswerLocal\(fromFp, callId, pc, sdpStr\)/,
+    /reenviarAnswerLocal\(fromFp, callId, pc, offer\.sdp\)/,
     'dedupe não pode ser um `return` seco: a answer pode ter se perdido',
   )
   assert.match(
@@ -215,6 +215,11 @@ test('offer repetida reenvia a answer local (answer perdida não trava)', () => 
     reenvio.slice(0, 1200),
     /remote\.sdp !== offerSdp/,
     'answer antiga não serve para uma offer nova',
+  )
+  assert.doesNotMatch(
+    reenvio.slice(0, 1200),
+    /remote\.sdp !== sdpStr/,
+    'comparar o SDP puro com o JSON do fio nunca casava e a answer nunca voltava',
   )
 })
 

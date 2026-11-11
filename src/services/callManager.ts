@@ -618,6 +618,8 @@ export class CallManager {
   private pendingIce = new Map<string, Map<string, RTCIceCandidateInit[]>>()
   private localIce = new Map<string, RTCIceCandidate[]>()
   private pendingOffers = new Map<string, { callId: string; sdp: string }>()
+  /** `call_accepted` que chegou antes do state (one-shot no fio). */
+  private pendingAccepts = new Map<string, number>()
   private pendingVoiceJoins = new Map<string, Set<string>>()
   private acceptedCalls = new Set<string>()
   private lastRemoteOffer = new Map<string, string>()
@@ -642,6 +644,7 @@ export class CallManager {
   private soloWaitSince = new Map<string, number>()
   private accepting = new Set<string>()
   private leavingCalls = new Set<string>()
+  private starting = false
   private roomConvId: string | null = null
   private collectiveRoom = false
   /** A chamada atual nasceu numa conversa de grupo: dura até o último sair. */
@@ -819,6 +822,9 @@ export class CallManager {
       }
       if (ev.type === 'call_accepted') {
         if (this.state && this.state.callId === ev.call_id) this.applyPhase('accept')
+        // `call_accepted` é one-shot no fio: guardar aqui cobre o caso de ele
+        // chegar durante o `call_invite`, antes do state existir.
+        else this.pendingAccepts.set(String(ev.call_id ?? ''), Date.now())
       }
       if (ev.type === 'call_ringing') {
         if (this.state && this.state.callId === ev.call_id) {
@@ -1120,6 +1126,28 @@ export class CallManager {
     } catch {  }
   }
 
+  /** A fase sobe com QUALQUER prova de par vivo, não com um evento único. */
+  private promoteFromPairEvidence(callId: string): void {
+    try {
+      const st = this.state
+      if (!st || st.callId !== callId) return
+      let conectado = false
+      let temRemote = false
+      let iceOk = false
+      for (const pc of this.pcs.values()) {
+        if ((pc as any).connectionState === 'connected') conectado = true
+        if (pc.remoteDescription) temRemote = true
+        const ice = pc.iceConnectionState
+        if (ice === 'connected' || ice === 'completed') iceOk = true
+      }
+      if (conectado) {
+        if (st.phase === 'outgoing' || st.phase === 'connecting') this.applyPhase('media-connected')
+        return
+      }
+      if (st.phase === 'outgoing' && (temRemote || iceOk)) this.applyPhase('signal')
+    } catch {  }
+  }
+
   private startConnectWatchdog() {
     this.stopConnectWatchdog()
     this.connectWatchdogGrants = 0
@@ -1314,6 +1342,7 @@ export class CallManager {
       const st = this.state
       if (!st || st.callId !== callId) return
       if (!fp || fp === this.myFp) return
+      this.promoteFromPairEvidence(callId)
       const p = st.participants.find((x: any) => x.fp === fp)
       if (!p) {
         if (this.pcs.has(fp)) this.markJoined(fp)
@@ -1446,6 +1475,18 @@ export class CallManager {
     if (this.state && isCallPhaseActive(this.state.phase)) {
       throw new Error('já existe uma chamada em andamento — encerre a atual antes')
     }
+    // Duplo clique passava pelos dois `await` e criava dois call_id; o atendente
+    // aceitava um e todos os guards do outro descartavam accept/answer/ICE.
+    if (this.starting) throw new Error('a chamada já está sendo iniciada')
+    this.starting = true
+    try {
+      return await this.startInner(kind, convId, targetFps, opts)
+    } finally {
+      this.starting = false
+    }
+  }
+
+  private async startInner(kind: CallKind, convId: string, targetFps: string[], opts?: { group?: boolean }): Promise<CallState> {
     await detectNativeVoice(true)
     if (!supportsCalls()) throw new Error(getCallsUnavailableMessage())
     const me = this.getIdentity()
@@ -1525,6 +1566,7 @@ export class CallManager {
     }
     this.startOutgoingWatchdog()
     this.onUpdate({ ...this.state })
+    if (this.pendingAccepts.delete(callId)) this.applyPhase('accept')
 
     const qOrVideo: MediaTrackConstraints | boolean = kind === 'video' ? { ...CAMERA_CONSTRAINTS } : false
     const constraints: MediaStreamConstraints = kind === 'video' ? { audio: true, video: qOrVideo } : { audio: true, video: false }
@@ -3045,15 +3087,8 @@ export class CallManager {
         const st = this.state
         if (!st || st.callId !== callId) { this.stopMeshRepair(); return }
         if (!isCallPhaseActive(st.phase)) return
-        if (st.phase === 'connecting') {
-          for (const pc of this.pcs.values()) {
-            const cs = (pc as any).connectionState
-            const ice = pc.iceConnectionState
-            if (cs === 'connected' || ice === 'connected' || ice === 'completed') {
-              this.applyPhase('media-connected')
-              break
-            }
-          }
+        if (st.phase === 'outgoing' || st.phase === 'connecting') {
+          this.promoteFromPairEvidence(callId)
         }
         this.announceSelfToRoom(callId)
         void this.repairHalfOpenPairs().catch(() => {  })
@@ -4634,6 +4669,9 @@ export class CallManager {
       const local = pc.localDescription
       if (!local?.sdp || local.type !== 'answer') return
       const remote = pc.remoteDescription
+      // `offerSdp` chega do fio como JSON (`{"type":"offer","sdp":...}`) e o
+      // remoteDescription é SDP puro: comparar os dois crus nunca casava e a
+      // answer nunca era reenviada.
       if (!remote?.sdp || remote.sdp !== offerSdp) return
       await services.callAnswer(fp, callId, JSON.stringify({ type: 'answer', sdp: local.sdp })).catch(() => {})
     } catch {  }
@@ -4684,7 +4722,7 @@ export class CallManager {
     }
 
     if (pc.signalingState === 'stable' && this.lastRemoteOffer.get(fromFp) === sdpStr) {
-      void this.reenviarAnswerLocal(fromFp, callId, pc, sdpStr)
+      void this.reenviarAnswerLocal(fromFp, callId, pc, offer.sdp)
       return
     }
 
@@ -4819,7 +4857,7 @@ export class CallManager {
       q.push(cand)
       return
     }
-    if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
+      if (this.state?.callId !== callId || this.pcs.get(fromFp) !== pc) return
     try {
       await pc.addIceCandidate(cand)
     } catch (e) {
@@ -4827,6 +4865,8 @@ export class CallManager {
         `[call] candidato ICE recusado (${cand.sdpMid ?? cand.sdpMLineIndex ?? '?'}): ${(e as Error)?.message ?? e}`,
       )
     }
+    // ICE chegando é prova de que o outro lado já tem a offer: tira de discando.
+    this.promoteFromPairEvidence(callId)
   }
 
   private async flushPendingIce(fp: string, pc: RTCPeerConnection, callId: string) {
@@ -4839,6 +4879,7 @@ export class CallManager {
       if (this.state?.callId !== callId || this.pcs.get(fp) !== pc) return
       try { await pc.addIceCandidate(cand) } catch {  }
     }
+    this.promoteFromPairEvidence(callId)
   }
 
   private startCallForeground() {

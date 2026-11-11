@@ -30,6 +30,22 @@ pub(super) async fn handle_calls(
                     kind,
                 });
             }
+            // Já aceitei este invite antes: o CallAccept é one-shot e pode ter se
+            // perdido. Reenviar aqui é idempotente e usa o retry de 6 s do
+            // chamador como canal de recuperação.
+            let sou_host = engine.store.get_call_host(&call_id)?.as_deref() == Some(peer_fp);
+            if !sou_host
+                && engine
+                    .store
+                    .is_in_call(&call_id, &engine.identity.fingerprint)
+            {
+                engine.queue_or_send_call_frame(
+                    peer_fp,
+                    SecureFrame::CallAccept {
+                        call_id: call_id.clone(),
+                    },
+                );
+            }
             engine.queue_or_send_call_frame(
                 peer_fp,
                 SecureFrame::CallRinging {
