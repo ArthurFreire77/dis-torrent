@@ -255,8 +255,16 @@ impl Plugins {
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("DISTORRENT_BOT_URL", bridge_url)
             .env("DISTORRENT_BOT_PORT", port_of(bridge_url))
-            .env("DISTORRENT_API", "distorrent-bot/1")
-            .stdin(Stdio::null())
+            .env("DISTORRENT_API", "distorrent-bot/1");
+        // Sem `SystemRoot` o Node aborta no arranque (ncrypto::CSPRNG falha e o
+        // processo sai com 134), então o plugin morria sem executar uma linha.
+        // O env_clear() é proposital: só repassa o que um runtime precisa.
+        for chave in ["SystemRoot", "SystemDrive", "WINDIR"] {
+            if let Ok(v) = std::env::var(chave) {
+                cmd.env(chave, v);
+            }
+        }
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(windows)]
@@ -472,6 +480,48 @@ mod tests {
         );
         // Linha sem segredo passa intacta.
         assert_eq!(redact("plugin iniciado", Some(&secret)), "plugin iniciado");
+    }
+
+    /// Regressão real: com `env_clear` e só `PATH`, o Node morria no arranque
+    /// (saída 134) e o plugin nunca executava. `SystemRoot` é obrigatório no
+    /// Windows para o CSPRNG inicializar — não remova essa repassagem.
+    ///
+    /// Usa o `node` do PATH e sai sem falhar quando ele não existe: o teste de
+    /// unidade não pode depender de runtime instalado na máquina.
+    #[test]
+    fn repassa_systemroot_para_o_runtime() {
+        if std::process::Command::new("node")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("node ausente: teste de ambiente pulado");
+            return;
+        }
+        let p = Plugins::new();
+        let dir = tempdir();
+        let script = dir.path().join("env.js");
+        // Sem `SystemRoot` o Node aborta com 134 antes de rodar a primeira linha,
+        // então o próprio código só chega aqui se a variável foi repassada.
+        std::fs::write(&script, "process.exit(process.env.SystemRoot ? 0 : 42)\n").unwrap();
+        p.start(
+            "sr",
+            &dir.path().display().to_string(),
+            "node env.js",
+            "http://127.0.0.1:1/b/segredo",
+        )
+        .expect("o plugin precisa iniciar");
+        for _ in 0..80 {
+            if let Some(Some(code)) = p.status("sr").map(|s| s.exited_code) {
+                assert_eq!(code, 0, "o runtime não recebeu SystemRoot");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        p.stop("sr");
+        panic!("o plugin não terminou a tempo");
     }
 
     #[test]
