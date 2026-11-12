@@ -1089,12 +1089,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
 
         let inicio = std::time::Instant::now();
-        let res = post(
-            port,
-            &c.prefix,
-            "/v1/audio/open",
-            "{}",
-        );
+        let res = post(port, &c.prefix, "/v1/audio/open", "{}");
         let levou = inicio.elapsed();
         assert!(res.contains("200"), "o audio/open falhou: {res}");
         assert!(
