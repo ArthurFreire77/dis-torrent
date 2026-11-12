@@ -282,7 +282,19 @@ pub fn start(
         .spawn(move || {
             while !loop_shared.stop.load(Ordering::Relaxed) {
                 match loop_server.recv_timeout(Duration::from_millis(400)) {
-                    Ok(Some(req)) => handle(req, &loop_shared, &loop_engine),
+                    Ok(Some(req)) => {
+                        // Cada requisição numa thread própria: o long-poll de
+                        // `/v1/events` pode ficar 20 s pendurado e, com um só
+                        // thread, TODO o resto da ponte esperava por ele — o
+                        // áudio do bot só andava quando chegava mensagem no
+                        // chat. Medido: 2,7 s de espera antes desta correção.
+                        let req_shared = loop_shared.clone();
+                        let req_engine = loop_engine.clone();
+                        let nome = format!("botbridge-req-{bot_id}");
+                        let _ = std::thread::Builder::new().name(nome).spawn(move || {
+                            handle(req, &req_shared, &req_engine);
+                        });
+                    }
                     Ok(None) => continue,
                     Err(_) => break,
                 }
@@ -1062,5 +1074,33 @@ mod tests {
         assert!(!secret_matches("/b/abc12/v1/info", "/b/abc123"));
         assert!(!secret_matches("/b/abc1234/v1/info", "/b/abc123"));
         assert!(!secret_matches("/v1/info", "/b/abc123"));
+    }
+
+    /// O long-poll de eventos segura a thread da ponte. Se o plugin estiver
+    /// esperando evento (`wait=20000`) e mandar áudio, o POST precisa ser
+    /// atendido — senão o som só anda quando chega mensagem no chat.
+    #[test]
+    fn audio_nao_espera_o_long_poll_de_eventos() {
+        let c = ctx();
+        let port = c.bridge.info().port;
+        let prefix = c.prefix.clone();
+        // Segura um /v1/events pendurado por 3 s numa thread.
+        let preso = std::thread::spawn(move || get(port, &prefix, "/v1/events?since=0&wait=3000"));
+        std::thread::sleep(Duration::from_millis(300));
+
+        let inicio = std::time::Instant::now();
+        let res = post(
+            port,
+            &c.prefix,
+            "/v1/audio/open",
+            "{}",
+        );
+        let levou = inicio.elapsed();
+        assert!(res.contains("200"), "o audio/open falhou: {res}");
+        assert!(
+            levou < Duration::from_millis(1500),
+            "o audio esperou o long-poll ({levou:?}); a ponte tem um thread so"
+        );
+        let _ = preso.join();
     }
 }

@@ -72,15 +72,19 @@ export async function sairDaCall(): Promise<void> {
 /**
  * Toca um bloco de áudio já decodificado na track do bot.
  * `sampleRate` do buffer precisa ser 48 kHz (o mesmo da track).
+ *
+ * `quando` é o instante no relógio do AudioContext. Sem ele cada buffer começa
+ * em `currentTime` e os frames de um mesmo lote tocam EMPILHADOS — o áudio de
+ * 360 ms virava um estalo de 20 ms a cada ciclo (o "cortando").
  */
-export function tocarNoBot(buffer: AudioBuffer): boolean {
+export function tocarNoBot(buffer: AudioBuffer, quando?: number): boolean {
   const { ctx, destination } = callManager.botMusicSink()
   if (!ctx || !destination) return false
   try {
     const fonte = ctx.createBufferSource()
     fonte.buffer = buffer
     fonte.connect(destination)
-    fonte.start()
+    fonte.start(quando && quando > ctx.currentTime ? quando : undefined)
     return true
   } catch {
     return false
@@ -91,6 +95,8 @@ export function tocarNoBot(buffer: AudioBuffer): boolean {
 
 let lacoAudio: ReturnType<typeof setInterval> | null = null
 let botAtual: { communityId: string; botId: string } | null = null
+/** Instante em que o próximo frame deve começar (agenda em série). */
+let proximoInicio = 0
 
 /** base64 → Float32Array (PCM i16 little-endian). */
 function pcmB64ParaFloat(b64: string): Float32Array<ArrayBuffer> | null {
@@ -109,10 +115,19 @@ function pcmB64ParaFloat(b64: string): Float32Array<ArrayBuffer> | null {
   }
 }
 
-/** Junta os frames em um AudioBuffer e toca. */
+/**
+ * Junta os frames em um AudioBuffer e toca, **em série**.
+ *
+ * Cada frame é 20 ms de PCM. Agendar todos em `currentTime` fazia um tocar por
+ * cima do outro: só o último era ouvido. Aqui o próximo começa onde o anterior
+ * terminou; se a fila atrasou (o app ficou 450 ms sem puxar), o cursor volta
+ * para `currentTime` para não acumular atraso — melhor um corte curto do que
+ * o áudio ficar minutos atrás do chat.
+ */
 function tocarLote(frames: string[]): number {
   const { ctx } = callManager.botMusicSink()
   if (!ctx) return 0
+  if (proximoInicio < ctx.currentTime) proximoInicio = ctx.currentTime
   let tocados = 0
   for (const b64 of frames) {
     const amostras = pcmB64ParaFloat(b64)
@@ -120,35 +135,43 @@ function tocarLote(frames: string[]): number {
     try {
       const buffer = ctx.createBuffer(1, amostras.length, 48_000)
       buffer.copyToChannel(amostras, 0)
-      if (tocarNoBot(buffer)) tocados++
+      if (tocarNoBot(buffer, proximoInicio)) {
+        proximoInicio += buffer.duration
+        tocados++
+      }
     } catch {}
   }
   return tocados
 }
 
 /**
- * Puxa o PCM do bot a cada 450 ms e toca na track do participante.
- * Começa quando um bot entra na call; para sozinho se a track sumir.
+ * Puxa o PCM do bot e toca na track do participante.
+ *
+ * O intervalo (200 ms) é MENOR que o áudio puxado por ciclo (25 frames =
+ * 500 ms) de propósito: assim a fila nunca esvazia entre um ciclo e outro, que
+ * era a outra metade do "cortando" — 450 ms de puxada para 500 ms de áudio
+ * deixava uma janela sem som a cada volta.
  */
 export function iniciarConsumoDeAudio(communityId: string, botId: string): void {
   botAtual = { communityId, botId }
+  proximoInicio = 0
   if (lacoAudio) return
   lacoAudio = setInterval(() => {
     void (async () => {
       if (!botAtual) return
       if (!services.botAudioDrain) return
       try {
-        // 25 frames = 500 ms de áudio por ciclo.
         const frames = await services.botAudioDrain(botAtual.communityId, botAtual.botId, 25)
         if (!Array.isArray(frames) || frames.length === 0) return
         tocarLote(frames)
       } catch {}
     })()
-  }, 450)
+  }, 200)
 }
 
 export function pararConsumoDeAudio(): void {
   botAtual = null
+  proximoInicio = 0
   if (lacoAudio) {
     clearInterval(lacoAudio)
     lacoAudio = null
