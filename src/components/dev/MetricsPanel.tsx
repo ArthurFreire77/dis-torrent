@@ -1,18 +1,20 @@
 import { useCallback, useEffect, useState } from 'react'
 import { services } from '../../services'
 
-const t = {
+import { themedPalette } from '../../shared/theme'
+
+const t = themedPalette({
   input: '#1e1f22', border: '#26272b',
   text: '#dbdee1', muted: '#949ba4', accent: '#5865f2', green: '#23a559',
-}
-const box: React.CSSProperties = {
-  background: t.input, border: `1px solid ${t.border}`, borderRadius: 10,
-  padding: '10px 14px', flex: 1, minWidth: 120,
-}
-const label: React.CSSProperties = { fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted }
-const value: React.CSSProperties = { fontSize: 16, fontWeight: 800, color: t.text, marginTop: 2 }
+})
 
 export function MetricsPanel() {
+  const box: React.CSSProperties = {
+    background: t.input, border: `1px solid ${t.border}`, borderRadius: 10,
+    padding: '10px 14px', flex: 1, minWidth: 120,
+  }
+  const label: React.CSSProperties = { fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted }
+  const value: React.CSSProperties = { fontSize: 16, fontWeight: 800, color: t.text, marginTop: 2 }
   const [snap, setSnap] = useState<Record<string, unknown> | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const refresh = useCallback(async () => {

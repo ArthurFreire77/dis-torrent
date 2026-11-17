@@ -4,7 +4,9 @@ import { formatFileSize } from '../services/fileSwarm'
 import { services } from '../services'
 import type { DownloadItem, DownloadStatus } from '../services/downloadQueue'
 
-const t = {
+import { themedPalette } from '../shared/theme'
+
+const t = themedPalette({
   sidebar: '#2b2d31',
   input: '#1e1f22',
   border: '#26272b',
@@ -17,7 +19,7 @@ const t = {
   text: '#dbdee1',
   heading: '#f2f3f5',
   muted: '#949ba4',
-}
+})
 
 const STATUS_LABEL: Record<DownloadStatus, string> = {
   queued: 'na fila',

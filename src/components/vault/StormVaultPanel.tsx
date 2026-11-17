@@ -9,15 +9,25 @@ import {
   setDownloadSpeedLimit,
 } from '../../services/downloadSpeed'
 
-const t = {
+import { themedPalette } from '../../shared/theme'
+
+const t = themedPalette({
   input: '#1e1f22', border: '#26272b', text: '#dbdee1',
   muted: '#949ba4', accent: '#5865f2', green: '#23a559', red: '#f23f43',
-}
-const label: React.CSSProperties = { display: 'block', fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted, marginBottom: 6 }
-const input: React.CSSProperties = { width: '100%', background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '10px 12px', color: t.text, fontSize: 13, boxSizing: 'border-box' }
+})
 const btn = (bg: string, fg = '#fff'): React.CSSProperties => ({ background: bg, color: fg, border: 'none', padding: '10px 14px', borderRadius: 8, fontWeight: 800, cursor: 'pointer', fontSize: 12 })
 
+/** Estilos que dependem da paleta: recalculados a cada render para seguir o tema. */
+function labelStyle(): React.CSSProperties {
+  return { display: 'block', fontSize: 10, fontWeight: 700, letterSpacing: 1, color: t.muted, marginBottom: 6 }
+}
+function inputStyle(): React.CSSProperties {
+  return { width: '100%', background: t.input, border: `1px solid ${t.border}`, borderRadius: 8, padding: '10px 12px', color: t.text, fontSize: 13, boxSizing: 'border-box' }
+}
+
 export function StormVaultPanel() {
+  const label: React.CSSProperties = labelStyle()
+  const input: React.CSSProperties = inputStyle()
   const [expPass, setExpPass] = useState('')
   const [impPass, setImpPass] = useState('')
   const [includeSecret, setIncludeSecret] = useState(true)
@@ -313,6 +323,8 @@ export function StormVaultPanel() {
 }
 
 function CacheBox() {
+  const label = labelStyle()
+  const input = inputStyle()
   const [ttl, setTtl] = useState(7)
   const [stats, setStats] = useState<{ total_bytes: number; entries: number; cap_mb: number } | null>(null)
   const [spool, setSpool] = useState<{ bytes: number; entries: number } | null>(null)
@@ -394,6 +406,7 @@ function CacheBox() {
 }
 
 function MediaSafetyBox() {
+  const label = labelStyle()
   const [safety, setSafety] = useState<{ strip_exif: boolean; block_executables: boolean } | null>(null)
   useEffect(() => {
     services.mediaSafetyGet().then(setSafety).catch(() => {})

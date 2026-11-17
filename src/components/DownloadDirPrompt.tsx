@@ -3,7 +3,9 @@ import { services } from '../services'
 import { formatFileSize } from '../shared/bytes'
 import { answerDownloadDir, type DownloadDirPromptInfo } from '../services/downloadDirPrompt'
 
-const t = {
+import { themedPalette } from '../shared/theme'
+
+const t = themedPalette({
   input: '#1e1f22',
   border: '#26272b',
   text: '#dbdee1',
@@ -12,7 +14,7 @@ const t = {
   green: '#23a559',
   heading: '#f2f3f5',
   yellow: '#f0b232',
-}
+})
 
 /**
  * Modal "onde salvar?" para download grande. Monta nos dois shells e responde

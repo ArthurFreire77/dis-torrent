@@ -1,12 +1,14 @@
 import { CALL_PHASE_LABELS, type CallPhase } from '../services/callPhases'
 
-const t = {
+import { themedPalette } from '../shared/theme'
+
+const t = themedPalette({
   accent: '#5865f2',
   green: '#23a559',
   yellow: '#f0b232',
   red: '#f23f42',
   link: '#00a8fc',
-}
+})
 
 function formatDuration(nowMs: number, startAt: number): string {
   const total = Math.max(0, Math.floor((nowMs - startAt) / 1000))

@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react'
 import { Ic, type IconName } from './icons'
 
-export const ui = {
+import { themedPalette } from './theme'
+
+export const ui = themedPalette({
   bg: '#313338',
   surface: '#2b2d31',
   surfaceHover: '#35373c',
@@ -31,7 +33,7 @@ export const ui = {
   radius: 8,
   radiusSm: 6,
   radiusLg: 12,
-} as const
+})
 
 export const WIDTHS = {
   sm: 520,

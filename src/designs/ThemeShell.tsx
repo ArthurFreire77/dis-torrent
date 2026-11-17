@@ -102,34 +102,34 @@ import { MessageRetentionSettings } from '../components/prefs/MessageRetentionSe
 import { usePrivacySettings } from '../services/usePrivacySettings'
 import { Avatar, PeerDot } from '../shared/avatarView'
 import { bannerBackground } from '../shared/profileStyle'
-import { avatarColor, resolveTheme, type Tokens } from '../shared/theme'
+import { avatarColor, resolveTheme, themedPalette, type ThemeName, type Tokens } from '../shared/theme'
+import { useThemeRevision } from '../shared/themeRuntime'
 import { BootScreen, CreateAccount, LockScreen } from './auth/AuthScreens'
 
-const authPalette = {
-  main: '#313338', sidebar: '#2b2d31', input: '#1e1f22', border: '#26272b',
-  heading: '#f2f3f5', text: '#dbdee1', muted: '#949ba4', accent: '#5865f2', red: '#f23f42',
+/** Paleta das telas de entrada, acompanhando o tema ativo. */
+function authPaletteOf(tokens: Tokens) {
+  return {
+    main: tokens.main, sidebar: tokens.sidebar, input: tokens.input, border: tokens.border,
+    heading: tokens.heading, text: tokens.text, muted: tokens.muted, accent: tokens.accent, red: tokens.red,
+  }
 }
 
-const t = {
+const t = themedPalette({
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
   input: '#1e1f22', hover: '#35373c', selected: '#404249', border: '#26272b',
   panel: '#2b2d31', footer: '#232428',
   accent: '#5865f2', accentHover: '#4752c4', link: '#00a8fc',
   green: '#23a559', yellow: '#f0b232', red: '#f23f42',
   text: '#dbdee1', heading: '#f2f3f5', muted: '#949ba4',
-  lbg: '#ffffff', lsidebar: '#f2f3f5', lrail: '#e3e5e8', ltext: '#060607',
-  lmuted: '#5c5e66', lborder: '#e3e5e8', linput: '#ebedef',
-}
+})
 
 /** Resolve o tema atual incluindo customizações do usuário. */
 function useResolvedTheme(): Tokens {
   const prefs = usePrefs()
-  return useMemo(() => {
-    if (prefs.theme === 'custom') {
-      return resolveTheme('custom', prefs.customTheme as Partial<Tokens>)
-    }
-    return resolveTheme(prefs.theme)
-  }, [prefs.theme, prefs.customTheme])
+  return useMemo(
+    () => resolveTheme(prefs.theme, prefs.customTheme as Partial<Tokens>, prefs.customBase as ThemeName),
+    [prefs.theme, prefs.customTheme, prefs.customBase],
+  )
 }
 
 const stateLabel: Record<NetworkState, string> = {
@@ -159,16 +159,16 @@ import {
 export default function ThemeShell({ designId }: {designId:string}){
   void designId
   const prefs = usePrefs()
-  const theme = prefs.theme
+  /** Aplica o tema na raiz para os componentes memoizados repintarem. */
+  useThemeRevision()
   const resolved = useResolvedTheme()
-  const light = theme==='light'
-  const bg = light ? t.lbg : resolved.main
-  const sidebarBg = light ? t.lsidebar : resolved.sidebar
-  const railBg = light ? t.lrail : resolved.rail
-  const text = light ? t.ltext : resolved.text
-  const muted = light ? t.lmuted : resolved.muted
-  const borderColor = light ? t.lborder : resolved.border
-  const inputBg = light ? t.linput : resolved.input
+  const bg = resolved.main
+  const sidebarBg = resolved.sidebar
+  const railBg = resolved.rail
+  const text = resolved.text
+  const muted = resolved.muted
+  const borderColor = resolved.border
+  const inputBg = resolved.input
 
   const [phase, setPhase] = useState<'loading'|'create'|'lock'|'app'>('loading')
   const { identity, setIdentity } = useIdentityBase()
@@ -1962,8 +1962,8 @@ export default function ThemeShell({ designId }: {designId:string}){
   const updateGate = useUpdateGate(true)
 
   if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen />} /><UpdateOverlay api={updateGate} /></>)
-  if (phase === 'create') return <CreateAccount palette={authPalette} onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
-  if (phase === 'lock') return <LockScreen palette={authPalette} nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
+  if (phase === 'create') return <CreateAccount palette={authPaletteOf(resolved)} onDone={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
+  if (phase === 'lock') return <LockScreen palette={authPaletteOf(resolved)} nickname={identity?.nickname ?? ''} onUnlock={(id) => { setIdentity(id); setPhase('app'); refreshNet(); refreshFriends() }} />
 
   const railStyle: any = {
     width: 72, background: railBg, borderRight: `1px solid ${borderColor}`,

@@ -2,7 +2,9 @@ import { useState } from 'react'
 import type { UpdateGateApi } from './UpdateGate'
 import { isNewer, updateModeFor } from '../services/updateRules'
 
-const t = {
+import { themedPalette } from '../shared/theme'
+
+const t = themedPalette({
   input: '#1e1f22',
   border: '#26272b',
   text: '#dbdee1',
@@ -12,7 +14,7 @@ const t = {
   red: '#f23f42',
   yellow: '#f0b232',
   heading: '#f2f3f5',
-}
+})
 
 /**
  * Atualização nas Configurações: antes não havia NENHUM lugar para verificar à

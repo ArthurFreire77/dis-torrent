@@ -48,8 +48,30 @@ export const light = {
   muted: '#5c5e66',
 } as const
 
-export type ThemeName = 'dark' | 'light' | 'system' | 'custom'
+export type ThemeName = 'dark' | 'light' | 'system' | 'custom' | 'midnight' | 'forest' | 'sunset' | 'ocean' | 'dracula'
 export type Tokens = Record<keyof typeof dark, string>
+
+/** Superfície de renderização: o mobile tem paleta própria no tema escuro. */
+export type Surface = 'desktop' | 'mobile'
+
+/** Base escura do celular (mantém a cara atual no tema Escuro). */
+export const mobileDark: Tokens = {
+  ...dark,
+  rail: '#0f1115',
+  sidebar: '#1a1d23',
+  main: '#14161a',
+  composer: '#1f2126',
+  input: '#23262f',
+  hover: '#2a2d36',
+  selected: '#2e313c',
+  border: '#242830',
+  borderStrong: '#32363f',
+  panel: '#1e2128',
+  footer: '#0f1115',
+  text: '#f2f3f5',
+  heading: '#ffffff',
+  muted: '#8e929b',
+}
 
 /** Tema customizado pelo usuário. */
 export interface CustomTheme {
@@ -182,19 +204,161 @@ export const PRESET_THEMES: Record<string, { name: string; tokens: Partial<Token
   },
 }
 
-export function resolveTheme(name: ThemeName, customTokens?: Partial<Tokens>): Tokens {
-  if (name === 'custom' && customTokens) {
-    return { ...dark, ...customTokens }
-  }
+/** Nomes oferecidos na galeria de temas. */
+export const THEME_CHOICES: ThemeName[] = ['dark', 'light', 'midnight', 'forest', 'sunset', 'ocean', 'dracula']
+
+function baseTokens(name: ThemeName, surface: Surface = 'desktop'): Tokens {
   if (name === 'light') return { ...light }
-  if (name === 'system' && typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    try {
-      if (window.matchMedia('(prefers-color-scheme: light)').matches) return { ...light }
-    } catch {  }
+  if (name === 'system') {
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      try {
+        if (window.matchMedia('(prefers-color-scheme: light)').matches) return { ...light }
+      } catch {  }
+    }
+    return surface === 'mobile' ? { ...mobileDark } : { ...dark }
   }
+  if (name === 'dark') return surface === 'mobile' ? { ...mobileDark } : { ...dark }
   const preset = PRESET_THEMES[name]
   if (preset) return { ...dark, ...preset.tokens }
-  return { ...dark }
+  return surface === 'mobile' ? { ...mobileDark } : { ...dark }
+}
+
+/**
+ * Resolve o tema efetivo. `custom` parte do tema `customBase` (padrão: escuro),
+ * senão personalizar um tema claro sempre voltaria a fundo escuro.
+ */
+export function resolveTheme(
+  name: ThemeName,
+  customTokens?: Partial<Tokens>,
+  customBase?: ThemeName,
+  surface: Surface = 'desktop',
+): Tokens {
+  if (name === 'custom') {
+    const base = customBase && customBase !== 'custom' ? baseTokens(customBase, surface) : baseTokens('dark', surface)
+    return { ...base, ...(customTokens ?? {}) }
+  }
+  return baseTokens(name, surface)
+}
+
+/* ------------------------------------------------------------------ *
+ * Paleta viva: os módulos declaram `const t = themedPalette({...})` e
+ * cada leitura devolve o token do tema ativo. Sem isso a cor ficava
+ * congelada no valor do import e a personalização não saía do papel.
+ * ------------------------------------------------------------------ */
+
+let liveTokens: Record<Surface, Tokens> = { desktop: { ...dark }, mobile: { ...mobileDark } }
+
+/**
+ * Fonte das preferências. O runtime registra isto; o módulo de tema fica puro
+ * para poder ser importado por testes sem localStorage nem React.
+ */
+export type ThemeSource = () => { theme: ThemeName; customTheme?: Record<string, string>; customBase?: string }
+
+let themeSource: ThemeSource | null = null
+let cachedSource: ReturnType<ThemeSource> | null = null
+
+export function setThemeSource(source: ThemeSource | null) {
+  themeSource = source
+  cachedSource = null
+}
+
+/** Força o recálculo depois de uma troca de tema. */
+export function refreshActiveTheme() {
+  cachedSource = null
+}
+
+function computeTokens(): Record<Surface, Tokens> {
+  if (!themeSource) return { desktop: { ...dark }, mobile: { ...mobileDark } }
+  const p = themeSource()
+  return {
+    desktop: resolveTheme(p.theme, p.customTheme as Partial<Tokens>, p.customBase as ThemeName, 'desktop'),
+    mobile: resolveTheme(p.theme, p.customTheme as Partial<Tokens>, p.customBase as ThemeName, 'mobile'),
+  }
+}
+
+/** Tokens do tema ativo para a superfície pedida. */
+export function activeTokens(surface: Surface = 'desktop'): Tokens {
+  if (!themeSource) return liveTokens[surface]
+  const p = themeSource()
+  // Compara por identidade: `prefs` devolve o mesmo objeto enquanto nada muda.
+  if (p !== cachedSource) {
+    cachedSource = p
+    liveTokens = computeTokens()
+  }
+  return liveTokens[surface]
+}
+
+/**
+ * Paleta reativa: tokens que existem no tema vêm do tema ativo; o resto
+ * (chaves locais de cada componente) cai no fallback do próprio arquivo.
+ */
+export function themedPalette<F extends Record<string, string | number>>(fallback: F, surface: Surface = 'desktop'): F {
+  const read = (prop: string): string | number | undefined => {
+    const v = (activeTokens(surface) as Record<string, string>)[prop]
+    if (typeof v === 'string') return v
+    return fallback[prop]
+  }
+  return new Proxy({} as F, {
+    get: (_alvo, prop) => (typeof prop === 'string' ? read(prop) : undefined),
+    has: (_alvo, prop) => typeof prop === 'string' && (prop in fallback || prop in activeTokens(surface)),
+    ownKeys: () => Array.from(new Set([...Object.keys(fallback), ...Object.keys(activeTokens(surface))])),
+    getOwnPropertyDescriptor: (_alvo, prop) => (
+      typeof prop === 'string'
+        ? { enumerable: true, configurable: true, value: read(prop) }
+        : undefined
+    ),
+  })
+}
+
+/** Publica os tokens como variáveis CSS, inclusive para os arquivos .css. */
+export function applyThemeVars(tokens: Tokens = activeTokens()) {
+  if (typeof document === 'undefined') return
+  const root = document.documentElement
+  if (!root) return
+  for (const [k, v] of Object.entries(tokens)) root.style.setProperty(`--dt-${k}`, v)
+  const surface = tokens.main || '#313338'
+  root.style.colorScheme = isLightSurface(surface) ? 'light' : 'dark'
+}
+
+const HEX_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i
+
+/** Normaliza `#abc`/`#AABBCC` para `#aabbcc`; devolve null se inválido. */
+export function normalizeHex(input: string): string | null {
+  const raw = (input ?? '').trim()
+  if (!HEX_RE.test(raw)) return null
+  const hex = raw.slice(1).toLowerCase()
+  return hex.length === 3 ? `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}` : `#${hex}`
+}
+
+function rgbOf(hex: string): [number, number, number] {
+  const h = normalizeHex(hex) ?? '#000000'
+  return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]
+}
+
+function toHex(n: number): string {
+  return Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0')
+}
+
+/** Clareia (positivo) ou escurece (negativo) uma cor por uma fração 0..1. */
+export function shade(hex: string, amount: number): string {
+  const [r, g, b] = rgbOf(hex)
+  const mix = (c: number) => (amount >= 0 ? c + (255 - c) * amount : c * (1 + amount))
+  return `#${toHex(mix(r))}${toHex(mix(g))}${toHex(mix(b))}`
+}
+
+/** Texto legível sobre a cor informada (contraste WCAG aproximado). */
+export function readableOn(hex: string): string {
+  const [r, g, b] = rgbOf(hex).map((c) => {
+    const v = c / 255
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+  })
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  return lum > 0.55 ? '#111214' : '#ffffff'
+}
+
+/** Superfície clara? Usado para escolher esquema de rolagem/controles nativos. */
+export function isLightSurface(hex: string): boolean {
+  return readableOn(hex) === '#111214'
 }
 
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const

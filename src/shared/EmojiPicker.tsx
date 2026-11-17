@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { EMOJI_GROUPS, ALL_EMOJI, type EmojiGroup } from '../shared/emojiSet'
 import type { EmojiView } from '../services/models'
 import { Icon, Icons } from '../shared/icons'
+import { themedPalette } from '../shared/theme'
 
-const DARK = {
+const DARK = themedPalette({
   bg: '#2b2d31', panel: '#1e1f22', border: '#3f4147', text: '#dbdee1',
   heading: '#f2f3f5', muted: '#949ba4', accent: '#5865f2', hover: '#35373c',
-}
+})
 
 export function EmojiPicker({
   open, onClose, onPick, serverEmojis, anchor, title = 'Emojis',

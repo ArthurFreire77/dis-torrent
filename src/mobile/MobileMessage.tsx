@@ -11,14 +11,16 @@ import {
 } from '../components/social/messageStatus'
 import { useConversationRoster, useMessageReceipts } from '../components/social/socialHooks'
 import { Avatar } from '../shared/avatarView'
+import { themedPalette } from '../shared/theme'
+import { usePalette } from '../shared/themeRuntime'
 
-const T = {
+const T = themedPalette({
   rail: '#1e1f22', sidebar: '#2b2d31', main: '#313338', composer: '#383a40',
   input: '#1e1f22', hover: '#35373c', selected: '#404249', border: '#26272b',
   panel: '#2b2d31', accent: '#5865f2', green: '#23a559', yellow: '#f0b232',
   red: '#f23f42', text: '#dbdee1', heading: '#f2f3f5', muted: '#949ba4',
   mentionBg: 'rgba(240,178,50,0.08)',
-}
+}, 'mobile')
 const MONO = 'JetBrains Mono, monospace'
 
 function Tick({ status, peerOnline, titulo }: { status: string; peerOnline?: boolean; titulo?: string }) {
@@ -73,6 +75,7 @@ export interface MobileMessageProps {
   type SheetAction = { id: string; label: string; icon?: string; svg?: string; danger?: boolean }
 
 const MobileMessage = memo(function MobileMessage(props: MobileMessageProps) {
+  usePalette()
   const {
     m, mine, authorName, authorFp, authorAvatar, authorAccent, body, meta, reactions, grouped, ctx,
     replyTo, onJumpToReply, onReact, onEdit, onDelete, onPin, onReply, onCopy,

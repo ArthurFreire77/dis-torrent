@@ -4,11 +4,13 @@ import { diagnoseCallsSupport } from '../services/callManager'
 import { buildDiagReport, shortFp, stateLabel } from '../services/connectionDiagnostics'
 import type { NetworkState, PeerView, RelayLegStatus, NetDiag, FirewallStatus } from '../services/models'
 
-const t = {
+import { themedPalette } from '../shared/theme'
+
+const t = themedPalette({
   sidebar: '#2b2d31', main: '#313338', input: '#1e1f22', border: '#26272b',
   panel: '#2b2d31', accent: '#5865f2', green: '#23a559', yellow: '#f0b232',
   red: '#f23f42', text: '#dbdee1', heading: '#f2f3f5', muted: '#949ba4',
-}
+})
 
 export default function ConnectionDiagnostics({ onClose }: { onClose?: () => void }) {
   const [redactSensitive, setRedactSensitive] = useState(true)

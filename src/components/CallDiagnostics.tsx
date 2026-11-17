@@ -6,11 +6,13 @@ import {
   type CallDiagnostics as PeerDiag,
 } from '../services/callManager'
 
-const t = {
+import { themedPalette } from '../shared/theme'
+
+const t = themedPalette({
   panel: '#2b2d31', input: '#1e1f22', border: '#26272b',
   accent: '#5865f2', green: '#23a559', yellow: '#f0b232',
   red: '#f23f42', text: '#dbdee1', heading: '#f2f3f5', muted: '#949ba4',
-}
+})
 
 function cell(v: string | number | null | undefined): string {
   if (v === null || v === undefined || v === '') return '—'

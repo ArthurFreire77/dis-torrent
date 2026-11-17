@@ -1,7 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Avatar as ViewAvatar, PeerDot as ViewPeerDot } from '../shared/avatarView'
 import { BootScreen, CreateAccount, LockScreen } from '../designs/auth/AuthScreens'
-import { avatarColor } from '../shared/theme'
+import { avatarColor, resolveTheme, themedPalette, type ThemeName, type Tokens } from '../shared/theme'
+import { usePalette, useThemeRevision } from '../shared/themeRuntime'
 import { services } from '../services'
 import { usePrivacySettings } from '../services/usePrivacySettings'
 import { Icon, Icons } from '../shared/icons'
@@ -96,22 +97,25 @@ interface AutoItemMobile {
 
 import { isImageName, isVideoName } from '../services/fileRules'
 
-const t = {
+const t = themedPalette({
   rail: '#0f1115', sidebar: '#1a1d23', main: '#14161a', composer: '#1f2126',
   input: '#23262f', hover: '#2a2d36', selected: '#2e313c', border: '#242830',
   panel: '#1e2128', footer: '#0f1115',
   accent: '#5865f2', accentHover: '#4752c4', link: '#00a8fc',
   green: '#23a559', yellow: '#f0b232', red: '#f23f42',
   text: '#f2f3f5', heading: '#ffffff', muted: '#8e929b',
-}
+}, 'mobile')
 
 const stateLabel: Record<NetworkState, string> = {
   CONNECTED: 'CONECTADO', CONNECTING: 'CONECTANDO', RECONNECTING: 'RECONECTANDO', DISCONNECTED: 'OFFLINE',
 }
 
-const authPalette = {
-  main: '#14161a', sidebar: '#1a1d23', input: '#23262f', border: '#242830',
-  heading: '#ffffff', text: '#f2f3f5', muted: '#8e929b', accent: '#5865f2', red: '#f23f42',
+/** Paleta das telas de entrada no celular, acompanhando o tema ativo. */
+function authPaletteOf(tokens: Tokens) {
+  return {
+    main: tokens.main, sidebar: tokens.sidebar, input: tokens.input, border: tokens.border,
+    heading: tokens.heading, text: tokens.text, muted: tokens.muted, accent: tokens.accent, red: tokens.red,
+  }
 }
 
 type Tab = 'home' | 'servers' | 'chats' | 'friends' | 'profile'
@@ -133,6 +137,7 @@ const ConvRow = memo(function ConvRow({ c, online, selected, avatarB64, myFp, on
   room?: CallRoomView | null
   onJoinRoom?: (c: Conversation | null, room: CallRoomView) => void
 }) {
+  usePalette()
   return (
     <div className="m-row" onClick={() => onOpen(c)}>
       <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0, borderRadius: '50%', boxShadow: room ? `0 0 0 2px ${t.green}, 0 0 8px ${t.green}66` : undefined }}>
@@ -168,6 +173,7 @@ const ServerRow = memo(function ServerRow({ c, active, onSelect }: {
   active: boolean
   onSelect: (id: string) => void
 }) {
+  usePalette()
   return (
     <button className={'nav-row' + (active ? ' active' : '')} onClick={() => onSelect(c.id)}>
       <Avatar name={c.name} fp={c.id} size={28} />
@@ -185,6 +191,7 @@ const FriendRow = memo(function FriendRow({ f, online, avatarB64, onOpen, onRemo
   onRemove: (fp: string, nickname: string) => void
   onBlock: (fp: string, nickname: string) => void
 }) {
+  usePalette()
   return (
     <div className="friend-row" onClick={() => onOpen(f.fp, f.nickname)}>
       <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
@@ -252,6 +259,12 @@ function EmptyBlock({ msg, sub }: { msg: string; sub?: any }) {
 
 export default function MobileShell() {
   const prefs = usePrefs()
+  /** Assinatura do tema: remonta a árvore para os componentes memoizados repintarem. */
+  useThemeRevision('mobile')
+  const resolved = useMemo(
+    () => resolveTheme(prefs.theme, prefs.customTheme as Partial<Tokens>, prefs.customBase as ThemeName, 'mobile'),
+    [prefs.theme, prefs.customTheme, prefs.customBase],
+  )
   const [phase, setPhase] = useState<'loading' | 'create' | 'lock' | 'app'>('loading')
   const { identity, setIdentity } = useIdentityBase()
   const { status, peers } = useNetwork(4000)
@@ -1980,8 +1993,8 @@ export default function MobileShell() {
   const updateGate = useUpdateGate(true)
 
   if (phase === 'loading') return (<><UpdateBootScreen api={updateGate} fallback={<BootScreen />} /><UpdateOverlay api={updateGate} /></>)
-  if (phase === 'create') return <CreateAccount palette={authPalette} mobile onDone={id => { setIdentity(id); setPhase('app') }} />
-  if (phase === 'lock') return <LockScreen palette={authPalette} mobile nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
+  if (phase === 'create') return <CreateAccount palette={authPaletteOf(resolved)} mobile onDone={id => { setIdentity(id); setPhase('app') }} />
+  if (phase === 'lock') return <LockScreen palette={authPaletteOf(resolved)} mobile nickname={identity?.nickname ?? ''} onUnlock={id => { setIdentity(id); setPhase('app') }} />
 
   const renderCallTilesMobile = (_compact: boolean, strip = false) => {
     if (callTilesMobile.length === 0) return null
@@ -3055,7 +3068,7 @@ export default function MobileShell() {
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>APARÊNCIA</div>
-              <AppearanceSettings T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} hideTheme />
+              <AppearanceSettings T={t} inputBg={t.input} borderColor={t.border} text={t.text} muted={t.muted} />
             </div>
             <div style={{ background: t.sidebar, border: `1px solid ${t.border}`, borderRadius: 14, padding: 12, marginTop: 8 }}>
               <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.2, color: t.muted, marginBottom: 8 }}>MENSAGENS</div>

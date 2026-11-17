@@ -1,6 +1,7 @@
 import type { PresenceStatus, ProfileView } from '../../services/models'
+import { themedPalette } from '../../shared/theme'
 
-export const T = {
+export const T = themedPalette({
   main: '#313338',
   sidebar: '#2b2d31',
   rail: '#1e1f22',
@@ -15,7 +16,7 @@ export const T = {
   yellow: '#f0b232',
   pink: '#eb459e',
   blurple: '#5865f2',
-}
+})
 
 export const PRESENCE_COLOR: Record<PresenceStatus, string> = {
   online: '#23a55a',

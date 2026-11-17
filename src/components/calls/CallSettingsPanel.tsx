@@ -7,13 +7,12 @@ import {
   type CallMediaPrefs,
   type CallVideoQuality,
 } from '../../services/callMediaPrefs'
+import { themedPalette } from '../../shared/theme'
 
-const T_INPUT = '#1e1f22'
-const T_BORDER = '#3f4147'
-const T_TEXT = '#dbdee1'
-const T_HEADING = '#f2f3f5'
-const T_MUTED = '#949ba4'
-const T_ACCENT = '#5865f2'
+const T = themedPalette({
+  input: '#1e1f22', border: '#3f4147', text: '#dbdee1',
+  heading: '#f2f3f5', muted: '#949ba4', accent: '#5865f2',
+})
 
 interface DeviceOption { deviceId: string; label: string }
 
@@ -36,17 +35,17 @@ export interface CallSettingsPanelProps {
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
-      <span style={{ fontSize: 11, fontWeight: 800, color: T_MUTED, letterSpacing: 0.4 }}>{label}</span>
+      <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, letterSpacing: 0.4 }}>{label}</span>
       {children}
-      {hint ? <span style={{ fontSize: 10.5, color: T_MUTED }}>{hint}</span> : null}
+      {hint ? <span style={{ fontSize: 10.5, color: T.muted }}>{hint}</span> : null}
     </label>
   )
 }
 
 function Secao({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: `1px solid ${T_BORDER}`, paddingTop: 10 }}>
-      <span style={{ fontSize: 10.5, fontWeight: 900, color: T_ACCENT, letterSpacing: 0.8 }}>{title}</span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>
+      <span style={{ fontSize: 10.5, fontWeight: 900, color: T.accent, letterSpacing: 0.8 }}>{title}</span>
       {children}
     </div>
   )
@@ -64,9 +63,9 @@ function Toggle({ on, label, onChange, disabled }: { on: boolean; label: string;
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
         width: '100%', textAlign: 'left', cursor: disabled ? 'default' : 'pointer',
-        background: on ? `${T_ACCENT}22` : T_INPUT,
-        border: `1px solid ${on ? T_ACCENT : T_BORDER}`,
-        color: on ? T_HEADING : T_MUTED,
+        background: on ? `${T.accent}22` : T.input,
+        border: `1px solid ${on ? T.accent : T.border}`,
+        color: on ? T.heading : T.muted,
         borderRadius: 8, padding: '8px 10px', fontSize: 12.5, fontWeight: 700,
         opacity: disabled ? 0.6 : 1,
       }}
@@ -78,9 +77,9 @@ function Toggle({ on, label, onChange, disabled }: { on: boolean; label: string;
 }
 
 const selectStyle: React.CSSProperties = {
-  background: T_INPUT,
-  color: T_TEXT,
-  border: `1px solid ${T_BORDER}`,
+  background: T.input,
+  color: T.text,
+  border: `1px solid ${T.border}`,
   borderRadius: 8,
   padding: '8px 10px',
   fontSize: 12.5,
@@ -133,8 +132,8 @@ function TestVideoButton({ onError }: { onError?: (msg: string) => void }) {
           type="button"
           onClick={startTest}
           style={{
-            width: '100%', background: T_INPUT, border: `1px solid ${T_BORDER}`,
-            borderRadius: 8, padding: '8px 10px', color: T_TEXT, fontSize: 12,
+            width: '100%', background: T.input, border: `1px solid ${T.border}`,
+            borderRadius: 8, padding: '8px 10px', color: T.text, fontSize: 12,
             fontWeight: 700, cursor: 'pointer',
           }}
         >
@@ -246,17 +245,17 @@ export default function CallSettingsPanel({
       style={{
         position: 'absolute', bottom: 86, right: 12, zIndex: 30, width: 320,
         maxHeight: 'calc(100% - 110px)', overflowY: 'auto',
-        background: '#232428', border: `1px solid ${T_BORDER}`, borderRadius: 12,
+        background: '#232428', border: `1px solid ${T.border}`, borderRadius: 12,
         padding: 12, display: 'flex', flexDirection: 'column', gap: 10,
         boxShadow: '0 12px 34px rgba(0,0,0,.55)',
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 13, fontWeight: 800, color: T_HEADING }}>Configurações da chamada</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: T.heading }}>Configurações da chamada</span>
         <button
           onClick={onClose}
           aria-label="Fechar ajustes"
-          style={{ background: 'transparent', border: 'none', color: T_MUTED, cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
+          style={{ background: 'transparent', border: 'none', color: T.muted, cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
         >✕</button>
       </div>
 
@@ -273,7 +272,7 @@ export default function CallSettingsPanel({
             {
 }
             {sharing && !cameraOn && (
-              <span style={{ fontSize: 10.5, color: T_MUTED }}>
+              <span style={{ fontSize: 10.5, color: T.muted }}>
                 Pare a transmissão de tela para ligar a câmera — as duas usam o mesmo vídeo.
               </span>
             )}
@@ -362,7 +361,7 @@ export default function CallSettingsPanel({
       {}
       <Secao title="MICROFONE">
         {onToggleCamera && muted !== undefined && (
-          <span style={{ fontSize: 10.5, color: T_MUTED }}>
+          <span style={{ fontSize: 10.5, color: T.muted }}>
             {muted ? 'Seu microfone está silenciado (botão da barra).' : 'Microfone ativo.'}
           </span>
         )}
@@ -382,13 +381,13 @@ export default function CallSettingsPanel({
             ['noiseSuppression', 'Supressão de ruído'],
             ['autoGainControl', 'Ganho automático'],
           ] as const).map(([key, label]) => (
-            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: T_TEXT, cursor: busy ? 'default' : 'pointer' }}>
+            <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: T.text, cursor: busy ? 'default' : 'pointer' }}>
               <input
                 type="checkbox"
                 checked={local[key]}
                 disabled={busy}
                 onChange={(e) => void aplicar({ [key]: e.target.checked } as Partial<CallMediaPrefs>)}
-                style={{ accentColor: T_ACCENT, width: 15, height: 15 }}
+                style={{ accentColor: T.accent, width: 15, height: 15 }}
               />
               {label}
             </label>
@@ -396,12 +395,12 @@ export default function CallSettingsPanel({
         </div>
       </Secao>
 
-      <span style={{ fontSize: 10.5, color: T_MUTED, lineHeight: 1.4 }}>
+      <span style={{ fontSize: 10.5, color: T.muted, lineHeight: 1.4 }}>
         {ouvinteDisponivel
           ? 'Trocar de aparelho no meio da chamada renegocia só a fonte — a conversa não cai.'
           : 'Este aparelho não expõe a lista de microfones/câmeras. As opções abaixo continuam valendo.'}
       </span>
-      {busy ? <span style={{ fontSize: 11, color: T_ACCENT, fontWeight: 700 }}>aplicando…</span> : null}
+      {busy ? <span style={{ fontSize: 11, color: T.accent, fontWeight: 700 }}>aplicando…</span> : null}
     </div>
   )
 }

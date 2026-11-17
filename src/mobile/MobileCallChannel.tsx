@@ -2,11 +2,13 @@ import { Ic, type IconName } from '../shared/icons'
 import type { ReactNode } from 'react'
 import { joinButtonState } from '../services/callUiState'
 
-const T = {
+import { themedPalette } from '../shared/theme'
+
+const T = themedPalette({
   rail: '#0f1115', main: '#14161a', panel: '#1e2128', input: '#23262f',
   border: '#242830', accent: '#5865f2', green: '#23a559', red: '#f23f42',
   text: '#f2f3f5', heading: '#ffffff', muted: '#8e929b', yellow: '#f0b232',
-}
+}, 'mobile')
 
 export interface CallChannelParticipant {
   fp: string

@@ -12,11 +12,13 @@ import {
   normalizeChannelName,
 } from './mobileServerModel'
 
-const T = {
+import { themedPalette } from '../shared/theme'
+
+const T = themedPalette({
   rail: '#0f1115', panel: '#1e2128', input: '#23262f', hover: '#2a2d36',
   border: '#242830', accent: '#5865f2', green: '#23a559', red: '#f23f42',
   text: '#f2f3f5', heading: '#ffffff', muted: '#8e929b', yellow: '#f0b232',
-}
+}, 'mobile')
 
 /** Cargos no celular: criar e dar/tirar de cada membro. Antes só as tags apareciam. */
 function CargosPanel({

@@ -47,7 +47,7 @@ button{ touch-action:manipulation; user-select:none }
 .dd-menu{ position:absolute; top:48px; left:8px; right:8px; background:#111214; border:1px solid #26272b; border-radius:8px; padding:6px; box-shadow:0 8px 24px rgba(0,0,0,.5); z-index:50 }
 .dd-item{ width:100%; display:flex; align-items:center; gap:8px; padding:8px 10px; background:transparent; border:none; color:#dbdee1; font-size:13px; font-weight:600; border-radius:4px; cursor:pointer; text-align:left }
 .dd-item:hover{ background:#35373c; color:#fff }
-.dd-item.invite{ color:#23a559 }
+.dd-item.invite{ color:var(--dt-green, #23a559) }
 .cat-head{ display:flex; align-items:center; gap:4px; font-size:11px; font-weight:700; letter-spacing:.5px; color:#949ba4; padding:4px 2px }
 .cat-plus{ background:transparent; border:none; color:#949ba4; cursor:pointer; display:flex; padding:2px; border-radius:4px }
 .cat-plus:hover{ color:#fff; background:#35373c }
@@ -56,12 +56,12 @@ button{ touch-action:manipulation; user-select:none }
 .chan-row{ flex:1; display:flex; align-items:center; gap:6px; padding:6px 8px; background:transparent; border:none; color:#949ba4; font-size:14px; font-weight:500; border-radius:4px; cursor:pointer; min-width:0 }
 .chan-row.active{ color:#f2f3f5 }
 .chan-row:hover{ background:#35373c; color:#dbdee1 }
-.chan-row-wrap.voice-active{ background:#1a3329; border:1px solid #23a55944 }
+.chan-row-wrap.voice-active{ background:color-mix(in srgb, var(--dt-green, #23a559) 14%, var(--dt-main, #313338)); border:1px solid color-mix(in srgb, var(--dt-green, #23a559) 27%, transparent) }
 .chan-gear{ background:transparent; border:none; color:#949ba4; cursor:pointer; padding:4px; border-radius:4px; display:flex; opacity:0 }
 .chan-row-wrap:hover .chan-gear{ opacity:1 }
 .chan-gear:hover{ color:#fff; background:#35373c }
 .type-card{ flex:1; display:flex; align-items:center; justify-content:center; gap:8px; padding:12px; background:#1e1f22; border:1px solid #26272b; border-radius:8px; color:#949ba4; font-weight:700; cursor:pointer }
-.type-card.on{ background:#404249; color:#fff; border-color:#5865f2 }
+.type-card.on{ background:var(--dt-selected, #404249); color:#fff; border-color:var(--dt-accent, #5865f2) }
 .nav-row{ width:100%; display:flex; align-items:center; gap:10px; padding:8px 8px; background:transparent; border:none; color:#949ba4; font-size:14px; font-weight:500; border-radius:4px; cursor:pointer; text-align:left }
 .nav-row.active{ background:#404249; color:#fff }
 .nav-row:hover{ background:#35373c; color:#dbdee1 }
@@ -71,22 +71,22 @@ button{ touch-action:manipulation; user-select:none }
 .tab-btn{ background:transparent; border:none; color:#949ba4; font-size:14px; font-weight:600; padding:6px 10px; border-radius:4px; cursor:pointer; display:flex; align-items:center; gap:6px }
 .tab-btn:hover{ color:#dbdee1; background:#3f4147 }
 .tab-btn.active{ background:#4e5058; color:#fff }
-.tab-btn.add{ background:transparent; color:#23a559 }
-.tab-btn.add:hover{ background:rgba(35,165,89,.12) }
-.tab-btn.add.active{ background:#23a559; color:#fff }
+.tab-btn.add{ background:transparent; color:var(--dt-green, #23a559) }
+.tab-btn.add:hover{ background:color-mix(in srgb, var(--dt-green, #23a559) 12%, transparent) }
+.tab-btn.add.active{ background:var(--dt-green, #23a559); color:#fff }
 .tab-badge{ background:#f23f42; color:#fff; font-size:10px; font-weight:800; padding:1px 5px; border-radius:99px }
 .fp-copy{ background:transparent; border:none; color:#00a8fc; font-family:'JetBrains Mono',monospace; font-size:12px; cursor:pointer; text-decoration:underline; padding:0; word-break:break-all; text-align:left }
-.add-btn{ background:#23a559; color:#fff; border:none; padding:10px 18px; border-radius:6px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap }
+.add-btn{ background:var(--dt-green, #23a559); color:#fff; border:none; padding:10px 18px; border-radius:6px; font-weight:800; font-size:13px; cursor:pointer; white-space:nowrap }
 .friend-row{ display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid #2b2d31; cursor:pointer }
 .friend-row:hover{ background:#393c41; border-radius:8px }
 .friend-row.active{ background:#404249; border-radius:8px }
 .req-row{ display:flex; align-items:center; gap:8px; padding:6px 8px; background:#2b2d31; border-radius:6px }
 .req-btn{ width:24px; height:24px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
-.req-btn.ok{ background:#23a559 }
+.req-btn.ok{ background:var(--dt-green, #23a559) }
 .req-btn.no{ background:#f23f42 }
 .row-icon{ width:34px; height:34px; border-radius:50%; background:#2b2d31; border:none; color:#b5bac1; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
 .row-icon:hover{ background:#4e5058; color:#f2f3f5 }
-.row-icon.ok{ background:#23a559; color:#fff }
+.row-icon.ok{ background:var(--dt-green, #23a559); color:#fff }
 .row-icon.no{ background:#f23f42; color:#fff }
 .link-btn{ background:transparent; border:none; color:#00a8fc; cursor:pointer; font-weight:700; padding:0 }
 .link-btn:hover{ text-decoration:underline }
@@ -94,10 +94,10 @@ button{ touch-action:manipulation; user-select:none }
 .member-row:hover{ background:#35373c }
 .member-group-head{ font-size:11px; font-weight:700; letter-spacing:.6px; color:#949ba4; padding:14px 6px 4px }
 .tpl-card{ display:flex; flex-direction:column; align-items:center; gap:6px; padding:14px 10px; background:#2b2d31; border:2px solid #26272b; border-radius:10px; cursor:pointer; text-align:center }
-.tpl-card:hover{ background:#35373c; border-color:#5865f2 }
+.tpl-card:hover{ background:var(--dt-hover, #35373c); border-color:var(--dt-accent, #5865f2) }
 .composer-icon{ background:transparent; border:none; color:#b5bac1; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; padding:2px }
 .composer-icon:hover{ color:#fff }
-.composer-icon.send{ background:#5865f2 }
+.composer-icon.send{ background:var(--dt-accent, #5865f2) }
 
 @keyframes spin { to { transform: rotate(360deg) } }
 .spin{ animation: spin .7s linear infinite }

@@ -3,6 +3,18 @@ import ReactDOM from 'react-dom/client'
 import App from './App'
 import './styles/global.css'
 import './styles/mobile.css'
+import { applyThemeVars, setThemeSource } from './shared/theme'
+import { getPrefs } from './shared/prefs'
+
+// Pinta as variáveis antes do primeiro render: sem isso a janela abriria
+// com as cores padrão e só depois "pularia" para o tema do usuário.
+try {
+  setThemeSource(() => {
+    const p = getPrefs()
+    return { theme: p.theme, customTheme: p.customTheme, customBase: p.customBase }
+  })
+  applyThemeVars()
+} catch {  }
 
 const rootEl = document.getElementById('root')
 if (!rootEl) throw new Error('[DisTorrent] #root não encontrado em index.html — render abortado')

@@ -6,6 +6,9 @@ import {
   volumeBoostSupported,
   MAX_PARTICIPANT_VOLUME,
 } from '../../services/callPlayback'
+import { themedPalette } from '../../shared/theme'
+
+const T = themedPalette({ accent: '#5865f2' })
 
 export function ParticipantAudioControls({
   fp,
@@ -95,7 +98,7 @@ export function ParticipantAudioControls({
               value={settings.volume}
               aria-label={`Volume de ${label}`}
               onChange={(event) => update({ volume: Number(event.target.value) })}
-              style={{ display: 'block', width: '100%', marginTop: 6, accentColor: '#5865f2' }}
+              style={{ display: 'block', width: '100%', marginTop: 6, accentColor: T.accent }}
             />
             <span style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9.5, color: '#9aa0aa', marginTop: 2 }}>
               <span>0%</span>
